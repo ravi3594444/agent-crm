@@ -1,0 +1,79 @@
+# plus-agent como un servicio más del stack de ERPNext.
+#
+# El README decía "agregalo al docker-compose.yml del stack" pero no había
+# ninguno en el repo. Este sirve de las dos formas:
+#
+#   A) SOLO (para probar): trae su propio Redis y se conecta al ERPNext que
+#      le pongas en ERPNEXT_URL.
+#           docker compose up -d
+#
+#   B) DENTRO del stack de ERPNext: copiá el bloque `agente` a tu compose y
+#      poné `ERPNEXT_URL=http://backend:8000`, en la misma red que `backend`.
+#
+# Verificá que arrancó bien:  curl localhost:8080/ready
+
+services:
+  agente:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Dentro de esta compose, Redis es el de abajo.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    ports:
+      # Detrás de tu reverse proxy: el webhook de Meta tiene que llegar por
+      # HTTPS a /webhook/whatsapp.
+      - "${PUERTO_AGENTE:-8080}:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # /health es liveness (no toca dependencias). /ready mira Redis y
+      # ERPNext, y es el que hay que consultar cuando "el bot no contesta".
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # appendonly: el checkpointer de las conversaciones y las marcas de
+    # idempotencia viven acá. Sin persistencia, un restart de Redis hace que
+    # los reintentos de Meta puedan duplicar pedidos.
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory ${REDIS_MAXMEMORY:-256mb}
+      --maxmemory-policy noeviction
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Briefing de la mañana. No corre solo: se dispara por cron del host.
+  #   0 10 * * * cd /srv/plus-agent && docker compose run --rm briefing
+  # (10:00 UTC = 07:00 en America/Argentina/Buenos_Aires)
+  # Ver deploy/crontab.
+  briefing:
+    build: .
+    profiles: ["manual"]
+    env_file: .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    command: ["python", "-m", "app.briefing"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis-data:

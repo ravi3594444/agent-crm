@@ -1,0 +1,19 @@
+# Briefing de la mañana. El README lo pedía y no estaba wireado.
+#
+# Instalación (en el host, no en el contenedor):
+#     crontab -l > /tmp/cron.actual
+#     cat deploy/crontab >> /tmp/cron.actual
+#     crontab /tmp/cron.actual
+#     crontab -l          # verificar
+#
+# OJO CON LA ZONA HORARIA: cron usa la del host. Si el host está en UTC
+# (lo normal en un VPS), 07:00 en Argentina (UTC-3) son las 10:00 UTC.
+# Verificá con:  date && date -u
+#
+# Cambiá /srv/plus-agent por la ruta real del repo en el servidor.
+
+# 07:00 America/Argentina/Buenos_Aires == 10:00 UTC
+0 10 * * * cd /srv/plus-agent && docker compose run --rm briefing >> /var/log/plus-agent-briefing.log 2>&1
+
+# Si el host YA está en la zona de Buenos Aires, usá esta y comentá la de arriba:
+# 0 7 * * * cd /srv/plus-agent && docker compose run --rm briefing >> /var/log/plus-agent-briefing.log 2>&1
