@@ -1,0 +1,34 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Los tests son offline: no hay red, no hay Redis, no hay ERPNext, no hay LLM.
+# Si alguno tarda más de un par de segundos, algo se escapó al mundo real.
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["deploy"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # bugbear
+    "UP",   # pyupgrade
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "RUF",
+]
+ignore = [
+    "E501",    # el largo de línea lo maneja el formatter
+    "B008",    # Depends()/Field() en defaults es el idioma de FastAPI
+    "RUF001",  # comillas y guiones unicode: los docstrings están en español
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Los tests importan la app después de setear el entorno: el import no puede
+# estar arriba del todo (ver tests/conftest.py).
+"tests/conftest.py" = ["E402"]

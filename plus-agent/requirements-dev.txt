@@ -1,0 +1,5 @@
+# Solo para correr los tests. No va en la imagen de producción.
+-r requirements.txt
+
+pytest==9.1.1
+ruff==0.15.4
