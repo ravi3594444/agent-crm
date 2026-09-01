@@ -33,7 +33,7 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `app/aprobacion.py` | Button taps -> ERPNext submit |
 | `app/formato.py` | `$12.000`, not `$12,000` — an Argentine reads those differently |
 | `app/log.py` | Logging, so silent-by-design failures are still visible |
-| `tests/` | 238 tests. No ERPNext, no Redis, no LLM, ~2 seconds. |
+| `tests/` | 245 tests. No ERPNext, no Redis, no LLM, ~2 seconds. |
 
 ## Two agents, one webhook
 
@@ -195,6 +195,13 @@ If the 07:15 count does not happen, do not flip `STOCK_CONFIABLE` to true.
 2. `cp .env.example .env` and fill it in. Then `make check-env`.
 
 3. `make up` — brings up the agent and Redis, waits for `/ready`.
+   **Redis must be Redis Stack, not plain Redis.** LangGraph's checkpointer
+   stores checkpoints with RedisJSON and queries them with RediSearch, so a
+   plain `redis:7-alpine` dies at boot with
+   `RedisSearchError: unknown command 'FT.INFO'`. The bundled
+   `docker-compose.yml` uses `redis/redis-stack-server`; if you point at your
+   own Redis, check it first with
+   `redis-cli -u "$REDIS_URL" module list` — it must list `ReJSON` and `search`.
    To run inside the existing ERPNext stack instead, copy the `agente`
    service from `docker-compose.yml` into that stack's compose file, on the
    same network as `backend`, with `ERPNEXT_URL=http://backend:8000`.

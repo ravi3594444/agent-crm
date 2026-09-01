@@ -42,16 +42,23 @@ services:
         max-file: "5"
 
   redis:
-    image: redis:7-alpine
+    # OJO: TIENE QUE SER REDIS STACK, NO REDIS PELADO.
+    # El checkpointer de LangGraph (RedisSaver) guarda los checkpoints con
+    # RedisJSON y los consulta con RediSearch: hace `redis.json().set(...)` y
+    # crea índices con FT.CREATE. Con `redis:7-alpine` el proceso muere en el
+    # arranque, en `setup()`, con un "unknown command JSON.SET".
+    image: redis/redis-stack-server:7.4.0-v1
     restart: unless-stopped
     # appendonly: el checkpointer de las conversaciones y las marcas de
     # idempotencia viven acá. Sin persistencia, un restart de Redis hace que
     # los reintentos de Meta puedan duplicar pedidos.
-    command: >
-      redis-server
-      --appendonly yes
-      --maxmemory ${REDIS_MAXMEMORY:-256mb}
-      --maxmemory-policy noeviction
+    # En redis-stack-server la config va por REDIS_ARGS, no por `command`:
+    # `command` le pisaría el entrypoint que carga los módulos.
+    environment:
+      REDIS_ARGS: >-
+        --appendonly yes
+        --maxmemory ${REDIS_MAXMEMORY:-256mb}
+        --maxmemory-policy noeviction
     volumes:
       - redis-data:/data
     healthcheck:
