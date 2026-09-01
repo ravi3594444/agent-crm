@@ -1,9 +1,19 @@
-fastapi>=0.115
-uvicorn[standard]>=0.32
-httpx>=0.27
-redis>=5.0
-pydantic>=2.9
-langgraph>=0.2.60
-langgraph-checkpoint-redis>=0.0.5
-langchain>=0.3
-langchain-anthropic>=0.3
+# Versiones FIJAS a propósito.
+#
+# Antes esto era todo `>=`. Hoy `langgraph>=0.2.60` resuelve a 1.2.x, que es
+# un cambio de major: `create_react_agent` pasó de `state_modifier` a
+# `prompt`. Un build de hace un mes y uno de hoy daban dos apps distintas, y
+# la que fallaba lo hacía en el primer mensaje de un cliente.
+#
+# Para actualizar: subí una, corré `pytest`, y recién entonces commiteá.
+
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+httpx==0.28.1
+redis==7.4.1
+pydantic==2.13.5
+
+langgraph==1.2.11
+langgraph-checkpoint-redis==0.5.2
+langchain==1.3.18
+langchain-anthropic==1.7.0
