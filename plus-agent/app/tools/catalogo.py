@@ -1,19 +1,19 @@
-"""Read-only tools. No approval needed — these can never change anything."""
+"""Read-only customer/management tools with server-enforced authorization."""
 import os
+from datetime import date
 
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from app import erpnext
+from app import erpnext, policy
+from app.runtime_context import RuntimeContextError, actor_context, require_customer
 
-# Master switch. Leave FALSE until offline sales are actually being captured.
-# A bot that promises stock it does not have is worse than no bot at all.
-STOCK_CONFIABLE = os.getenv("STOCK_CONFIABLE", "false").lower() == "true"
+STOCK_CONFIABLE = os.getenv("STOCK_CONFIABLE", "false").strip().lower() == "true"
 
 
 @tool
 def buscar_producto(consulta: str) -> str:
-    """Busca productos del catálogo por nombre. Usar cuando el cliente
-    menciona un producto (leche, queso, yogur, manteca, dulce de leche)."""
+    """Busca productos del catálogo por nombre y muestra su unidad exacta."""
     items = erpnext.get_list(
         "Item",
         filters=[["item_name", "like", f"%{consulta}%"], ["disabled", "=", 0]],
@@ -23,93 +23,199 @@ def buscar_producto(consulta: str) -> str:
     if not items:
         return f"No se encontraron productos para '{consulta}'."
 
+    price_list = os.getenv("AUTO_CONFIRM_PRICE_LIST", "").strip()
+    currency = os.getenv("AUTO_CONFIRM_CURRENCY", "").strip()
+    try:
+        today = policy._hoy_del_negocio()
+    except erpnext.ERPNextError:
+        today = None
     out = []
-    for it in items:
-        precios = erpnext.get_list(
-            "Item Price",
-            filters=[["item_code", "=", it["item_code"]], ["selling", "=", 1]],
-            fields=["price_list_rate", "currency"],
-            limit=1,
+    for item in items:
+        filters = [["item_code", "=", item["item_code"]], ["selling", "=", 1]]
+        if price_list:
+            filters.append(["price_list", "=", price_list])
+        if currency:
+            filters.append(["currency", "=", currency])
+        prices = (
+            erpnext.get_list(
+                "Item Price",
+                filters=filters,
+                fields=[
+                    "price_list_rate",
+                    "price_list",
+                    "currency",
+                    "uom",
+                    "valid_from",
+                    "valid_upto",
+                    "customer",
+                    "batch_no",
+                ],
+                limit=20,
+            )
+            if price_list and currency and today is not None
+            else []
         )
-        precio = (
-            f"{precios[0]['currency']} {precios[0]['price_list_rate']}"
-            if precios
+        matching = next(
+            (
+                price
+                for price in prices
+                if _catalog_price_is_valid(
+                    price,
+                    str(item.get("stock_uom") or ""),
+                    price_list,
+                    currency,
+                    today,
+                )
+            ),
+            None,
+        )
+        price_text = (
+            f"{matching['currency']} {matching['price_list_rate']}"
+            if matching
             else "precio a confirmar"
         )
-        out.append(f"- {it['item_name']} ({it['item_code']}) — {precio} por {it['stock_uom']}")
+        out.append(
+            f"- {item['item_name']} ({item['item_code']}) — {price_text} "
+            f"por {item['stock_uom']}"
+        )
     return "\n".join(out)
+
+
+def _catalog_price_is_valid(
+    price: dict,
+    uom: str,
+    price_list: str,
+    currency: str,
+    today: date,
+) -> bool:
+    if str(price.get("price_list") or "") != price_list:
+        return False
+    if str(price.get("currency") or "") != currency:
+        return False
+    if str(price.get("uom") or "") != uom:
+        return False
+    if price.get("customer") or price.get("batch_no"):
+        return False
+    try:
+        valid_from = (
+            date.fromisoformat(str(price["valid_from"]))
+            if price.get("valid_from")
+            else date.min
+        )
+        valid_upto = (
+            date.fromisoformat(str(price["valid_upto"]))
+            if price.get("valid_upto")
+            else date.max
+        )
+    except ValueError:
+        return False
+    return valid_from <= today <= valid_upto
 
 
 @tool
 def consultar_stock(item_code: str) -> str:
-    """Consulta la disponibilidad de un producto.
-
-    Devuelve un NIVEL, no un número exacto, porque parte de las ventas
-    ocurren fuera del sistema (mostrador, reparto) y el número exacto puede
-    estar desactualizado. Nunca le prometas al cliente una cantidad exacta.
-    """
-    bins = erpnext.get_list(
-        "Bin",
-        filters=[["item_code", "=", item_code]],
-        fields=["warehouse", "actual_qty", "reserved_qty"],
-        limit=10,
-    )
-    if not bins:
-        return f"Sin registro de stock para {item_code}. Confirmá con el equipo."
-
-    # Reserved qty covers drafts already promised, so two customers can't be
-    # sold the same milk. The buffer absorbs offline sales not yet loaded.
-    disponible = sum(b["actual_qty"] - b.get("reserved_qty", 0) for b in bins)
-    buffer = float(os.getenv("STOCK_BUFFER_PCT", "20")) / 100.0
-    seguro = disponible * (1 - buffer)
-
+    """Consulta un nivel orientativo en el depósito de preparación."""
     if not STOCK_CONFIABLE:
         return (
-            f"{item_code}: no confirmes disponibilidad exacta. Decí que lo cargás "
-            f"y que el equipo confirma stock al preparar el pedido."
+            f"{item_code}: inventario no verificado. No confirmes disponibilidad; "
+            "el pedido solo puede quedar pendiente de revisión."
         )
-    if seguro <= 0:
-        return f"{item_code}: SIN STOCK. Ofrecé una alternativa o anotá el pedido para cuando haya."
-    if seguro < float(os.getenv("STOCK_POCO", "20")):
-        return f"{item_code}: POCO STOCK. Podés tomar pedidos chicos, avisá que es sujeto a confirmación."
-    return f"{item_code}: DISPONIBLE."
-
-
-@tool
-def estado_pedido(numero_pedido: str) -> str:
-    """Consulta el estado de un pedido existente por su número."""
     try:
-        so = erpnext.get_doc("Sales Order", numero_pedido)
+        warehouse = erpnext.default_warehouse()
+        bins = erpnext.get_list(
+            "Bin",
+            filters=[
+                ["item_code", "=", item_code],
+                ["warehouse", "=", warehouse],
+            ],
+            fields=["warehouse", "actual_qty", "reserved_qty"],
+            limit=10,
+        )
     except erpnext.ERPNextError:
-        return f"No encontré el pedido {numero_pedido}."
-    estados = {0: "borrador (pendiente de confirmación)", 1: "confirmado", 2: "cancelado"}
+        return (
+            f"No pude verificar el depósito de preparación para {item_code}. "
+            "No confirmes disponibilidad."
+        )
+    if not bins:
+        return (
+            f"Sin registro de stock para {item_code} en el depósito de preparación. "
+            "No confirmes disponibilidad."
+        )
+
+    available = sum(
+        float(row.get("actual_qty") or 0) - float(row.get("reserved_qty") or 0)
+        for row in bins
+    )
+    buffer = float(os.getenv("STOCK_BUFFER_PCT", "20")) / 100.0
+    if buffer < 0 or buffer >= 1:
+        return f"{item_code}: configuración de stock inválida. No confirmes disponibilidad."
+    safe = available * (1 - buffer)
+    if safe <= 0:
+        return f"{item_code}: SIN STOCK. Ofrecé una alternativa."
+    if safe < float(os.getenv("STOCK_POCO", "20")):
+        return (
+            f"{item_code}: POCO STOCK. El pedido requiere validación de cantidad "
+            "y puede quedar pendiente."
+        )
     return (
-        f"Pedido {so['name']}: {estados.get(so['docstatus'], 'desconocido')}. "
-        f"Total: {so.get('currency', '')} {so.get('grand_total', 0)}. "
-        f"Entrega estimada: {so.get('delivery_date', 'a confirmar')}."
+        f"{item_code}: stock registrado. La cantidad exacta se vuelve a validar "
+        "al crear y antes de confirmar el pedido."
     )
 
 
 @tool
-def pedido_habitual(cliente: str) -> str:
-    """Devuelve el último pedido confirmado del cliente, para repetirlo.
-    Usar cuando dice "lo de siempre", "lo mismo que la vez pasada", "repetime el pedido".
-    Es el camino más rápido: la mayoría de los clientes piden siempre lo mismo."""
-    sos = erpnext.get_list(
+def estado_pedido(numero_pedido: str, config: RunnableConfig) -> str:
+    """Consulta un pedido; clientes solo pueden ver pedidos de su propia cuenta."""
+    try:
+        actor = actor_context(config)
+    except RuntimeContextError:
+        return "No pude autorizar la consulta del pedido."
+    try:
+        order = erpnext.get_doc("Sales Order", numero_pedido)
+    except erpnext.ERPNextError:
+        return f"No encontré el pedido {numero_pedido}."
+    if not actor.is_management and (
+        not actor.customer_code or order.get("customer") != actor.customer_code
+    ):
+        # Deliberately indistinguishable from a missing order to prevent ID
+        # enumeration across customer accounts.
+        return f"No encontré el pedido {numero_pedido}."
+    states = {
+        0: "borrador (pendiente de confirmación)",
+        1: "confirmado",
+        2: "cancelado",
+    }
+    return (
+        f"Pedido {order['name']}: "
+        f"{states.get(order.get('docstatus'), 'desconocido')}. "
+        f"Total: {order.get('currency', '')} {order.get('grand_total', 0)}. "
+        f"Entrega estimada: {order.get('delivery_date', 'a confirmar')}."
+    )
+
+
+@tool
+def pedido_habitual(config: RunnableConfig) -> str:
+    """Devuelve el último pedido confirmado del cliente autenticado."""
+    try:
+        actor = require_customer(config)
+    except RuntimeContextError:
+        return "No pude identificar una cuenta de cliente registrada."
+    orders = erpnext.get_list(
         "Sales Order",
-        filters=[["customer", "=", cliente], ["docstatus", "=", 1]],
+        filters=[["customer", "=", actor.customer_code], ["docstatus", "=", 1]],
         fields=["name"],
         limit=1,
     )
-    if not sos:
-        return f"{cliente} no tiene pedidos anteriores confirmados."
-    so = erpnext.get_doc("Sales Order", sos[0]["name"])
-    lineas = "\n".join(
-        f"  · {i['qty']:g} x {i.get('item_name') or i['item_code']}"
-        for i in so.get("items", [])
+    if not orders:
+        return "Esta cuenta no tiene pedidos anteriores confirmados."
+    order = erpnext.get_doc("Sales Order", orders[0]["name"])
+    lines = "\n".join(
+        f"  · {float(item['qty']):g} {item.get('uom') or item.get('stock_uom')} "
+        f"de {item.get('item_name') or item['item_code']}"
+        for item in order.get("items", [])
     )
     return (
-        f"Último pedido ({so['name']}, {so.get('transaction_date')}):\n{lineas}\n"
-        f"Total ${so.get('grand_total', 0):,.0f}. "
-        f"Confirmá con el cliente si quiere lo mismo y usá crear_pedido."
+        f"Último pedido ({order['name']}, {order.get('transaction_date')}):\n{lines}\n"
+        f"Total ${order.get('grand_total', 0):,.0f}. Confirmá productos, cantidades, "
+        "unidades y una nueva fecha de entrega antes de crear otro pedido."
     )

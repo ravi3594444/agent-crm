@@ -5,9 +5,6 @@ The client is 100% on paper. There is no catalog to import, no customer list,
 nothing. You cannot demo a WhatsApp sales agent against an empty database —
 the bot will just say "no encontre ese producto" to everything.
 
-This gives you a working demo in ~30 seconds. Replace it with his real
-catalog and customers once you get them.
-
     python deploy/seed_dairy.py
 
 PRICES ARE PLACEHOLDERS. Argentine prices move fast - do not show these to
@@ -15,6 +12,7 @@ the client as if they were real. Ask for his actual price list.
 """
 import os
 import sys
+from decimal import Decimal, InvalidOperation
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -67,6 +65,86 @@ def _ensure(doctype: str, name: str, payload: dict) -> str:
     doc = erpnext.create_doc(doctype, payload)
     print(f"  + {doctype} {doc['name']}")
     return doc["name"]
+
+
+def _account_by_type(company: str, account_type: str) -> str:
+    """Resolve an account structurally, independent of chart language/names."""
+    rows = erpnext.get_list(
+        "Account",
+        filters=[
+            ["company", "=", company],
+            ["is_group", "=", 0],
+            ["account_type", "=", account_type],
+        ],
+        fields=["name"],
+        limit=1,
+    )
+    return str(rows[0].get("name") or "").strip() if rows else ""
+
+
+def _stock_reconciliation_payload(company: str, items: list[dict]) -> dict:
+    """Build an opening-stock payload using ERPNext account metadata."""
+    temporary_opening = _account_by_type(company, "Temporary")
+    if temporary_opening:
+        return {
+            "company": company,
+            "purpose": "Opening Stock",
+            "expense_account": temporary_opening,
+            "items": items,
+        }
+
+    payload = {
+        "company": company,
+        "purpose": "Stock Reconciliation",
+        "items": items,
+    }
+    stock_adjustment = _account_by_type(company, "Stock Adjustment")
+    if stock_adjustment:
+        payload["expense_account"] = stock_adjustment
+    return payload
+
+
+def _stock_signature(items: list[dict]) -> tuple:
+    """Canonical signature for recognizing a seed reconciliation on reruns."""
+    signature = []
+    for item in items:
+        item_code = str(item.get("item_code") or "").strip()
+        warehouse = str(item.get("warehouse") or "").strip()
+        if not item_code or not warehouse:
+            return ()
+        try:
+            qty = Decimal(str(item.get("qty") or 0)).normalize()
+            valuation_rate = Decimal(
+                str(item.get("valuation_rate") or 0)
+            ).normalize()
+        except (InvalidOperation, TypeError, ValueError):
+            return ()
+        signature.append((item_code, warehouse, qty, valuation_rate))
+    return tuple(sorted(signature))
+
+
+def _existing_stock_reconciliation(
+    company: str, items: list[dict]
+) -> tuple[str, int] | None:
+    """Find the same non-cancelled seed reconciliation, draft or submitted."""
+    expected = _stock_signature(items)
+    if not expected:
+        return None
+
+    rows = erpnext.get_list(
+        "Stock Reconciliation",
+        filters=[["company", "=", company], ["docstatus", "!=", 2]],
+        fields=["name", "docstatus"],
+        limit=500,
+    )
+    for row in rows:
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        doc = erpnext.get_doc("Stock Reconciliation", name)
+        if _stock_signature(doc.get("items") or []) == expected:
+            return name, int(doc.get("docstatus") or row.get("docstatus") or 0)
+    return None
 
 
 def main() -> None:
@@ -122,19 +200,42 @@ def main() -> None:
         })
 
     print("Stock inicial...")
-    dep = erpnext.default_warehouse()
+    empresa, dep = erpnext.default_context()
+    print(f"  empresa: {empresa} · deposito: {dep}")
+
+    # Valuation ~60% of selling price so margin reports are not nonsense.
+    costo = {code: round(precio * 0.6, 2) for code, _, _, precio in PRODUCTOS}
     items = [
-        {"item_code": c, "warehouse": dep, "qty": q, "valuation_rate": 1}
+        {
+            "item_code": c,
+            "warehouse": dep,
+            "qty": q,
+            "valuation_rate": costo.get(c, 1),
+        }
         for c, q in STOCK_INICIAL.items()
     ]
-    doc = erpnext.create_doc("Stock Reconciliation", {
-        "purpose": "Opening Stock",
-        "items": items,
-    })
-    print(f"  + Stock Reconciliation {doc['name']} (BORRADOR - confirmalo en ERPNext)")
+
+    existing = _existing_stock_reconciliation(empresa, items)
+    if existing:
+        stock_name, stock_docstatus = existing
+        estado = "BORRADOR" if stock_docstatus == 0 else "YA CONFIRMADO"
+        print(f"  = Stock Reconciliation {stock_name} ({estado})")
+    else:
+        # ERPNext identifies the opening account by account_type="Temporary";
+        # account names are customizable and localized. If no such account
+        # exists, create a normal reconciliation against Stock Adjustment.
+        payload = _stock_reconciliation_payload(empresa, items)
+        doc = erpnext.create_doc("Stock Reconciliation", payload)
+        stock_name = doc["name"]
+        stock_docstatus = 0
+        print(f"  + Stock Reconciliation {stock_name} ({payload['purpose']})")
+        print("    BORRADOR - confirmalo en ERPNext para que cargue el stock.")
 
     print("\nListo. Ahora:")
-    print("  1. Confirma el Stock Reconciliation en ERPNext para cargar el stock.")
+    if stock_docstatus == 0:
+        print("  1. Confirma el Stock Reconciliation en ERPNext para cargar el stock.")
+    else:
+        print(f"  1. El Stock Reconciliation {stock_name} ya estaba confirmado.")
     print("  2. Poné el numero de prueba de Meta y tu numero en TELEFONOS_EQUIPO.")
     print("  3. Escribile al bot: 'hola, tenes queso cremoso?'")
     print("\nOJO: los precios son inventados. Pedile la lista real al cliente.")

@@ -1,116 +1,511 @@
-"""Write tools. Everything here creates DRAFTS only.
+"""Customer write tools with deterministic identity and order guardrails."""
+from __future__ import annotations
 
-A human opens ERPNext and clicks Submit. Only then does stock move and
-only then does the ARCA factura get its CAE. The agent has no route to
-submit — its ERPNext Role does not include the permission.
-"""
-from datetime import date, timedelta
+import hashlib
+import os
+import re
+import unicodedata
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from app import erpnext, policy
+from app.locks import CoordinationError, distributed_lock
 from app.notificar import notificar_equipo
+from app.runtime_context import RuntimeContextError, actor_context, require_customer
+
+_DIAS = {
+    "lunes": 0,
+    "martes": 1,
+    "miercoles": 2,
+    "jueves": 3,
+    "viernes": 4,
+    "sabado": 5,
+    "domingo": 6,
+}
+_ZONA_HORARIA_DEFAULT = "America/Argentina/Buenos_Aires"
+
+
+class FechaEntregaInvalida(ValueError):
+    """A supplied delivery date needs clarification from the customer."""
+
+
+def _sin_tildes(text: str) -> str:
+    return "".join(
+        char
+        for char in unicodedata.normalize("NFD", text.lower())
+        if unicodedata.category(char) != "Mn"
+    ).strip()
+
+
+def _hoy_del_negocio() -> date:
+    zone_name = os.getenv("BUSINESS_TIMEZONE", _ZONA_HORARIA_DEFAULT).strip()
+    try:
+        return datetime.now(ZoneInfo(zone_name)).date()
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise erpnext.ERPNextError("BUSINESS_TIMEZONE inválida") from exc
+
+
+def _validar_fecha(candidate: date, today: date) -> str:
+    if candidate < today:
+        raise FechaEntregaInvalida("la fecha de entrega ya pasó")
+    return candidate.isoformat()
+
+
+def _parse_fecha(text: str, *, hoy: date | None = None) -> str:
+    """Parse supported customer date forms; absence/ambiguity never defaults."""
+    today = hoy or _hoy_del_negocio()
+    if text is None:
+        raise FechaEntregaInvalida("falta la fecha de entrega")
+    normalized = _sin_tildes(str(text))
+    if not normalized:
+        raise FechaEntregaInvalida("falta la fecha de entrega")
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
+        try:
+            candidate = date.fromisoformat(normalized)
+        except ValueError as exc:
+            raise FechaEntregaInvalida("la fecha de entrega no existe") from exc
+        return _validar_fecha(candidate, today)
+
+    if normalized in ("hoy", "ahora"):
+        return today.isoformat()
+    if normalized in ("manana", "para manana"):
+        return (today + timedelta(days=1)).isoformat()
+    if normalized in ("pasado manana", "para pasado manana"):
+        return (today + timedelta(days=2)).isoformat()
+
+    for weekday, index in _DIAS.items():
+        if weekday in normalized:
+            delta = (index - today.weekday()) % 7
+            return (today + timedelta(days=delta or 7)).isoformat()
+
+    match = re.fullmatch(
+        r"(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?", normalized
+    )
+    if match:
+        day, month, year_text = (
+            int(match.group(1)),
+            int(match.group(2)),
+            match.group(3),
+        )
+        if year_text:
+            year = 2000 + int(year_text) if len(year_text) == 2 else int(year_text)
+            try:
+                candidate = date(year, month, day)
+            except ValueError as exc:
+                raise FechaEntregaInvalida("la fecha de entrega no existe") from exc
+            return _validar_fecha(candidate, today)
+        for year in range(today.year, today.year + 9):
+            try:
+                candidate = date(year, month, day)
+            except ValueError:
+                continue
+            if candidate >= today:
+                return candidate.isoformat()
+        raise FechaEntregaInvalida("la fecha de entrega no existe")
+
+    raise FechaEntregaInvalida("no pude interpretar la fecha de entrega")
+
+
+def _unidad_clave(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "", _sin_tildes(value))
+    aliases = {
+        "u": "unidad",
+        "un": "unidad",
+        "unidad": "unidad",
+        "unidades": "unidad",
+        "kg": "kg",
+        "kgs": "kg",
+        "kilo": "kg",
+        "kilos": "kg",
+        "kilogramo": "kg",
+        "kilogramos": "kg",
+        "l": "litro",
+        "lt": "litro",
+        "lts": "litro",
+        "litro": "litro",
+        "litros": "litro",
+    }
+    return aliases.get(normalized, normalized)
 
 
 class LineaPedido(BaseModel):
-    item_code: str = Field(description="Código exacto del producto, de buscar_producto")
-    cantidad: float = Field(gt=0, description="Cantidad solicitada")
+    item_code: str = Field(
+        min_length=1, description="Código exacto devuelto por buscar_producto"
+    )
+    cantidad: float = Field(gt=0, description="Cantidad solicitada por el cliente")
+    unidad: str = Field(
+        min_length=1,
+        description="Unidad que dijo el cliente; debe coincidir con la del catálogo",
+    )
+
+
+def _message_key(message_id: str) -> str:
+    digest = hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:40]
+    return f"WA-{digest}"
+
+
+def _log_ref(value: str) -> str:
+    """Non-reversible correlation tag for logs; never log ERP/customer IDs."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _find_existing(customer: str, message_key: str) -> dict | None:
+    rows = erpnext.get_list(
+        "Sales Order",
+        filters=[["po_no", "=", message_key], ["customer", "=", customer]],
+        fields=["name", "customer", "docstatus", "delivery_date"],
+        limit=2,
+    )
+    if not rows:
+        return None
+    try:
+        return erpnext.get_doc("Sales Order", rows[0]["name"])
+    except erpnext.ERPNextError:
+        return rows[0]
+
+
+def _validated_lines(lines: list[LineaPedido]) -> tuple[list[dict], str | None]:
+    combined: dict[tuple[str, str], float] = {}
+    canonical_uom: dict[tuple[str, str], str] = {}
+    for line in lines:
+        code = line.item_code.strip()
+        try:
+            item = erpnext.get_doc("Item", code)
+        except erpnext.ERPNextError:
+            return [], f"No pude validar el producto {code}."
+        if int(item.get("disabled") or 0):
+            return [], f"El producto {code} no está habilitado."
+        stock_uom = str(item.get("stock_uom") or "").strip()
+        if not stock_uom:
+            return [], f"El producto {code} no tiene una unidad válida en el catálogo."
+        if _unidad_clave(line.unidad) != _unidad_clave(stock_uom):
+            return [], (
+                f"No creé el pedido: {code} se vende por {stock_uom}, no por "
+                f"{line.unidad}. Confirmá la cantidad en {stock_uom}; no conviertas "
+                "la unidad automáticamente."
+            )
+        key = (code, _unidad_clave(stock_uom))
+        combined[key] = combined.get(key, 0) + float(line.cantidad)
+        canonical_uom[key] = stock_uom
+    validated = [
+        {"item_code": code, "qty": qty, "uom": canonical_uom[(code, uom_key)]}
+        for (code, uom_key), qty in combined.items()
+    ]
+    return validated, None
+
+
+def _summary(order: dict, fallback: list[dict]) -> str:
+    items = order.get("items") if isinstance(order.get("items"), list) else fallback
+    parts = []
+    for item in items or []:
+        try:
+            qty = float(item.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        parts.append(
+            f"{qty:g} {item.get('uom') or item.get('stock_uom') or 'unidad'} "
+            f"de {item.get('item_code') or 'producto'}"
+        )
+    return ", ".join(parts) or "detalle disponible en ERPNext"
+
+
+def _order_result(order: dict, fallback: list[dict], fallback_date: str) -> str:
+    name = str(order.get("name") or "").strip()
+    if not name:
+        return (
+            "PEDIDO_NO_CREADO. No hay un número de pedido verificable; "
+            "derivá el caso al equipo."
+        )
+    status = int(order.get("docstatus") or 0)
+    delivery = order.get("delivery_date") or fallback_date
+    detail = _summary(order, fallback)
+    if status == 1:
+        return (
+            f"PEDIDO_CONFIRMADO. Número real: {name}. Resumen: {detail}. "
+            f"Entrega: {delivery}. Estado: confirmado."
+        )
+    if status == 2:
+        return (
+            f"PEDIDO_CANCELADO. Número real: {name}. Resumen: {detail}. "
+            f"Entrega: {delivery}. Estado: cancelado; no crees otro pedido "
+            "sin una nueva solicitud del cliente."
+        )
+    return (
+        f"PEDIDO_PENDIENTE. Número real: {name}. Resumen: {detail}. "
+        f"Entrega: {delivery}. Estado: borrador pendiente de revisión."
+    )
+
+
+def _safe_notify(name: str, order: dict, *, auto: bool, reasons: str = "") -> bool:
+    try:
+        return bool(notificar_equipo(name, order, auto=auto, motivos=reasons))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[orders] notificación al equipo falló ({type(exc).__name__})")
+        return False
+
+
+def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
+    name = str(order.get("name") or "").strip()
+    if not name:
+        return _order_result({}, validated, delivery)
+
+    try:
+        complete = erpnext.get_doc("Sales Order", name)
+    except erpnext.ERPNextError:
+        complete = order
+
+    try:
+        decision = policy.evaluar(complete)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[orders] política falló order={_log_ref(name)} "
+            f"type={type(exc).__name__}"
+        )
+        decision = policy.Decision(False, ["no se pudo completar la política"])
+
+    if decision.auto:
+        try:
+            with policy.auto_submit_lock():
+                # Re-read and re-run every rule while holding the global lock.
+                complete = erpnext.get_doc("Sales Order", name)
+                final_decision = policy.evaluar(complete)
+                if final_decision.auto:
+                    submitted = erpnext.submit_doc("Sales Order", name)
+                    complete = submitted or complete
+                    erpnext.add_comment(
+                        "Sales Order",
+                        name,
+                        "Auto-confirmado después de revalidación bajo lock distribuido.",
+                    )
+                    _safe_notify(name, complete, auto=True)
+                    return _order_result(complete, validated, delivery)
+                decision = final_decision
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[orders] auto-confirmación falló order={_log_ref(name)} "
+                f"type={type(exc).__name__}"
+            )
+            # A timeout can be ambiguous: submission may have committed. Resolve
+            # the actual ERP state before telling the customer anything.
+            try:
+                complete = erpnext.get_doc("Sales Order", name)
+            except erpnext.ERPNextError:
+                pass
+            if int(complete.get("docstatus") or 0) == 1:
+                _safe_notify(name, complete, auto=True)
+                return _order_result(complete, validated, delivery)
+            decision = policy.Decision(False, ["auto-confirmación no disponible"])
+
+    erpnext.add_comment(
+        "Sales Order", name, f"Requiere revisión humana: {decision}"
+    )
+    _safe_notify(name, complete, auto=False, reasons=str(decision))
+    return _order_result(complete, validated, delivery)
 
 
 @tool
-def crear_lead(nombre: str, telefono: str, nota: str = "") -> str:
-    """Registra un cliente potencial nuevo (que aún no está en el sistema).
-    Usar cuando escribe alguien desconocido y muestra interés."""
-    doc = erpnext.create_doc(
-        "Lead",
-        {
-            "lead_name": nombre,
-            "mobile_no": telefono,
-            "source": "WhatsApp",
-            "notes": nota,
-        },
-    )
+def crear_lead(
+    nombre: str,
+    config: RunnableConfig,
+    nota: str = "",
+) -> str:
+    """Registra al remitente autenticado como contacto potencial."""
+    try:
+        actor = actor_context(config)
+    except RuntimeContextError:
+        return "No pude autenticar el remitente; no registré el contacto."
+    if actor.scope != "customer" or not actor.actor_phone:
+        return "No pude autenticar el remitente; no registré el contacto."
+    if actor.customer_code:
+        return "La cuenta ya está registrada; no creé otro contacto."
+    try:
+        existing = erpnext.get_list(
+            "Lead",
+            filters=[["mobile_no", "=", actor.actor_phone]],
+            fields=["name"],
+            limit=1,
+        )
+        if existing:
+            return f"Contacto ya registrado como {existing[0]['name']}."
+        message_ref = (
+            _message_key(actor.inbound_message_id)
+            if actor.inbound_message_id
+            else "sin referencia"
+        )
+        doc = erpnext.create_doc(
+            "Lead",
+            {
+                "lead_name": nombre,
+                "mobile_no": actor.actor_phone,
+                "source": "WhatsApp",
+                "notes": f"{nota}\nReferencia segura: {message_ref}",
+            },
+        )
+    except erpnext.ERPNextError:
+        return "No pude registrar el contacto. Derivá el caso al equipo."
     erpnext.add_comment("Lead", doc["name"], "Creado por Agente IA vía WhatsApp.")
     return f"Contacto registrado como {doc['name']}."
 
 
 @tool
 def crear_pedido(
-    cliente: str,
     lineas: list[LineaPedido],
-    fecha_entrega: str | None = None,
-    thread_id: str = "",
+    fecha_entrega: str,
+    config: RunnableConfig,
 ) -> str:
-    """Crea un pedido en BORRADOR para que el equipo lo revise y confirme.
+    """Crea un pedido para el cliente autenticado.
 
-    IMPORTANTE: esto NO confirma el pedido. Siempre decirle al cliente que
-    el pedido queda pendiente de confirmación por el equipo.
-    Verificar stock con consultar_stock antes de usar esta herramienta.
+    Cada línea requiere código, cantidad y la unidad textual confirmada por el
+    cliente. La fecha de entrega también es obligatoria. Nunca conviertas una
+    unidad ni inventes una fecha.
     """
-    if not lineas:
-        return "No puedo crear un pedido vacío."
-
-    entrega = fecha_entrega or (date.today() + timedelta(days=1)).isoformat()
-
-    doc = erpnext.create_doc(
-        "Sales Order",
-        {
-            "customer": cliente,
-            "delivery_date": entrega,
-            "order_type": "Sales",
-            "items": [
-                {"item_code": l.item_code, "qty": l.cantidad, "delivery_date": entrega}
-                for l in lineas
-            ],
-        },
-    )
-    erpnext.add_comment(
-        "Sales Order",
-        doc["name"],
-        f"Borrador creado por Agente IA vía WhatsApp. Hilo: {thread_id or 'n/d'}. "
-        f"Requiere revisión y confirmación humana.",
-    )
-    detalle = ", ".join(f"{l.cantidad:g} x {l.item_code}" for l in lineas)
-
-    # --- the wait-killer ---------------------------------------------------
-    # Deterministic policy decides. The agent does not, and cannot.
-    completo = erpnext.get_doc("Sales Order", doc["name"])
-    decision = policy.evaluar(completo)
-
-    if decision.auto:
-        erpnext.submit_doc("Sales Order", doc["name"])
-        erpnext.add_comment(
-            "Sales Order", doc["name"],
-            "Auto-confirmado: cliente conocido, precio de lista, stock verificado, sin deuda.",
-        )
-        notificar_equipo(doc["name"], completo, auto=True)
+    try:
+        actor = require_customer(config)
+    except RuntimeContextError:
         return (
-            f"CONFIRMADO al instante. Pedido {doc['name']} ({detalle}), "
-            f"entrega {entrega}. Decile al cliente que ya está confirmado."
+            "PEDIDO_NO_CREADO. No hay una cuenta de cliente autenticada; "
+            "derivá el caso al equipo."
+        )
+    if not actor.inbound_message_id:
+        return (
+            "PEDIDO_NO_CREADO. Falta la referencia segura del mensaje; "
+            "derivá el caso al equipo y no reintentes automáticamente."
+        )
+    if not lineas:
+        return "PEDIDO_NO_CREADO. El pedido no puede estar vacío."
+
+    message_key = _message_key(actor.inbound_message_id)
+    try:
+        existing = _find_existing(actor.customer_code, message_key)
+    except erpnext.ERPNextError:
+        return (
+            "PEDIDO_NO_CREADO. No pude verificar si este mensaje ya tenía un "
+            "pedido; no reintentes automáticamente y derivá el caso al equipo."
+        )
+    if existing:
+        return _order_result(existing, [], "")
+
+    try:
+        business_today = _hoy_del_negocio()
+        delivery = _parse_fecha(fecha_entrega, hoy=business_today)
+    except FechaEntregaInvalida as exc:
+        return (
+            f"PEDIDO_NO_CREADO. {exc}. Pedile al cliente una fecha válida y explícita."
+        )
+    except erpnext.ERPNextError:
+        return (
+            "PEDIDO_NO_CREADO. No pude validar la fecha del negocio; "
+            "derivá el caso al equipo."
         )
 
-    erpnext.add_comment(
-        "Sales Order", doc["name"],
-        f"Requiere revisión humana: {decision}",
-    )
-    notificar_equipo(doc["name"], completo, auto=False, motivos=str(decision))
-    return (
-        f"Pedido {doc['name']} tomado ({detalle}), entrega {entrega}. "
-        f"Decile al cliente que quedó tomado con ese número y que le confirmás "
-        f"en unos minutos. NO digas que está confirmado."
-    )
+    try:
+        with distributed_lock(
+            f"order-message:{message_key}", lease_seconds=300, wait_seconds=30
+        ):
+            existing = _find_existing(actor.customer_code, message_key)
+            if existing:
+                return _order_result(existing, [], delivery)
+
+            validated, validation_error = _validated_lines(lineas)
+            if validation_error:
+                return f"PEDIDO_NO_CREADO. {validation_error}"
+
+            try:
+                company, warehouse = erpnext.default_context()
+                payload: dict = {
+                    "customer": actor.customer_code,
+                    "company": company,
+                    "po_no": message_key,
+                    "transaction_date": business_today.isoformat(),
+                    "delivery_date": delivery,
+                    "order_type": "Sales",
+                    "items": [
+                        {
+                            **line,
+                            "delivery_date": delivery,
+                            "warehouse": warehouse,
+                            "conversion_factor": 1,
+                        }
+                        for line in validated
+                    ],
+                }
+                if policy.PRICE_LIST:
+                    payload["selling_price_list"] = policy.PRICE_LIST
+                if policy.CURRENCY:
+                    payload["currency"] = policy.CURRENCY
+                order = erpnext.create_doc("Sales Order", payload)
+            except erpnext.ERPNextError:
+                # A transport timeout may have happened after commit. Resolve by
+                # the persisted business key before claiming creation failed.
+                try:
+                    existing = _find_existing(actor.customer_code, message_key)
+                except erpnext.ERPNextError:
+                    existing = None
+                if existing:
+                    return _order_result(existing, validated, delivery)
+                return (
+                    "PEDIDO_NO_CREADO. ERPNext no confirmó la creación y no hay "
+                    "un número verificable; derivá el caso al equipo."
+                )
+
+            name = str(order.get("name") or "").strip()
+            if not name:
+                return (
+                    "PEDIDO_NO_CREADO. ERPNext no devolvió un número verificable; "
+                    "derivá el caso al equipo."
+                )
+            erpnext.add_comment(
+                "Sales Order",
+                name,
+                f"Borrador creado por Agente IA. Referencia idempotente: {message_key}.",
+            )
+    except CoordinationError:
+        # Never create without cross-worker idempotency. A concurrent worker may
+        # already have completed, so make one final read-only resolution.
+        try:
+            existing = _find_existing(actor.customer_code, message_key)
+        except erpnext.ERPNextError:
+            existing = None
+        if existing:
+            return _order_result(existing, [], delivery)
+        return (
+            "PEDIDO_NO_CREADO. No pude coordinar una creación segura; "
+            "derivá el caso al equipo y no reintentes automáticamente."
+        )
+    # The idempotency critical section ends once the durable keyed draft exists.
+    # Policy evaluation can be slow and has its own global submit lock.
+    return _after_create(order, validated, delivery)
 
 
 @tool
-def escalar_a_humano(motivo: str, thread_id: str = "") -> str:
-    """Deriva la conversación a una persona del equipo. Usar ante reclamos,
-    pedidos de descuento, temas de pago, o cuando no estés seguro."""
-    doc = erpnext.create_doc(
-        "ToDo",
-        {
-            "description": f"[WhatsApp] Escalado por Agente IA: {motivo} (hilo {thread_id})",
-            "priority": "High",
-        },
+def escalar_a_humano(motivo: str, config: RunnableConfig) -> str:
+    """Deriva la conversación autenticada a una persona del equipo."""
+    try:
+        actor = actor_context(config)
+    except RuntimeContextError:
+        return "No pude autenticar la conversación para derivarla."
+    reference = (
+        _message_key(actor.inbound_message_id)
+        if actor.inbound_message_id
+        else "sin referencia de mensaje"
     )
-    return f"Derivado al equipo (tarea {doc['name']}). Alguien continúa la conversación."
+    account = actor.customer_code or "cuenta no registrada"
+    try:
+        doc = erpnext.create_doc(
+            "ToDo",
+            {
+                "description": (
+                    f"[WhatsApp] Escalado por Agente IA: {motivo}. "
+                    f"Cuenta: {account}. Referencia: {reference}."
+                ),
+                "priority": "High",
+            },
+        )
+    except erpnext.ERPNextError:
+        return "No pude crear la tarea de derivación; avisá que el equipo revisará el caso."
+    return f"Derivado al equipo (tarea {doc['name']})."

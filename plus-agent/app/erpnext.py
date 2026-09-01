@@ -1,20 +1,21 @@
-"""
-Thin ERPNext REST client.
+"""Thin ERPNext REST client.
 
-RULE: the agent NEVER touches MariaDB. Everything goes through this file.
-RULE: this client authenticates as a dedicated ERPNext user ("Agente IA")
-      whose Role grants create-draft but NOT submit. The permission boundary
-      is enforced by ERPNext, not by the prompt. Prompt injection cannot
-      escalate past a role.
+The customer agent never touches MariaDB and authenticates as a restricted
+ERPNext user. A separate policy identity is used only for privileged policy
+reads and the deterministic submit transition.
 """
 from __future__ import annotations
 
+import json
 import os
-from typing import Any
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Iterator
+from urllib.parse import quote
 
 import httpx
 
-ERPNEXT_URL = os.environ["ERPNEXT_URL"]          # http://backend:8000 (internal docker network)
+ERPNEXT_URL = os.environ["ERPNEXT_URL"]
 ERPNEXT_KEY = os.environ["ERPNEXT_API_KEY"]
 ERPNEXT_SECRET = os.environ["ERPNEXT_API_SECRET"]
 
@@ -25,17 +26,97 @@ _HEADERS = {
 }
 
 _client = httpx.Client(base_url=ERPNEXT_URL, headers=_HEADERS, timeout=20.0)
+_manager_client: httpx.Client | None = None
+_credential_scope: ContextVar[str] = ContextVar(
+    "erpnext_credential_scope", default="customer"
+)
 
 
 class ERPNextError(RuntimeError):
-    """Raised so the agent can tell the customer something went wrong,
-    instead of hallucinating a successful order."""
+    """A sanitized ERPNext failure safe to pass through internal tool logic."""
 
 
-def _check(r: httpx.Response) -> Any:
-    if r.status_code >= 400:
-        raise ERPNextError(f"ERPNext {r.status_code}: {r.text[:300]}")
-    return r.json().get("data")
+def _manager() -> httpx.Client:
+    """Build the broad management client lazily and fail closed if absent."""
+    global _manager_client
+    if _manager_client is None:
+        try:
+            key = os.environ["ERPNEXT_MANAGER_API_KEY"].strip()
+            secret = os.environ["ERPNEXT_MANAGER_API_SECRET"].strip()
+        except KeyError as exc:
+            raise ERPNextError("Credenciales de gerencia ERPNext no configuradas") from exc
+        if not key or not secret:
+            raise ERPNextError("Credenciales de gerencia ERPNext no configuradas")
+        _manager_client = httpx.Client(
+            base_url=ERPNEXT_URL,
+            headers={
+                "Authorization": f"token {key}:{secret}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            timeout=30.0,
+        )
+    return _manager_client
+
+
+def _active_client() -> httpx.Client:
+    return _manager() if _credential_scope.get() == "management" else _client
+
+
+@contextmanager
+def customer_scope() -> Iterator[None]:
+    """Force restricted credentials for an entire customer-agent turn."""
+    token = _credential_scope.set("customer")
+    try:
+        yield
+    finally:
+        _credential_scope.reset(token)
+
+
+@contextmanager
+def manager_scope() -> Iterator[None]:
+    """Use manager credentials for a turn, refusing to run if not configured."""
+    _manager()  # validate before any model/tool work starts
+    token = _credential_scope.set("management")
+    try:
+        yield
+    finally:
+        _credential_scope.reset(token)
+
+
+def _request(
+    client: httpx.Client,
+    method: str,
+    path: str,
+    *,
+    operation: str,
+    **kwargs: Any,
+) -> dict:
+    """Run one request without exposing ERPNext response bodies to the LLM."""
+    try:
+        response = client.request(method, path, **kwargs)
+    except httpx.HTTPError as exc:
+        raise ERPNextError(f"ERPNext no disponible durante {operation}") from exc
+    if response.status_code >= 400:
+        raise ERPNextError(
+            f"ERPNext rechazó {operation} (estado {response.status_code})"
+        )
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise ERPNextError(
+            f"ERPNext devolvió una respuesta inválida durante {operation}"
+        ) from exc
+    if not isinstance(body, dict):
+        raise ERPNextError(
+            f"ERPNext devolvió una respuesta inválida durante {operation}"
+        )
+    return body
+
+
+def _resource_path(doctype: str, name: str | None = None) -> str:
+    path = f"/api/resource/{quote(doctype, safe='')}"
+    return f"{path}/{quote(name, safe='')}" if name is not None else path
 
 
 def get_list(
@@ -46,33 +127,58 @@ def get_list(
 ) -> list[dict]:
     params: dict[str, Any] = {"limit_page_length": limit}
     if filters:
-        params["filters"] = str(filters).replace("'", '"')
+        params["filters"] = json.dumps(filters, ensure_ascii=False)
     if fields:
-        params["fields"] = str(fields).replace("'", '"')
-    return _check(_client.get(f"/api/resource/{doctype}", params=params)) or []
+        params["fields"] = json.dumps(fields, ensure_ascii=False)
+    body = _request(
+        _active_client(),
+        "GET",
+        _resource_path(doctype),
+        operation=f"la consulta de {doctype}",
+        params=params,
+    )
+    data = body.get("data") or []
+    if not isinstance(data, list):
+        raise ERPNextError(f"ERPNext devolvió datos inválidos para {doctype}")
+    return data
 
 
 def get_doc(doctype: str, name: str) -> dict:
-    return _check(_client.get(f"/api/resource/{doctype}/{name}"))
+    body = _request(
+        _active_client(),
+        "GET",
+        _resource_path(doctype, name),
+        operation=f"la lectura de {doctype}",
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(f"ERPNext devolvió datos inválidos para {doctype}")
+    return data
 
 
 def create_doc(doctype: str, payload: dict) -> dict:
-    """Creates a DRAFT document (docstatus 0).
-
-    We never send docstatus=1. Submitting is a human action in the ERPNext UI.
-    That single fact is the entire money/stock guardrail — and ERPNext gives
-    it to us for free via its built-in draft -> submitted -> cancelled model.
-    """
-    payload = {**payload, "docstatus": 0}
-    return _check(_client.post(f"/api/resource/{doctype}", json=payload))
+    """Create a draft; the restricted identity has no Submit permission."""
+    body = _request(
+        _active_client(),
+        "POST",
+        _resource_path(doctype),
+        operation=f"la creación de {doctype}",
+        json={**payload, "docstatus": 0},
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(f"ERPNext devolvió datos inválidos al crear {doctype}")
+    return data
 
 
 def add_comment(doctype: str, name: str, text: str) -> None:
-    """Audit trail. Every single AI write leaves a footprint on the record,
-    so at 2am you know whether the bot or a human did it."""
+    """Best-effort audit note; it never changes the known order outcome."""
     try:
-        _client.post(
-            "/api/resource/Comment",
+        _request(
+            _active_client(),
+            "POST",
+            _resource_path("Comment"),
+            operation="la creación del comentario de auditoría",
             json={
                 "comment_type": "Comment",
                 "reference_doctype": doctype,
@@ -80,62 +186,69 @@ def add_comment(doctype: str, name: str, text: str) -> None:
                 "content": text,
             },
         )
-    except Exception:
-        pass  # never fail a customer order because the audit note failed
+    except ERPNextError as exc:
+        print(f"[erpnext] comentario de auditoría no creado: {exc}")
+
+
+def _run_report(client: httpx.Client, report_name: str, filters: dict | None) -> list:
+    body = _request(
+        client,
+        "GET",
+        "/api/method/frappe.desk.query_report.run",
+        operation=f"el reporte {report_name}",
+        params={
+            "report_name": report_name,
+            "filters": json.dumps(filters or {}, ensure_ascii=False),
+        },
+    )
+    message = body.get("message") or {}
+    result = message.get("result") if isinstance(message, dict) else None
+    if not isinstance(result, list):
+        raise ERPNextError(
+            f"ERPNext devolvió datos inválidos para el reporte {report_name}"
+        )
+    return result
 
 
 def run_report(report_name: str, filters: dict | None = None) -> list:
-    """Run an ERPNext Query Report and return its rows.
+    """Run an ERPNext report with the active customer/management identity."""
+    return _run_report(_active_client(), report_name, filters)
 
-    This is how the management agent gets numbers. ERPNext computes them;
-    the LLM only explains them. Never let the model aggregate raw rows.
+
+def default_context() -> tuple[str, str]:
+    """Return the explicitly configured company and fulfilment warehouse.
+
+    A fallback warehouse is unsafe on multi-company sites. Missing or partial
+    configuration therefore fails closed before an order can be written.
     """
-    r = _client.get(
-        "/api/method/frappe.desk.query_report.run",
-        params={"report_name": report_name, "filters": str(filters or {}).replace("'", '"')},
-    )
-    if r.status_code >= 400:
-        raise ERPNextError(f"report {report_name} failed: {r.text[:200]}")
-    return r.json().get("message", {}).get("result", [])
-
-
-_company_cache: str | None = None
+    company = os.getenv("ERPNEXT_COMPANY", "").strip()
+    warehouse = os.getenv("ERPNEXT_WAREHOUSE", "").strip()
+    if not company or not warehouse:
+        raise ERPNextError(
+            "ERPNEXT_COMPANY y ERPNEXT_WAREHOUSE deben configurarse explícitamente"
+        )
+    return company, warehouse
 
 
 def default_company() -> str:
-    global _company_cache
-    if _company_cache is None:
-        rows = get_list("Company", fields=["name"], limit=1)
-        _company_cache = rows[0]["name"] if rows else ""
-    return _company_cache
-
-
-_warehouse_cache: str | None = None
+    return default_context()[0]
 
 
 def default_warehouse() -> str:
-    global _warehouse_cache
-    if _warehouse_cache is None:
-        rows = get_list(
-            "Warehouse", filters=[["is_group", "=", 0]], fields=["name"], limit=1
-        )
-        _warehouse_cache = rows[0]["name"] if rows else ""
-    return _warehouse_cache
+    return default_context()[1]
 
 
-# ---------------------------------------------------------------------------
-# SUBMIT — separate credentials, deliberately NOT importable as an agent tool.
-# Only app/policy.py calls this, and only after every deterministic rule
-# passes. The LLM has no route to reach it.
-# ---------------------------------------------------------------------------
 _policy_client: httpx.Client | None = None
 
 
 def _policy() -> httpx.Client:
     global _policy_client
     if _policy_client is None:
-        key = os.environ["ERPNEXT_POLICY_API_KEY"]
-        secret = os.environ["ERPNEXT_POLICY_API_SECRET"]
+        try:
+            key = os.environ["ERPNEXT_POLICY_API_KEY"]
+            secret = os.environ["ERPNEXT_POLICY_API_SECRET"]
+        except KeyError as exc:
+            raise ERPNextError("Credenciales de política ERPNext no configuradas") from exc
         _policy_client = httpx.Client(
             base_url=ERPNEXT_URL,
             headers={
@@ -148,8 +261,36 @@ def _policy() -> httpx.Client:
     return _policy_client
 
 
+def policy_run_report(report_name: str, filters: dict | None = None) -> list:
+    """Run a policy-only report using the privileged non-LLM identity."""
+    return _run_report(_policy(), report_name, filters)
+
+
+def policy_get_doc(doctype: str, name: str) -> dict:
+    """Read a document with the policy identity after privileged transitions."""
+    body = _request(
+        _policy(),
+        "GET",
+        _resource_path(doctype, name),
+        operation=f"la lectura de política de {doctype}",
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(f"ERPNext devolvió datos inválidos para {doctype}")
+    return data
+
+
 def submit_doc(doctype: str, name: str) -> dict:
-    r = _policy().put(f"/api/resource/{doctype}/{name}", json={"docstatus": 1})
-    if r.status_code >= 400:
-        raise ERPNextError(f"submit {doctype} {name} failed: {r.text[:300]}")
-    return r.json().get("data")
+    body = _request(
+        _policy(),
+        "PUT",
+        _resource_path(doctype, name),
+        operation=f"la confirmación de {doctype}",
+        json={"docstatus": 1},
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(
+            f"ERPNext devolvió datos inválidos al confirmar {doctype}"
+        )
+    return data

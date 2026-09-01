@@ -3,29 +3,12 @@
 WhatsApp order agent for the Plus dairy stack. Runs as one container on the
 same server as ERPNext, talking to it over the internal Docker network.
 
-## The point of this repo
+## Architecture
 
-LangGraph is one line in `requirements.txt`. Everything else here is yours,
-and it is roughly 350 lines. That is the entire "we still have to write code"
-problem, measured.
-
-| File | Lines | What it is |
-|---|---|---|
-| `app/erpnext.py` | ~75 | REST client. The agent never touches MariaDB. |
-| `app/tools/catalogo.py` | ~55 | Read tools — products, stock, order status |
-| `app/tools/pedidos.py` | ~85 | Write tools — **drafts only** |
-| `app/prompts.py` | ~30 | Rioplatense Spanish system prompt |
-| `app/graph.py` | ~50 | The agent itself |
-| `app/main.py` | ~90 | Webhook: signature, idempotency, customer lookup |
-| `app/whatsapp.py` | ~25 | Outbound messages |
-| `app/tools/gerencia.py` | ~135 | Management read tools (owner assistant) |
-| `app/prompts_gerencia.py` | ~30 | Management prompt |
-| `app/router.py` | ~20 | Phone-based agent routing (security boundary) |
-| `app/briefing.py` | ~30 | 07:00 WhatsApp morning briefing |
-| `app/tools/captura.py` | ~180 | **Offline-sale capture** — the hard part |
-| `app/policy.py` | ~130 | **Auto-confirm engine** — deterministic, LLM-proof |
-| `app/notificar.py` | ~50 | WhatsApp approval buttons |
-| `app/aprobacion.py` | ~65 | Button taps -> ERPNext submit |
+The service keeps the LLM behind narrow ERPNext tools, a deterministic
+auto-confirm policy, a durable Redis-backed webhook queue and signed Meta
+webhooks. ERPNext remains the system of record; neither agent accesses MariaDB
+or invents an order number.
 
 ## Two agents, one webhook
 
@@ -33,7 +16,8 @@ Route by phone number in `router.py`:
 
 - **staff phone** -> management agent: broad read across sales, stock,
   receivables, customers. Stronger model. Still cannot submit.
-- **anyone else** -> customer agent: 6 narrow tools, draft-only writes.
+- **anyone else** -> customer agent: narrow, account-scoped tools and
+  draft-only writes.
 
 This is a **security boundary**, not a convenience. A customer-facing bot with
 full system read is one prompt injection away from leaking the customer list,
@@ -67,16 +51,27 @@ Start `AUTO_CONFIRM_MAX=0` (everything reviewed). Raise it week by week as he
 watches the decisions land. By month two most orders never touch him.
 
 **2. One-tap approval (`app/notificar.py`, `app/aprobacion.py`)**
-Orders that DO need him arrive as a WhatsApp with buttons —
-[Confirmar] [Rechazar] [Ver detalle]. He taps from his lock screen, ERPNext
-submits, the customer is notified automatically. Two seconds, no app.
+Orders that need review can arrive as a WhatsApp utility template with
+[Confirmar] [Ver detalle]. The template must be approved in the
+client's WhatsApp Manager first; a customer's message does not open a 24-hour
+window for the owner's separate phone. If Meta rejects the alert, the order
+stays visible as a draft in ERPNext and the bot records that manual follow-up
+is required. A successful button tap submits the order and starts a templated
+customer confirmation.
 
 **3. "Lo de siempre" (`pedido_habitual`)**
-Dairy customers reorder the same thing forever. One message, one tap, done.
+Dairy customers reorder the same thing forever. The bot retrieves only that
+authenticated account's last order, then reconfirms products, units and a new
+delivery date before creating anything.
 
-**Plus: never leave silence.** Even a held order gets an instant reply with a
-real order number — *"pedido SO-0042 tomado, te confirmo en unos minutos."*
-The wait people hate is the silence, not the delay.
+**Plus: two visible replies, never silence.** As soon as a text request is
+accepted for processing, the customer gets a short acknowledgement such as
+*"Dame un momento mientras verifico disponibilidad."* The agent then sends a
+separate final result. A created draft must include its real ERPNext number —
+for example, *"pedido SO-0042 tomado; te confirmamos en unos minutos"* — while
+an auto-confirmed order must say explicitly that it is confirmed. The first
+message means only "we are checking"; the order number and status in the final
+message are the customer's proof that the request reached ERPNext.
 
 ## Inventory truth — read this before launch
 
@@ -90,8 +85,8 @@ The design decouples order-taking from stock accuracy:
 **Phase 1 — `STOCK_CONFIABLE=false` (launch here)**
 The bot takes orders and never promises stock: *"te lo cargo, el equipo te
 confirma disponibilidad."* Honest, works from day one with zero inventory
-accuracy, and still delivers the real day-one win: no customer message is
-ever lost again.
+accuracy, while accepted requests remain in the durable queue across worker
+restarts and outbound-send failures.
 
 **Phase 2 — capture works, flip to `true`**
 Staff report sales by WhatsApp to the management agent, in their own words:
@@ -104,8 +99,9 @@ No data entry, no new app, no training. The same WhatsApp they already use.
 
 Even then the bot answers in **levels, not numbers** — DISPONIBLE /
 POCO STOCK / SIN STOCK — with `STOCK_BUFFER_PCT` (default 20%) absorbing
-sales not yet loaded, and ERPNext's `reserved_qty` stopping two customers
-being sold the same milk.
+sales not yet loaded. Submitted Sales Orders contribute to ERPNext's
+`reserved_qty`; bot auto-confirmations are serialized and recheck stock while
+holding the business lock.
 
 **Daily rhythm that makes it work**
 
@@ -125,23 +121,163 @@ If the 07:15 count does not happen, do not flip `STOCK_CONFIABLE` to true.
 2. **Draft only.** `create_doc` forces `docstatus: 0`. The agent's ERPNext
    Role has no submit permission, so this is enforced by ERPNext — not by
    the prompt. Prompt injection cannot escalate it.
-3. **Idempotency.** Meta retries webhooks. `wa:seen:{message_id}` in Redis
-   stops one retry becoming two orders.
-4. **Audit.** Every AI write leaves a Comment on the record.
+3. **Idempotency.** Meta retries webhooks. Hashed inbound-message markers in
+   Redis plus a deterministic ERPNext purchase-order reference stop one retry
+   becoming two orders without storing phone numbers in Redis key names.
+4. **Audit.** AI-created orders carry a hashed inbound reference and the
+   service adds best-effort ERPNext audit comments for writes and delivery
+   failures.
 
 ## Setup
 
-1. In ERPNext: create Role "Agente IA" — grant Create+Read on Item, Bin,
-   Customer, Lead, Sales Order, ToDo. **Do not grant Submit.** Create user
-   `agente@…`, assign the role, generate API key + secret.
-2. `cp .env.example .env` and fill it in.
-3. Add to the stack's `docker-compose.yml` on the same network as `backend`.
-4. Point the Meta webhook at `https://…/webhook/whatsapp`.
+1. In ERPNext, create Role "Agente IA" and grant only the reads and draft
+   creates used by the customer tools: Item, Bin, Customer, Lead, Sales Order,
+   ToDo, Item Price and Comment. **Do not grant Submit.** Create a dedicated
+   user, assign the role, and generate its API key and secret. Create a second
+   management user with the required broad reads plus draft-only offline-sale,
+   stock-reconciliation, delivery-note, ToDo and Comment writes, but no Submit.
+   Create a third policy user for the narrowly scoped report/Submit operations.
+   Never reuse the policy key in either LLM-facing agent.
+2. `cp .env.example .env`, immediately run `chmod 600 .env`, and fill in every
+   `replace-me` value. Prefer the deployment platform's secret manager. Never
+   commit `.env`, API credentials, or WhatsApp tokens.
+3. Set `ERPNEXT_COMPANY` and `ERPNEXT_WAREHOUSE` to the exact ERPNext names.
+   The warehouse must be enabled, must not be a group, and must belong to that
+   company. Explicit values prevent a new or unrelated warehouse from silently
+   becoming the order default.
+4. Set `BUSINESS_TIMEZONE` to the client's IANA timezone, such as
+   `America/Argentina/Buenos_Aires`. The host may run in UTC; customer dates and
+   business rules must still use the client's local date.
+5. Set `AUTO_CONFIRM_PRICE_LIST` and `AUTO_CONFIRM_CURRENCY` to the exact
+   authorized ERPNext selling price list and currency. Auto-confirmation fails
+   closed if either is missing or if a line has a different UOM, rate, validity
+   window, customer-specific price or discount.
+6. Add the container to the ERPNext stack's network so that `ERPNEXT_URL` can
+   reach `backend`, and point `REDIS_URL` at Redis Stack as described below.
+7. Set `TELEFONOS_EQUIPO` to the owner's/test staff number in international
+   format. An empty value disables management routing and staff alerts.
+8. Point the Meta callback at `https://…/webhook/whatsapp`, subscribe the WABA
+   to the `messages` field, and use the same `META_VERIFY_TOKEN` on both sides.
+
+### Required WhatsApp templates
+
+Create and obtain Meta approval for these templates before enabling staff
+alerts. The names and locale must match the corresponding `.env` values, and
+each recipient must have opted in to the relevant order/status messages.
+
+- `WHATSAPP_STAFF_PENDING_TEMPLATE`: seven body variables in this order —
+  order number, status, customer, line summary, total, delivery date and review
+  reason — plus two quick-reply buttons titled Confirmar and Ver detalle.
+- `WHATSAPP_STAFF_CONFIRMED_TEMPLATE`: the same seven body variables, without
+  action buttons.
+- `WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE`: two body variables — order number and
+  delivery date.
+
+The service supplies an order-specific payload for each staff quick reply.
+Missing/unapproved templates fail closed: no free-form staff alert is attempted,
+the Sales Order remains in ERPNext, and an audit comment records the required
+manual follow-up.
+
+### Google model-provider migration
+
+The default model identifiers are now `google_genai:gemini-2.5-flash` for
+customers and `google_genai:gemini-2.5-pro` for management. Set
+`GOOGLE_API_KEY`; an existing `ANTHROPIC_API_KEY` does not authenticate these
+models. `LLM_MODEL_CLIENTES` and `LLM_MODEL_GERENCIA` can still override the
+provider/model explicitly, but the matching provider package and API key must
+then be present.
+
+### Redis Stack is required
+
+`langgraph-checkpoint-redis` stores JSON checkpoints and creates search
+indexes, so it requires both RedisJSON and RediSearch. Redis 8 includes them;
+for older Redis versions use Redis Stack or install both modules. Use a
+dedicated Redis instance at logical database 0 (`.../0`) rather than sharing
+one instance with unrelated applications. Enable AOF persistence on a durable
+volume and use a non-evicting memory policy; otherwise Redis cannot guarantee
+that an HTTP-accepted webhook survives a Redis/container loss. Restrict Redis
+network access because queued events temporarily contain recipient numbers and
+message text. `CONVERSATION_TTL_DAYS` limits how
+long inactive LangGraph conversation checkpoints are retained and refreshes
+the TTL when a conversation continues. A server that reaches `/health` has
+successfully imported the app and initialized the checkpointer; it has not yet
+proved ERPNext or WhatsApp connectivity.
+
+### Install, test, and start
+
+Run these commands from `plus-agent/` in an isolated client staging environment:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+python -m pip check
+python -m pytest -q tests
+uvicorn app.main:app --host 0.0.0.0 --port 8080 --no-access-log
+```
+
+In another terminal:
+
+```bash
+curl --fail http://127.0.0.1:8080/health
+```
+
+For a client launch, begin with `AUTO_CONFIRM_MAX=0` and
+`STOCK_CONFIABLE=false`. Exercise the test WhatsApp number against staging
+ERPNext first, and verify that one request produces one Sales Order number.
+Only then point Meta's production callback at this server.
+
+### Staging seed credentials
+
+`deploy/seed_dairy.py` is a staging/demo bootstrap, not a production migration.
+It creates catalog and customer records and therefore needs a temporary ERPNext
+setup user with more permissions than either runtime agent. Inject that user's
+`ERPNEXT_API_KEY` and `ERPNEXT_API_SECRET` only for the seed process, then revoke
+them; do not store them in the service `.env`. The stock reconciliation remains
+a draft for a person to review and submit, and reruns reuse an identical
+non-cancelled reconciliation instead of creating duplicates.
+
+## WhatsApp response and delivery contract
+
+The HTTP `200` returned to Meta acknowledges the webhook and is invisible to
+the customer. The visible acknowledgement and final result are two ordinary,
+discrete WhatsApp messages:
+
+1. *"Dame un momento mientras verifico…"* is sent immediately.
+2. The final message says either **confirmed**, or **taken and pending review**,
+   and includes the ERPNext Sales Order number. On failure it says that no
+   order was created and escalates to a person; it must never invent a number.
+
+Meta permits a free-form reply within 24 hours of the customer's last message.
+Outside that customer-service window, an approved Message Template is required,
+so a human confirmation delayed beyond 24 hours must use an approved order
+status template. This is the current rule in Meta's
+[WhatsApp Business Messaging Policy](https://whatsappbusiness.com/policy/).
+Automation must also offer a clear human escalation path.
+
+Streaming is neither needed nor exposed as a customer-visible WhatsApp Cloud
+API capability. WhatsApp accepts complete message payloads through its
+[message endpoint](https://developers.facebook.com/docs/whatsapp/cloud-api/guides/send-messages)
+and reports lifecycle updates through webhooks; it does not render LLM tokens
+as they are generated. The acknowledgement followed by one complete final
+message is the appropriate UX. `sent`, `delivered`, and `read` status webhooks
+are persisted by hashed outbound ID; terminal failures add an ERPNext follow-up
+comment when the message is correlated to an order. Only the ERPNext order
+number/status proves that the business request itself was recorded.
+
+The short-lived token generated in Meta's Getting Started dashboard is for
+testing. Before production, replace `WHATSAPP_TOKEN` with a properly scoped
+System User access token and establish a rotation/revocation procedure; Meta's
+[Cloud API access-token guidance](https://developers.facebook.com/docs/whatsapp/business-management-api/get-started)
+describes the supported token types. Never paste a live token into source,
+logs, issues, or a pull request.
 
 ## Deploying client #2
 
-Copy `.env`, change `NOMBRE_NEGOCIO`, point at that client's ERPNext,
-edit the prompt. No new build.
+Create a fresh secret configuration from `.env.example`, use that client's
+separate Meta, ERPNext and Redis credentials, change `NOMBRE_NEGOCIO`, and
+approve the templates in that client's WhatsApp Manager. Never copy one
+client's live `.env` into another deployment.
 
 ## Not done yet
 
