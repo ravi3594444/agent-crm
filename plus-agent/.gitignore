@@ -10,3 +10,6 @@ frappe_docker/
 .env
 .env.*
 !.env.example
+
+# logs del agente (start.sh escribe agente.log al lado de la app)
+*.log
