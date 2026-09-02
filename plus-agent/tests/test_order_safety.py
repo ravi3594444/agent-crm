@@ -5,11 +5,10 @@ import sys
 from contextlib import nullcontext
 from datetime import date, datetime as RealDateTime
 from pathlib import Path
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import httpx
 import pytest
-from pydantic import ValidationError
 
 os.environ.setdefault("ERPNEXT_URL", "http://erpnext.test")
 os.environ.setdefault("ERPNEXT_API_KEY", "test-key")

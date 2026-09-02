@@ -372,13 +372,22 @@ def crear_lead(
             if actor.inbound_message_id
             else "sin referencia"
         )
+        # ERPNext v15+ stores Lead notes as a child table (CRM Note); a plain
+        # string here makes the API return HTTP 500 and no Lead is created.
+        detalle = " ".join(part for part in (nota.strip(), "") if part)
         doc = erpnext.create_doc(
             "Lead",
             {
                 "lead_name": nombre,
                 "mobile_no": actor.actor_phone,
-                "source": "WhatsApp",
-                "notes": f"{nota}\nReferencia segura: {message_ref}",
+                "notes": [
+                    {
+                        "note": (
+                            f"Origen: WhatsApp. {detalle}".strip()
+                            + f"<br>Referencia segura: {message_ref}"
+                        )
+                    }
+                ],
             },
         )
     except erpnext.ERPNextError:

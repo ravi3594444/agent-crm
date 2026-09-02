@@ -99,6 +99,37 @@ def record_outbound(
         _audit_failed(client, outbound_digest, metadata)
 
 
+# Meta allows free-form messages only inside the 24-hour customer-service
+# window opened by the recipient's own last inbound message. The window is
+# tracked per hashed phone so alerts can legitimately fall back to free-form
+# text when a template is not yet approved.
+WINDOW_TTL_SECONDS = 23 * 60 * 60
+
+
+def _window_key(phone: str) -> str:
+    return f"wa:{{inbound}}:window:{_digest(phone.strip().lstrip('+'))}"
+
+
+def record_inbound_window(phone: str) -> None:
+    """Remember that ``phone`` messaged us; opens its free-form window."""
+    if not phone or not phone.strip():
+        return
+    _redis().set(_window_key(phone), "1", ex=WINDOW_TTL_SECONDS)
+
+
+def window_open(phone: str) -> bool:
+    """Whether ``phone`` wrote to us recently enough for a free-form reply.
+
+    Fails closed: any Redis problem reads as "window closed".
+    """
+    if not phone or not phone.strip():
+        return False
+    try:
+        return _redis().get(_window_key(phone)) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def has_accepted(order_name: str, purpose: str) -> bool:
     """Whether Meta already accepted this order/purpose notification."""
     if not order_name or not purpose:

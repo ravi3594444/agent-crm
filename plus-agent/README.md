@@ -51,18 +51,41 @@ Start `AUTO_CONFIRM_MAX=0` (everything reviewed). Raise it week by week as he
 watches the decisions land. By month two most orders never touch him.
 
 **2. One-tap approval (`app/notificar.py`, `app/aprobacion.py`)**
-Orders that need review can arrive as a WhatsApp utility template with
-[Confirmar] [Ver detalle]. The template must be approved in the
-client's WhatsApp Manager first; a customer's message does not open a 24-hour
-window for the owner's separate phone. If Meta rejects the alert, the order
-stays visible as a draft in ERPNext and the bot records that manual follow-up
-is required. A successful button tap submits the order and starts a templated
-customer confirmation.
+Orders that need review arrive on the owner's WhatsApp with
+[Confirmar] [Ver detalle]. Preferred channel: an approved utility template,
+because a customer's message does not open a 24-hour window for the owner's
+separate phone. While the templates are not yet approved, the alert is sent
+free-form with the same two buttons **only if the owner wrote to the bot in the
+last 24 hours** (any message, e.g. "pendientes?"); otherwise it fails closed and
+the order stays visible as a draft in ERPNext with an audit comment saying so.
+
+The owner can also approve by text, without buttons and without the LLM:
+
+```
+confirmar SAL-ORD-2026-00008     (also: ok / aprobar / apruebo)
+ver SAL-ORD-2026-00008           (also: detalle)
+```
+
+Both paths run the same authorized handler (`manejar_boton`): only numbers in
+`TELEFONOS_EQUIPO` are accepted, a second tap is idempotent, and a successful
+confirmation starts the customer confirmation (template, or free-form while
+the customer's own 24-hour window is open).
 
 **3. "Lo de siempre" (`pedido_habitual`)**
 Dairy customers reorder the same thing forever. The bot retrieves only that
 authenticated account's last order, then reconfirms products, units and a new
 delivery date before creating anything.
+
+**Plus: a stuck recipient never blocks the queue.** A final reply that Meta
+rejects permanently (expired or invalid token, error 190; recipient not in the
+test allow-list, 131030; closed 24-hour window, 131047; template errors) is
+parked on the first attempt in the Redis list `wa:{inbound}:dead`, an audit
+comment naming the HTTP status and Meta code is added to any order quoted in
+that reply, and the FIFO moves on to the next customer. Only timeouts, HTTP 429
+and 5xx (plus Meta's own rate-limit codes) are retried, with exponential
+backoff from 2 s up to `WHATSAPP_RETRY_MAX_SECONDS`, at most
+`WHATSAPP_SEND_MAX_ATTEMPTS` times, and then parked the same way. Redis
+failures never count towards that limit.
 
 **Plus: two visible replies, never silence.** As soon as a text request is
 accepted for processing, the customer gets a short acknowledgement such as
@@ -174,9 +197,11 @@ each recipient must have opted in to the relevant order/status messages.
   delivery date.
 
 The service supplies an order-specific payload for each staff quick reply.
-Missing/unapproved templates fail closed: no free-form staff alert is attempted,
-the Sales Order remains in ERPNext, and an audit comment records the required
-manual follow-up.
+Until a template is configured, an alert is sent free-form only to a recipient
+whose own 24-hour window is open (they wrote to the bot within 24 hours, tracked
+by hashed phone in Redis); otherwise nothing is attempted, the Sales Order
+remains in ERPNext, and an audit comment records the required manual follow-up.
+The startup log prints one `[config] WARN` line per missing template.
 
 ### Google model-provider migration
 
@@ -202,6 +227,26 @@ long inactive LangGraph conversation checkpoints are retained and refreshes
 the TTL when a conversation continues. A server that reaches `/health` has
 successfully imported the app and initialized the checkpointer; it has not yet
 proved ERPNext or WhatsApp connectivity.
+
+### What the startup log tells you
+
+Right after "Application startup complete" the agent prints its readiness:
+
+- `[config] WARN TELEFONOS_EQUIPO vacío ...` — no manager loop at all.
+- `[config] WARN WHATSAPP_*_TEMPLATE vacío ...` — alerts only go out free-form
+  inside a 24-hour window.
+- `[config] WARN AUTO_CONFIRM_PRICE_LIST/AUTO_CONFIRM_CURRENCY vacíos` — the
+  bot answers "precio a confirmar" to every price question.
+- `[whatsapp] OK credenciales de WhatsApp válidas` or
+  `[whatsapp] ERROR Meta rechazó WHATSAPP_TOKEN ...` — a temporary Getting
+  Started token expires within 24 hours; use a System User token.
+
+Conversation memory: the system prompt is rebuilt every turn and never stored
+in the Redis checkpoint, and the model only sees the last
+`CONVERSATION_MAX_MESSAGES` messages of a thread (default 40). The Gemini
+free tier used in staging allows only 20 requests per day per model; the
+production deployment uses a paid provider key configured through
+`LLM_MODEL_CLIENTES` / `LLM_MODEL_GERENCIA`.
 
 ### Install, test, and start
 
@@ -278,6 +323,16 @@ Create a fresh secret configuration from `.env.example`, use that client's
 separate Meta, ERPNext and Redis credentials, change `NOMBRE_NEGOCIO`, and
 approve the templates in that client's WhatsApp Manager. Never copy one
 client's live `.env` into another deployment.
+
+## Running in a Codespace
+
+`start.sh` is idempotent and is what `.devcontainer/devcontainer.json` runs on
+every start: ERPNext stack, Redis Stack, public port 8081 for Meta, then the
+agent under a small restart loop (`agente.pid`, log in `agente.log`). A
+Codespace created before that file existed must be rebuilt once ("Rebuild
+Container") for the automatic start to kick in; until then run
+`bash start.sh` by hand after each resume. The public URL of the webhook
+changes if the Codespace is recreated, so re-check Meta's callback URL.
 
 ## Not done yet
 

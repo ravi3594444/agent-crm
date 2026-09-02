@@ -13,3 +13,5 @@ frappe_docker/
 
 # logs del agente (start.sh escribe agente.log al lado de la app)
 *.log
+# pid del supervisor que lanza start.sh
+agente.pid

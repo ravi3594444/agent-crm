@@ -4,7 +4,6 @@ This is the single feature that makes the owner FEEL the system is working
 for him. He wakes up and the business has already reported in.
 """
 import hashlib
-import os
 
 from app.graph import responder_gerencia
 from app.router import STAFF

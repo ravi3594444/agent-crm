@@ -6,9 +6,9 @@ button payload gets nothing.
 import os
 
 from app import erpnext
-from app.outbound_status import has_accepted, record_outbound
+from app.outbound_status import has_accepted, record_outbound, window_open
 from app.router import es_equipo
-from app.whatsapp import enviar_plantilla
+from app.whatsapp import enviar_mensaje, enviar_plantilla
 
 
 def _leer_doc(doctype: str, name: str) -> dict:
@@ -86,23 +86,16 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
 
 
 def _avisar_cliente(nombre: str) -> bool:
-    """Use a template because approval may happen after the 24-hour window."""
+    """Prefer a template: approval may happen after the 24-hour window.
+
+    Without a configured template, a free-form confirmation is sent only while
+    the customer's own window is still open (they wrote within 24 hours).
+    """
     try:
         purpose = "customer_order_confirmation"
         if has_accepted(nombre, purpose):
             return True
         plantilla = os.getenv("WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE", "").strip()
-        if not plantilla:
-            print(
-                f"[customer-notify] {nombre}: falta "
-                "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE"
-            )
-            erpnext.add_comment(
-                "Sales Order",
-                nombre,
-                "Aviso de confirmación no enviado: falta la plantilla de WhatsApp.",
-            )
-            return False
 
         so = _leer_doc("Sales Order", nombre)
         cliente = _leer_doc("Customer", so["customer"])
@@ -114,12 +107,32 @@ def _avisar_cliente(nombre: str) -> bool:
                 "Aviso de confirmación no enviado: el cliente no tiene teléfono.",
             )
             return False
-        result = enviar_plantilla(
-            tel,
-            plantilla,
-            os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR",
-            [nombre, str(so.get("delivery_date") or "a coordinar")],
-        )
+        entrega = str(so.get("delivery_date") or "a coordinar")
+        if plantilla:
+            result = enviar_plantilla(
+                tel,
+                plantilla,
+                os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR",
+                [nombre, entrega],
+            )
+        elif window_open(tel):
+            result = enviar_mensaje(
+                tel,
+                f"✅ Tu pedido {nombre} quedó confirmado. Entrega: {entrega}. "
+                "¡Gracias!",
+            )
+        else:
+            print(
+                f"[customer-notify] {nombre}: falta "
+                "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE y la ventana de 24 h cerró"
+            )
+            erpnext.add_comment(
+                "Sales Order",
+                nombre,
+                "Aviso de confirmación no enviado: falta la plantilla de WhatsApp "
+                "y la ventana de 24 h del cliente está cerrada. Avisarle manualmente.",
+            )
+            return False
         wamid = result["messages"][0]["id"]
         try:
             record_outbound(wamid, purpose, order_name=nombre)

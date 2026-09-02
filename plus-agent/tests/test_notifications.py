@@ -29,8 +29,10 @@ def _clean_templates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR")
     monkeypatch.setattr(notificar, "has_accepted", lambda *args: False)
     monkeypatch.setattr(notificar, "record_outbound", Mock())
+    monkeypatch.setattr(notificar, "window_open", lambda phone: False)
     monkeypatch.setattr(aprobacion, "has_accepted", lambda *args: False)
     monkeypatch.setattr(aprobacion, "record_outbound", Mock())
+    monkeypatch.setattr(aprobacion, "window_open", lambda phone: False)
 
 
 def test_template_quick_replies_use_approved_template_components(
@@ -300,3 +302,116 @@ def test_customer_confirmation_replay_uses_recorded_acceptance_without_resend(
 
     assert aprobacion._avisar_cliente("SAL-ORD-0001") is True
     send.assert_not_called()
+
+
+_SO = {
+    "customer": "CUST-001",
+    "customer_name": "Kiosco La Esquina",
+    "items": [{"item_code": "MAN-200", "item_name": "Manteca 200 g", "qty": 2}],
+    "grand_total": 4800,
+    "delivery_date": "2026-09-03",
+}
+
+
+def test_pending_alert_without_template_uses_buttons_inside_staff_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staff = "5491100000000"
+    monkeypatch.setattr(notificar, "STAFF", {staff})
+    monkeypatch.setattr(notificar, "window_open", lambda phone: phone == staff)
+    monkeypatch.setattr(notificar.erpnext, "add_comment", Mock())
+    template = Mock(side_effect=AssertionError("sin plantilla no se usa enviar_plantilla"))
+    buttons = Mock(return_value={"messages": [{"id": "wamid.btn"}]})
+    monkeypatch.setattr(notificar, "enviar_plantilla", template)
+    monkeypatch.setattr(notificar, "enviar_botones", buttons)
+
+    assert notificar.notificar_equipo(
+        "SAL-ORD-2026-00008", _SO, auto=False, motivos="auto-confirmación desactivada"
+    ) is True
+
+    phone, body, botones = buttons.call_args.args
+    assert phone == staff
+    assert "SAL-ORD-2026-00008" in body
+    assert "Kiosco La Esquina" in body
+    assert "2 x Manteca 200 g" in body
+    assert "auto-confirmación desactivada" in body
+    assert "confirmar SAL-ORD-2026-00008" in body
+    assert len(body) <= 1024
+    assert [b["id"] for b in botones] == ["ok:SAL-ORD-2026-00008", "ver:SAL-ORD-2026-00008"]
+    assert notificar.record_outbound.call_args.args[0] == "wamid.btn"
+
+
+def test_confirmed_alert_without_template_uses_plain_text_inside_staff_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staff = "5491100000000"
+    monkeypatch.setattr(notificar, "STAFF", {staff})
+    monkeypatch.setattr(notificar, "window_open", lambda phone: True)
+    monkeypatch.setattr(notificar.erpnext, "add_comment", Mock())
+    text = Mock(return_value={"messages": [{"id": "wamid.txt"}]})
+    buttons = Mock(side_effect=AssertionError("un pedido confirmado no lleva botones"))
+    monkeypatch.setattr(notificar, "enviar_mensaje", text)
+    monkeypatch.setattr(notificar, "enviar_botones", buttons)
+
+    assert notificar.notificar_equipo("SAL-ORD-2026-00008", _SO, auto=True) is True
+    assert text.call_args.args[0] == staff
+    assert "confirmado" in text.call_args.args[1]
+
+
+def test_pending_alert_without_template_and_closed_window_fails_closed_with_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(notificar, "STAFF", {"5491100000000"})
+    comment = Mock()
+    monkeypatch.setattr(notificar.erpnext, "add_comment", comment)
+    monkeypatch.setattr(notificar, "enviar_botones", Mock(side_effect=AssertionError("ventana cerrada")))
+    monkeypatch.setattr(notificar, "enviar_mensaje", Mock(side_effect=AssertionError("ventana cerrada")))
+
+    assert notificar.notificar_equipo("SAL-ORD-2026-00008", _SO, auto=False) is False
+    texto = comment.call_args.args[2]
+    assert "falta configurar WHATSAPP_STAFF_PENDING_TEMPLATE" in texto
+    assert "24 h" in texto
+
+
+def test_customer_confirmation_without_template_uses_text_inside_customer_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs = {
+        ("Sales Order", "SAL-ORD-0001"): {
+            "name": "SAL-ORD-0001",
+            "customer": "CUST-001",
+            "delivery_date": "2026-08-31",
+        },
+        ("Customer", "CUST-001"): {"name": "CUST-001", "mobile_no": "+5491100000001"},
+    }
+    monkeypatch.setattr(aprobacion, "_leer_doc", lambda doctype, name: docs[(doctype, name)])
+    monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(aprobacion, "window_open", lambda phone: phone == "+5491100000001")
+    text = Mock(return_value={"messages": [{"id": "wamid.out"}]})
+    template = Mock(side_effect=AssertionError("sin plantilla no se usa enviar_plantilla"))
+    monkeypatch.setattr(aprobacion, "enviar_mensaje", text)
+    monkeypatch.setattr(aprobacion, "enviar_plantilla", template)
+
+    assert aprobacion._avisar_cliente("SAL-ORD-0001") is True
+    phone, body = text.call_args.args
+    assert phone == "+5491100000001"
+    assert "SAL-ORD-0001" in body and "2026-08-31" in body
+    aprobacion.record_outbound.assert_called_once_with(
+        "wamid.out", "customer_order_confirmation", order_name="SAL-ORD-0001"
+    )
+
+
+def test_customer_confirmation_without_template_and_closed_window_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    docs = {
+        ("Sales Order", "SAL-ORD-0001"): {"name": "SAL-ORD-0001", "customer": "CUST-001"},
+        ("Customer", "CUST-001"): {"name": "CUST-001", "mobile_no": "+5491100000001"},
+    }
+    monkeypatch.setattr(aprobacion, "_leer_doc", lambda doctype, name: docs[(doctype, name)])
+    comment = Mock()
+    monkeypatch.setattr(aprobacion.erpnext, "add_comment", comment)
+    monkeypatch.setattr(aprobacion, "enviar_mensaje", Mock(side_effect=AssertionError("cerrada")))
+
+    assert aprobacion._avisar_cliente("SAL-ORD-0001") is False
+    assert "ventana de 24 h" in comment.call_args.args[2]
