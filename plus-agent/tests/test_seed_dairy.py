@@ -7,13 +7,12 @@ from unittest.mock import Mock, call
 
 import pytest
 
-
 os.environ.setdefault("ERPNEXT_URL", "http://erpnext.test")
 os.environ.setdefault("ERPNEXT_API_KEY", "test-key")
 os.environ.setdefault("ERPNEXT_API_SECRET", "test-secret")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from deploy import seed_dairy as seed  # noqa: E402
+from deploy import seed_dairy as seed
 
 
 @pytest.fixture(autouse=True)

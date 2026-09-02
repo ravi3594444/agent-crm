@@ -19,6 +19,12 @@ from langgraph.prebuilt import ToolNode, create_react_agent
 from app import erpnext
 from app.prompts import SYSTEM_ES_AR
 from app.prompts_gerencia import SYSTEM_GERENCIA
+from app.tools.captura import (
+    confirmar_entrega,
+    contar_stock,
+    redactar_mensaje_cliente,
+    registrar_venta_offline,
+)
 from app.tools.catalogo import (
     buscar_producto,
     consultar_stock,
@@ -32,12 +38,6 @@ from app.tools.gerencia import (
     pedidos_pendientes,
     stock_bajo,
     ventas_del_periodo,
-)
-from app.tools.captura import (
-    confirmar_entrega,
-    contar_stock,
-    redactar_mensaje_cliente,
-    registrar_venta_offline,
 )
 from app.tools.pedidos import crear_lead, crear_pedido, escalar_a_humano
 

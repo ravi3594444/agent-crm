@@ -279,7 +279,7 @@ def _order_result(order: dict, fallback: list[dict], fallback_date: str) -> str:
 def _safe_notify(name: str, order: dict, *, auto: bool, reasons: str = "") -> bool:
     try:
         return bool(notificar_equipo(name, order, auto=auto, motivos=reasons))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(f"[orders] notificación al equipo falló ({type(exc).__name__})")
         return False
 
@@ -296,7 +296,7 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
 
     try:
         decision = policy.evaluar(complete)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print(
             f"[orders] política falló order={_log_ref(name)} "
             f"type={type(exc).__name__}"
@@ -320,7 +320,7 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
                     _safe_notify(name, complete, auto=True)
                     return _order_result(complete, validated, delivery)
                 decision = final_decision
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(
                 f"[orders] auto-confirmación falló order={_log_ref(name)} "
                 f"type={type(exc).__name__}"

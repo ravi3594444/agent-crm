@@ -15,9 +15,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import aprobacion, whatsapp  # noqa: E402
-from app.formato import cantidad, pesos, whatsapp_texto  # noqa: E402
-
+from app import aprobacion, whatsapp
+from app.formato import cantidad, pesos, whatsapp_texto
 
 # --- pesos ------------------------------------------------------------------
 

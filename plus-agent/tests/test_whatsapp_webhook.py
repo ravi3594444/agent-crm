@@ -379,7 +379,7 @@ def test_ack_fifo_and_server_bound_customer_identity(webhook, monkeypatch):
     assert fake.expires[seen_key] - fake.now == webhook._STATE_TTL_SECONDS
 
     # A successful POST is recorded as API acceptance, never as delivery.
-    outbound_digest = hashlib.sha256("wamid.out.3".encode()).hexdigest()
+    outbound_digest = hashlib.sha256(b"wamid.out.3").hexdigest()
     assert fake.values[f"wa:{{inbound}}:status:{outbound_digest}"] == (
         "accepted_by_meta"
     )

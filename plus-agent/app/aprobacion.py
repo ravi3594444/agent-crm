@@ -124,7 +124,7 @@ def _avisar_cliente(nombre: str) -> bool:
         wamid = result["messages"][0]["id"]
         try:
             record_outbound(wamid, purpose, order_name=nombre)
-        except Exception as tracking_error:  # noqa: BLE001
+        except Exception as tracking_error:
             print(
                 f"[customer-notify] {nombre}: tracking falló "
                 f"({type(tracking_error).__name__})"
@@ -141,7 +141,7 @@ def _avisar_cliente(nombre: str) -> bool:
             "Meta aceptó el aviso de confirmación para el cliente.",
         )
         return True
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         print(f"[customer-notify] {nombre}: falló ({type(e).__name__})")
         erpnext.add_comment(
             "Sales Order",

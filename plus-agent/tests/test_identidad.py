@@ -212,7 +212,7 @@ def test_staff_es_lista_ordenada_y_sin_duplicados(monkeypatch):
         # Determinista entre recargas.
         antes = list(router.STAFF)
         router.recargar()
-        assert router.STAFF == antes
+        assert antes == router.STAFF
         # notificar.py hace sorted(STAFF): tiene que seguir funcionando.
         assert sorted(router.STAFF) == ["5491145678901", "5493511234567"]
     finally:

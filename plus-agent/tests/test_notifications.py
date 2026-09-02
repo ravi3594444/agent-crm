@@ -7,7 +7,6 @@ from unittest.mock import Mock
 
 import pytest
 
-
 os.environ.setdefault("ERPNEXT_URL", "http://erpnext.test")
 os.environ.setdefault("ERPNEXT_API_KEY", "test-key")
 os.environ.setdefault("ERPNEXT_API_SECRET", "test-secret")
@@ -15,7 +14,7 @@ os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "test-phone-id")
 os.environ.setdefault("WHATSAPP_TOKEN", "test-token")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import aprobacion, notificar, whatsapp  # noqa: E402
+from app import aprobacion, notificar, whatsapp
 
 
 @pytest.fixture(autouse=True)

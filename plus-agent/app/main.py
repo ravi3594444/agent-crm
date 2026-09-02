@@ -208,7 +208,7 @@ def _generate_response(item: dict) -> str:
                 actor_phone=telefono,
             )
         )
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         print(
             f"[agent] error msg={_correlation(message_id)} "
             f"phone={_correlation(telefono)} type={_error_name(error)}"
@@ -222,7 +222,7 @@ def _acknowledge_once(telefono: str, message_id: str) -> None:
     claim = uuid.uuid4().hex
     try:
         claimed = bool(r.set(key, claim, nx=True, ex=_ACK_CLAIM_TTL_SECONDS))
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         print(
             f"[queue] ack coordination phone={_correlation(telefono)} "
             f"type={_error_name(error)}"
@@ -236,7 +236,7 @@ def _acknowledge_once(telefono: str, message_id: str) -> None:
         while time.monotonic() < deadline:
             try:
                 state = _as_text(r.get(key))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 return
             if state == "accepted_by_meta":
                 return
@@ -247,20 +247,20 @@ def _acknowledge_once(telefono: str, message_id: str) -> None:
 
     try:
         enviar_mensaje(telefono, ACK_TEXT)
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         print(
             f"[whatsapp] ack failed phone={_correlation(telefono)} "
             f"type={_error_name(error)}"
         )
         try:
             r.eval(_DELETE_IF_VALUE_LUA, 1, key, claim)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         return
 
     try:
         r.set(key, "accepted_by_meta", ex=_STATE_TTL_SECONDS)
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         print(
             f"[queue] ack state phone={_correlation(telefono)} "
             f"type={_error_name(error)}"
@@ -309,7 +309,7 @@ def _heartbeat(ownership: _Ownership, stop: threading.Event) -> None:
             ):
                 ownership.lost.set()
                 return
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             # Before the outbound API call the worker performs a direct
             # ownership read. A transient timeout is not proof of lock loss.
             print(f"[queue] lock refresh type={_error_name(error)}")
@@ -320,7 +320,7 @@ def _owns_worker_lock(ownership: _Ownership) -> bool:
         return False
     try:
         owns = _as_text(r.get(_WORKER_LOCK_KEY)) == ownership.token
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         print(f"[queue] lock check type={_error_name(error)}")
         return False
     if not owns:
@@ -331,7 +331,7 @@ def _owns_worker_lock(ownership: _Ownership) -> bool:
 def _release_owned(key: str, token: str) -> None:
     try:
         r.eval(_DELETE_IF_VALUE_LUA, 1, key, token)
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         print(f"[queue] lock release type={_error_name(error)}")
 
 
@@ -366,7 +366,7 @@ def _cache_result(message_id: str, response: str) -> bool:
             ex=_STATE_TTL_SECONDS,
         )
         return True
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         print(
             f"[queue] final cache msg={_correlation(message_id)} "
             f"type={_error_name(error)}"
@@ -402,7 +402,7 @@ def _persist_accepted(message_id: str, outbound_id: str | None) -> bool:
                 ex=_STATE_TTL_SECONDS,
             )
         return True
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         print(
             f"[queue] acceptance state msg={_correlation(message_id)} "
             f"type={_error_name(error)}"
@@ -423,7 +423,7 @@ def _is_accepted(message_id: str) -> bool:
 
     try:
         return r.get(_message_key("accepted", message_id)) is not None
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         print(
             f"[queue] acceptance read msg={_correlation(message_id)} "
             f"type={_error_name(error)}"
@@ -455,7 +455,7 @@ def _complete_pending(
                 raw,
             )
         )
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         print(f"[queue] completion type={_error_name(error)}")
         return False
     return result == 1
@@ -491,7 +491,7 @@ def _handle_pending(
 
     try:
         accepted = _is_accepted(message_id)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return "retry"
 
     if accepted:
@@ -499,7 +499,7 @@ def _handle_pending(
 
     try:
         response, response_is_durable = _cached_result(message_id)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return "retry"
 
     if response is None:
@@ -512,7 +512,7 @@ def _handle_pending(
                     ex=_ITEM_LEASE_TTL_SECONDS,
                 )
             )
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             print(
                 f"[queue] item claim msg={_correlation(message_id)} "
                 f"type={_error_name(error)}"
@@ -552,7 +552,7 @@ def _handle_pending(
                     ex=_ITEM_LEASE_TTL_SECONDS,
                 )
             )
-        except Exception as error:  # noqa: BLE001
+        except Exception as error:
             print(
                 f"[queue] item lease msg={_correlation(message_id)} "
                 f"type={_error_name(error)}"
@@ -571,7 +571,7 @@ def _handle_pending(
 
     try:
         send_result = enviar_mensaje(telefono, response)
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         print(
             f"[whatsapp] final pending msg={_correlation(message_id)} "
             f"phone={_correlation(telefono)} type={_error_name(error)}"
@@ -615,7 +615,7 @@ def _worker_cycle(stop: threading.Event | None = None) -> str:
                 ex=_WORKER_LOCK_TTL_SECONDS,
             )
         )
-    except Exception as error:  # noqa: BLE001
+    except Exception as error:
         print(f"[queue] worker lock type={_error_name(error)}")
         return "retry"
     if not acquired:
@@ -636,7 +636,7 @@ def _worker_cycle(stop: threading.Event | None = None) -> str:
         while not stop.is_set() and not ownership.lost.is_set():
             try:
                 raw = _claim_pending()
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:
                 print(f"[queue] claim type={_error_name(error)}")
                 return "retry"
             if raw is None:
@@ -754,7 +754,7 @@ async def inbound(request: Request, background: BackgroundTasks):
                         outbound_id,
                         outbound_status,
                     )
-                except Exception as error:  # noqa: BLE001
+                except Exception as error:
                     print("[queue] status persistence " f"type={_error_name(error)}")
                     raise HTTPException(503, "queue unavailable") from error
 
@@ -789,7 +789,7 @@ async def inbound(request: Request, background: BackgroundTasks):
                         kind,
                         data,
                     )
-                except Exception as error:  # noqa: BLE001
+                except Exception as error:
                     # Nothing was acknowledged unless the atomic script fully
                     # committed; Meta can safely retry the whole webhook.
                     print(

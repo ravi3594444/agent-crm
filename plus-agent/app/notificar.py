@@ -88,7 +88,7 @@ def notificar_equipo(
             wamid = result["messages"][0]["id"]
             try:
                 record_outbound(wamid, purpose, order_name=nombre)
-            except Exception as tracking_error:  # noqa: BLE001
+            except Exception as tracking_error:
                 # The API acceptance is still real. Record the observability
                 # gap without causing a duplicate template send.
                 print(
@@ -101,7 +101,7 @@ def notificar_equipo(
                     "Meta aceptó la alerta al equipo, pero no se pudo guardar "
                     "su seguimiento de entrega.",
                 )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(
                 f"[staff-notify] {nombre}: envío falló "
                 f"({type(e).__name__})"

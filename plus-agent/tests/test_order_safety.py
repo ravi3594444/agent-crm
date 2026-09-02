@@ -3,13 +3,13 @@ from __future__ import annotations
 import os
 import sys
 from contextlib import nullcontext
-from datetime import date, datetime as RealDateTime
+from datetime import date
+from datetime import datetime as RealDateTime
 from pathlib import Path
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import httpx
 import pytest
-from pydantic import ValidationError
 
 os.environ.setdefault("ERPNEXT_URL", "http://erpnext.test")
 os.environ.setdefault("ERPNEXT_API_KEY", "test-key")
@@ -20,8 +20,8 @@ os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "test-phone-id")
 os.environ.setdefault("WHATSAPP_TOKEN", "test-token")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import erpnext, policy  # noqa: E402
-from app.tools import catalogo, pedidos  # noqa: E402
+from app import erpnext, policy
+from app.tools import catalogo, pedidos
 
 
 def _customer_config(
@@ -145,9 +145,8 @@ def test_manager_scope_uses_distinct_credentials_and_fails_closed_when_missing(
     monkeypatch.setattr(erpnext, "_manager_client", None)
     monkeypatch.delenv("ERPNEXT_MANAGER_API_KEY", raising=False)
     monkeypatch.delenv("ERPNEXT_MANAGER_API_SECRET", raising=False)
-    with pytest.raises(erpnext.ERPNextError, match="gerencia"):
-        with erpnext.manager_scope():
-            pass
+    with pytest.raises(erpnext.ERPNextError, match="gerencia"), erpnext.manager_scope():
+        pass
     assert erpnext._active_client() is erpnext._client
 
     monkeypatch.setenv("ERPNEXT_MANAGER_API_KEY", "manager-key")

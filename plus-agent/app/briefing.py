@@ -4,7 +4,6 @@ This is the single feature that makes the owner FEEL the system is working
 for him. He wakes up and the business has already reported in.
 """
 import hashlib
-import os
 
 from app.graph import responder_gerencia
 from app.router import STAFF
@@ -28,7 +27,7 @@ def enviar_briefing() -> None:
                 usuario=f"staff:{recipient_tag}",
             )
             enviar_mensaje(telefono, texto)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(
                 f"[briefing] recipient={recipient_tag[:10]} "
                 f"type={type(e).__name__}"

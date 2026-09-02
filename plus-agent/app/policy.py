@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app import erpnext
