@@ -309,9 +309,13 @@ def test_ack_fifo_and_server_bound_customer_identity(webhook, monkeypatch):
     phone = "5491112345678"
 
     def get_list(doctype, filters, **kwargs):
-        candidate = filters[0][2]
-        lookups.append(candidate)
-        return [{"name": "CUST-INTERNAL"}] if candidate.startswith("+") else []
+        # Contrato nuevo (app/clientes.py): UNA búsqueda por mensaje, con
+        # `like` sobre los últimos 8 dígitos, y la confirmación canónica se
+        # hace en Python comparando mobile_no. Por eso el fake devuelve el
+        # teléfono tal como lo cargaría una persona (con +), y el servidor
+        # tiene que matchearlo igual contra los dígitos pelados de Meta.
+        lookups.append(tuple(filters[0]))
+        return [{"name": "CUST-INTERNAL", "mobile_no": f"+{phone}"}]
 
     def respond(text, **kwargs):
         agent_calls.append((text, kwargs))
@@ -345,7 +349,17 @@ def test_ack_fifo_and_server_bound_customer_identity(webhook, monkeypatch):
         ("agent", "de leche"),
         ("send", "final:de leche"),
     ]
-    assert lookups == [phone, f"+{phone}", phone, f"+{phone}"]
+    # Una sola consulta por mensaje, y siempre un `like` acotado al sufijo del
+    # abonado: nunca el número completo en un `=` que no matchea formatos.
+    assert len(lookups) == 2
+    for campo, operador, patron in lookups:
+        assert campo == "mobile_no"
+        assert operador == "like"
+        # El patrón lleva un % entre dígito y dígito ('%1%2%3%...'): así el
+        # `like` matchea '351 123-4567' aunque un guion o un espacio corte la
+        # secuencia de los últimos 8 dígitos. Lo que importa: son ESOS dígitos.
+        assert patron.startswith("%") and patron.endswith("%")
+        assert patron.replace("%", "") == phone[-8:]
     for (_, kwargs), inbound_id in zip(
         agent_calls, ["wamid.in.1", "wamid.in.2"], strict=True
     ):

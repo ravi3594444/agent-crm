@@ -159,30 +159,21 @@ def _enqueue_message(telefono: str, message_id: str, kind: str, data: str) -> bo
     )
 
 
-def _alternate_phone_numbers(telefono: str) -> list[str]:
-    normalized = telefono.strip()
-    without_plus = normalized.lstrip("+")
-    candidates = [normalized]
-    alternate = without_plus if normalized.startswith("+") else f"+{without_plus}"
-    if alternate and alternate not in candidates:
-        candidates.append(alternate)
-    return candidates
-
-
 def _contexto(telefono: str) -> tuple[str, str]:
-    """Resolve authorization internally; identifiers never enter the prompt."""
-    for candidate in _alternate_phone_numbers(telefono):
-        clientes = erpnext.get_list(
-            "Customer",
-            filters=[["mobile_no", "=", candidate]],
-            fields=["name"],
-            limit=1,
+    """Resolve authorization internally; identifiers never enter the prompt.
+
+    The lookup tolerates hand-typed mobile_no formats (+54 9 351 123-4567,
+    0351 15 123-4567, ...) by matching in canonical form; see app/clientes.py.
+    """
+    # Local import: keeps main.py's import block untouched for this concern.
+    from app import clientes
+
+    cliente = clientes.buscar_por_telefono(telefono, get_list=erpnext.get_list)
+    if cliente:
+        return str(cliente["name"]), (
+            "Cliente registrado y validado por el servidor. "
+            "Podés ayudarlo con su pedido."
         )
-        if clientes:
-            return str(clientes[0]["name"]), (
-                "Cliente registrado y validado por el servidor. "
-                "Podés ayudarlo con su pedido."
-            )
     return "", (
         "Cliente no registrado todavía. Si hace un pedido, "
         "registralo primero con crear_lead."
