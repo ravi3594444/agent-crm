@@ -87,19 +87,23 @@ Those confirm INSTANTLY. Only unusual ones wake a human. Every rule must pass:
 | Order total under ceiling | 0 = off | owner, from WhatsApp |
 | No more than X of one product, in stock units | 0 = nothing passes | owner |
 | Stock above the buffer, minus what other open orders already promised | 20% | owner |
-| A customer with no real history stays under their own ceiling | 0 = they always wait | owner |
+| A customer with no real history stays under their own ceiling | off until delivery checks land | owner (parked) |
 | No overdue balance | 0 | owner |
 | Any discount goes to a person | yes | owner |
+| If not, line + document discount combined stays under the cap | 5% | owner |
 | Not wildly above customer's own average | 2x | `AUTO_CONFIRM_MULT` |
 | Enough order history to have an average | 3 confirmed orders | `AUTO_CONFIRM_MIN_ORDERS` |
 | List price, no rate above it | — | — |
 
-The six marked *owner* are his to change, from the same WhatsApp thread he
+The ones marked *owner* are his to change, from the same WhatsApp thread he
 already uses: "mostrame los límites", "subime el tope a 30 mil". A change needs
 a four-digit code he types back, applies from the next order with no restart,
 and is recorded with his number, the time and both values
-(`historial_limites`). They live in Redis; the `.env` values are only what the
-system starts with. If the limits cannot be read, nothing auto-confirms.
+(`historial_limites`), in Redis and on the ERPNext Company document. The
+`.env` values are only what the system starts with. If the limits cannot be
+read — or the store comes back empty while ERPNext remembers a change — nothing
+auto-confirms, because a bootstrap value can be looser than what he set.
+Proof that a real restart keeps them: `deploy/verificar_persistencia_limites.sh`.
 
 **The safety property:** `policy.py` is deterministic Python. It never sees the
 customer's words, and it reads the owner's limits itself, on every evaluation,

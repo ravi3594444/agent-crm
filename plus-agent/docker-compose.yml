@@ -55,14 +55,21 @@ services:
     image: redis/redis-stack-server:7.4.0-v1
     restart: unless-stopped
     # appendonly + noeviction: la cola durable de webhooks, los locks, las
-    # marcas de idempotencia y el seguimiento de entregas viven acá. Sin
+    # marcas de idempotencia, el seguimiento de entregas y —desde 2b— LOS
+    # LÍMITES DE AUTO-CONFIRMACIÓN QUE FIJA EL DUEÑO viven acá. Sin
     # persistencia, un restart de Redis hace que los reintentos de Meta
-    # puedan duplicar pedidos; con eviction, se pierden mensajes aceptados.
+    # puedan duplicar pedidos; con eviction, se pierden mensajes aceptados; y
+    # sin el volumen de abajo, un `docker rm` borraría los límites y el
+    # sistema volvería a los valores de arranque del .env, que pueden ser MÁS
+    # FLOJOS que los que puso el dueño. Eso no pasa en silencio —
+    # app/limites.py lo cruza contra la auditoría en ERPNext y falla cerrado—
+    # pero deja todo pendiente hasta que alguien los restaure.
     # En redis-stack-server la config va por REDIS_ARGS, no por `command`:
     # `command` le pisaría el entrypoint que carga los módulos.
     environment:
       REDIS_ARGS: >-
         --appendonly yes
+        --appendfsync everysec
         --maxmemory ${REDIS_MAXMEMORY:-256mb}
         --maxmemory-policy noeviction
     volumes:

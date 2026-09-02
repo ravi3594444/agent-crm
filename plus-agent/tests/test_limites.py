@@ -17,6 +17,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -26,6 +27,10 @@ from conftest import FakeRedis
 
 from app import limites, locks, policy
 from app.tools import configuracion
+
+# Captured before the autouse fixture in conftest replaces it: the two tests
+# below are about the real ERPNext cross-check, not about a stub of it.
+_CONSULTA_DURABLE_REAL = limites._hubo_cambios_durables
 
 EQUIPO = "5493511111111"
 OTRO_DEL_EQUIPO = "5493512222222"
@@ -368,6 +373,109 @@ def test_the_llm_cannot_decide_a_confirmation_only_the_limits_can(
     assert decision == policy.Decision(False, ["auto-confirmación desactivada"])
 
 
+# ------------------------------------------- the durable copy, and data loss
+def test_every_change_is_also_recorded_in_erpnext(almacen: FakeRedis) -> None:
+    """Redis is fast, not durable enough to be the only record. The copy in
+    ERPNext is what survives a wiped container — and what lets this module
+    tell "never configured" apart from "the store was lost"."""
+    configuracion.proponer_limite.invoke(
+        {"limite": "tope", "valor": "8000"}, config=_gerencia()
+    )
+    configuracion.confirmar_limite.invoke({"codigo": "4242"}, config=_gerencia())
+
+    limites.erpnext.registrar_comentario.assert_called_once()
+    doctype, _nombre, texto = limites.erpnext.registrar_comentario.call_args.args
+    assert doctype == "Company"
+    assert limites.MARCA_DURABLE in texto
+    assert "AUTO_CONFIRM_MAX: 0 -> 8000" in texto
+    assert EQUIPO in texto
+
+
+def test_a_change_that_cannot_be_recorded_durably_is_not_applied(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Better not to move the limit than to move it with no record: a change
+    with no durable trace is a change that a restart could silently undo."""
+    monkeypatch.setattr(
+        limites.erpnext,
+        "registrar_comentario",
+        Mock(side_effect=limites.erpnext.ERPNextError("ERPNext no disponible")),
+    )
+    configuracion.proponer_limite.invoke(
+        {"limite": "tope", "valor": "8000"}, config=_gerencia()
+    )
+
+    respuesta = configuracion.confirmar_limite.invoke(
+        {"codigo": "4242"}, config=_gerencia()
+    )
+
+    assert "No apliqué nada" in respuesta
+    assert almacen.hashes == {}
+    assert limites.configuracion().tope == 0.0
+
+
+def test_an_empty_store_with_changes_on_record_is_data_loss_not_a_fresh_install(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE failure this guards against: Redis comes back empty after a restart
+    and the bootstrap environment quietly restores a LOOSER ceiling than the
+    one the owner had set. An empty store plus changes on record in ERPNext
+    means the limits are missing, and nothing confirms until they are back."""
+    monkeypatch.setenv("AUTO_CONFIRM_MAX", "1000000")  # the looser bootstrap
+    monkeypatch.setattr(limites, "_hubo_cambios_durables", lambda: True)
+
+    with pytest.raises(limites.LimiteError) as fallo:
+        limites.configuracion()
+    assert "restaurarlos" in str(fallo.value)
+
+    decision = policy.evaluar({"name": "SO-1", "customer": "CUST-001"})
+    assert decision.auto is False
+    assert any("límites sin verificar" in m for m in decision.motivos)
+
+
+def test_an_empty_store_with_nothing_on_record_is_simply_a_fresh_install(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same emptiness must not block a genuinely new deployment."""
+    monkeypatch.setenv("AUTO_CONFIRM_MAX", "1000")
+    monkeypatch.setattr(limites, "_hubo_cambios_durables", lambda: False)
+
+    assert limites.configuracion().tope == 1_000.0
+
+
+def test_the_durable_check_asks_erpnext_for_the_marked_comments(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lector = Mock(return_value=[{"name": "COMMENT-1"}])
+    monkeypatch.setattr(limites.erpnext, "policy_get_list", lector)
+    monkeypatch.setattr(limites, "_hubo_cambios_durables", _CONSULTA_DURABLE_REAL)
+    monkeypatch.setattr(limites, "_durable_cache", None)
+
+    assert limites._hubo_cambios_durables() is True
+
+    assert lector.call_args.args[0] == "Comment"
+    filtros = lector.call_args.kwargs["filters"]
+    assert ["reference_doctype", "=", "Company"] in filtros
+    assert any(limites.MARCA_DURABLE in str(f[2]) for f in filtros if f[1] == "like")
+
+
+def test_an_erpnext_that_cannot_be_asked_fails_closed(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"I could not check whether the limits were lost" is not "they were
+    not"."""
+    monkeypatch.setattr(
+        limites.erpnext,
+        "policy_get_list",
+        Mock(side_effect=limites.erpnext.ERPNextError("caído")),
+    )
+    monkeypatch.setattr(limites, "_hubo_cambios_durables", _CONSULTA_DURABLE_REAL)
+    monkeypatch.setattr(limites, "_durable_cache", None)
+
+    with pytest.raises(limites.LimiteError):
+        limites.configuracion()
+
+
 # ------------------------------------------------------------ invalid and broken
 @pytest.mark.parametrize(
     ("limite", "valor"),
@@ -441,6 +549,22 @@ def test_the_owner_sees_where_each_value_comes_from(
     assert "tope cliente nuevo" in vista
     assert "deuda tolerada" in vista
     assert "descuentos" in vista
+
+
+def test_the_owner_is_told_the_new_customer_ceiling_is_parked(
+    almacen: FakeRedis,
+) -> None:
+    """He can set it, and it is stored and audited, but it decides nothing
+    until the delivery address and area are verified. Saying so is the
+    difference between a parked setting and a broken one."""
+    from app import policy
+
+    assert policy.CLIENTE_NUEVO_HABILITADO is False
+
+    vista = configuracion.ver_limites.invoke({}, config=_gerencia())
+
+    assert "todavía sin efecto" in vista
+    assert "dirección y la zona de entrega" in vista
 
 
 def test_one_setting_at_a_time(almacen: FakeRedis) -> None:

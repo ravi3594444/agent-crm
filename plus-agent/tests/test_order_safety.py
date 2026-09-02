@@ -790,6 +790,71 @@ def test_the_locked_revalidation_uses_the_limits_in_force_at_that_moment(
     assert "supera el tope" in audit
 
 
+def test_a_new_customer_order_stays_a_draft_and_the_manager_is_told(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Until 2d checks the address and the delivery area, a customer with no
+    history never auto-confirms — and the team hears about it, because a
+    customer waiting silently is the worst outcome this system can produce."""
+    mocks = _politica_verde(monkeypatch, fisico=1_000)
+    monkeypatch.setattr(policy, "MIN_PEDIDOS", 3)
+    monkeypatch.setattr(erpnext, "get_list", Mock(return_value=[]))  # no history
+    draft = _order()
+
+    result = pedidos._after_create(draft, draft["items"], draft["delivery_date"])
+
+    assert result.startswith("PEDIDO_PENDIENTE. Número real: SO-0001")
+    mocks["submit"].assert_not_called()
+    mocks["notify"].assert_called_once()
+    assert mocks["notify"].call_args.kwargs["auto"] is False
+    assert "falta verificar dirección y zona de entrega" in (
+        mocks["notify"].call_args.kwargs["motivos"]
+    )
+
+
+def test_the_locked_revalidation_also_re_reads_the_discount_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same guarantee as the ceiling: the cap that decides is the one in
+    force when the lock is held, not the one read when the order arrived."""
+    from conftest import FakeRedis
+
+    from app import locks
+
+    mocks = _politica_verde(monkeypatch, fisico=1_000)
+    dentro_del_lock: list[bool] = []
+    permisivo = {
+        "AUTO_CONFIRM_DESCUENTOS_APRUEBAN": "false",
+        "AUTO_CONFIRM_MAX_DESCUENTO_PCT": "20",
+    }
+    estricto = {**permisivo, "AUTO_CONFIRM_MAX_DESCUENTO_PCT": "1"}
+
+    class Cambiante(FakeRedis):
+        def hgetall(self, key):
+            return dict(estricto if dentro_del_lock else permisivo)
+
+    monkeypatch.setattr(locks, "conexion", lambda: Cambiante())
+
+    @contextmanager
+    def lock():
+        dentro_del_lock.append(True)
+        yield
+
+    monkeypatch.setattr(policy, "auto_submit_lock", lock)
+    # 10% off the line: fine under a 20% cap, not under a 1% one.
+    con_descuento = {**_order()["items"][0], "rate": 18, "price_list_rate": 20}
+    draft = _order(items=[con_descuento])
+    monkeypatch.setattr(erpnext, "get_doc", Mock(return_value=draft))
+
+    result = pedidos._after_create(draft, draft["items"], draft["delivery_date"])
+
+    assert dentro_del_lock == [True]  # the first evaluation did say "confirm"
+    assert result.startswith("PEDIDO_PENDIENTE")
+    mocks["submit"].assert_not_called()
+    audit = " ".join(str(call) for call in mocks["comment"].call_args_list)
+    assert "supera el tope de 1%" in audit
+
+
 def test_standard_price_requires_exact_unscoped_valid_currency_uom_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

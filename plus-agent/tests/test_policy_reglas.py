@@ -250,7 +250,11 @@ def test_customer_with_fewer_confirmed_orders_than_minimum_goes_to_human(green) 
     decision = policy.evaluar(_order())
 
     assert decision.auto is False
-    assert "cliente con solo 2 pedidos confirmados" in decision.motivos
+    # Until 2d verifies the address and the delivery area, a customer without
+    # enough history waits no matter what ceiling is configured.
+    assert decision.motivos == [
+        "cliente sin historial suficiente: falta verificar dirección y zona de entrega"
+    ]
 
 
 def test_history_lookup_is_restricted_to_this_customer_confirmed_orders(green) -> None:
@@ -1001,6 +1005,7 @@ def test_a_new_customer_can_buy_up_to_the_ceiling_the_owner_set(
     rules have nothing to work with. The owner sets what a stranger may take
     on trust, and the two history rules step aside for them."""
     _fijar(monkeypatch, AUTO_CONFIRM_MAX_CLIENTE_NUEVO=5_000)
+    monkeypatch.setattr(policy, "CLIENTE_NUEVO_HABILITADO", True)  # lo enciende 2d
     green["history"].return_value = []
 
     assert policy.evaluar(_order()).auto is True
@@ -1010,6 +1015,7 @@ def test_a_new_customer_over_their_ceiling_still_waits(
     green, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _fijar(monkeypatch, AUTO_CONFIRM_MAX=100_000, AUTO_CONFIRM_MAX_CLIENTE_NUEVO=5_000)
+    monkeypatch.setattr(policy, "CLIENTE_NUEVO_HABILITADO", True)
     green["history"].return_value = []
 
     decision = policy.evaluar(_order(grand_total=5_000.01))
@@ -1024,6 +1030,7 @@ def test_a_new_customer_ceiling_of_zero_keeps_them_waiting_as_before(
     """The default changes nothing: with the ceiling at zero a new customer is
     handled exactly as the system handled them before this stage."""
     _fijar(monkeypatch, AUTO_CONFIRM_MAX_CLIENTE_NUEVO=0)
+    monkeypatch.setattr(policy, "CLIENTE_NUEVO_HABILITADO", True)
     green["history"].return_value = []
 
     decision = policy.evaluar(_order())
@@ -1039,6 +1046,7 @@ def test_new_means_no_submitted_orders_not_the_absence_of_a_customer_record(
     evidence of anything. What counts is SUBMITTED orders in ERPNext, and the
     ceiling covers everyone below the history threshold."""
     _fijar(monkeypatch, AUTO_CONFIRM_MAX=100_000, AUTO_CONFIRM_MAX_CLIENTE_NUEVO=5_000)
+    monkeypatch.setattr(policy, "CLIENTE_NUEVO_HABILITADO", True)
     monkeypatch.setattr(policy, "MIN_PEDIDOS", 3)
 
     # Two submitted orders: still judged as new, so the ceiling decides.
@@ -1071,18 +1079,166 @@ def test_a_discount_on_a_line_goes_to_a_human_while_the_rule_is_on(
     assert "descuento en LECHE-1L requiere aprobación" in decision.motivos
 
 
-def test_with_the_discount_rule_off_a_discounted_order_can_confirm(
+def _con_descuento(rate: float, **extra) -> dict:
+    """One line at `rate` against a list price of 20."""
+    return {**_order()["items"][0], "rate": rate, "price_list_rate": 20, **extra}
+
+
+def test_with_the_discount_rule_off_a_small_discount_can_confirm(
     green, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The switch has to mean something when the owner turns it off."""
-    _fijar(monkeypatch, AUTO_CONFIRM_DESCUENTOS_APRUEBAN="false")
-    con_descuento = {**_order()["items"][0], "discount_percentage": 10}
+    """The switch has to mean something when the owner turns it off — but only
+    up to the percentage he set."""
+    _fijar(
+        monkeypatch,
+        AUTO_CONFIRM_DESCUENTOS_APRUEBAN="false",
+        AUTO_CONFIRM_MAX_DESCUENTO_PCT=5,
+    )
 
-    assert policy.evaluar(
-        _order(items=[con_descuento], discount_amount=50)
-    ).auto is True
+    assert policy.evaluar(_order(items=[_con_descuento(19.5)])).auto is True
     # And the price rule is told that a lower rate is now acceptable.
     assert green["price"].call_args.kwargs["permitir_descuento"] is True
+
+
+def test_the_discount_cap_holds_exactly_at_the_cap_and_refuses_a_hair_over(
+    green, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """5% off a list price of 20 is a rate of 19. That confirms. 19 minus two
+    cents is 5.10% and waits for a person."""
+    _fijar(
+        monkeypatch,
+        AUTO_CONFIRM_DESCUENTOS_APRUEBAN="false",
+        AUTO_CONFIRM_MAX_DESCUENTO_PCT=5,
+    )
+
+    assert policy.evaluar(_order(items=[_con_descuento(19.0)])).auto is True
+
+    decision = policy.evaluar(_order(items=[_con_descuento(18.98)]))
+    assert decision.auto is False
+    assert any("supera el tope de 5%" in m for m in decision.motivos)
+
+
+def test_a_ninety_percent_discount_never_confirms_just_for_being_under_list(
+    green, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """This is the hole the cap closes: "at or below the list price" would have
+    read 90% off as acceptable, because 2 is less than 20."""
+    _fijar(
+        monkeypatch,
+        AUTO_CONFIRM_DESCUENTOS_APRUEBAN="false",
+        AUTO_CONFIRM_MAX_DESCUENTO_PCT=5,
+    )
+
+    decision = policy.evaluar(_order(items=[_con_descuento(2.0)]))
+
+    assert decision.auto is False
+    assert any("descuento de 90.00%" in m for m in decision.motivos)
+
+
+def test_line_and_document_discounts_are_counted_together(
+    green, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """They stack. 5% off the line plus 5% off the document is 9.75% off the
+    list, and each one on its own would have looked fine."""
+    _fijar(
+        monkeypatch,
+        AUTO_CONFIRM_DESCUENTOS_APRUEBAN="false",
+        AUTO_CONFIRM_MAX_DESCUENTO_PCT=5,
+    )
+    renglon = _con_descuento(19.0)  # 5% off the line, exactly at the cap
+
+    assert policy.evaluar(_order(items=[renglon])).auto is True
+
+    # Same line, now with 5% off the whole document as well.
+    apilado = policy.evaluar(
+        _order(items=[renglon], additional_discount_percentage=5)
+    )
+    assert apilado.auto is False
+    assert any("descuento de 9.75%" in m for m in apilado.motivos)
+
+    # And the same thing expressed as an amount: $19 x 5 = $95, less $4.75.
+    como_monto = policy.evaluar(
+        _order(items=[{**renglon, "amount": 95.0}], discount_amount=4.75)
+    )
+    assert como_monto.auto is False
+    assert any("descuento de 9.75%" in m for m in como_monto.motivos)
+
+
+@pytest.mark.parametrize(
+    "roto",
+    [
+        {"price_list_rate": 0},
+        {"price_list_rate": None},
+        {"price_list_rate": "veinte"},
+    ],
+)
+def test_a_discount_that_cannot_be_measured_is_not_approved(
+    green, monkeypatch: pytest.MonkeyPatch, roto: dict
+) -> None:
+    """With no list price there is nothing to measure the discount against, and
+    an unmeasurable discount is not a small one."""
+    _fijar(
+        monkeypatch,
+        AUTO_CONFIRM_DESCUENTOS_APRUEBAN="false",
+        AUTO_CONFIRM_MAX_DESCUENTO_PCT=5,
+    )
+
+    decision = policy.evaluar(_order(items=[{**_con_descuento(19.0), **roto}]))
+
+    assert decision.auto is False
+    assert "no pude medir el descuento del pedido" in decision.motivos
+
+
+def test_a_cap_of_zero_means_no_discount_confirms_at_all(
+    green, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fijar(
+        monkeypatch,
+        AUTO_CONFIRM_DESCUENTOS_APRUEBAN="false",
+        AUTO_CONFIRM_MAX_DESCUENTO_PCT=0,
+    )
+
+    assert policy.evaluar(_order(items=[_con_descuento(20.0)])).auto is True
+    assert policy.evaluar(_order(items=[_con_descuento(19.99)])).auto is False
+
+
+def test_with_the_discount_rule_on_the_cap_is_irrelevant(
+    green, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Approval enabled means EVERY discount waits, however small, and a
+    generous cap cannot quietly override that."""
+    _fijar(
+        monkeypatch,
+        AUTO_CONFIRM_DESCUENTOS_APRUEBAN="true",
+        AUTO_CONFIRM_MAX_DESCUENTO_PCT=50,
+    )
+
+    decision = policy.evaluar(
+        _order(items=[_con_descuento(19.99, discount_percentage=0.05)])
+    )
+
+    assert decision.auto is False
+    assert "descuento en LECHE-1L requiere aprobación" in decision.motivos
+
+
+def test_new_customer_auto_confirmation_is_off_until_the_address_is_verified(
+    green, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Promising an automatic delivery to an address nobody has checked — or
+    one outside the delivery area — is worse than making the customer wait.
+    Until 2d verifies both, a customer without history always waits, whatever
+    ceiling is configured, and this is deliberately not a knob the owner can
+    turn on from WhatsApp."""
+    assert policy.CLIENTE_NUEVO_HABILITADO is False
+    _fijar(monkeypatch, AUTO_CONFIRM_MAX=100_000, AUTO_CONFIRM_MAX_CLIENTE_NUEVO=50_000)
+    green["history"].return_value = []
+
+    decision = policy.evaluar(_order())
+
+    assert decision.auto is False
+    assert decision.motivos == [
+        "cliente sin historial suficiente: falta verificar dirección y zona de entrega"
+    ]
 
 
 def test_discounts_allowed_never_means_a_price_above_the_list(
@@ -1192,7 +1348,7 @@ def test_all_failing_reasons_are_reported_not_just_the_first(green) -> None:
 
     assert decision.auto is False
     assert len(decision.motivos) >= 5
-    for fragment in ("supera el tope", "solo 0 pedidos", "vencidos",
+    for fragment in ("supera el tope", "falta verificar dirección", "vencidos",
                      "stock insuficiente", "fecha de entrega vencida"):
         assert any(fragment in m for m in decision.motivos), fragment
 

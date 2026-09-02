@@ -48,6 +48,8 @@ _DUMMY = {
 for _k, _v in _DUMMY.items():
     os.environ.setdefault(_k, _v)
 
+from unittest.mock import Mock
+
 import pytest
 from redis.exceptions import RedisError
 
@@ -131,4 +133,14 @@ def limites_sin_redis(monkeypatch):
         monkeypatch.delenv(nombre, raising=False)
     vacio = FakeRedis()
     monkeypatch.setattr(locks, "conexion", lambda: vacio)
+    # An empty store is only "brand new install" if ERPNext has no record of a
+    # limit ever being changed. Tests answer that question themselves rather
+    # than reaching for ERPNext; the ones about data loss say otherwise.
+    from app import limites
+
+    monkeypatch.setattr(limites, "_hubo_cambios_durables", lambda: False)
+    monkeypatch.setattr(limites, "_durable_cache", None)
+    # Applying a limit change writes a durable copy to ERPNext. No test may
+    # reach a real one; the tests about that record assert on this mock.
+    monkeypatch.setattr(limites.erpnext, "registrar_comentario", Mock())
     return vacio

@@ -212,6 +212,28 @@ def add_comment(doctype: str, name: str, text: str) -> None:
         print(f"[erpnext] comentario de auditoría no creado: {exc}")
 
 
+def registrar_comentario(doctype: str, name: str, text: str) -> None:
+    """Like add_comment, but a failure is an error instead of a log line.
+
+    add_comment is best effort on purpose: an audit note must never change a
+    known order outcome. app/limites.py needs the opposite guarantee — the
+    comment IS the durable record of a limit change, and a change with no
+    record must not be applied.
+    """
+    _request(
+        _active_client(),
+        "POST",
+        _resource_path("Comment"),
+        operation="el registro durable del cambio",
+        json={
+            "comment_type": "Comment",
+            "reference_doctype": doctype,
+            "reference_name": name,
+            "content": text,
+        },
+    )
+
+
 def _run_report(client: httpx.Client, report_name: str, filters: dict | None) -> list:
     body = _request(
         client,

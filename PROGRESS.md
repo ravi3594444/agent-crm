@@ -219,6 +219,7 @@ process, and applied from the next order without a restart.
 | `AUTO_CONFIRM_MAX_CLIENTE_NUEVO` | ceiling for a customer below the history threshold | $ | `0` → they wait | same | same as the ceiling |
 | `AUTO_CONFIRM_MAX_DEBT` | overdue balance tolerated | $ | `0` | same | same |
 | `AUTO_CONFIRM_DESCUENTOS_APRUEBAN` | any discount goes to a person | sí/no | `true` | same | anything not clearly sí/no → **pending**, never read as `false` |
+| `AUTO_CONFIRM_MAX_DESCUENTO_PCT` | most discount that may pass when the rule above is off — line **and** document combined | % | `5` | same | max accepted `50`; `0` = no discount confirms; unmeasurable → **pending** |
 
 **Every default reproduces the behaviour before this stage.** With nothing
 configured, 2b changes which orders auto-confirm: not at all. Only an explicit,
@@ -251,14 +252,95 @@ lowering the ceiling while the lock is held stops that order).
    (not "has no Customer record" — anyone can be given one in a second). For
    them the new-customer ceiling **replaces** both history rules, since a
    customer with no history has no average to be compared against.
-2. *Discounts off* relaxes **both** the document-level and the line-level check,
-   but a rate above the authorized list price is still refused, and so is a rate
-   of zero. Off means "you may charge less", never "you may charge more".
+2. *Discounts off* relaxes **both** the document-level and the line-level
+   check, up to `AUTO_CONFIRM_MAX_DESCUENTO_PCT` — corrected in 2b.1 below,
+   where this was first built as "anything at or below list price".
 
 Result: **369 passed**, lint clean. 35 mutations (18 from 2a, 17 from 2b) all
 caught — including the dangerous ones: a Redis outage falling back to the
 environment, an unchecked confirmation code, one manager confirming another's
 change, and the configuration tools appearing in the customer tool list.
+
+## Stage 2b.1 — DONE: three corrections to 2b
+
+### 1. The discount rule was built wrong
+2b implemented "any discount at or below the list price", which would have let
+**90% off** auto-confirm: 2 is less than 20. The rule is now a manager-set
+ceiling, `AUTO_CONFIRM_MAX_DESCUENTO_PCT`, default **5%**.
+
+- Approval **on** (the default): every discount waits for a person, however
+  small, and a generous cap cannot override that.
+- Approval **off**: only up to the cap. It is measured on the **combined**
+  line + document discount, because they stack — 5% off a line with 5% off the
+  document is 9.75% off the list, not 5% — and on the **worst line**, because
+  an average lets one heavily discounted product hide behind the rest of the
+  order. A document `discount_amount` is measured against the sum of the line
+  amounts; if that base is missing, or a line has no list price, the discount
+  cannot be measured and the order waits (`_descuento_efectivo` raises).
+- The cap itself is bounded at 50: more than half off is not a decision an
+  unattended system should be making. Raise it in `limites.LIMITES` if the
+  client disagrees — deliberately, not by typing a bigger number into WhatsApp.
+
+Tested exactly at the cap (rate 19 against a list of 20), a hair over (18.98 →
+5.10%), stacked as a percentage and as an amount, 90% off, an unmeasurable
+discount, a cap of zero, and the cap being re-read in the locked revalidation.
+
+### 2. New-customer auto-confirmation is off until 2d
+`policy.CLIENTE_NUEVO_HABILITADO = False`. Promising an automatic delivery to
+an address nobody has checked — or one outside the delivery area — is worse
+than making the customer wait. So a customer below the history threshold always
+stays a draft **and the manager is told** (the existing `notificar_equipo`
+path, reason: "cliente sin historial suficiente: falta verificar dirección y
+zona de entrega").
+
+Deliberately **not** a knob the owner can turn on from WhatsApp and **not** an
+environment variable: it is switched on in 2d, together with the verification
+that justifies it. He can still set the ceiling — it is stored and audited —
+and `ver_limites` tells him plainly that it decides nothing yet.
+
+### 3. Persistence is proven, not assumed
+A second connection proves two processes see the same value, not that the value
+is on disk. `deploy/verificar_persistencia_limites.sh` proves it properly, on a
+throwaway container with the production configuration, and it is re-runnable:
+
+```
+== 1. Redis con AOF + volumen, y un límite fijado por el código real ==
+   valor|auditoría = 31337|1
+== 2. docker restart (el proceso muere y vuelve) ==
+   valor|auditoría = 31337|1
+== 3. docker rm -f y docker run con el MISMO volumen ==
+   valor|auditoría = 31337|1
+   AOF en el volumen: yes
+== 4. y si el volumen SÍ se pierde, no se vuelve a un default más flojo ==
+   falla cerrada, como debe: los límites que configuró el dueño no están en el
+   almacén, y ERPNext tiene cambios registrados: hay que restaurarlos antes de
+   que algo se confirme solo
+```
+
+Step 3 is the one that matters: the container is destroyed, so a value that
+comes back was on the volume and not in the container's filesystem.
+
+**Step 4 is the requirement "a restart must never silently restore a looser
+environment default".** Redis cannot answer "was I wiped?" — an empty store is
+identical to a new install. So every applied change now also writes a durable
+comment on the ERPNext **Company** document (`limites.MARCA_DURABLE`), and the
+change is **not applied** if that record cannot be written. An empty store
+*plus* changes on record means data loss, not a fresh install, and everything
+stays pending until the limits are restored. That comment is also the owner's
+audit trail in the system where his accounting lives.
+
+**Infrastructure:** `docker-compose.yml` already had AOF and a named volume;
+it now also pins `--appendfsync everysec` and says that the owner's limits live
+there. `start.sh` created its container with **neither**, and now creates it
+with both — and warns loudly if it finds an old one without a volume.
+The Codespace's `agent-redis` was one of those: migrated with
+`deploy/migrar_redis_a_volumen.sh` (SAVE, copy `/data` into the volume, recreate,
+roll back if the new container does not answer). All 68 keys preserved, AOF on,
+RedisJSON and RediSearch still loaded, and it survives a restart. The old
+container is kept as `agent-redis-sin-volumen` until someone deletes it.
+
+Result: **387 passed**, lint clean. 44 mutations (18 from 2a, 17 from 2b, 9
+from 2b.1) all caught.
 
 ### 2c. Stock reliability becomes earned, not a static flag
 Today `STOCK_CONFIABLE` is a static env var. Required: the manager sends today's

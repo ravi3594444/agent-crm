@@ -27,13 +27,21 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from redis.exceptions import RedisError
 
-from app import locks
+from app import erpnext, locks
+
+# Marca de los comentarios de auditoría en ERPNext. Redis no puede contestar
+# «¿me borraron?»: un almacén vacío es idéntico a uno recién instalado. La
+# copia durable de cada cambio vive en ERPNext, así que un almacén vacío CON
+# cambios registrados es pérdida de datos, no una instalación nueva.
+MARCA_DURABLE = "[limite]"
+DURABLE_CACHE_SEGUNDOS = 60.0
 
 CLAVE_VALORES = "plus-agent:limites"
 CLAVE_AUDITORIA = "plus-agent:limites:auditoria"
@@ -115,6 +123,24 @@ LIMITES: dict[str, Definicion] = {
         default="0",
         maximo=100_000_000.0,
     ),
+    "AUTO_CONFIRM_MAX_DESCUENTO_PCT": Definicion(
+        nombre="AUTO_CONFIRM_MAX_DESCUENTO_PCT",
+        alias=(
+            "descuento maximo",
+            "descuento máximo",
+            "tope de descuento",
+            "maximo descuento",
+        ),
+        significado=(
+            "Descuento máximo —renglón y pedido SUMADOS— que puede "
+            "auto-confirmarse cuando la aprobación de descuentos está en no"
+        ),
+        unidad="%",
+        default="5",
+        # Un tope de más de la mitad del precio no es una decisión de negocio
+        # que pueda tomar un sistema sin nadie mirando.
+        maximo=50.0,
+    ),
     "AUTO_CONFIRM_DESCUENTOS_APRUEBAN": Definicion(
         nombre="AUTO_CONFIRM_DESCUENTOS_APRUEBAN",
         alias=("descuentos", "aprobar descuentos", "descuentos aprueban"),
@@ -143,6 +169,7 @@ class Configuracion:
     tope_cliente_nuevo: float
     tope_deuda: float
     descuentos_aprueban: bool
+    tope_descuento_pct: float  # fracción 0..0.5, ya dividida por 100
 
 
 def _texto(valor: object) -> str:
@@ -151,17 +178,61 @@ def _texto(valor: object) -> str:
     return "" if valor is None else str(valor)
 
 
+_durable_cache: tuple[float, bool] | None = None
+
+
+def _hubo_cambios_durables() -> bool:
+    """Si ERPNext recuerda que alguna vez se configuró un límite.
+
+    Es la única pregunta que Redis no puede contestar sobre sí mismo. La
+    respuesta se cachea un minuto: si es «sí» el sistema ya está fallando
+    cerrado, y si es «no» es porque nunca se configuró nada y no hay nada que
+    perder.
+    """
+    global _durable_cache
+    ahora = time.monotonic()
+    if _durable_cache and _durable_cache[0] > ahora:
+        return _durable_cache[1]
+    try:
+        filas = erpnext.policy_get_list(
+            "Comment",
+            filters=[
+                ["reference_doctype", "=", "Company"],
+                ["content", "like", f"%{MARCA_DURABLE}%"],
+            ],
+            fields=["name"],
+            limit=1,
+        )
+    except erpnext.ERPNextError as exc:
+        raise LimiteError(
+            "no pude verificar en ERPNext si los límites se configuraron antes"
+        ) from exc
+    hubo = bool(filas)
+    _durable_cache = (ahora + DURABLE_CACHE_SEGUNDOS, hubo)
+    return hubo
+
+
 def _almacen() -> dict[str, str]:
     """Lo que fijó el dueño. Falla cerrada si Redis no contesta.
 
     No cae al entorno cuando Redis está caído: eso convertiría una caída en un
-    aflojamiento silencioso de un límite que el dueño había apretado.
+    aflojamiento silencioso de un límite que el dueño había apretado. Y si el
+    almacén aparece VACÍO pero ERPNext tiene cambios registrados, entonces se
+    perdieron los datos: tampoco se cae al entorno, porque el valor de arranque
+    puede ser más flojo que el que había fijado el dueño.
     """
     try:
         crudo = locks.conexion().hgetall(CLAVE_VALORES)
     except (locks.CoordinationError, RedisError) as exc:
         raise LimiteError("no pude leer los límites configurados") from exc
-    return {_texto(k): _texto(v) for k, v in (crudo or {}).items()}
+    valores = {_texto(k): _texto(v) for k, v in (crudo or {}).items()}
+    if not valores and _hubo_cambios_durables():
+        raise LimiteError(
+            "los límites que configuró el dueño no están en el almacén, y "
+            "ERPNext tiene cambios registrados: hay que restaurarlos antes de "
+            "que algo se confirme solo"
+        )
+    return valores
 
 
 def _resolver(nombre: str, almacen: dict[str, str]) -> tuple[str, str]:
@@ -238,6 +309,11 @@ def configuracion() -> Configuracion:
             LIMITES["AUTO_CONFIRM_DESCUENTOS_APRUEBAN"],
             crudos["AUTO_CONFIRM_DESCUENTOS_APRUEBAN"],
         ),
+        tope_descuento_pct=_numero(
+            LIMITES["AUTO_CONFIRM_MAX_DESCUENTO_PCT"],
+            crudos["AUTO_CONFIRM_MAX_DESCUENTO_PCT"],
+        )
+        / 100.0,
     )
 
 
@@ -367,6 +443,10 @@ def aplicar(codigo: str, telefono: str) -> dict:
         "anterior": anterior,
         "nuevo": nuevo,
     }
+    # The durable copy goes in FIRST, and a failure here cancels the change.
+    # An audit that only lives in Redis disappears with Redis, and then a wiped
+    # store looks like a brand-new install.
+    _auditar_en_erpnext(entrada)
     try:
         cliente = locks.conexion()
         cliente.hset(CLAVE_VALORES, nombre, nuevo)
@@ -379,6 +459,31 @@ def aplicar(codigo: str, telefono: str) -> dict:
         f"[limites] {nombre}: {anterior} -> {nuevo} por {telefono} ({entrada['ts']})"
     )
     return entrada
+
+
+def _auditar_en_erpnext(entrada: dict) -> None:
+    """Deja el cambio anotado en ERPNext, que es lo que sobrevive a todo.
+
+    Sirve para dos cosas: el dueño puede leer el historial en el sistema donde
+    vive su contabilidad, y app/limites.py puede distinguir «nunca se
+    configuró» de «se perdió el almacén». Si no se puede escribir, el cambio
+    NO se aplica: prefiero no mover el límite antes que moverlo sin registro.
+    """
+    global _durable_cache
+    texto = (
+        f"{MARCA_DURABLE} {entrada['limite']}: {entrada['anterior']} -> "
+        f"{entrada['nuevo']} · lo cambió {entrada['telefono']} "
+        f"el {entrada['ts']}"
+    )
+    try:
+        erpnext.registrar_comentario(
+            "Company", erpnext.default_company(), texto
+        )
+    except erpnext.ERPNextError as exc:
+        raise LimiteError(
+            "no pude registrar el cambio en ERPNext, así que no lo apliqué"
+        ) from exc
+    _durable_cache = None
 
 
 def auditoria(maximo: int = 10) -> list[dict]:

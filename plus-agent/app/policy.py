@@ -18,6 +18,14 @@ from app.locks import distributed_lock
 # configuración de despliegue, no decisiones de negocio del día a día.
 MAX_MULT = float(os.getenv("AUTO_CONFIRM_MULT", "2.0"))
 MIN_PEDIDOS = int(os.getenv("AUTO_CONFIRM_MIN_ORDERS", "3"))
+
+# La auto-confirmación de clientes sin historial queda APAGADA hasta que la
+# etapa 2d verifique la dirección de entrega y la zona de reparto. Prometerle
+# una entrega automática a una dirección que nadie miró —o que está fuera del
+# reparto— es peor que hacer esperar al cliente: el pedido queda en borrador y
+# el equipo se entera. A propósito NO es una perilla del dueño ni una variable
+# de entorno: se enciende en 2d, junto con la verificación que la justifica.
+CLIENTE_NUEVO_HABILITADO = False
 STOCK_CONFIABLE = os.getenv("STOCK_CONFIABLE", "false").strip().lower() == "true"
 PRICE_LIST = os.getenv("AUTO_CONFIRM_PRICE_LIST", "").strip()
 CURRENCY = os.getenv("AUTO_CONFIRM_CURRENCY", "").strip()
@@ -107,6 +115,50 @@ def _reclamo_previo(
     if otra is None or mia is None:
         return True
     return otra < mia
+
+
+def _descuento_efectivo(sales_order: dict, items: list[dict]) -> float:
+    """Worst combined discount on any line, as a fraction of the list price.
+
+    Line and document discounts STACK: the line rate is already reduced and
+    then the document discount comes off the total, so 30% on a line with 20%
+    off the document is 44% off the list, not 30%. The worst line is what
+    counts — an average would let one heavily discounted product hide behind
+    the rest of the order.
+
+    Raises when it cannot be established: a line with no list price, or a
+    document discount with nothing to measure it against. A discount that
+    cannot be measured is not a discount that can be approved automatically.
+    """
+    base = 0.0
+    for item in items:
+        importe = _float(item.get("amount"))
+        if importe <= 0:
+            importe = _float(item.get("rate")) * _float(item.get("qty"))
+        base += importe
+
+    doc = _float(sales_order.get("additional_discount_percentage")) / 100.0
+    monto = _float(sales_order.get("discount_amount"))
+    if monto:
+        if base <= 0:
+            raise erpnext.ERPNextError(
+                "descuento del pedido sin base para medirlo"
+            )
+        doc = max(doc, monto / base)
+    if doc < 0 or doc >= 1:
+        raise erpnext.ERPNextError("descuento del pedido fuera de rango")
+
+    peor = 0.0
+    for item in items:
+        lista = _float(item.get("price_list_rate"))
+        rate = _float(item.get("rate"))
+        if lista <= 0:
+            raise erpnext.ERPNextError(
+                "renglón sin precio de lista: no puedo medir su descuento"
+            )
+        linea = 0.0 if rate >= lista else (lista - rate) / lista
+        peor = max(peor, 1.0 - (1.0 - linea) * (1.0 - doc))
+    return peor
 
 
 def _cantidad_en_stock_uom(item: dict) -> float:
@@ -219,7 +271,12 @@ def evaluar(sales_order: dict) -> Decision:
                 # of the two history rules. "New" means SUBMITTED orders in
                 # ERPNext, not whether a Customer document happens to exist —
                 # anyone can be given a Customer record in a second.
-                if cfg.tope_cliente_nuevo <= 0:
+                if not CLIENTE_NUEVO_HABILITADO:
+                    motivos.append(
+                        "cliente sin historial suficiente: falta verificar "
+                        "dirección y zona de entrega"
+                    )
+                elif cfg.tope_cliente_nuevo <= 0:
                     motivos.append(
                         f"cliente con solo {len(importes)} pedidos confirmados"
                     )
@@ -282,6 +339,22 @@ def evaluar(sales_order: dict) -> Decision:
                 motivos.append(f"descuento inválido en {code}")
         key = (code, warehouse)
         cantidades[key] = cantidades.get(key, 0) + qty
+
+    # With the owner's discount rule off, a discount may pass — but only up to
+    # the percentage he set. "Below the list price" on its own would let 90%
+    # off through, which is not a discount, it is giving the milk away.
+    if not cfg.descuentos_aprueban and items:
+        try:
+            efectivo = _descuento_efectivo(sales_order, items)
+        except erpnext.ERPNextError as exc:
+            print(f"[policy] descuento no medible causa={exc}")
+            motivos.append("no pude medir el descuento del pedido")
+        else:
+            if efectivo > cfg.tope_descuento_pct + 0.000001:
+                motivos.append(
+                    f"descuento de {efectivo * 100:.2f}% supera el tope de "
+                    f"{cfg.tope_descuento_pct * 100:g}%"
+                )
 
     # The per-product ceiling is checked on the COMBINED quantity per product
     # and warehouse, in stock units, so five lines of two litres are ten litres

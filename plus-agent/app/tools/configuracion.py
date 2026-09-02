@@ -19,7 +19,7 @@ from __future__ import annotations
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from app import limites
+from app import limites, policy
 from app.formato import pesos
 from app.runtime_context import RuntimeContextError, require_management
 
@@ -48,6 +48,17 @@ def _mostrar(fila: dict) -> str:
     linea = f"*{fila['alias']}*: {valor}  ({origen})"
     if fila["problema"]:
         linea += f"\n   ⚠️ mal configurado: {fila['problema']}"
+    # Better he knows the number is parked than set it and wonder why nothing
+    # changed. It starts working when the delivery checks land (2d).
+    if (
+        fila["nombre"] == "AUTO_CONFIRM_MAX_CLIENTE_NUEVO"
+        and not policy.CLIENTE_NUEVO_HABILITADO
+    ):
+        linea += (
+            "\n   ℹ️ todavía sin efecto: hasta que el sistema verifique la "
+            "dirección y la zona de entrega, un cliente nuevo siempre espera "
+            "a una persona"
+        )
     return linea
 
 
