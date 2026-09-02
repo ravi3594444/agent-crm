@@ -14,18 +14,22 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import threading
 import time
+import unicodedata
 import uuid
 from contextlib import asynccontextmanager
 
+import httpx
 import redis
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 
 from app import erpnext, notificar
+from app import whatsapp as whatsapp_client
 from app.aprobacion import manejar_boton
 from app.graph import responder_cliente, responder_gerencia
-from app.outbound_status import record_outbound, update_status
+from app.outbound_status import record_inbound_window, record_outbound, update_status
 from app.router import es_equipo
 from app.whatsapp import enviar_mensaje
 
@@ -36,7 +40,13 @@ ACK_TEXT = "Recibido, dame un momento mientras lo verifico. / Got it, give me a 
 TEXT_REQUIRED = (
     "Por ahora necesito que me escribas el pedido en texto para poder ayudarte."
 )
+# Two variants so the customer is never told the team was alerted unless an
+# ERPNext task actually exists.
 TECHNICAL_ERROR = (
+    "Perdón, tuve un problema técnico y no pude procesar tu mensaje. "
+    "Probá de nuevo en unos minutos."
+)
+TECHNICAL_ERROR_ALERTED = (
     "Perdón, tuve un problema técnico. Ya avisé al equipo y te responden en un rato."
 )
 # A model turn can end with no text at all (a provider may return a content
@@ -55,12 +65,28 @@ _WORKER_POLL_SECONDS = 1.0
 _RETRY_SECONDS = 2.0
 _ACK_CLAIM_TTL_SECONDS = 30
 _ACK_WAIT_SECONDS = 16
+_TECH_ALERT_TTL_SECONDS = 60 * 60
+# A final send Meta rejects must not block every other customer behind it.
+# Permanent rejections (expired token 190, recipient not allowed 131030, closed
+# 24-hour window 131047, template errors...) are parked in the dead-letter list
+# on the FIRST attempt. Only timeouts, HTTP 429 and 5xx are retried, with
+# exponential backoff from _RETRY_SECONDS up to _RETRY_MAX_SECONDS, at most
+# _SEND_MAX_ATTEMPTS times. Redis failures never count towards that limit.
+_SEND_MAX_ATTEMPTS = max(1, int(os.getenv("WHATSAPP_SEND_MAX_ATTEMPTS", "10")))
+_RETRY_MAX_SECONDS = max(
+    _RETRY_SECONDS, float(os.getenv("WHATSAPP_RETRY_MAX_SECONDS", "60"))
+)
+# Meta codes that mean "try again later" although they arrive as HTTP 400.
+_TRANSIENT_META_CODES = frozenset({4, 80007, 130429, 131000, 131016, 131048, 131056})
+_retry_hint_guard = threading.Lock()
+_retry_hint: float | None = None
 
 # All queue keys share a Redis Cluster hash slot. This deployment uses a
 # single container, but keeping the transaction cluster-safe costs nothing.
 _QUEUE_KEY = "wa:{inbound}:queue"
 _PROCESSING_KEY = "wa:{inbound}:processing"
 _WORKER_LOCK_KEY = "wa:{inbound}:worker-lock"
+_DEAD_KEY = "wa:{inbound}:dead"
 
 r = redis.from_url(
     os.environ["REDIS_URL"],
@@ -107,6 +133,22 @@ if redis.call('GET', KEYS[1]) ~= ARGV[1] then
     return -1
 end
 local removed = redis.call('LREM', KEYS[2], 1, ARGV[2])
+if redis.call('GET', KEYS[3]) == ARGV[1] then
+    redis.call('DEL', KEYS[3])
+end
+return removed
+"""
+
+
+_DEAD_LETTER_LUA = """
+-- dead-letter: park an item whose final send Meta keeps rejecting
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return -1
+end
+local removed = redis.call('LREM', KEYS[2], 1, ARGV[2])
+if removed == 1 then
+    redis.call('RPUSH', KEYS[4], ARGV[2])
+end
 if redis.call('GET', KEYS[3]) == ARGV[1] then
     redis.call('DEL', KEYS[3])
 end
@@ -196,6 +238,97 @@ def _non_empty(respuesta: object, message_id: str) -> str:
     return EMPTY_REPLY_FALLBACK
 
 
+def _sin_tildes(text: str) -> str:
+    return "".join(
+        char
+        for char in unicodedata.normalize("NFD", text.lower())
+        if unicodedata.category(char) != "Mn"
+    ).strip()
+
+
+# Deterministic manager commands: "confirmar SAL-ORD-2026-00008", "ver SO-0042".
+# They reuse the same authorized button handler, so the manager can approve an
+# order even when no WhatsApp template is approved yet or the LLM is down.
+_ORDER_REF = r"(?P<order>[A-Za-z]{1,6}(?:-[A-Za-z]{1,6})?-\d[\w-]*)"
+_STAFF_COMMAND_RE = re.compile(
+    r"^\s*(?P<verb>[^\W\d_]+)\s+" + _ORDER_REF + r"\s*[.!]*\s*$"
+)
+_STAFF_ACTIONS = {
+    "ok": "ok",
+    "confirmar": "ok",
+    "confirma": "ok",
+    "confirmo": "ok",
+    "aprobar": "ok",
+    "apruebo": "ok",
+    "aprobado": "ok",
+    "ver": "ver",
+    "detalle": "ver",
+    "detalles": "ver",
+    "mostrar": "ver",
+}
+_ORDER_IN_TEXT = re.compile(r"\b[A-Z]{2,6}(?:-[A-Z]{2,6})?-\d{2,}[0-9-]*\b")
+
+
+def _staff_command(text: str) -> str | None:
+    """Map a short manager message to a button payload, or None."""
+    match = _STAFF_COMMAND_RE.match(text or "")
+    if not match:
+        return None
+    action = _STAFF_ACTIONS.get(_sin_tildes(match.group("verb")))
+    if not action:
+        return None
+    return f"{action}:{match.group('order').upper()}"
+
+
+def _alert_technical_failure(error: Exception, telefono: str, data: object) -> bool:
+    """Make "ya avisé al equipo" true, once per failure type per hour.
+
+    Two channels, independent of each other: a deduplicated ERPNext ToDo (the
+    durable record) and the WhatsApp exception alert (the one somebody sees
+    tonight). Returns True only when at least one of them really happened, or
+    a recent one exists; when both fail the hourly marker is released so the
+    next failure tries again instead of hiding behind a claim.
+    """
+    name = _error_name(error)
+    key = f"wa:{{inbound}}:tech-alert:{hashlib.sha256(name.encode()).hexdigest()[:16]}"
+    try:
+        fresh = bool(r.set(key, "1", nx=True, ex=_TECH_ALERT_TTL_SECONDS))
+    except Exception as redis_error:
+        # Cannot deduplicate: alert anyway rather than stay silent.
+        print(f"[agent] tech-alert coordination type={_error_name(redis_error)}")
+        fresh, key = True, ""
+    if not fresh:
+        return True
+
+    alerted = False
+    try:
+        erpnext.create_doc(
+            "ToDo",
+            {
+                "description": (
+                    "[WhatsApp] Falla técnica atendiendo mensajes de clientes: "
+                    f"{name}. Los clientes reciben una disculpa automática. "
+                    "Revisar el log del agente (cuota del modelo, ERPNext, Redis)."
+                ),
+                "priority": "High",
+            },
+        )
+        alerted = True
+    except Exception as todo_error:
+        print(f"[agent] tech-alert ToDo failed type={_error_name(todo_error)}")
+    try:
+        alerted = bool(notificar.avisar_falla_tecnica(telefono, str(data), name)) or alerted
+    except Exception as alert_error:
+        print(f"[agent] alerta al equipo falló type={_error_name(alert_error)}")
+
+    if not alerted and key:
+        try:
+            r.eval(_DELETE_IF_VALUE_LUA, 1, key, "1")
+        except Exception:
+            pass
+    return alerted
+
+
 def _generate_response(item: dict) -> str:
     telefono = item["telefono"]
     message_id = item["message_id"]
@@ -209,6 +342,9 @@ def _generate_response(item: dict) -> str:
         if kind != "text":
             return TEXT_REQUIRED
         if es_equipo(telefono):
+            command = _staff_command(data)
+            if command:
+                return str(manejar_boton(command, telefono))
             return _non_empty(
                 responder_gerencia(data, thread_id=thread_tag, usuario=thread_tag),
                 message_id,
@@ -231,12 +367,10 @@ def _generate_response(item: dict) -> str:
             f"[agent] error msg={_correlation(message_id)} "
             f"phone={_correlation(telefono)} type={_error_name(error)}"
         )
-        # TECHNICAL_ERROR promises the customer that the team was told. Make it
-        # true. A failure to alert must not mask the original error.
-        try:
-            notificar.avisar_falla_tecnica(telefono, str(data), _error_name(error))
-        except Exception as alert_error:
-            print(f"[agent] alerta al equipo falló type={_error_name(alert_error)}")
+        # TECHNICAL_ERROR_ALERTED promises the customer that the team was told.
+        # Only say so when a ToDo or a WhatsApp alert really exists.
+        if _alert_technical_failure(error, telefono, data):
+            return TECHNICAL_ERROR_ALERTED
         return TECHNICAL_ERROR
 
 
@@ -485,6 +619,137 @@ def _complete_pending(
     return result == 1
 
 
+def _send_error_is_permanent(error: Exception) -> bool:
+    """Decide whether retrying the very same send could ever succeed.
+
+    ``app.whatsapp`` already classifies its own errors (``permanent``); the
+    fallbacks cover raw httpx errors and unknown exceptions, which are retried
+    within the bounded budget rather than dropped.
+    """
+    flagged = getattr(error, "permanent", None)
+    if isinstance(flagged, bool):
+        return flagged
+    if isinstance(error, (httpx.TimeoutException, httpx.TransportError)):
+        return False
+    status = getattr(error, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(getattr(error, "response", None), "status_code", None)
+    if isinstance(status, int):
+        if status == 429 or status >= 500:
+            return False
+        return getattr(error, "error_code", None) not in _TRANSIENT_META_CODES
+    return False
+
+
+def _send_error_detail(error: Exception) -> str:
+    """Status and Meta code only: never recipient data or response bodies."""
+    status = getattr(error, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(getattr(error, "response", None), "status_code", None)
+    code = getattr(error, "error_code", None)
+    if isinstance(status, int):
+        return f"HTTP {status}, código {code if code is not None else 'desconocido'}"
+    return _error_name(error)
+
+
+def _retry_delay_seconds(error: Exception, attempts: int) -> float:
+    """Bounded exponential backoff; a Retry-After hint can only lengthen it."""
+    delay = min(_RETRY_MAX_SECONDS, _RETRY_SECONDS * (2 ** max(0, attempts - 1)))
+    retry_after = getattr(error, "retry_after", None)
+    try:
+        if retry_after is not None:
+            delay = min(_RETRY_MAX_SECONDS, max(delay, float(retry_after)))
+    except (TypeError, ValueError):
+        pass
+    return delay
+
+
+def _set_retry_hint(seconds: float) -> None:
+    global _retry_hint
+    with _retry_hint_guard:
+        _retry_hint = seconds
+
+
+def _take_retry_hint() -> float:
+    """Delay before the next worker cycle after a retryable outcome."""
+    global _retry_hint
+    with _retry_hint_guard:
+        hint, _retry_hint = _retry_hint, None
+    return hint if hint is not None else _RETRY_SECONDS
+
+
+def _note_send_failure(message_id: str) -> int:
+    """Count consecutive rejected final sends; the worker lock serializes it."""
+    key = _message_key("send-attempts", message_id)
+    try:
+        attempts = int(_as_text(r.get(key)) or 0) + 1
+        r.set(key, str(attempts), ex=_STATE_TTL_SECONDS)
+        return attempts
+    except Exception as error:
+        print(
+            f"[queue] attempt counter msg={_correlation(message_id)} "
+            f"type={_error_name(error)}"
+        )
+        # An unknown count must never dead-letter a message: 0 is below any cap.
+        return 0
+
+
+def _audit_undelivered(response: str, reason: str) -> None:
+    """If the undeliverable reply named an ERPNext order, leave a trace on it."""
+    for name in sorted(set(_ORDER_IN_TEXT.findall(response or ""))):
+        try:
+            erpnext.add_comment(
+                "Sales Order",
+                name,
+                f"WhatsApp no aceptó la respuesta al cliente ({reason}); "
+                "el cliente NO recibió el número de pedido por este canal. "
+                "Requiere contacto manual.",
+            )
+        except Exception as error:
+            print(f"[queue] dead-letter audit type={_error_name(error)}")
+
+
+def _dead_letter(
+    raw: bytes | str,
+    lease_key: str,
+    ownership: _Ownership,
+    message_id: str,
+    telefono: str,
+    response: str,
+    attempts: int,
+    reason: str,
+) -> bool:
+    """Atomically move the head item to the dead-letter list. True if parked."""
+    try:
+        result = int(
+            r.eval(
+                _DEAD_LETTER_LUA,
+                4,
+                _WORKER_LOCK_KEY,
+                _PROCESSING_KEY,
+                lease_key,
+                _DEAD_KEY,
+                ownership.token,
+                raw,
+            )
+        )
+    except Exception as error:
+        print(f"[queue] dead-letter type={_error_name(error)}")
+        return False
+    if result != 1:
+        return False
+    with _volatile_guard:
+        _volatile_results.pop(message_id, None)
+        _volatile_accepted.pop(message_id, None)
+    print(
+        f"[queue] dead-letter msg={_correlation(message_id)} "
+        f"phone={_correlation(telefono)} attempts={attempts} motivo={reason}; "
+        f"la respuesta quedó en {_DEAD_KEY} para revisión manual"
+    )
+    _audit_undelivered(response, reason)
+    return True
+
+
 def _parse_item(raw: bytes | str) -> dict | None:
     try:
         item = json.loads(raw)
@@ -596,10 +861,29 @@ def _handle_pending(
     try:
         send_result = enviar_mensaje(telefono, response)
     except Exception as error:
+        permanent = _send_error_is_permanent(error)
+        attempts = _note_send_failure(message_id)
         print(
             f"[whatsapp] final pending msg={_correlation(message_id)} "
-            f"phone={_correlation(telefono)} type={_error_name(error)}"
+            f"phone={_correlation(telefono)} type={_error_name(error)} "
+            f"{'permanente' if permanent else 'transitorio'} "
+            f"attempt={attempts}/{_SEND_MAX_ATTEMPTS}"
         )
+        if permanent:
+            reason = f"rechazo definitivo de Meta: {_send_error_detail(error)}"
+        elif attempts >= _SEND_MAX_ATTEMPTS:
+            reason = (
+                f"{attempts} intentos con reintentos agotados: "
+                f"{_send_error_detail(error)}"
+            )
+        else:
+            reason = None
+        if reason and _dead_letter(
+            raw, lease_key, ownership, message_id, telefono, response, attempts, reason
+        ):
+            ownership.set_item_lease(None)
+            return "done"
+        _set_retry_hint(_retry_delay_seconds(error, attempts))
         _release_owned(lease_key, ownership.token)
         ownership.set_item_lease(None)
         return "retry"
@@ -688,13 +972,58 @@ def _worker_supervisor(stop: threading.Event) -> None:
         if stop.is_set():
             break
         if outcome in {"retry", "blocked", "lost"}:
-            stop.wait(_RETRY_SECONDS)
+            stop.wait(_take_retry_hint())
         else:
             _worker_wake.wait(_WORKER_POLL_SECONDS)
 
 
+def _config_warnings() -> list[str]:
+    """Configuration gaps that silently disable part of the order flow."""
+    warnings: list[str] = []
+    if not os.getenv("TELEFONOS_EQUIPO", "").strip():
+        warnings.append(
+            "TELEFONOS_EQUIPO vacío: no hay agente de gestión, nadie recibe "
+            "alertas y nadie puede confirmar pedidos por WhatsApp"
+        )
+    for variable, efecto in (
+        ("WHATSAPP_STAFF_PENDING_TEMPLATE", "la alerta de pedido pendiente"),
+        ("WHATSAPP_STAFF_CONFIRMED_TEMPLATE", "la alerta de pedido confirmado"),
+        ("WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE", "el aviso de confirmación al cliente"),
+    ):
+        if not os.getenv(variable, "").strip():
+            warnings.append(
+                f"{variable} vacío: {efecto} solo sale como mensaje libre si el "
+                "destinatario escribió en las últimas 24 h"
+            )
+    if (
+        not os.getenv("AUTO_CONFIRM_PRICE_LIST", "").strip()
+        or not os.getenv("AUTO_CONFIRM_CURRENCY", "").strip()
+    ):
+        warnings.append(
+            "AUTO_CONFIRM_PRICE_LIST/AUTO_CONFIRM_CURRENCY vacíos: el agente "
+            "responde 'precio a confirmar' a toda consulta de precio"
+        )
+    return warnings
+
+
+def _startup_checks() -> None:
+    """Log, never raise: a misconfigured agent must still answer customers."""
+    for warning in _config_warnings():
+        print(f"[config] WARN {warning}")
+    verify = getattr(whatsapp_client, "verificar_credenciales", None)
+    if verify is None:
+        return
+    try:
+        ok, detail = verify()
+    except Exception as error:
+        print(f"[whatsapp] verificación de credenciales falló type={_error_name(error)}")
+        return
+    print(f"[whatsapp] {'OK' if ok else 'ERROR'} {detail}")
+
+
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
+    threading.Thread(target=_startup_checks, daemon=True, name="startup-checks").start()
     stop = threading.Event()
     worker = threading.Thread(
         target=_worker_supervisor,
@@ -825,6 +1154,15 @@ async def inbound(request: Request, background: BackgroundTasks):
                 if not accepted:
                     print(f"[webhook] duplicate msg={_correlation(message_id)}")
                     continue
+
+                # Any inbound opens the sender's 24-hour free-form window.
+                try:
+                    await _run_sync(record_inbound_window, telefono)
+                except Exception as error:
+                    print(
+                        f"[queue] window marker phone={_correlation(telefono)} "
+                        f"type={_error_name(error)}"
+                    )
 
                 print(
                     f"[webhook] type={kind} "

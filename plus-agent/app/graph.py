@@ -9,16 +9,19 @@ They use DIFFERENT ERPNext API credentials, so the permission boundary is
 enforced by ERPNext itself — not by which prompt happened to load.
 """
 import os
-from datetime import datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.prebuilt import ToolNode, create_react_agent
 
 from app import erpnext
-from app.prompts import SYSTEM_ES_AR
-from app.prompts_gerencia import SYSTEM_GERENCIA
+from app.conversacion import (
+    business_today,
+    prompt_clientes,
+    prompt_gerencia,
+    recortar_historial,
+    texto_plano,
+)
 from app.tools.captura import (
     confirmar_entrega,
     contar_stock,
@@ -111,42 +114,28 @@ _ERROR_MSG = (
     "pedile disculpas al cliente y usa escalar_a_humano."
 )
 
+# The system prompt is built per call (prompt=) and never stored in the
+# checkpoint; the model only sees a bounded tail of the thread
+# (pre_model_hook=). See app/conversacion.py for why.
 agente_clientes = create_react_agent(
     model=_modelo_clientes,
     tools=ToolNode(TOOLS_CLIENTES, handle_tool_errors=_ERROR_MSG),
+    prompt=prompt_clientes,
+    pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,
 )
 agente_gerencia = create_react_agent(
     model=_modelo_gerencia,
     tools=ToolNode(TOOLS_GERENCIA, handle_tool_errors=_ERROR_MSG),
+    prompt=prompt_gerencia,
+    pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,
 )
 
 
-def _texto(msg) -> str:
-    """Providers differ: some return a string, Gemini returns a list of
-    content blocks. Always hand WhatsApp plain text."""
-    c = getattr(msg, "content", msg)
-    if isinstance(c, str):
-        return c
-    if isinstance(c, list):
-        partes = [
-            b.get("text", "")
-            for b in c
-            if isinstance(b, dict) and b.get("type") == "text"
-        ]
-        return "\n".join(p for p in partes if p).strip() or str(c)
-    return str(c)
-
-
-def _business_today() -> str:
-    zone_name = os.getenv(
-        "BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires"
-    ).strip()
-    try:
-        return datetime.now(ZoneInfo(zone_name)).date().isoformat()
-    except (ZoneInfoNotFoundError, ValueError) as exc:
-        raise RuntimeError("BUSINESS_TIMEZONE inválida") from exc
+# Kept as aliases for callers/tests that import them from here.
+_texto = texto_plano
+_business_today = business_today
 
 
 def responder_cliente(
@@ -162,26 +151,13 @@ def responder_cliente(
 
     ``contexto_cliente`` remains accepted while callers migrate, but is
     deliberately not interpolated: it previously contained phone, ERP customer
-    code and group. Tools receive those values only through RunnableConfig.
+    code and group. Tools receive those values only through RunnableConfig,
+    and the system prompt reads ``customer_code`` from the same config.
     """
     del contexto_cliente
-    minimal_context = (
-        "Cliente con cuenta registrada en ERPNext."
-        if customer_code
-        else (
-            "Remitente sin cuenta de cliente registrada. Si quiere comprar, "
-            "registrá primero un contacto y derivá el alta comercial."
-        )
-    )
-    system = SYSTEM_ES_AR.format(
-        NEGOCIO=os.getenv("NOMBRE_NEGOCIO", "la empresa"),
-        CONTEXTO_CLIENTE=minimal_context,
-        HORARIO=os.getenv("HORARIO_ATENCION", "lunes a viernes de 8 a 17"),
-        HOY=_business_today(),
-    )
     with erpnext.customer_scope():
         out = agente_clientes.invoke(
-            {"messages": [("system", system), ("user", mensaje)]},
+            {"messages": [("user", mensaje)]},
             config={
                 "configurable": {
                     "thread_id": f"cli:{thread_id}",
@@ -192,7 +168,7 @@ def responder_cliente(
                 }
             },
         )
-    return _texto(out["messages"][-1])
+    return texto_plano(out["messages"][-1])
 
 
 def responder_gerencia(
@@ -202,14 +178,9 @@ def responder_gerencia(
     *,
     inbound_message_id: str = "",
 ) -> str:
-    system = SYSTEM_GERENCIA.format(
-        NEGOCIO=os.getenv("NOMBRE_NEGOCIO", "la empresa"),
-        USUARIO="miembro autorizado del equipo",
-        HOY=_business_today(),
-    )
     with erpnext.manager_scope():
         out = agente_gerencia.invoke(
-            {"messages": [("system", system), ("user", mensaje)]},
+            {"messages": [("user", mensaje)]},
             config={
                 "configurable": {
                     "thread_id": f"ger:{thread_id}",
@@ -219,4 +190,4 @@ def responder_gerencia(
                 }
             },
         )
-    return _texto(out["messages"][-1])
+    return texto_plano(out["messages"][-1])

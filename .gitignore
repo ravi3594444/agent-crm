@@ -1,6 +1,8 @@
-plus-agent/.env.example
 
 # secrets — every variant, including backups
 .env
 .env.*
 !.env.example
+
+# worktrees temporales de las herramientas de revisión
+.claude/worktrees/

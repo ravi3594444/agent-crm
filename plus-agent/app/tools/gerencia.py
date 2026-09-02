@@ -8,11 +8,11 @@ accountant sees — and explains the result.
 
 Deterministic numbers. LLM explanation. Never the other way round.
 """
-from datetime import date, timedelta
+from datetime import timedelta
 
 from langchain_core.tools import tool
 
-from app import erpnext
+from app import erpnext, policy
 from app.formato import pesos
 
 
@@ -57,7 +57,7 @@ def pedidos_pendientes() -> str:
 @tool
 def ventas_del_periodo(dias: int = 7) -> str:
     """Ventas confirmadas de los últimos N días."""
-    desde = (date.today() - timedelta(days=dias)).isoformat()
+    desde = (policy._hoy_del_negocio() - timedelta(days=dias)).isoformat()
     sos = erpnext.get_list(
         "Sales Order",
         filters=[["docstatus", "=", 1], ["transaction_date", ">=", desde]],

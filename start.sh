@@ -53,13 +53,33 @@ if [ -n "${CODESPACE_NAME:-}" ] && command -v gh >/dev/null 2>&1; then
     || echo "[start] !! no pude poner el puerto $PORT público (hacelo desde la pestaña PORTS)"
 fi
 
+PIDFILE=${AGENTE_PIDFILE:-$APP/agente.pid}
+supervisor_vivo() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; }
+
 if curl -sf -m 3 "http://localhost:$PORT/health" >/dev/null 2>&1; then
   echo "[start] el agente ya está corriendo en :$PORT"
+elif supervisor_vivo; then
+  echo "[start] el supervisor del agente ya está vivo (pid $(cat "$PIDFILE")); espero que levante"
+  for i in $(seq 1 30); do curl -sf -m 2 "http://localhost:$PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 else
   echo "[start] agente -> :$PORT  (log: $LOG)"
   # setsid: sesión propia, sobrevive al shell que lo lanzó. Ruta absoluta al venv:
   # `uvicorn` a secas asumía el venv activado, y en un arranque frío no lo está.
-  setsid nohup "$APP/.venv/bin/uvicorn" app.main:app --host 0.0.0.0 --port "$PORT" >"$LOG" 2>&1 </dev/null &
+  # Bucle de reinicio: si uvicorn muere (excepción, OOM, kill), vuelve solo en 3 s.
+  # --no-access-log: el access log imprimía el META_VERIFY_TOKEN de la query string.
+  # El pid lo escribe el propio bucle ($$): `$!` sería el de setsid, que muere
+  # enseguida al re-forkear, y supervisor_vivo() nunca lo encontraría.
+  setsid nohup bash -c '
+    cd "$1" || exit 1
+    echo $$ >"$3"
+    # PYTHONUNBUFFERED: los print() del agente van a un archivo; sin esto quedan
+    # en el buffer y el log parece vacío justo cuando hace falta leerlo.
+    export PYTHONUNBUFFERED=1
+    while true; do
+      "$1/.venv/bin/uvicorn" app.main:app --host 0.0.0.0 --port "$2" --no-access-log
+      echo "[start] el agente terminó (exit $?); reinicio en 3 s"
+      sleep 3
+    done' _ "$APP" "$PORT" "$PIDFILE" >"$LOG" 2>&1 </dev/null &
   for i in $(seq 1 30); do curl -sf -m 2 "http://localhost:$PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 fi
 curl -sf -m 3 "http://localhost:$PORT/health" >/dev/null 2>&1 && echo "[start] LISTO" || { echo "[start] !! el agente no levantó; mirá $LOG"; tail -20 "$LOG"; exit 1; }

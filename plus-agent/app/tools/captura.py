@@ -14,14 +14,17 @@ a Don José" into a real ERPNext document — as a DRAFT, like everything else.
 
 Capture first. Accurate stock promises come only AFTER capture works.
 """
-from datetime import date
-
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app import erpnext, notificar
+from app import erpnext, notificar, policy
 from app.runtime_context import RuntimeContextError, require_management
+
+
+def _hoy() -> str:
+    """Business-local date; the host clock may run in UTC."""
+    return policy._hoy_del_negocio().isoformat()
 
 
 class LineaVenta(BaseModel):
@@ -48,22 +51,30 @@ def registrar_venta_offline(
     if not lineas:
         return "Necesito saber qué productos se vendieron."
 
+    # Explicit company and warehouse: with update_stock ERPNext rejects any
+    # stock item without a warehouse, and a multi-company site must never
+    # pick a company by accident.
+    company, warehouse = erpnext.default_context()
     items = []
     for linea in lineas:
-        item = {"item_code": linea.item_code, "qty": linea.cantidad}
+        item = {"item_code": linea.item_code, "qty": linea.cantidad, "warehouse": warehouse}
         if linea.precio_unitario is not None:
             item["rate"] = linea.precio_unitario
         items.append(item)
 
+    cobro = "Cobrado en el momento." if cobrado else "Pendiente de cobro."
     doc = erpnext.create_doc(
         "Sales Invoice",
         {
+            "company": company,
             "customer": cliente,
-            "posting_date": date.today().isoformat(),
+            "posting_date": _hoy(),
+            "set_posting_time": 1,
             "update_stock": 1,          # this invoice moves stock on submit
+            "set_warehouse": warehouse,
             "is_pos": 1 if cobrado else 0,
             "items": items,
-            "remarks": f"Venta offline registrada por WhatsApp. {nota}".strip(),
+            "remarks": f"Venta offline registrada por WhatsApp. {cobro} {nota}".strip(),
         },
     )
     erpnext.add_comment(
@@ -96,19 +107,29 @@ def contar_stock(
         actor = require_management(config)
     except RuntimeContextError:
         return "No pude autenticar quién cuenta; no cargué el conteo."
-    dep = deposito or erpnext.default_warehouse()
+    company, default_warehouse = erpnext.default_context()
+    dep = deposito or default_warehouse
     bins = erpnext.get_list(
         "Bin",
         filters=[["item_code", "=", item_code], ["warehouse", "=", dep]],
         fields=["actual_qty"], limit=1,
     )
-    sistema = bins[0]["actual_qty"] if bins else 0
+    sistema = float(bins[0].get("actual_qty") or 0) if bins else 0.0
+    if abs(cantidad_real - sistema) < 0.000001:
+        # ERPNext refuses a reconciliation with no change; say so instead of
+        # surfacing a technical error.
+        return (
+            f"El sistema ya tiene {sistema:g} de {item_code} en {dep}; "
+            "no hace falta ningún ajuste."
+        )
 
     doc = erpnext.create_doc(
         "Stock Reconciliation",
         {
+            "company": company,
             "purpose": "Stock Reconciliation",
-            "posting_date": date.today().isoformat(),
+            "posting_date": _hoy(),
+            "set_posting_time": 1,
             "items": [{"item_code": item_code, "warehouse": dep, "qty": cantidad_real}],
         },
     )
@@ -155,15 +176,19 @@ def confirmar_entrega(numero_pedido: str, nota: str = "") -> str:
             f"El pedido {numero_pedido} todavía está en borrador. "
             f"Hay que confirmarlo antes de marcarlo entregado."
         )
+    company, warehouse = erpnext.default_context()
     doc = erpnext.create_doc(
         "Delivery Note",
         {
+            "company": so.get("company") or company,
             "customer": so["customer"],
-            "posting_date": date.today().isoformat(),
+            "posting_date": _hoy(),
+            "set_posting_time": 1,
             "items": [
                 {
                     "item_code": i["item_code"],
                     "qty": i["qty"],
+                    "warehouse": i.get("warehouse") or warehouse,
                     "against_sales_order": so["name"],
                     "so_detail": i["name"],
                 }
