@@ -32,7 +32,7 @@ from app.whatsapp import enviar_mensaje
 APP_SECRET = os.environ["META_APP_SECRET"]
 VERIFY_TOKEN = os.environ["META_VERIFY_TOKEN"]
 
-ACK_TEXT = "Recibido, dame un momento mientras lo verifico."
+ACK_TEXT = "Recibido, dame un momento mientras lo verifico. / Got it, give me a moment to check."
 TEXT_REQUIRED = (
     "Por ahora necesito que me escribas el pedido en texto para poder ayudarte."
 )
