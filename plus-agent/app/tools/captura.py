@@ -47,10 +47,10 @@ def registrar_venta_offline(
         return "Necesito saber qué productos se vendieron."
 
     items = []
-    for l in lineas:
-        item = {"item_code": l.item_code, "qty": l.cantidad}
-        if l.precio_unitario is not None:
-            item["rate"] = l.precio_unitario
+    for linea in lineas:
+        item = {"item_code": linea.item_code, "qty": linea.cantidad}
+        if linea.precio_unitario is not None:
+            item["rate"] = linea.precio_unitario
         items.append(item)
 
     doc = erpnext.create_doc(
@@ -68,7 +68,7 @@ def registrar_venta_offline(
         "Sales Invoice", doc["name"],
         "Venta offline cargada por Agente IA vía WhatsApp. Requiere confirmación.",
     )
-    detalle = ", ".join(f"{l.cantidad:g} x {l.item_code}" for l in lineas)
+    detalle = ", ".join(f"{linea.cantidad:g} x {linea.item_code}" for linea in lineas)
     return (
         f"Cargado como {doc['name']} en borrador ({detalle}) para {cliente}. "
         f"Confirmalo en el sistema y se descuenta del stock."
