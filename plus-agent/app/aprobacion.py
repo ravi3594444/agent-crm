@@ -45,6 +45,13 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
             f"revises o lo borres en ERPNext. {cola}"
         )
 
+    if accion == "conteo":
+        # A physical count is a claim about the real world; only a person can
+        # make it. The submit uses the policy credential, never an LLM tool.
+        from app import decisiones
+
+        return decisiones.confirmar_conteo(nombre, telefono)["detalle"]
+
     if accion == "ver":
         try:
             so = _leer_doc("Sales Order", nombre)

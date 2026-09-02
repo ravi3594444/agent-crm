@@ -81,6 +81,77 @@ def confirmar(nombre: str, por: str) -> dict:
     return confirmar_pedido(nombre, por)
 
 
+def confirmar_conteo(nombre: str, por: str) -> dict:
+    """Confirm a physical stock count by hand. HUMAN MANAGER ONLY.
+
+    Until somebody confirms it, a count is a WhatsApp message with a number in
+    it: app/inventario.py does not treat the product as trustworthy and the bot
+    keeps refusing to promise stock. Confirming it is what makes today's count
+    worth something — and it has to be a person, because a count is a claim
+    about the physical world that only a person can make.
+
+    Submitting goes through erpnext.submit_doc, the policy credential, exactly
+    like an order. Neither agent has Submit permission and this function is in
+    no tool list, so no prompt can reach it.
+
+    Returns {"ok": bool, "detalle": str}; `detalle` is the text for the manager.
+    """
+    try:
+        actual = _leer_doc("Stock Reconciliation", nombre)
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: no pude leer el conteo ({type(exc).__name__})")
+        return {
+            "ok": False,
+            "detalle": f"No pude abrir el conteo {nombre}. Revisalo en ERPNext.",
+        }
+
+    estado = int(actual.get("docstatus") or 0)
+    if estado == 1:
+        return {"ok": True, "detalle": f"El conteo {nombre} ya estaba confirmado."}
+    if estado != 0:
+        return {
+            "ok": False,
+            "detalle": f"El conteo {nombre} está cancelado; cargá uno nuevo.",
+        }
+
+    try:
+        erpnext.submit_doc("Stock Reconciliation", nombre)
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: submit del conteo falló ({type(exc).__name__})")
+        # A timeout can commit anyway: ask ERPNext what actually happened
+        # before telling the manager it failed.
+        try:
+            actual = _leer_doc("Stock Reconciliation", nombre)
+        except Exception:
+            actual = {}
+        if int(actual.get("docstatus") or 0) != 1:
+            return {
+                "ok": False,
+                "detalle": (
+                    f"No pude confirmar el conteo {nombre}. Confirmalo en ERPNext "
+                    "o volvé a intentar."
+                ),
+            }
+
+    _comentar_conteo(
+        nombre, f"Conteo confirmado por un integrante autorizado ({por})."
+    )
+    return {
+        "ok": True,
+        "detalle": (
+            f"Conteo {nombre} confirmado. Desde ahora el bot puede hablar de "
+            "stock de esos productos."
+        ),
+    }
+
+
+def _comentar_conteo(nombre: str, texto: str) -> None:
+    try:
+        erpnext.add_comment("Stock Reconciliation", nombre, texto)
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: comentario falló ({type(exc).__name__})")
+
+
 def rechazar(nombre: str, por: str, motivo: str = "") -> dict:
     """Reject an exception order by hand. HUMAN MANAGER ONLY.
 

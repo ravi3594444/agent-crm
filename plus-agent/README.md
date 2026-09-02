@@ -187,9 +187,23 @@ Staff report sales by WhatsApp to the management agent, in their own words:
 
 No data entry, no new app, no training. The same WhatsApp they already use.
 
+**Trust in the inventory is earned per product, and it expires.**
+`STOCK_CONFIABLE=true` used to be a promise written once in the `.env`: the
+system then promised stock for ever, even if nobody had counted anything in
+three weeks. Now a product is trustworthy only while somebody has **counted
+that product and confirmed the adjustment** within `STOCK_CONFIABLE_HORAS`
+(default 24). Counting the milk says nothing about the cheese. Without a recent
+confirmed count the bot says so and the order waits for a person — and
+`STOCK_CONFIABLE=false` still turns everything off in one move.
+
+The count is a draft until a human confirms it: `contar_stock` turns "quedan 12
+kilos" into a draft Stock Reconciliation and sends **one button**. The tap
+submits it with the policy credential — neither agent has Submit permission,
+and `decisiones.confirmar_conteo` is in no tool list.
+
 Even then the bot answers in **levels, not numbers** — DISPONIBLE /
 POCO STOCK / SIN STOCK — with `STOCK_BUFFER_PCT` (default 20%) absorbing
-sales not yet loaded. That orientative answer reads ERPNext's `Bin` alone.
+sales not yet loaded.
 The rule that actually confirms an order with nobody watching is stricter: it
 subtracts submitted orders (`reserved_qty`), the safety buffer, AND everything
 promised in other open orders, all while holding the business lock.
@@ -199,7 +213,7 @@ promised in other open orders, all while holding the business lock.
 | When | Who | What |
 |---|---|---|
 | 07:00 | system | Morning briefing to owner (`deploy/crontab`) |
-| 07:15 | whoever opens | Counts key products -> `contar_stock` |
+| 07:15 | whoever opens | Counts key products -> `contar_stock` -> taps *Confirmar conteo* |
 | all day | counter/truck | Reports sales as they happen |
 | all day | owner | Confirms drafts from his phone |
 | 18:00 | owner | Clears remaining drafts |

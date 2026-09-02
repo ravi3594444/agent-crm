@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app import erpnext, limites
+from app import erpnext, inventario, limites
 from app.formato import pesos
 from app.locks import distributed_lock
 
@@ -26,7 +26,6 @@ MIN_PEDIDOS = int(os.getenv("AUTO_CONFIRM_MIN_ORDERS", "3"))
 # el equipo se entera. A propósito NO es una perilla del dueño ni una variable
 # de entorno: se enciende en 2d, junto con la verificación que la justifica.
 CLIENTE_NUEVO_HABILITADO = False
-STOCK_CONFIABLE = os.getenv("STOCK_CONFIABLE", "false").strip().lower() == "true"
 PRICE_LIST = os.getenv("AUTO_CONFIRM_PRICE_LIST", "").strip()
 CURRENCY = os.getenv("AUTO_CONFIRM_CURRENCY", "").strip()
 
@@ -213,7 +212,10 @@ def evaluar(sales_order: dict) -> Decision:
         return Decision(False, ["auto-confirmación desactivada"])
 
     motivos: list[str] = []
-    if not STOCK_CONFIABLE:
+    # Trust in the inventory is earned per product and expires — see
+    # app/inventario.py. The deployment switch is only the outer gate.
+    inventario_habilitado = inventario.maestra_encendida()
+    if not inventario_habilitado:
         motivos.append("inventario no marcado como confiable")
     if not PRICE_LIST:
         motivos.append("lista estándar de auto-confirmación no configurada")
@@ -372,7 +374,7 @@ def evaluar(sales_order: dict) -> Decision:
                 f"{cfg.tope_qty_por_producto:g} por producto"
             )
 
-    if STOCK_CONFIABLE:
+    if inventario_habilitado:
         # This order's own quantity is the one being checked, so it must not be
         # counted as competition against itself; and an order that was asked
         # for LATER cannot take units away from this one.
@@ -380,6 +382,12 @@ def evaluar(sales_order: dict) -> Decision:
         empresa = str(sales_order.get("company") or "").strip()
         pedido_desde = str(sales_order.get("creation") or "").strip()
         for (code, warehouse), qty in cantidades.items():
+            # Is what ERPNext says about THIS product recent enough to promise?
+            # A stock figure nobody has counted in three weeks is a guess.
+            fresco, sin_confianza = inventario.confiable(code, warehouse)
+            if not fresco:
+                motivos.append(sin_confianza or f"stock de {code} sin verificar")
+                continue
             try:
                 if not _hay_stock(
                     code,

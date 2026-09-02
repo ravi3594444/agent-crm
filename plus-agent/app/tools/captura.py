@@ -16,10 +16,12 @@ Capture first. Accurate stock promises come only AFTER capture works.
 """
 from datetime import date
 
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app import erpnext
+from app import erpnext, notificar
+from app.runtime_context import RuntimeContextError, require_management
 
 
 class LineaVenta(BaseModel):
@@ -76,12 +78,24 @@ def registrar_venta_offline(
 
 
 @tool
-def contar_stock(item_code: str, cantidad_real: float, deposito: str = "") -> str:
+def contar_stock(
+    item_code: str,
+    cantidad_real: float,
+    config: RunnableConfig,
+    deposito: str = "",
+) -> str:
     """Corrige el stock de un producto al valor contado físicamente.
     Usar en el conteo de la mañana o cuando alguien dice "quedan X".
 
     Ejemplo: "quedan 12 kilos de queso cremoso" -> contar_stock('QUE-CRE', 12)
+
+    Queda como BORRADOR: el conteo recién vale cuando la persona lo confirma
+    con el botón. Hasta entonces el bot sigue sin prometer stock.
     """
+    try:
+        actor = require_management(config)
+    except RuntimeContextError:
+        return "No pude autenticar quién cuenta; no cargué el conteo."
     dep = deposito or erpnext.default_warehouse()
     bins = erpnext.get_list(
         "Bin",
@@ -104,10 +118,27 @@ def contar_stock(item_code: str, cantidad_real: float, deposito: str = "") -> st
     )
     dif = cantidad_real - sistema
     signo = "faltan" if dif < 0 else "sobran"
+    resumen = (
+        f"Conteo de {item_code} ({doc['name']}): el sistema decía {sistema:g}, "
+        f"vos contaste {cantidad_real:g} — {signo} {abs(dif):g}."
+    )
+    # The count only starts counting when a person confirms it, so ask for that
+    # in one tap instead of sending him into ERPNext.
+    pedido = notificar.pedir_confirmacion_conteo(
+        actor.actor_phone,
+        doc["name"],
+        f"{resumen}\n\n¿Confirmo el ajuste?",
+    )
+    if pedido:
+        return (
+            f"{resumen} Le mandé el botón *Confirmar conteo*. Hasta que lo "
+            "toque, el conteo es un borrador y el bot no promete stock de "
+            f"{item_code}."
+        )
     return (
-        f"Conteo cargado ({doc['name']}). El sistema decía {sistema:g}, "
-        f"vos contaste {cantidad_real:g} — {signo} {abs(dif):g}. "
-        f"Confirmá el ajuste en el sistema."
+        f"{resumen} No pude mandarle el botón de confirmación: tiene que "
+        f"confirmar {doc['name']} en ERPNext. Hasta entonces el bot no promete "
+        f"stock de {item_code}."
     )
 
 

@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import aprobacion, decisiones
 from app.graph import TOOLS_CLIENTES, TOOLS_GERENCIA
 
-MANUAL = ("confirmar", "rechazar", "confirmar_pedido")
+MANUAL = ("confirmar", "rechazar", "confirmar_pedido", "confirmar_conteo")
 
 
 def test_no_llm_tool_exposes_the_manual_decision_functions() -> None:
@@ -50,7 +50,12 @@ def test_no_llm_tool_exposes_the_manual_decision_functions() -> None:
 
 def test_no_tool_function_is_the_manual_decision_function() -> None:
     """Name-independent: compare the underlying callables, not the labels."""
-    prohibidas = {decisiones.confirmar, decisiones.rechazar, aprobacion.confirmar_pedido}
+    prohibidas = {
+        decisiones.confirmar,
+        decisiones.rechazar,
+        decisiones.confirmar_conteo,
+        aprobacion.confirmar_pedido,
+    }
     for lista in (TOOLS_CLIENTES, TOOLS_GERENCIA):
         for herramienta in lista:
             fn = getattr(herramienta, "func", None) or getattr(

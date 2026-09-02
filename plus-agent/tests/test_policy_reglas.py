@@ -17,6 +17,7 @@ from datetime import date
 from unittest.mock import Mock
 
 import pytest
+from conftest import inventario_confiable
 
 from app import erpnext, limites, policy
 
@@ -186,7 +187,7 @@ def green(monkeypatch: pytest.MonkeyPatch) -> dict:
     )
     monkeypatch.setattr(policy, "MAX_MULT", 2.0)
     monkeypatch.setattr(policy, "MIN_PEDIDOS", 3)
-    monkeypatch.setattr(policy, "STOCK_CONFIABLE", True)
+    inventario_confiable(monkeypatch)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
     monkeypatch.setattr(policy, "_hoy_del_negocio", lambda: HOY)

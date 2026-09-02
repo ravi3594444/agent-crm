@@ -360,6 +360,157 @@ def test_reject_warns_the_manager_when_the_customer_could_not_be_told(
     assert "NO pude avisarle al cliente" in result
 
 
+# --------------------------------------------------------------------------
+# El conteo físico: un número por WhatsApp no es un inventario hasta que una
+# PERSONA lo confirma. Recién entonces el bot puede hablar de stock.
+# --------------------------------------------------------------------------
+GERENTE = "5493511111111"
+
+
+def _config_gerencia(telefono: str = GERENTE) -> dict:
+    return {
+        "configurable": {
+            "thread_id": "ger:thread",
+            "actor_scope": "management",
+            "actor_phone": telefono,
+            "inbound_message_id": "wamid.staff-conteo",
+        }
+    }
+
+
+def test_a_count_stays_a_draft_until_a_person_taps_confirm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """contar_stock turns "quedan 12 kilos" into a DRAFT Stock Reconciliation
+    and asks for one tap. Nothing about the stock is trusted until that tap:
+    the AI has no Submit permission and must not have one."""
+    from app import router
+    from app.tools import captura
+
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    monkeypatch.setattr(captura.erpnext, "default_warehouse", lambda: "Depósito A - LP")
+    monkeypatch.setattr(
+        captura.erpnext, "get_list", Mock(return_value=[{"actual_qty": 20}])
+    )
+    crear = Mock(return_value={"name": "SR-0001"})
+    monkeypatch.setattr(captura.erpnext, "create_doc", crear)
+    monkeypatch.setattr(captura.erpnext, "add_comment", Mock())
+    submit = Mock()
+    monkeypatch.setattr(captura.erpnext, "submit_doc", submit)
+    botones = Mock(return_value=True)
+    monkeypatch.setattr(captura.notificar, "pedir_confirmacion_conteo", botones)
+
+    reply = captura.contar_stock.invoke(
+        {"item_code": "QUE-CRE", "cantidad_real": 12}, config=_config_gerencia()
+    )
+
+    assert crear.call_args.args[0] == "Stock Reconciliation"
+    submit.assert_not_called()
+    botones.assert_called_once()
+    assert botones.call_args.args[0] == GERENTE
+    assert botones.call_args.args[1] == "SR-0001"
+    assert "Confirmar conteo" in reply
+    assert "no promete stock" in reply
+
+
+def test_when_the_button_cannot_be_sent_he_is_told_to_use_erpnext(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import router
+    from app.tools import captura
+
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    monkeypatch.setattr(captura.erpnext, "default_warehouse", lambda: "Depósito A - LP")
+    monkeypatch.setattr(captura.erpnext, "get_list", Mock(return_value=[]))
+    monkeypatch.setattr(
+        captura.erpnext, "create_doc", Mock(return_value={"name": "SR-0002"})
+    )
+    monkeypatch.setattr(captura.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(
+        captura.notificar, "pedir_confirmacion_conteo", Mock(return_value=False)
+    )
+
+    reply = captura.contar_stock.invoke(
+        {"item_code": "QUE-CRE", "cantidad_real": 12}, config=_config_gerencia()
+    )
+
+    assert "en ERPNext" in reply
+    assert "no promete stock" in reply
+
+
+def test_a_stranger_cannot_load_a_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import router
+    from app.tools import captura
+
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    crear = Mock()
+    monkeypatch.setattr(captura.erpnext, "create_doc", crear)
+
+    reply = captura.contar_stock.invoke(
+        {"item_code": "QUE-CRE", "cantidad_real": 12},
+        config=_config_gerencia("5490000000000"),
+    )
+
+    assert "No pude autenticar" in reply
+    crear.assert_not_called()
+
+
+def test_tapping_confirm_submits_the_count_with_the_policy_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import decisiones
+
+    monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
+    monkeypatch.setattr(
+        decisiones, "_leer_doc", Mock(return_value={"docstatus": 0})
+    )
+    submit = Mock(return_value={"name": "SR-0001", "docstatus": 1})
+    monkeypatch.setattr(decisiones.erpnext, "submit_doc", submit)
+    comentario = Mock()
+    monkeypatch.setattr(decisiones.erpnext, "add_comment", comentario)
+
+    reply = aprobacion.manejar_boton("conteo:SR-0001", GERENTE)
+
+    submit.assert_called_once_with("Stock Reconciliation", "SR-0001")
+    assert "confirmado" in reply
+    audit = " ".join(str(c) for c in comentario.call_args_list)
+    assert "Conteo confirmado por un integrante autorizado" in audit
+
+
+def test_an_unauthorized_phone_cannot_confirm_a_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import decisiones
+
+    monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: False)
+    confirmar = Mock()
+    monkeypatch.setattr(decisiones, "confirmar_conteo", confirmar)
+
+    reply = aprobacion.manejar_boton("conteo:SR-0001", "5490000000000")
+
+    assert "permiso" in reply
+    confirmar.assert_not_called()
+
+
+def test_a_count_already_confirmed_is_not_submitted_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two taps on the same button must not post the adjustment twice."""
+    from app import decisiones
+
+    monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
+    monkeypatch.setattr(
+        decisiones, "_leer_doc", Mock(return_value={"docstatus": 1})
+    )
+    submit = Mock()
+    monkeypatch.setattr(decisiones.erpnext, "submit_doc", submit)
+
+    reply = aprobacion.manejar_boton("conteo:SR-0001", GERENTE)
+
+    submit.assert_not_called()
+    assert "ya estaba confirmado" in reply
+
+
 def test_unauthorized_phone_cannot_reject(monkeypatch: pytest.MonkeyPatch) -> None:
     from app import decisiones
 

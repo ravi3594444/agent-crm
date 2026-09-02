@@ -5,11 +5,9 @@ from datetime import date
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from app import erpnext, policy
+from app import erpnext, inventario, policy
 from app.formato import pesos
 from app.runtime_context import RuntimeContextError, actor_context, require_customer
-
-STOCK_CONFIABLE = os.getenv("STOCK_CONFIABLE", "false").strip().lower() == "true"
 
 
 @tool
@@ -116,13 +114,21 @@ def _catalog_price_is_valid(
 @tool
 def consultar_stock(item_code: str) -> str:
     """Consulta un nivel orientativo en el depósito de preparación."""
-    if not STOCK_CONFIABLE:
+    try:
+        warehouse = erpnext.default_warehouse()
+    except erpnext.ERPNextError:
         return (
-            f"{item_code}: inventario no verificado. No confirmes disponibilidad; "
+            f"No pude verificar el depósito de preparación para {item_code}. "
+            "No confirmes disponibilidad."
+        )
+    # Trust is earned per product by a confirmed count, and it expires.
+    fresco, sin_confianza = inventario.confiable(item_code, warehouse)
+    if not fresco:
+        return (
+            f"{item_code}: {sin_confianza}. No confirmes disponibilidad; "
             "el pedido solo puede quedar pendiente de revisión."
         )
     try:
-        warehouse = erpnext.default_warehouse()
         bins = erpnext.get_list(
             "Bin",
             filters=[

@@ -342,15 +342,67 @@ container is kept as `agent-redis-sin-volumen` until someone deletes it.
 Result: **387 passed**, lint clean. 44 mutations (18 from 2a, 17 from 2b, 9
 from 2b.1) all caught.
 
-### 2c. Stock reliability becomes earned, not a static flag
-Today `STOCK_CONFIABLE` is a static env var. Required: the manager sends today's
-counts as **text** to the AI Management Agent → `contar_stock` creates a **draft**
-Stock Reconciliation → the manager confirms it → only then is stock treated as
-reliable for auto-confirmation. Suggested: record the timestamp of the last
-**confirmed** reconciliation and treat stock as reliable for
-`STOCK_CONFIABLE_HORAS` (new, default 24). `STOCK_CONFIABLE=false` must still force
-"never promise stock". Offline sales already flow through
-`registrar_venta_offline`. **Voice notes are out of scope — text only.**
+## Stage 2c — DONE: trust in the inventory is earned, and it expires
+
+`STOCK_CONFIABLE=true` was a promise written once in the `.env`. The system
+kept it for ever — promising stock three weeks after the last count. In a dairy
+the system figure drifts from reality in hours.
+
+**The rule** (`app/inventario.py`):
+
+```
+un producto es confiable  ⇔  STOCK_CONFIABLE=true  (interruptor maestro)
+                             Y alguien contó ESE producto en ESE depósito
+                             Y confirmó el ajuste (docstatus 1)
+                             hace menos de STOCK_CONFIABLE_HORAS (default 24)
+```
+
+**Per product, not per warehouse.** Counting the milk says nothing about the
+cheese, and one global flag would let a milk count vouch for the whole cold
+room. `ultimo_conteo` finds the most recent *confirmed* `Stock Reconciliation`
+containing that item and warehouse — child rows first, `order_by="modified
+desc"`, then the parents for their `posting_date`/`posting_time` in business
+time (`erpnext.get_list` gained `order_by` for this).
+
+**A draft count is not a count.** It is somebody's WhatsApp message with a
+number in it. `contar_stock` now requires an authenticated manager, creates the
+draft, and sends **one button** (`notificar.pedir_confirmacion_conteo` →
+`conteo:<name>`). The tap goes to `aprobacion.manejar_boton` → `es_equipo` →
+`decisiones.confirmar_conteo`, which submits with **the policy credential**.
+Neither agent has Submit permission and `confirmar_conteo` is in no tool list
+(asserted in `test_frontera_decisiones.py`). Tapping twice does not post the
+adjustment twice; if the button cannot be sent, he is told to confirm in
+ERPNext rather than told it is done.
+
+**Fails closed, always.** No count, a draft-only count, a count of another item
+or warehouse, an unreadable posting date, a count dated in the future, a
+nonsense `STOCK_CONFIABLE_HORAS`, or an ERPNext that cannot be read → not
+trustworthy. `confiable()` never raises: the customer agent calls it on the way
+to answering somebody, so it degrades into "I am not promising", never into an
+exception. Both callers use it: `policy.evaluar` (order pending, reason names
+the age — *"el último conteo de LECHE-1L es de hace 40 h (vale 24 h)"*) and
+`catalogo.consultar_stock`, which now does not even read `Bin` without a fresh
+count.
+
+`STOCK_CONFIABLE=false` still forces "never promise stock", counted or not.
+Voice notes stayed out of scope: text only.
+
+Result: **417 passed**, lint clean.
+
+### The mutation harness is now part of the repo
+`plus-agent/deploy/mutaciones.py` — it breaks each guard in the
+auto-confirmation policy one at a time, runs the suite, and expects a failure.
+A mutation nothing catches is a guard with no test.
+
+```
+python deploy/mutaciones.py          # all 54
+python deploy/mutaciones.py stock    # just the ones about stock
+```
+
+All **54** are caught (2a stock reservations and FIFO, 2b limits and audit,
+2b.1 discount cap and data loss, 2c earned trust). It restores every file in a
+`finally`, so an interrupted run leaves nothing mutated. Use it before touching
+`policy.py`, `limites.py` or `inventario.py`.
 
 ### 2d. New customer can order in the same conversation (was Stage 2 of the old plan)
 Today a stranger cannot order: `require_customer` fails closed with no customer

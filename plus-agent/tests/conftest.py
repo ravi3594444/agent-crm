@@ -111,6 +111,31 @@ class FakeRedis:
         self.lists[key] = self.lrange(key, start, end)
 
 
+def inventario_confiable(
+    monkeypatch,
+    *,
+    maestra: bool = True,
+    fresco: bool = True,
+    motivo: str = "el último conteo de LECHE-1L es de hace 40 h (vale 24 h)",
+):
+    """Trust the inventory the way a counted-and-confirmed morning does.
+
+    Trust is earned per product now (app/inventario.py), so a test about some
+    other rule says "the count is in" here instead of restating it. The tests
+    about the counting itself live in tests/test_inventario.py and use the real
+    function.
+    """
+    from app import inventario
+
+    monkeypatch.setenv("STOCK_CONFIABLE", "true" if maestra else "false")
+    monkeypatch.setenv("STOCK_CONFIABLE_HORAS", "24")
+    monkeypatch.setattr(
+        inventario,
+        "confiable",
+        lambda code, warehouse: (fresco, "" if fresco else motivo),
+    )
+
+
 @pytest.fixture(autouse=True)
 def limites_sin_redis(monkeypatch):
     """Every test starts with an EMPTY limits store and a clean environment.
@@ -129,6 +154,9 @@ def limites_sin_redis(monkeypatch):
         "AUTO_CONFIRM_MAX_CLIENTE_NUEVO",
         "AUTO_CONFIRM_MAX_DEBT",
         "AUTO_CONFIRM_DESCUENTOS_APRUEBAN",
+        "AUTO_CONFIRM_MAX_DESCUENTO_PCT",
+        "STOCK_CONFIABLE",
+        "STOCK_CONFIABLE_HORAS",
     ):
         monkeypatch.delenv(nombre, raising=False)
     vacio = FakeRedis()

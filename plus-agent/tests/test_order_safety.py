@@ -20,8 +20,14 @@ os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "test-phone-id")
 os.environ.setdefault("WHATSAPP_TOKEN", "test-token")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import erpnext, policy
+from conftest import inventario_confiable
+
+from app import erpnext, inventario, policy
 from app.tools import catalogo, pedidos
+
+# Captured before any fixture stubs it: these two tests are about the real
+# earned-trust logic, not about a stub of it.
+_CONFIABLE_REAL = inventario.confiable
 
 
 def _limites_del_dueno(monkeypatch: pytest.MonkeyPatch, **cambios: object) -> None:
@@ -447,7 +453,7 @@ def test_policy_never_auto_confirms_when_stock_is_not_trusted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _limites_del_dueno(monkeypatch)
-    monkeypatch.setattr(policy, "STOCK_CONFIABLE", False)
+    inventario_confiable(monkeypatch, maestra=False)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
     monkeypatch.setattr(policy, "MIN_PEDIDOS", 1)
@@ -466,7 +472,7 @@ def test_policy_aggregates_duplicate_lines_per_item_and_warehouse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _limites_del_dueno(monkeypatch)
-    monkeypatch.setattr(policy, "STOCK_CONFIABLE", True)
+    inventario_confiable(monkeypatch)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
     monkeypatch.setattr(policy, "MIN_PEDIDOS", 1)
@@ -516,7 +522,7 @@ def _catalogo_erp(
     borradores_fallan: bool = False,
 ) -> None:
     """Wire consultar_stock's two reads: Bin, and what other drafts hold."""
-    monkeypatch.setattr(catalogo, "STOCK_CONFIABLE", True)
+    inventario_confiable(monkeypatch)
     monkeypatch.setenv("STOCK_BUFFER_PCT", "0")
     monkeypatch.setenv("STOCK_POCO", "20")
     monkeypatch.setattr(erpnext, "default_warehouse", lambda: "Depósito A - LP")
@@ -607,7 +613,7 @@ def _politica_verde(
     _limites_del_dueno(monkeypatch)
     monkeypatch.setattr(policy, "MAX_MULT", 2.0)
     monkeypatch.setattr(policy, "MIN_PEDIDOS", 1)
-    monkeypatch.setattr(policy, "STOCK_CONFIABLE", True)
+    inventario_confiable(monkeypatch)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
     monkeypatch.setattr(policy, "_hoy_del_negocio", lambda: date(2026, 8, 29))
@@ -743,6 +749,57 @@ def test_competing_drafts_are_re_read_inside_the_submit_lock(
     mocks["submit"].assert_called_once_with("Sales Order", "SO-0001")
     dentro = rastro[rastro.index("lock-in") : rastro.index("lock-out")]
     assert "lee:Sales Order" in dentro
+
+
+def test_a_stale_count_leaves_the_order_pending_with_a_reason_he_can_act_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nobody counted this product today, so the stock figure is a guess. The
+    order waits and the reason tells the team exactly what to do about it."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    mocks = _politica_verde(monkeypatch, fisico=1_000)
+    monkeypatch.setattr(inventario, "confiable", _CONFIABLE_REAL)
+    monkeypatch.setenv("STOCK_CONFIABLE", "true")
+    monkeypatch.setenv("STOCK_CONFIABLE_HORAS", "24")
+    zona = ZoneInfo("America/Argentina/Buenos_Aires")
+    ahora = datetime(2026, 8, 29, 9, 0, tzinfo=zona)
+    viejo = ahora - timedelta(hours=40)
+    monkeypatch.setattr(inventario, "_ahora", lambda: ahora)
+    monkeypatch.setattr(
+        inventario,
+        "ultimo_conteo",
+        lambda item_code, warehouse: viejo,
+    )
+    draft = _order()
+
+    result = pedidos._after_create(draft, draft["items"], draft["delivery_date"])
+
+    assert result.startswith("PEDIDO_PENDIENTE. Número real: SO-0001")
+    mocks["submit"].assert_not_called()
+    audit = " ".join(str(call) for call in mocks["comment"].call_args_list)
+    assert "hace 40 h" in audit
+
+
+def test_the_customer_is_not_promised_stock_when_nobody_counted_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The level the sales agent answers with is only as good as the last
+    count. With no count it says so, instead of reading Bin out loud."""
+    monkeypatch.setattr(inventario, "confiable", _CONFIABLE_REAL)
+    monkeypatch.setenv("STOCK_CONFIABLE", "true")
+    monkeypatch.setenv("STOCK_CONFIABLE_HORAS", "24")
+    monkeypatch.setattr(erpnext, "default_warehouse", lambda: "Depósito A - LP")
+    monkeypatch.setattr(inventario, "ultimo_conteo", lambda item_code, warehouse: None)
+    bins = Mock(return_value=[{"actual_qty": 500, "reserved_qty": 0}])
+    monkeypatch.setattr(erpnext, "get_list", bins)
+
+    answer = catalogo.consultar_stock.invoke({"item_code": "LECHE-1L"})
+
+    assert "nadie confirmó un conteo" in answer
+    assert "No confirmes disponibilidad" in answer
+    bins.assert_not_called()  # it does not even look at Bin
 
 
 def test_the_locked_revalidation_uses_the_limits_in_force_at_that_moment(
@@ -910,7 +967,7 @@ def test_policy_delivery_limit_uses_business_date_not_host_date(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _limites_del_dueno(monkeypatch)
-    monkeypatch.setattr(policy, "STOCK_CONFIABLE", True)
+    inventario_confiable(monkeypatch)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
     monkeypatch.setattr(policy, "MIN_PEDIDOS", 1)

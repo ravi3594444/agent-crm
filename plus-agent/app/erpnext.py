@@ -127,8 +127,11 @@ def _list(
     fields: list[str] | None,
     limit: int,
     parent: str | None,
+    order_by: str | None = None,
 ) -> list[dict]:
     params: dict[str, Any] = {"limit_page_length": limit}
+    if order_by:
+        params["order_by"] = order_by
     if filters:
         params["filters"] = json.dumps(filters, ensure_ascii=False)
     if fields:
@@ -161,8 +164,9 @@ def get_list(
     fields: list[str] | None = None,
     limit: int = 20,
     parent: str | None = None,
+    order_by: str | None = None,
 ) -> list[dict]:
-    return _list(_active_client(), doctype, filters, fields, limit, parent)
+    return _list(_active_client(), doctype, filters, fields, limit, parent, order_by)
 
 
 def get_doc(doctype: str, name: str) -> dict:
@@ -330,6 +334,7 @@ def policy_get_list(
     fields: list[str] | None = None,
     limit: int = 20,
     parent: str | None = None,
+    order_by: str | None = None,
 ) -> list[dict]:
     """List documents with the policy identity, for policy checks only.
 
@@ -337,7 +342,7 @@ def policy_get_list(
     customers' orders. app/policy.py needs exactly that to know how much stock
     is already promised, so the read runs under the non-LLM policy identity.
     """
-    return _list(_policy(), doctype, filters, fields, limit, parent)
+    return _list(_policy(), doctype, filters, fields, limit, parent, order_by)
 
 
 def policy_update_status(doctype: str, name: str, status: str) -> dict:

@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from conftest import FakeRedis
+from conftest import FakeRedis, inventario_confiable
 
 from app import limites, locks, policy
 from app.tools import configuracion
@@ -315,7 +315,7 @@ def _todo_verde_menos_los_limites(monkeypatch: pytest.MonkeyPatch) -> None:
     when a limit does."""
     from datetime import date
 
-    monkeypatch.setattr(policy, "STOCK_CONFIABLE", True)
+    inventario_confiable(monkeypatch)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
     monkeypatch.setattr(policy, "MIN_PEDIDOS", 1)

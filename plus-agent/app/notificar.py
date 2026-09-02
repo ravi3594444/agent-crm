@@ -201,6 +201,28 @@ def _destinatarios(router_module) -> list[str]:
     return numeros
 
 
+def pedir_confirmacion_conteo(telefono: str, nombre: str, texto: str) -> bool:
+    """Ask the manager to confirm a count with one tap.
+
+    He is by definition inside the 24-hour window — he just sent the count —
+    so a free-form interactive message works and no template is needed. Never
+    raises: if the button cannot be sent, the caller tells him to confirm it in
+    ERPNext instead of pretending it is done.
+    """
+    from app import whatsapp
+
+    try:
+        whatsapp.enviar_botones(
+            telefono,
+            texto,
+            [{"id": f"conteo:{nombre}", "title": "Confirmar conteo"}],
+        )
+        return True
+    except Exception as exc:
+        print(f"[staff-notify] botón de conteo {nombre} falló ({type(exc).__name__})")
+        return False
+
+
 def avisar_falla_tecnica(telefono: str, texto: str, error: str) -> bool:
     """A customer got the technical-problem apology. That text says the team was
     told, so this makes it true."""
