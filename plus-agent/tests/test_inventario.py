@@ -8,7 +8,8 @@ en horas. Lo que se prueba acá:
   * un producto es confiable sólo si alguien lo CONTÓ y CONFIRMÓ el ajuste
     hace menos de STOCK_CONFIABLE_HORAS;
   * un borrador de conteo no alcanza — es un mensaje de WhatsApp con un número;
-  * contar la leche no hace confiable al queso;
+  * la confianza es por par (item_code, warehouse): contar la leche no hace
+    confiable al queso, ni la leche del depósito de al lado;
   * cualquier duda es "no confiable": nunca se estima una fecha ni una hora.
 """
 from __future__ import annotations
@@ -151,8 +152,8 @@ def test_a_draft_count_is_not_a_count(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_counting_the_milk_says_nothing_about_the_cheese(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Trust is per product on purpose: one global flag would let a count of
-    milk vouch for the whole cold room."""
+    """Trust is per (item_code, warehouse) pair on purpose: one global flag
+    would let a count of milk vouch for every product in every warehouse."""
     _conteos(monkeypatch, hace_horas=1, item="LECHE-1L")
 
     assert inventario.confiable("LECHE-1L", DEPOSITO)[0] is True

@@ -48,17 +48,21 @@ def _mostrar(fila: dict) -> str:
     linea = f"*{fila['alias']}*: {valor}  ({origen})"
     if fila["problema"]:
         linea += f"\n   ⚠️ mal configurado: {fila['problema']}"
-    # Better he knows the number is parked than set it and wonder why nothing
-    # changed. It starts working when the delivery checks land (2d).
-    if (
-        fila["nombre"] == "AUTO_CONFIRM_MAX_CLIENTE_NUEVO"
-        and not policy.CLIENTE_NUEVO_HABILITADO
-    ):
-        linea += (
-            "\n   ℹ️ todavía sin efecto: hasta que el sistema verifique la "
-            "dirección y la zona de entrega, un cliente nuevo siempre espera "
-            "a una persona"
-        )
+    # He should know the ceiling is not the only thing standing between a new
+    # customer and an automatic order: the address has to check out too.
+    if fila["nombre"] == "AUTO_CONFIRM_MAX_CLIENTE_NUEVO":
+        if not policy.CLIENTE_NUEVO_HABILITADO:
+            linea += (
+                "\n   ℹ️ todavía sin efecto: hasta que el sistema verifique la "
+                "dirección y la zona de entrega, un cliente nuevo siempre "
+                "espera a una persona"
+            )
+        elif fila["valor"] not in ("", "0"):
+            linea += (
+                "\n   ℹ️ sólo cuando la dirección del pedido cae en una zona de "
+                "reparto configurada (o ya se le entregó ahí antes); si no, el "
+                "pedido queda en borrador igual"
+            )
     return linea
 
 

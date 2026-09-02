@@ -87,7 +87,8 @@ Those confirm INSTANTLY. Only unusual ones wake a human. Every rule must pass:
 | Order total under ceiling | 0 = off | owner, from WhatsApp |
 | No more than X of one product, in stock units | 0 = nothing passes | owner |
 | Stock above the buffer, minus what other open orders already promised | 20% | owner |
-| A customer with no real history stays under their own ceiling | off until delivery checks land | owner (parked) |
+| A customer with no real history stays under their own ceiling | 0 = they always wait | owner |
+| The delivery address is in a configured zone, or was delivered to before | no zones = nothing delivers | `ZONAS_ENTREGA_*` |
 | No overdue balance | 0 | owner |
 | Any discount goes to a person | yes | owner |
 | If not, line + document discount combined stays under the cap | 5% | owner |

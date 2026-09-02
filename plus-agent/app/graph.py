@@ -45,11 +45,19 @@ from app.tools.gerencia import (
     stock_bajo,
     ventas_del_periodo,
 )
-from app.tools.pedidos import crear_lead, crear_pedido, escalar_a_humano
+from app.tools.pedidos import (
+    crear_cliente,
+    crear_lead,
+    crear_pedido,
+    escalar_a_humano,
+)
 
 TOOLS_CLIENTES = [
     buscar_producto, consultar_stock, estado_pedido, pedido_habitual,
-    crear_lead, crear_pedido, escalar_a_humano,
+    # crear_cliente da de alta al REMITENTE con el teléfono del webhook: no
+    # acepta un teléfono como argumento, así que ningún mensaje puede pedir
+    # el alta de otra persona.
+    crear_cliente, crear_lead, crear_pedido, escalar_a_humano,
 ]
 
 TOOLS_GERENCIA = [

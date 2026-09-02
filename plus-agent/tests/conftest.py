@@ -136,6 +136,28 @@ def inventario_confiable(
     )
 
 
+def entrega_autorizada(
+    monkeypatch,
+    *,
+    autorizada: bool = True,
+    motivo: str = "entrega a revisar: Ruta 9 km 300, Villa Rara — el código postal X9999 no está en las zonas de reparto",
+):
+    """Say the delivery address is settled, without restating how.
+
+    Delivery eligibility is decided in app/entrega.py, deterministically and
+    outside the model. A test about some other rule says "the address is fine"
+    here; the tests about the decision itself live in tests/test_entrega.py and
+    use the real function.
+    """
+    from app import entrega
+
+    monkeypatch.setattr(
+        entrega,
+        "autorizada",
+        lambda sales_order: (autorizada, "" if autorizada else motivo),
+    )
+
+
 @pytest.fixture(autouse=True)
 def limites_sin_redis(monkeypatch):
     """Every test starts with an EMPTY limits store and a clean environment.

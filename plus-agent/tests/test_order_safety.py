@@ -20,7 +20,7 @@ os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "test-phone-id")
 os.environ.setdefault("WHATSAPP_TOKEN", "test-token")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from conftest import inventario_confiable
+from conftest import entrega_autorizada, inventario_confiable
 
 from app import erpnext, inventario, policy
 from app.tools import catalogo, pedidos
@@ -473,6 +473,7 @@ def test_policy_aggregates_duplicate_lines_per_item_and_warehouse(
 ) -> None:
     _limites_del_dueno(monkeypatch)
     inventario_confiable(monkeypatch)
+    entrega_autorizada(monkeypatch)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
     monkeypatch.setattr(policy, "MIN_PEDIDOS", 1)
@@ -523,6 +524,7 @@ def _catalogo_erp(
 ) -> None:
     """Wire consultar_stock's two reads: Bin, and what other drafts hold."""
     inventario_confiable(monkeypatch)
+    entrega_autorizada(monkeypatch)
     monkeypatch.setenv("STOCK_BUFFER_PCT", "0")
     monkeypatch.setenv("STOCK_POCO", "20")
     monkeypatch.setattr(erpnext, "default_warehouse", lambda: "Depósito A - LP")
@@ -614,6 +616,7 @@ def _politica_verde(
     monkeypatch.setattr(policy, "MAX_MULT", 2.0)
     monkeypatch.setattr(policy, "MIN_PEDIDOS", 1)
     inventario_confiable(monkeypatch)
+    entrega_autorizada(monkeypatch)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
     monkeypatch.setattr(policy, "_hoy_del_negocio", lambda: date(2026, 8, 29))
@@ -847,15 +850,21 @@ def test_the_locked_revalidation_uses_the_limits_in_force_at_that_moment(
     assert "supera el tope" in audit
 
 
-def test_a_new_customer_order_stays_a_draft_and_the_manager_is_told(
+def test_an_unchecked_address_alerts_the_manager_with_address_reason_and_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Until 2d checks the address and the delivery area, a customer with no
-    history never auto-confirms — and the team hears about it, because a
+    """The order stays a draft and the team gets everything it needs to decide
+    in one message: which order, where it goes, and why it is being asked. A
     customer waiting silently is the worst outcome this system can produce."""
     mocks = _politica_verde(monkeypatch, fisico=1_000)
-    monkeypatch.setattr(policy, "MIN_PEDIDOS", 3)
-    monkeypatch.setattr(erpnext, "get_list", Mock(return_value=[]))  # no history
+    entrega_autorizada(
+        monkeypatch,
+        autorizada=False,
+        motivo=(
+            "entrega a revisar: Ruta 9 km 300, Villa Rara (CP X9999) — el "
+            "código postal X9999 no está en las zonas de reparto"
+        ),
+    )
     draft = _order()
 
     result = pedidos._after_create(draft, draft["items"], draft["delivery_date"])
@@ -863,10 +872,30 @@ def test_a_new_customer_order_stays_a_draft_and_the_manager_is_told(
     assert result.startswith("PEDIDO_PENDIENTE. Número real: SO-0001")
     mocks["submit"].assert_not_called()
     mocks["notify"].assert_called_once()
+    # The ERP order id, the address and the reason, all in the same alert.
+    assert mocks["notify"].call_args.args[0] == "SO-0001"
     assert mocks["notify"].call_args.kwargs["auto"] is False
-    assert "falta verificar dirección y zona de entrega" in (
-        mocks["notify"].call_args.kwargs["motivos"]
-    )
+    motivos = mocks["notify"].call_args.kwargs["motivos"]
+    assert "Ruta 9 km 300, Villa Rara" in motivos
+    assert "no está en las zonas de reparto" in motivos
+
+
+def test_the_customer_hears_received_and_under_review_never_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one sentence the customer must not hear is "confirmed". The tool
+    result tells the model exactly what to say, because a cheerful
+    paraphrase of a draft is how a dairy loses a customer on delivery day."""
+    _politica_verde(monkeypatch, fisico=1_000)
+    entrega_autorizada(monkeypatch, autorizada=False)
+    draft = _order()
+
+    result = pedidos._after_create(draft, draft["items"], draft["delivery_date"])
+
+    assert "PEDIDO_PENDIENTE" in result
+    assert "revisando la entrega" in result
+    assert "NO le digas que está confirmado" in result
+    assert "PEDIDO_CONFIRMADO" not in result
 
 
 def test_the_locked_revalidation_also_re_reads_the_discount_cap(
@@ -968,6 +997,7 @@ def test_policy_delivery_limit_uses_business_date_not_host_date(
 ) -> None:
     _limites_del_dueno(monkeypatch)
     inventario_confiable(monkeypatch)
+    entrega_autorizada(monkeypatch)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
     monkeypatch.setattr(policy, "MIN_PEDIDOS", 1)

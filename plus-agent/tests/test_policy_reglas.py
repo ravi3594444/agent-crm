@@ -17,7 +17,7 @@ from datetime import date
 from unittest.mock import Mock
 
 import pytest
-from conftest import inventario_confiable
+from conftest import entrega_autorizada, inventario_confiable
 
 from app import erpnext, limites, policy
 
@@ -188,6 +188,7 @@ def green(monkeypatch: pytest.MonkeyPatch) -> dict:
     monkeypatch.setattr(policy, "MAX_MULT", 2.0)
     monkeypatch.setattr(policy, "MIN_PEDIDOS", 3)
     inventario_confiable(monkeypatch)
+    entrega_autorizada(monkeypatch)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
     monkeypatch.setattr(policy, "_hoy_del_negocio", lambda: HOY)
@@ -251,11 +252,7 @@ def test_customer_with_fewer_confirmed_orders_than_minimum_goes_to_human(green) 
     decision = policy.evaluar(_order())
 
     assert decision.auto is False
-    # Until 2d verifies the address and the delivery area, a customer without
-    # enough history waits no matter what ceiling is configured.
-    assert decision.motivos == [
-        "cliente sin historial suficiente: falta verificar dirección y zona de entrega"
-    ]
+    assert "cliente con solo 2 pedidos confirmados" in decision.motivos
 
 
 def test_history_lookup_is_restricted_to_this_customer_confirmed_orders(green) -> None:
@@ -1222,24 +1219,69 @@ def test_with_the_discount_rule_on_the_cap_is_irrelevant(
     assert "descuento en LECHE-1L requiere aprobación" in decision.motivos
 
 
-def test_new_customer_auto_confirmation_is_off_until_the_address_is_verified(
+def test_a_new_customer_needs_a_checked_address_as_well_as_the_ceiling(
     green, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Promising an automatic delivery to an address nobody has checked — or
-    one outside the delivery area — is worse than making the customer wait.
-    Until 2d verifies both, a customer without history always waits, whatever
-    ceiling is configured, and this is deliberately not a knob the owner can
-    turn on from WhatsApp."""
-    assert policy.CLIENTE_NUEVO_HABILITADO is False
+    """Two independent rules, and both have to pass. Promising an automatic
+    delivery to an address nobody checked — or one outside the delivery area —
+    is worse than making the customer wait, so the ceiling alone is never
+    enough."""
     _fijar(monkeypatch, AUTO_CONFIRM_MAX=100_000, AUTO_CONFIRM_MAX_CLIENTE_NUEVO=50_000)
     green["history"].return_value = []
+
+    # Ceiling generous, address unchecked -> waits, and says why.
+    entrega_autorizada(monkeypatch, autorizada=False)
+    sin_direccion = policy.evaluar(_order())
+    assert sin_direccion.auto is False
+    assert any("entrega a revisar" in m for m in sin_direccion.motivos)
+
+    # Address checked, ceiling generous -> a first-time customer is served.
+    entrega_autorizada(monkeypatch)
+    assert policy.evaluar(_order()).auto is True
+
+    # Address checked but the ceiling is the one that says no.
+    _fijar(monkeypatch, AUTO_CONFIRM_MAX_CLIENTE_NUEVO=50)
+    con_tope = policy.evaluar(_order())
+    assert con_tope.auto is False
+    assert any("cliente nuevo" in m for m in con_tope.motivos)
+
+
+@pytest.mark.parametrize(
+    ("knob", "valor", "fragmento"),
+    [
+        ("AUTO_CONFIRM_MAX", 10, "supera el tope"),
+        ("AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO", 1, "supera el máximo"),
+        ("AUTO_CONFIRM_MAX_CLIENTE_NUEVO", 10, "cliente nuevo"),
+    ],
+)
+def test_every_other_limit_still_applies_to_a_verified_new_customer(
+    green, monkeypatch: pytest.MonkeyPatch, knob: str, valor: int, fragmento: str
+) -> None:
+    """A checked address is not a pass on everything else: stock, discount,
+    quantity, debt and the new-customer ceiling each still decide on their
+    own."""
+    _fijar(monkeypatch, AUTO_CONFIRM_MAX=100_000, AUTO_CONFIRM_MAX_CLIENTE_NUEVO=50_000)
+    green["history"].return_value = []
+    _fijar(monkeypatch, **{knob: valor})
 
     decision = policy.evaluar(_order())
 
     assert decision.auto is False
-    assert decision.motivos == [
-        "cliente sin historial suficiente: falta verificar dirección y zona de entrega"
-    ]
+    assert any(fragmento in m for m in decision.motivos)
+
+
+def test_a_verified_address_does_not_excuse_stock_or_debt(
+    green, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fijar(monkeypatch, AUTO_CONFIRM_MAX=100_000, AUTO_CONFIRM_MAX_CLIENTE_NUEVO=50_000)
+    green["history"].return_value = []
+
+    green["stock"].return_value = False
+    assert policy.evaluar(_order()).auto is False
+
+    green["stock"].return_value = True
+    green["debt"].return_value = 500.0
+    assert policy.evaluar(_order()).auto is False
 
 
 def test_discounts_allowed_never_means_a_price_above_the_list(
@@ -1349,7 +1391,7 @@ def test_all_failing_reasons_are_reported_not_just_the_first(green) -> None:
 
     assert decision.auto is False
     assert len(decision.motivos) >= 5
-    for fragment in ("supera el tope", "falta verificar dirección", "vencidos",
+    for fragment in ("supera el tope", "solo 0 pedidos", "vencidos",
                      "stock insuficiente", "fecha de entrega vencida"):
         assert any(fragment in m for m in decision.motivos), fragment
 

@@ -22,7 +22,11 @@ falso positivo acá significa cargarle un pedido a otra persona.
 
 from __future__ import annotations
 
+import os
+
 from app import erpnext, telefono
+from app.entrega import normalizar_cp, normalizar_localidad
+from app.locks import distributed_lock
 
 CAMPOS = ["name", "customer_name", "customer_group", "mobile_no"]
 
@@ -68,3 +72,172 @@ def buscar_por_telefono(numero: str, get_list=None) -> dict | None:
             f"{[c['name'] for c in exactos]}. Usando {exactos[0]['name']}."
         )
     return exactos[0]
+
+
+# ---------------------------------------------------------------------------
+# Alta del cliente nuevo, en la misma conversación
+#
+# EL TELÉFONO NO ES UN PARÁMETRO QUE ALGUIEN ELIJA. Llega del webhook firmado
+# de Meta y se normaliza acá. Ninguna herramienta lo acepta como argumento:
+# si el modelo pudiera pasarlo, un mensaje bastaría para dar de alta —o para
+# pedir por— el número de otra persona.
+#
+# Y NADA SE DUPLICA. Meta reintenta los webhooks y la gente manda dos mensajes
+# seguidos, así que el alta corre bajo el mismo lock distribuido que protege la
+# creación de pedidos, y vuelve a buscar adentro del lock antes de crear.
+# ---------------------------------------------------------------------------
+
+# La ficha de un cliente y su dirección: dos documentos, un solo intento.
+LOCK_ALTA_SEGUNDOS = 60
+ESPERA_ALTA_SEGUNDOS = 20
+MAX_DIRECCIONES = 20
+
+
+def _campo(direccion: dict, nombre: str) -> str:
+    return str(direccion.get(nombre) or "").strip()
+
+
+def misma_direccion(guardada: dict, pedida: dict) -> bool:
+    """Si son la misma dirección, comparando como la leería una persona."""
+    return (
+        normalizar_localidad(guardada.get("address_line1"))
+        == normalizar_localidad(pedida.get("address_line1"))
+        and normalizar_localidad(guardada.get("city"))
+        == normalizar_localidad(pedida.get("city"))
+        and normalizar_cp(guardada.get("pincode")) == normalizar_cp(pedida.get("pincode"))
+    )
+
+
+def direcciones_de(cliente: str) -> list[str]:
+    """Las Address vinculadas a ese Customer, por su Dynamic Link."""
+    if not cliente:
+        return []
+    filas = erpnext.get_list(
+        "Dynamic Link",
+        filters=[
+            ["link_doctype", "=", "Customer"],
+            ["link_name", "=", cliente],
+            ["parenttype", "=", "Address"],
+        ],
+        fields=["parent", "link_name", "parenttype"],
+        limit=MAX_DIRECCIONES,
+        parent="Address",
+    )
+    nombres: list[str] = []
+    for fila in filas:
+        if str(fila.get("link_name") or cliente).strip() != cliente:
+            continue
+        nombre = str(fila.get("parent") or "").strip()
+        if nombre and nombre not in nombres:
+            nombres.append(nombre)
+    return nombres
+
+
+def direccion_principal(cliente: str) -> str:
+    """Una dirección del cliente, elegida de forma determinística.
+
+    El pedido tiene que decir a dónde va: si ERPNext lo dedujera solo, dos
+    pedidos del mismo cliente podrían salir con direcciones distintas según
+    qué documento tocó primero. Sin dirección, devuelve "" y la política deja
+    el pedido en borrador.
+    """
+    nombres = sorted(direcciones_de(cliente))
+    return nombres[0] if nombres else ""
+
+
+def asegurar_direccion(cliente: str, direccion: dict) -> str:
+    """La Address del cliente con esos datos, creándola sólo si no está.
+
+    Un reintento con la misma dirección devuelve la que ya existe en vez de
+    dejar tres copias iguales colgadas del mismo cliente.
+    """
+    linea = _campo(direccion, "address_line1")
+    if not linea:
+        raise erpnext.ERPNextError("la dirección no tiene calle y número")
+    for nombre in direcciones_de(cliente):
+        try:
+            guardada = erpnext.get_doc("Address", nombre)
+        except erpnext.ERPNextError:
+            continue
+        if misma_direccion(guardada, direccion):
+            return nombre
+
+    payload = {
+        "address_title": cliente,
+        "address_type": "Shipping",
+        "address_line1": linea,
+        "city": _campo(direccion, "city") or "Sin especificar",
+        "country": os.getenv("ERPNEXT_COUNTRY", "Argentina").strip() or "Argentina",
+        "links": [{"link_doctype": "Customer", "link_name": cliente}],
+    }
+    for campo in ("address_line2", "pincode", "state"):
+        valor = _campo(direccion, campo)
+        if valor:
+            payload[campo] = valor
+    doc = erpnext.create_doc("Address", payload)
+    nombre = str(doc.get("name") or "").strip()
+    if not nombre:
+        raise erpnext.ERPNextError("ERPNext no devolvió la dirección creada")
+    return nombre
+
+
+def crear(nombre_negocio: str, numero: str, direccion: dict) -> dict:
+    """Da de alta al cliente que escribió, con su dirección de entrega.
+
+    Devuelve {"cliente", "direccion", "creado"}. `creado` es False cuando ya
+    existía: el alta es idempotente por teléfono, así que un reintento o dos
+    mensajes simultáneos del mismo número no dejan dos fichas.
+    """
+    canonico = telefono.normalizar(numero)
+    if not canonico:
+        raise erpnext.ERPNextError("el teléfono del remitente no es válido")
+    nombre = " ".join(str(nombre_negocio or "").split())
+    if not nombre:
+        raise erpnext.ERPNextError("falta el nombre del cliente")
+
+    with distributed_lock(
+        f"alta-cliente:{canonico}",
+        lease_seconds=LOCK_ALTA_SEGUNDOS,
+        wait_seconds=ESPERA_ALTA_SEGUNDOS,
+    ):
+        existente = buscar_por_telefono(canonico)
+        if existente:
+            return {
+                "cliente": existente["name"],
+                "direccion": asegurar_direccion(existente["name"], direccion),
+                "creado": False,
+            }
+
+        payload = {"customer_name": nombre, "mobile_no": canonico}
+        for variable, campo in (
+            ("ERPNEXT_CUSTOMER_GROUP", "customer_group"),
+            ("ERPNEXT_TERRITORY", "territory"),
+        ):
+            valor = os.getenv(variable, "").strip()
+            if valor:
+                payload[campo] = valor
+        try:
+            doc = erpnext.create_doc("Customer", payload)
+        except erpnext.ERPNextError:
+            # Puede haber fallado por nombre duplicado, o porque otro worker
+            # lo creó recién. Resolver por teléfono antes de decir que falló.
+            reintento = buscar_por_telefono(canonico)
+            if not reintento:
+                raise
+            return {
+                "cliente": reintento["name"],
+                "direccion": asegurar_direccion(reintento["name"], direccion),
+                "creado": False,
+            }
+
+        cliente = str(doc.get("name") or "").strip()
+        if not cliente:
+            raise erpnext.ERPNextError("ERPNext no devolvió la ficha creada")
+        erpnext.add_comment(
+            "Customer", cliente, "Alta por WhatsApp: el número lo verificó el webhook."
+        )
+        return {
+            "cliente": cliente,
+            "direccion": asegurar_direccion(cliente, direccion),
+            "creado": True,
+        }

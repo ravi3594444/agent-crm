@@ -357,9 +357,10 @@ un producto es confiable  ⇔  STOCK_CONFIABLE=true  (interruptor maestro)
                              hace menos de STOCK_CONFIABLE_HORAS (default 24)
 ```
 
-**Per product, not per warehouse.** Counting the milk says nothing about the
-cheese, and one global flag would let a milk count vouch for the whole cold
-room. `ultimo_conteo` finds the most recent *confirmed* `Stock Reconciliation`
+**Per `(item_code, warehouse)` pair.** Both halves matter: counting the milk
+says nothing about the cheese, and counting the milk in one warehouse says
+nothing about the milk in another. A single global flag would have let one
+count of one product vouch for every product in every warehouse. `ultimo_conteo` finds the most recent *confirmed* `Stock Reconciliation`
 containing that item and warehouse — child rows first, `order_by="modified
 desc"`, then the parents for their `posting_date`/`posting_time` in business
 time (`erpnext.get_list` gained `order_by` for this).
@@ -404,14 +405,82 @@ All **54** are caught (2a stock reservations and FIFO, 2b limits and audit,
 `finally`, so an interrupted run leaves nothing mutated. Use it before touching
 `policy.py`, `limites.py` or `inventario.py`.
 
-### 2d. New customer can order in the same conversation (was Stage 2 of the old plan)
-Today a stranger cannot order: `require_customer` fails closed with no customer
-code, so the bot can only create a Lead and promise a callback. Required:
-`crear_cliente(nombre, direccion, ...)` (Customer + Address, phone taken
-server-side from `actor.actor_phone`, never from the model), `require_customer`
-falling back to `clientes.buscar_por_telefono`, then `crear_pedido` in the **same
-turn**. A new customer has no history so it can never auto-confirm — the manager
-always sees the first order. Prompt rule: ask **one** question for name + address.
+## Stage 2d — DONE: a stranger can order in one conversation, and the system decides where the truck goes
+
+**The phone is never a parameter.** `crear_cliente(nombre, direccion)` takes
+exactly those two things. The phone comes from the webhook Meta signed
+(`actor_context(config).actor_phone`) and is normalised in `clientes.crear`. No
+tool accepts one, so no message can register — or order for — somebody else
+(`test_the_model_cannot_name_a_phone_number`, and the schema-boundary
+parametrize in `test_autorizacion.py`).
+
+**Nothing duplicates.** The alta runs under `distributed_lock("alta-cliente:
+<phone>")` — the same mechanism that protects order creation — and looks the
+phone up again *inside* the lock. Same phone twice → one Customer, `creado=
+False`. Same address twice, or the same address spelled differently → one
+Address (`clientes.misma_direccion` compares like a person reads). A changed
+address → a second Address on the same Customer, which has to earn its own
+approval. A `Customer` create that fails on a name collision (or a race) is
+resolved by phone before it is reported as a failure. Orders were already
+idempotent by `po_no = _message_key(message_id)`.
+
+**The order says where it goes.** `crear_pedido` now resolves the account by
+the verified phone when the webhook's config has none yet — the customer
+registered a second ago in this same turn — and sets `customer_address` and
+`shipping_address_name` from `clientes.direccion_principal`. Without an address
+on the order, the policy cannot verify the delivery, and the order waits (good).
+An ERPNext that cannot answer the lookup is not "this person has no account":
+the tool returns text, because raising breaks that customer's thread for good.
+
+**Where the truck goes is decided in Python** (`app/entrega.py`), in this
+order, and the model cannot move it:
+
+1. the address's postal code is in `ZONAS_ENTREGA_CP` → deliver;
+2. no postal code, and the locality is in `ZONAS_ENTREGA_LOCALIDADES`
+   (accents and case aside) → deliver;
+3. there is a **submitted** Sales Order from the same customer to the same
+   address → deliver. A person already approved that delivery and the truck
+   arrived: stronger evidence than any configured zone, and what keeps
+   long-standing customers with no postcode on file from suddenly waiting;
+4. anything else — no address, unreadable address, no postcode and unknown
+   locality, outside the zone, ERPNext not answering, no zones configured at
+   all — → **draft**.
+
+With a postcode present the postcode wins: a locality that "sounds right" does
+not rescue a code 200 km away. The rule applies to **every** order, so a known
+customer using a new address is reviewed like a stranger. Both lists are read
+per call.
+
+**The alert has what a person needs to decide.** Every delivery reason starts
+with `entrega a revisar:` and carries the human-readable address and the cause
+(*"entrega a revisar: Ruta 9 km 300, Villa Rara (CP X9999) — el código postal
+X9999 no está en las zonas de reparto"*). It travels through the existing
+`notificar_equipo(nombre, ..., motivos=...)`, so the manager sees the ERP order
+id, the address and the reason in one message. He confirms or rejects with the
+same `ok:`/`no:` buttons as every other exception — nothing new was added for
+the override, on purpose.
+
+**The customer hears "received, delivery under review" — never "confirmed".**
+`_after_create` appends `ENTREGA EN REVISIÓN: … NO le digas que está confirmado`
+to the tool result whenever a delivery reason is among the motives, and the
+prompt repeats it. Asserted in
+`test_the_customer_hears_received_and_under_review_never_confirmed`.
+
+**`CLIENTE_NUEVO_HABILITADO = True`**, now that there is a verification behind
+it. It is a separate rule from the address check and both must pass — and
+stock, discount, per-product quantity, debt and the new-customer ceiling still
+each decide on their own
+(`test_every_other_limit_still_applies_to_a_verified_new_customer`).
+
+**Needs the client:** the `Agente IA` role in ERPNext must gain Read + Create
+on `Address` and Read on `Dynamic Link` (still no Submit on anything), and
+`ZONAS_ENTREGA_CP` / `ZONAS_ENTREGA_LOCALIDADES` must be filled — with both
+empty, nothing is delivered without a person, by design.
+
+Files: `app/entrega.py` (new), `app/clientes.py`, `app/tools/pedidos.py`,
+`app/policy.py`, `app/graph.py`, `app/prompts.py`, `app/tools/configuracion.py`,
+`.env.example`, `tests/test_entrega.py` (new), `tests/test_alta_cliente.py`
+(new), and the existing suites.
 
 ### 2e. Owner's two-messages-a-day (design agreed, not built)
 `app/digest.py` at 18:00 ("N orders for tomorrow, reply OK to confirm all") —

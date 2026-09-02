@@ -511,6 +511,52 @@ def test_a_count_already_confirmed_is_not_submitted_twice(
     assert "ya estaba confirmado" in reply
 
 
+def test_a_delivery_review_draft_is_confirmed_by_the_manager_not_the_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The system said "review the delivery". A person looks at the address
+    and taps Confirmar: the existing human-only path submits it with the policy
+    credential. Nothing new was added for this, on purpose — the override is
+    the same button as every other exception."""
+    monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
+    monkeypatch.setattr(
+        aprobacion,
+        "_leer_doc",
+        Mock(return_value={"docstatus": 0, "status": "Draft", "customer": "CUST-001"}),
+    )
+    submit = Mock(return_value={"name": "SAL-ORD-0100", "docstatus": 1})
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
+    monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(aprobacion, "_avisar_cliente", lambda nombre: True)
+
+    reply = aprobacion.manejar_boton("ok:SAL-ORD-0100", GERENTE)
+
+    submit.assert_called_once_with("Sales Order", "SAL-ORD-0100")
+    assert "confirmado" in reply
+
+
+def test_a_delivery_review_draft_can_be_rejected_the_same_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import decisiones
+
+    monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
+    monkeypatch.setattr(decisiones, "telefono_del_cliente", lambda nombre: "5493511234567")
+    aviso = Mock(return_value=True)
+    monkeypatch.setattr(decisiones, "_avisar_cliente_rechazo", aviso)
+    monkeypatch.setattr(decisiones.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(decisiones, "_leer_doc", Mock(return_value={"docstatus": 0}))
+    monkeypatch.setattr(decisiones.erpnext, "policy_update_status", Mock(return_value={"status": "Closed"}))
+    submit = Mock()
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
+
+    reply = aprobacion.manejar_boton("no:SAL-ORD-0100", GERENTE)
+
+    submit.assert_not_called()
+    aviso.assert_called_once()  # the customer is told, honestly
+    assert "rechazado" in reply.lower()
+
+
 def test_unauthorized_phone_cannot_reject(monkeypatch: pytest.MonkeyPatch) -> None:
     from app import decisiones
 

@@ -415,6 +415,90 @@ MUTACIONES: dict[str, tuple[str, str, str]] = {
         '    if estado == 1:\n        return {"ok": True, "detalle": f"El conteo {nombre} ya estaba confirmado."}\n',
         "",
     ),
+    # ---------------- 2d: la entrega la decide el sistema, no el modelo ---
+    "2d entrega: la política no mira la dirección": (
+        "app/policy.py",
+        """    entrega_autorizada, motivo_entrega = entrega.autorizada(sales_order)
+    if not entrega_autorizada:
+        motivos.append(motivo_entrega)
+""",
+        "",
+    ),
+    "2d entrega: sin zonas configuradas se entrega a todos": (
+        "app/entrega.py",
+        '    if not codigos and not localidades:\n        return False, "no hay zonas de reparto configuradas"\n',
+        "    if not codigos and not localidades:\n        return True, \"\"\n",
+    ),
+    "2d entrega: un CP desconocido se entrega igual": (
+        "app/entrega.py",
+        '        return False, f"el código postal {cp} no está en las zonas de reparto"',
+        '        return True, ""',
+    ),
+    "2d entrega: la localidad le gana al CP": (
+        "app/entrega.py",
+        "    if cp:\n        if cp in codigos:\n            return True, \"\"",
+        "    if cp and cp in codigos:\n        return True, \"\"\n    if False:\n        pass",
+    ),
+    "2d entrega: sin dirección se entrega": (
+        "app/entrega.py",
+        '    if not nombre:\n        return False, f"{MOTIVO}: el pedido no tiene dirección cargada"\n',
+        "",
+    ),
+    "2d entrega: una entrega previa de OTRO cliente cuenta": (
+        "app/entrega.py",
+        '        if str(previo.get("customer") or "").strip() != cliente:\n            continue\n',
+        "",
+    ),
+    "2d entrega: si no puede leer entregas previas, autoriza": (
+        "app/entrega.py",
+        """    except erpnext.ERPNextError as exc:
+        print(f"[entrega] no pude revisar entregas previas de {cliente}: {exc}")
+        return False""",
+        "    except erpnext.ERPNextError:\n        return True",
+    ),
+    "2d entrega: cuenta borradores como entregas previas": (
+        "app/entrega.py",
+        '            filters=[["customer", "=", cliente], ["docstatus", "=", 1]],',
+        '            filters=[["customer", "=", cliente]],',
+    ),
+    "2d alta: sin lock por teléfono": (
+        "app/clientes.py",
+        """    with distributed_lock(
+        f"alta-cliente:{canonico}",
+        lease_seconds=LOCK_ALTA_SEGUNDOS,
+        wait_seconds=ESPERA_ALTA_SEGUNDOS,
+    ):
+        existente = buscar_por_telefono(canonico)""",
+        "    if True:\n        existente = None",
+    ),
+    "2d alta: la misma dirección se crea de nuevo": (
+        "app/clientes.py",
+        "        if misma_direccion(guardada, direccion):\n            return nombre\n",
+        "",
+    ),
+    "2d pedido: no le pone la dirección al pedido": (
+        "app/tools/pedidos.py",
+        """                if envio:
+                    payload["customer_address"] = envio
+                    payload["shipping_address_name"] = envio
+""",
+        "",
+    ),
+    "2d pedido: al cliente no se le aclara que es una revisión": (
+        "app/tools/pedidos.py",
+        "    if entrega.MOTIVO in str(decision):",
+        "    if False:",
+    ),
+    "2d alta: cualquiera puede registrar a cualquiera": (
+        "app/tools/pedidos.py",
+        """    if actor.scope != "customer" or not actor.actor_phone:
+        return "No pude autenticar el remitente; no registré la cuenta."
+
+    try:
+        resultado = clientes.crear(nombre, actor.actor_phone, direccion.como_erpnext())""",
+        """    try:
+        resultado = clientes.crear(nombre, actor.actor_phone or "5490000000000", direccion.como_erpnext())""",
+    ),
 }
 
 

@@ -93,6 +93,7 @@ def erp_denies_everything(monkeypatch: pytest.MonkeyPatch) -> dict[str, Mock]:
         (catalogo.estado_pedido, {"numero_pedido"}),
         (catalogo.pedido_habitual, set()),
         (pedidos.crear_lead, {"nombre", "nota"}),
+        (pedidos.crear_cliente, {"nombre", "direccion"}),
         (pedidos.escalar_a_humano, {"motivo"}),
     ],
     ids=lambda value: getattr(value, "name", None) or "args",
@@ -288,13 +289,38 @@ _LINES = {
 }
 
 
-def test_unregistered_phone_cannot_create_an_order(erp_denies_everything) -> None:
+def test_unregistered_phone_cannot_create_an_order(
+    erp_denies_everything, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No account, no order. The system DOES look the sender up by their
+    verified phone first — somebody who registered a minute ago in this same
+    conversation has an account the webhook had not seen yet — but that is one
+    read of Customer, and nothing is written."""
+    busqueda = Mock(return_value=[])
+    monkeypatch.setattr(erpnext, "get_list", busqueda)
+
     reply = pedidos.crear_pedido.invoke(_LINES, config=_customer_config(customer=""))
 
     assert reply.startswith("PEDIDO_NO_CREADO")
-    assert "No hay una cuenta de cliente autenticada" in reply
+    assert "crear_cliente" in reply
     erp_denies_everything["create_doc"].assert_not_called()
-    erp_denies_everything["get_list"].assert_not_called()
+    assert busqueda.call_args.args[0] == "Customer"
+
+
+def test_a_customer_lookup_that_fails_creates_nothing(
+    erp_denies_everything, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ERPNext that cannot answer is not "this person has no account", and
+    the tool has to return text: raising would break the conversation thread
+    for that customer for good."""
+    monkeypatch.setattr(
+        erpnext, "get_list", Mock(side_effect=erpnext.ERPNextError("caído"))
+    )
+
+    reply = pedidos.crear_pedido.invoke(_LINES, config=_customer_config(customer=""))
+
+    assert reply.startswith("PEDIDO_NO_CREADO")
+    erp_denies_everything["create_doc"].assert_not_called()
 
 
 def test_management_scope_cannot_create_an_order_on_behalf_of_nobody(

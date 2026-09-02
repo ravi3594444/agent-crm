@@ -13,8 +13,10 @@ Ahora la confianza se GANA y se VENCE:
                                y confirmó el ajuste hace menos de
                                STOCK_CONFIABLE_HORAS
 
-Por producto, no por depósito: contar la leche no dice nada del queso, y un
-"confiable" global dejaría que un conteo de leche avalara toda la cámara.
+La confianza es por PAR (item_code, warehouse), y las dos mitades importan:
+contar la leche no dice nada del queso, y contar la leche de un depósito no
+dice nada de la leche del otro. Un "confiable" global dejaría que un conteo de
+un producto avalara todos los productos de todos los depósitos.
 
 El interruptor maestro sigue existiendo. Con STOCK_CONFIABLE=false nada es
 confiable, se haya contado o no: es la forma de apagar todo de una.

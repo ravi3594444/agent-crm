@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app import erpnext, inventario, limites
+from app import entrega, erpnext, inventario, limites
 from app.formato import pesos
 from app.locks import distributed_lock
 
@@ -19,13 +19,13 @@ from app.locks import distributed_lock
 MAX_MULT = float(os.getenv("AUTO_CONFIRM_MULT", "2.0"))
 MIN_PEDIDOS = int(os.getenv("AUTO_CONFIRM_MIN_ORDERS", "3"))
 
-# La auto-confirmación de clientes sin historial queda APAGADA hasta que la
-# etapa 2d verifique la dirección de entrega y la zona de reparto. Prometerle
-# una entrega automática a una dirección que nadie miró —o que está fuera del
-# reparto— es peor que hacer esperar al cliente: el pedido queda en borrador y
-# el equipo se entera. A propósito NO es una perilla del dueño ni una variable
-# de entorno: se enciende en 2d, junto con la verificación que la justifica.
-CLIENTE_NUEVO_HABILITADO = False
+# Un cliente sin historial puede auto-confirmar SÓLO desde que existe la
+# verificación de entrega (etapa 2d, app/entrega.py): la dirección del pedido
+# tiene que caer en una zona de reparto configurada, o ser una a la que ya se
+# entregó con la aprobación de una persona. Las dos reglas se aplican por
+# separado y las dos tienen que pasar — y siguen aplicándose además el stock,
+# el descuento, la cantidad por producto, la deuda y el tope de cliente nuevo.
+CLIENTE_NUEVO_HABILITADO = True
 PRICE_LIST = os.getenv("AUTO_CONFIRM_PRICE_LIST", "").strip()
 CURRENCY = os.getenv("AUTO_CONFIRM_CURRENCY", "").strip()
 
@@ -417,10 +417,18 @@ def evaluar(sales_order: dict) -> Decision:
             except erpnext.ERPNextError:
                 motivos.append(f"no se pudo verificar precio de {code}")
 
-    entrega = sales_order.get("delivery_date")
+    # ¿Se puede entregar AHÍ sin que lo mire nadie? Determinista y fuera del
+    # modelo (app/entrega.py): ningún mensaje de un cliente puede convencer al
+    # sistema de que su dirección "está cerca". Se aplica a TODOS los pedidos,
+    # así que también al cliente conocido que estrena dirección.
+    entrega_autorizada, motivo_entrega = entrega.autorizada(sales_order)
+    if not entrega_autorizada:
+        motivos.append(motivo_entrega)
+
+    fecha_pedida = sales_order.get("delivery_date")
     try:
         today = _hoy_del_negocio()
-        delivery_day = date.fromisoformat(str(entrega))
+        delivery_day = date.fromisoformat(str(fecha_pedida))
         if delivery_day < today:
             motivos.append("fecha de entrega vencida")
         elif delivery_day > today + timedelta(days=30):

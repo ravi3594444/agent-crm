@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from conftest import FakeRedis, inventario_confiable
+from conftest import FakeRedis, entrega_autorizada, inventario_confiable
 
 from app import limites, locks, policy
 from app.tools import configuracion
@@ -316,6 +316,7 @@ def _todo_verde_menos_los_limites(monkeypatch: pytest.MonkeyPatch) -> None:
     from datetime import date
 
     inventario_confiable(monkeypatch)
+    entrega_autorizada(monkeypatch)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
     monkeypatch.setattr(policy, "MIN_PEDIDOS", 1)
@@ -551,20 +552,21 @@ def test_the_owner_sees_where_each_value_comes_from(
     assert "descuentos" in vista
 
 
-def test_the_owner_is_told_the_new_customer_ceiling_is_parked(
-    almacen: FakeRedis,
+def test_the_owner_is_told_the_new_customer_ceiling_needs_a_checked_address(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """He can set it, and it is stored and audited, but it decides nothing
-    until the delivery address and area are verified. Saying so is the
-    difference between a parked setting and a broken one."""
+    """Setting the ceiling is not the only thing between a new customer and an
+    automatic order: the delivery address still has to check out. If we did not
+    say so, he would raise the number and wonder why orders still wait."""
     from app import policy
 
-    assert policy.CLIENTE_NUEVO_HABILITADO is False
+    assert policy.CLIENTE_NUEVO_HABILITADO is True
+    monkeypatch.setenv("AUTO_CONFIRM_MAX_CLIENTE_NUEVO", "5000")
 
     vista = configuracion.ver_limites.invoke({}, config=_gerencia())
 
-    assert "todavía sin efecto" in vista
-    assert "dirección y la zona de entrega" in vista
+    assert "zona de reparto configurada" in vista
+    assert "queda en borrador igual" in vista
 
 
 def test_one_setting_at_a_time(almacen: FakeRedis) -> None:
