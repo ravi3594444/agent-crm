@@ -20,3 +20,8 @@
 
 # Si el host YA está en la zona de Buenos Aires, usá esta y comentá la de arriba:
 # 0 7 * * * cd /srv/plus-agent && docker compose run --rm briefing >> /var/log/plus-agent-briefing.log 2>&1
+
+# 18:00 America/Argentina/Buenos_Aires == 21:00 UTC — resumen de mañana + "respondé OK"
+0 21 * * * cd /srv/plus-agent && docker compose run --rm digest >> /var/log/plus-agent-digest.log 2>&1
+# (si el host ya está en hora de Buenos Aires:)
+# 0 18 * * * cd /srv/plus-agent && docker compose run --rm digest >> /var/log/plus-agent-digest.log 2>&1

@@ -90,5 +90,18 @@ services:
       redis:
         condition: service_healthy
 
+  # Resumen de las 18:00 al dueño: "9 pedidos para mañana, respondé OK para confirmar todos".
+  #   0 21 * * * cd /srv/plus-agent && docker compose run --rm digest      (ver deploy/crontab)
+  digest:
+    build: .
+    profiles: ["manual"]
+    env_file: .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    command: ["python", "-m", "app.digest"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
 volumes:
   redis-data:
