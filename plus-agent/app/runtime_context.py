@@ -45,3 +45,20 @@ def require_customer(config: RunnableConfig) -> ActorContext:
     if actor.scope != "customer" or not actor.customer_code:
         raise RuntimeContextError("cliente autenticado ausente")
     return actor
+
+
+def require_management(config: RunnableConfig) -> ActorContext:
+    """Management scope AND a phone that is on the staff list.
+
+    The router already sends only staff phones to the management agent, so this
+    is a second, independent check. A tool that changes what confirms orders
+    without a human present should not rely on one gate having held.
+    """
+    from app import router
+
+    actor = actor_context(config)
+    if not actor.is_management or not actor.actor_phone:
+        raise RuntimeContextError("gerencia autenticada ausente")
+    if not router.es_equipo(actor.actor_phone):
+        raise RuntimeContextError("teléfono no autorizado")
+    return actor

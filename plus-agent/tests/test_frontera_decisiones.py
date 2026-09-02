@@ -59,6 +59,26 @@ def test_no_tool_function_is_the_manual_decision_function() -> None:
             assert fn not in prohibidas, f"{herramienta.name} envuelve una decisión manual"
 
 
+def test_a_customer_is_never_offered_the_tools_that_move_a_limit() -> None:
+    """The limits decide which orders confirm with nobody watching. A customer
+    talking to the sales agent must not be able to read them, let alone move
+    one — not even by asking nicely, because the tool is not there."""
+    from app import graph
+
+    de_limites = {
+        "ver_limites",
+        "proponer_limite",
+        "confirmar_limite",
+        "historial_limites",
+    }
+    de_clientes = {t.name for t in graph.TOOLS_CLIENTES}
+    de_gerencia = {t.name for t in graph.TOOLS_GERENCIA}
+
+    assert de_limites & de_clientes == set()
+    # And they ARE available to the owner, or the feature does not exist.
+    assert de_limites <= de_gerencia
+
+
 def test_no_tool_can_submit_or_adjust_anything() -> None:
     """The LLM has no submit/payment/invoice/stock-adjustment verb at all."""
     prohibidos = ("submit", "confirmar_pedido", "aprobar", "pagar", "ajustar_stock")

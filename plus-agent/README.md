@@ -82,17 +82,29 @@ Nobody waits for milk. Three mechanisms, in order of impact:
 Most orders are boring — known customer, usual products, list price, in stock.
 Those confirm INSTANTLY. Only unusual ones wake a human. Every rule must pass:
 
-| Rule | Default |
-|---|---|
-| Order total under ceiling | `AUTO_CONFIRM_MAX` |
-| Not wildly above customer's own average | 2x |
-| Customer has real order history | 3+ confirmed orders |
-| No overdue balance | 0 |
-| Stock above the buffer, minus what other open orders already promised | — |
-| List price, no negotiated rate | — |
+| Rule | Default | Who sets it |
+|---|---|---|
+| Order total under ceiling | 0 = off | owner, from WhatsApp |
+| No more than X of one product, in stock units | 0 = nothing passes | owner |
+| Stock above the buffer, minus what other open orders already promised | 20% | owner |
+| A customer with no real history stays under their own ceiling | 0 = they always wait | owner |
+| No overdue balance | 0 | owner |
+| Any discount goes to a person | yes | owner |
+| Not wildly above customer's own average | 2x | `AUTO_CONFIRM_MULT` |
+| Enough order history to have an average | 3 confirmed orders | `AUTO_CONFIRM_MIN_ORDERS` |
+| List price, no rate above it | — | — |
+
+The six marked *owner* are his to change, from the same WhatsApp thread he
+already uses: "mostrame los límites", "subime el tope a 30 mil". A change needs
+a four-digit code he types back, applies from the next order with no restart,
+and is recorded with his number, the time and both values
+(`historial_limites`). They live in Redis; the `.env` values are only what the
+system starts with. If the limits cannot be read, nothing auto-confirms.
 
 **The safety property:** `policy.py` is deterministic Python. It never sees the
-customer's words. The agent has no submit tool and no way to call it. Prompt
+customer's words, and it reads the owner's limits itself, on every evaluation,
+including the last one inside the submit lock. The management agent can move a
+number the owner asked it to move; it cannot decide an order. The agent has no submit tool and no way to call it. Prompt
 injection cannot widen the envelope — it can only produce a draft that then
 fails the rules. That is how you get instant confirmation without handing an
 LLM the keys.

@@ -47,3 +47,88 @@ _DUMMY = {
 }
 for _k, _v in _DUMMY.items():
     os.environ.setdefault(_k, _v)
+
+import pytest
+from redis.exceptions import RedisError
+
+
+class FakeRedis:
+    """Enough Redis for app/limites.py, with no server and no network.
+
+    The limits the owner sets are the numbers that decide whether an order
+    confirms with nobody watching, so no test result may depend on what some
+    real Redis happens to have left over, and no test should need one running.
+    """
+
+    def __init__(self, hashes=None, strings=None, lists=None):
+        self.hashes = {k: dict(v) for k, v in (hashes or {}).items()}
+        self.strings = dict(strings or {})
+        self.lists = {k: list(v) for k, v in (lists or {}).items()}
+        self.ttls: dict[str, int] = {}
+        self.caido = False
+
+    def _vivo(self) -> None:
+        if self.caido:
+            raise RedisError("redis de prueba caído")
+
+    def hgetall(self, key):
+        self._vivo()
+        return dict(self.hashes.get(key, {}))
+
+    def hset(self, key, field, value):
+        self._vivo()
+        self.hashes.setdefault(key, {})[field] = value
+
+    def get(self, key):
+        self._vivo()
+        return self.strings.get(key)
+
+    def setex(self, key, ttl, value):
+        self._vivo()
+        self.strings[key] = value
+        self.ttls[key] = ttl
+
+    def delete(self, key):
+        self._vivo()
+        self.strings.pop(key, None)
+
+    def rpush(self, key, value):
+        self._vivo()
+        self.lists.setdefault(key, []).append(value)
+
+    def lrange(self, key, start, end):
+        self._vivo()
+        datos = self.lists.get(key, [])
+        total = len(datos)
+        desde = max(0, total + start) if start < 0 else start
+        hasta = total + end if end < 0 else end
+        return datos[desde : hasta + 1]
+
+    def ltrim(self, key, start, end):
+        self._vivo()
+        self.lists[key] = self.lrange(key, start, end)
+
+
+@pytest.fixture(autouse=True)
+def limites_sin_redis(monkeypatch):
+    """Every test starts with an EMPTY limits store and a clean environment.
+
+    Limits then resolve the way they do in production — store, then the
+    bootstrap environment, then the code default — but from nothing, so a test
+    that cares sets exactly what it needs. A test about the store itself
+    installs its own FakeRedis over this one.
+    """
+    from app import locks
+
+    for nombre in (
+        "AUTO_CONFIRM_MAX",
+        "AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO",
+        "STOCK_BUFFER_PCT",
+        "AUTO_CONFIRM_MAX_CLIENTE_NUEVO",
+        "AUTO_CONFIRM_MAX_DEBT",
+        "AUTO_CONFIRM_DESCUENTOS_APRUEBAN",
+    ):
+        monkeypatch.delenv(nombre, raising=False)
+    vacio = FakeRedis()
+    monkeypatch.setattr(locks, "conexion", lambda: vacio)
+    return vacio

@@ -31,6 +31,12 @@ from app.tools.catalogo import (
     estado_pedido,
     pedido_habitual,
 )
+from app.tools.configuracion import (
+    confirmar_limite,
+    historial_limites,
+    proponer_limite,
+    ver_limites,
+)
 from app.tools.gerencia import (
     cobranzas_vencidas,
     ejecutar_reporte,
@@ -54,6 +60,9 @@ TOOLS_GERENCIA = [
     # offline capture — how reality gets back into the system
     registrar_venta_offline, contar_stock, confirmar_entrega,
     redactar_mensaje_cliente,
+    # the owner's own limits: read them out, propose a change, confirm it.
+    # NEVER in TOOLS_CLIENTES — a customer cannot be allowed near these.
+    ver_limites, proponer_limite, confirmar_limite, historial_limites,
 ]
 
 # from_conn_string() is a CONTEXT MANAGER, not a constructor — using it

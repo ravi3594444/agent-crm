@@ -8,14 +8,16 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app import erpnext
+from app import erpnext, limites
 from app.formato import pesos
 from app.locks import distributed_lock
 
-MAX_AUTO = float(os.getenv("AUTO_CONFIRM_MAX", "0"))
+# El tope, el colchón de stock, la deuda tolerada, la cantidad por producto,
+# el tope de cliente nuevo y la regla de descuentos los fija el DUEÑO y se leen
+# en cada evaluación (app/limites.py). Acá quedan sólo las perillas que son
+# configuración de despliegue, no decisiones de negocio del día a día.
 MAX_MULT = float(os.getenv("AUTO_CONFIRM_MULT", "2.0"))
 MIN_PEDIDOS = int(os.getenv("AUTO_CONFIRM_MIN_ORDERS", "3"))
-MAX_DEUDA = float(os.getenv("AUTO_CONFIRM_MAX_DEBT", "0"))
 STOCK_CONFIABLE = os.getenv("STOCK_CONFIABLE", "false").strip().lower() == "true"
 PRICE_LIST = os.getenv("AUTO_CONFIRM_PRICE_LIST", "").strip()
 CURRENCY = os.getenv("AUTO_CONFIRM_CURRENCY", "").strip()
@@ -141,8 +143,21 @@ def _cantidad_en_stock_uom(item: dict) -> float:
 
 
 def evaluar(sales_order: dict) -> Decision:
-    """Return auto=True only when every independently verified rule passes."""
-    if MAX_AUTO <= 0:
+    """Return auto=True only when every independently verified rule passes.
+
+    The owner's limits are read HERE, on every call. _after_create calls this
+    again inside the submit lock, so the numbers that decide a confirmation are
+    the ones in force at that moment — a limit lowered thirty seconds earlier
+    already applies, with no restart and no deploy.
+    """
+    try:
+        cfg = limites.configuracion()
+    except limites.LimiteError as exc:
+        # Never guess a limit. Unreadable or nonsense configuration means a
+        # person decides this order, and the reason says what to fix.
+        return Decision(False, [f"límites sin verificar: {exc}"])
+
+    if cfg.tope <= 0:
         return Decision(False, ["auto-confirmación desactivada"])
 
     motivos: list[str] = []
@@ -164,25 +179,30 @@ def evaluar(sales_order: dict) -> Decision:
         motivos.append("total inválido")
     if total <= 0:
         motivos.append("total no positivo")
-    elif total > MAX_AUTO:
-        motivos.append(f"monto {pesos(total)} supera el tope de {pesos(MAX_AUTO)}")
+    elif total > cfg.tope:
+        motivos.append(f"monto {pesos(total)} supera el tope de {pesos(cfg.tope)}")
 
     if PRICE_LIST and str(sales_order.get("selling_price_list") or "") != PRICE_LIST:
         motivos.append("lista de precios distinta de la autorizada")
     if CURRENCY and str(sales_order.get("currency") or "") != CURRENCY:
         motivos.append("moneda distinta de la autorizada")
-    for field_name in (
-        "discount_amount",
-        "base_discount_amount",
-        "additional_discount_percentage",
-    ):
-        try:
-            if not _zero(sales_order.get(field_name)):
-                motivos.append("descuento general no autorizado")
+    # With the owner's discount rule on (the default), ANY discount goes to a
+    # person — at document level here, at line level in the items loop below.
+    # With it off, a discount can auto-confirm, but _precio_estandar still
+    # refuses a rate above the authorized list price.
+    if cfg.descuentos_aprueban:
+        for field_name in (
+            "discount_amount",
+            "base_discount_amount",
+            "additional_discount_percentage",
+        ):
+            try:
+                if not _zero(sales_order.get(field_name)):
+                    motivos.append("descuento general no autorizado")
+                    break
+            except erpnext.ERPNextError:
+                motivos.append("descuento general inválido")
                 break
-        except erpnext.ERPNextError:
-            motivos.append("descuento general inválido")
-            break
 
     if cliente:
         try:
@@ -194,9 +214,20 @@ def evaluar(sales_order: dict) -> Decision:
             )
             importes = [_float(row.get("grand_total")) for row in historial]
             if len(importes) < MIN_PEDIDOS:
-                motivos.append(
-                    f"cliente con solo {len(importes)} pedidos confirmados"
-                )
+                # A customer without enough history has no average to compare
+                # against, so the owner's new-customer ceiling decides instead
+                # of the two history rules. "New" means SUBMITTED orders in
+                # ERPNext, not whether a Customer document happens to exist —
+                # anyone can be given a Customer record in a second.
+                if cfg.tope_cliente_nuevo <= 0:
+                    motivos.append(
+                        f"cliente con solo {len(importes)} pedidos confirmados"
+                    )
+                elif total > cfg.tope_cliente_nuevo:
+                    motivos.append(
+                        f"cliente nuevo: {pesos(total)} supera su tope de "
+                        f"{pesos(cfg.tope_cliente_nuevo)}"
+                    )
             else:
                 promedio = sum(importes) / len(importes)
                 if promedio <= 0:
@@ -211,7 +242,7 @@ def evaluar(sales_order: dict) -> Decision:
         deuda = _saldo_vencido(cliente)
         if deuda is None:
             motivos.append("no se pudo verificar la deuda vencida")
-        elif deuda > MAX_DEUDA:
+        elif deuda > cfg.tope_deuda:
             motivos.append(f"tiene {pesos(deuda)} vencidos")
 
     items = sales_order.get("items") or []
@@ -236,8 +267,37 @@ def evaluar(sales_order: dict) -> Decision:
         if qty <= 0:
             motivos.append(f"cantidad no positiva para {code}")
             continue
+        if cfg.descuentos_aprueban:
+            try:
+                if any(
+                    not _zero(item.get(campo))
+                    for campo in (
+                        "discount_percentage",
+                        "discount_amount",
+                        "distributed_discount_amount",
+                    )
+                ):
+                    motivos.append(f"descuento en {code} requiere aprobación")
+            except erpnext.ERPNextError:
+                motivos.append(f"descuento inválido en {code}")
         key = (code, warehouse)
         cantidades[key] = cantidades.get(key, 0) + qty
+
+    # The per-product ceiling is checked on the COMBINED quantity per product
+    # and warehouse, in stock units, so five lines of two litres are ten litres
+    # and not five separate small lines. Zero means nobody configured it, and
+    # an unconfigured limit is not permission.
+    for (code, _warehouse), qty in cantidades.items():
+        if cfg.tope_qty_por_producto <= 0:
+            motivos.append(
+                "falta configurar la cantidad máxima por producto"
+            )
+            break
+        if qty > cfg.tope_qty_por_producto:
+            motivos.append(
+                f"{qty:g} de {code} supera el máximo de "
+                f"{cfg.tope_qty_por_producto:g} por producto"
+            )
 
     if STOCK_CONFIABLE:
         # This order's own quantity is the one being checked, so it must not be
@@ -257,10 +317,10 @@ def evaluar(sales_order: dict) -> Decision:
                     desde=pedido_desde,
                 ):
                     motivos.append(f"stock insuficiente de {code}")
-            except erpnext.ERPNextError as exc:
+            except (erpnext.ERPNextError, limites.LimiteError) as exc:
                 # The reason the team gets is deliberately the same for every
-                # cause, so log the real one: a row cap or a 414 looks exactly
-                # like an ERPNext outage from the outside.
+                # cause, so log the real one: a row cap, a 414 or a misconfigured
+                # buffer all look like an ERPNext outage from the outside.
                 print(f"[policy] stock no verificable item={code} causa={exc}")
                 motivos.append(f"no se pudo verificar stock de {code}")
 
@@ -269,7 +329,9 @@ def evaluar(sales_order: dict) -> Decision:
         for item in items:
             code = str(item.get("item_code") or "").strip() or "producto"
             try:
-                if not _precio_estandar(item, order_day):
+                if not _precio_estandar(
+                    item, order_day, permitir_descuento=not cfg.descuentos_aprueban
+                ):
                     motivos.append(f"precio fuera de lista en {code}")
             except erpnext.ERPNextError:
                 motivos.append(f"no se pudo verificar precio de {code}")
@@ -501,11 +563,10 @@ def _hay_stock(
     """True only when ``qty`` fits above the safety buffer, drafts included."""
     if not warehouse or qty <= 0:
         return False
-    # A misconfigured buffer is refused before anything is read: it would
-    # otherwise turn the whole rule upside down.
-    buffer = float(os.getenv("STOCK_BUFFER_PCT", "20")) / 100.0
-    if buffer < 0 or buffer >= 1:
-        raise erpnext.ERPNextError("STOCK_BUFFER_PCT fuera de rango")
+    # A misconfigured buffer is refused before anything is read: a negative one
+    # would turn the whole rule upside down and oversell. limites.configuracion
+    # raises on anything outside [0, 95] %.
+    buffer = limites.configuracion().buffer
     bins = erpnext.get_list(
         "Bin",
         filters=[
@@ -531,8 +592,17 @@ def _hay_stock(
     return disponible * (1 - buffer) >= qty
 
 
-def _precio_estandar(item: dict, order_day: date) -> bool:
-    """Verify exact unscoped price, currency, UOM, validity, and no discounts."""
+def _precio_estandar(
+    item: dict, order_day: date, *, permitir_descuento: bool = False
+) -> bool:
+    """Verify the line is priced off the authorized list.
+
+    Normally that means EXACTLY the list price and no discount anywhere. When
+    the owner has turned the discount rule off, a lower rate is accepted — but
+    the LIST price still has to be the authorized one, and a rate ABOVE it is
+    refused either way. Nothing here ever lets a line be charged more than the
+    list says, or charged nothing at all.
+    """
     code = str(item.get("item_code") or "").strip()
     uom = str(item.get("uom") or "").strip()
     stock_uom = str(item.get("stock_uom") or "").strip()
@@ -540,17 +610,23 @@ def _precio_estandar(item: dict, order_day: date) -> bool:
         return False
     if abs(_float(item.get("conversion_factor")) - 1.0) > 0.000001:
         return False
-    for field_name in (
-        "discount_percentage",
-        "discount_amount",
-        "distributed_discount_amount",
-    ):
-        if not _zero(item.get(field_name)):
-            return False
+    if not permitir_descuento:
+        for field_name in (
+            "discount_percentage",
+            "discount_amount",
+            "distributed_discount_amount",
+        ):
+            if not _zero(item.get(field_name)):
+                return False
 
     rate = _float(item.get("rate"))
     list_rate = _float(item.get("price_list_rate"))
-    if rate <= 0 or list_rate <= 0 or abs(rate - list_rate) >= 0.01:
+    if rate <= 0 or list_rate <= 0:
+        return False
+    if permitir_descuento:
+        if rate > list_rate + 0.01:
+            return False
+    elif abs(rate - list_rate) >= 0.01:
         return False
 
     prices = erpnext.get_list(
@@ -596,7 +672,13 @@ def _precio_estandar(item: dict, order_day: date) -> bool:
             configured_rate = _float(price.get("price_list_rate"))
         except (ValueError, erpnext.ERPNextError):
             continue
-        if valid_from <= order_day <= valid_upto and abs(configured_rate - rate) < 0.01:
+        if not (valid_from <= order_day <= valid_upto):
+            continue
+        # The document's own list price has to be the configured one. With
+        # discounts allowed, the charged rate may sit at or below it.
+        if abs(configured_rate - list_rate) >= 0.01:
+            continue
+        if permitir_descuento or abs(configured_rate - rate) < 0.01:
             return True
     return False
 

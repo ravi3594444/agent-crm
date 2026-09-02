@@ -37,6 +37,16 @@ def _redis() -> redis.Redis:
     return _client
 
 
+def conexion() -> redis.Redis:
+    """The same Redis the business locks use.
+
+    app/limites.py stores the owner's auto-confirmation limits here on purpose:
+    a limits read and a submit lock then fail closed together, instead of the
+    policy trusting numbers it could not verify while the lock was unavailable.
+    """
+    return _redis()
+
+
 @contextmanager
 def distributed_lock(
     name: str,

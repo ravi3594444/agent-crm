@@ -204,16 +204,61 @@ belongs with 2e.
 
 ## Stage 2 — NEXT, in this order
 
-### 2b. Manager-configured limits (all read per call, no restart)
-Existing: `AUTO_CONFIRM_MAX`, `STOCK_BUFFER_PCT`, `AUTO_CONFIRM_MAX_DEBT`,
-`AUTO_CONFIRM_MULT`, `AUTO_CONFIRM_MIN_ORDERS`.
-Add as policy rules + tests + `.env.example` entries:
-- `AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO` — max quantity of one product per auto order
-- `AUTO_CONFIRM_MAX_CLIENTE_NUEVO` — order ceiling for a customer with no history
-- `AUTO_CONFIRM_DESCUENTOS_APRUEBAN` (default `true`) — when true any document- or
-  line-level discount always goes to the manager (today discounts are *always*
-  rejected; this makes it configurable without weakening the default)
-Every new rule must fail **closed** on unreadable data.
+## Stage 2b — DONE: the owner sets the limits, from WhatsApp
+
+"Manager-configured" cannot mean an env var somebody redeploys. The six numbers
+that decide whether an order confirms with nobody watching are now the owner's,
+changed from the same WhatsApp thread he already uses, stored outside the
+process, and applied from the next order without a restart.
+
+| Setting | Meaning | Unit | Default | Stored | Missing / invalid / unreadable |
+|---|---|---|---|---|---|
+| `AUTO_CONFIRM_MAX` | biggest order that may confirm unseen | $ | `0` → off | Redis ← env ← code | `0` blocks; invalid or unreadable → **pending**, reason names it |
+| `AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO` | most of one product per auto order | **stock UOM** | `0` → blocks | same | same |
+| `STOCK_BUFFER_PCT` | margin held back for unloaded sales | % | `20` | same | must be `[0, 95]`; outside → stock rule pending |
+| `AUTO_CONFIRM_MAX_CLIENTE_NUEVO` | ceiling for a customer below the history threshold | $ | `0` → they wait | same | same as the ceiling |
+| `AUTO_CONFIRM_MAX_DEBT` | overdue balance tolerated | $ | `0` | same | same |
+| `AUTO_CONFIRM_DESCUENTOS_APRUEBAN` | any discount goes to a person | sí/no | `true` | same | anything not clearly sí/no → **pending**, never read as `false` |
+
+**Every default reproduces the behaviour before this stage.** With nothing
+configured, 2b changes which orders auto-confirm: not at all. Only an explicit,
+confirmed change from the owner loosens anything.
+
+**Where they live** — `app/limites.py`, a Redis hash, resolved
+`Redis → env → code default`. Redis is the same connection the submit lock uses
+(`locks.conexion`), so a limits read and a lock failure fail closed together. A
+Redis outage does **not** fall back to the environment: that would quietly undo
+a limit the owner had tightened. It raises, and the order waits for a person.
+
+**How he changes one** — `app/tools/configuracion.py`, management scope only,
+re-checking `router.es_equipo` itself (`runtime_context.require_management`):
+- `ver_limites` — all six, with the value and where it came from.
+- `proponer_limite(limite, valor)` — validates and stores the change as
+  **pending**. Nothing moves. Returns a four-digit code.
+- `confirmar_limite(codigo)` — applies it, only for the phone that proposed it,
+  only with that code, and only one setting at a time. Audited with phone,
+  timestamp, old and new value; the pending change expires in 10 minutes.
+- `historial_limites` — the last ten changes.
+
+The LLM interprets what the owner wrote and relays the code. It cannot move a
+limit on its own, and it still decides nothing about any order: `policy.evaluar`
+reads the numbers and decides, in Python, including in the locked revalidation
+(`test_the_locked_revalidation_uses_the_limits_in_force_at_that_moment` —
+lowering the ceiling while the lock is held stops that order).
+
+**Two rules were ambiguous, and the client chose:**
+1. *New customer* = fewer than `AUTO_CONFIRM_MIN_ORDERS` **submitted** orders
+   (not "has no Customer record" — anyone can be given one in a second). For
+   them the new-customer ceiling **replaces** both history rules, since a
+   customer with no history has no average to be compared against.
+2. *Discounts off* relaxes **both** the document-level and the line-level check,
+   but a rate above the authorized list price is still refused, and so is a rate
+   of zero. Off means "you may charge less", never "you may charge more".
+
+Result: **369 passed**, lint clean. 35 mutations (18 from 2a, 17 from 2b) all
+caught — including the dangerous ones: a Redis outage falling back to the
+environment, an unchecked confirmation code, one manager confirming another's
+change, and the configuration tools appearing in the customer tool list.
 
 ### 2c. Stock reliability becomes earned, not a static flag
 Today `STOCK_CONFIABLE` is a static env var. Required: the manager sends today's

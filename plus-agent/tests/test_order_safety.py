@@ -24,6 +24,25 @@ from app import erpnext, policy
 from app.tools import catalogo, pedidos
 
 
+def _limites_del_dueno(monkeypatch: pytest.MonkeyPatch, **cambios: object) -> None:
+    """The owner's six limits, set the way the bootstrap environment sets them.
+
+    The store is empty in every test (conftest), so these resolve exactly as on
+    a fresh install. `cambios` overrides one of them for a single test.
+    """
+    valores: dict[str, object] = {
+        "AUTO_CONFIRM_MAX": 1_000,
+        "AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO": 100,
+        "AUTO_CONFIRM_MAX_DEBT": 0,
+        "AUTO_CONFIRM_MAX_CLIENTE_NUEVO": 0,
+        "AUTO_CONFIRM_DESCUENTOS_APRUEBAN": "true",
+        "STOCK_BUFFER_PCT": 0,
+    }
+    valores.update(cambios)
+    for nombre, valor in valores.items():
+        monkeypatch.setenv(nombre, str(valor))
+
+
 def _customer_config(
     customer: str = "CUST-001", message_id: str = "wamid.test-001"
 ) -> dict:
@@ -427,7 +446,7 @@ def test_auto_confirm_revalidates_under_lock_before_submit(
 def test_policy_never_auto_confirms_when_stock_is_not_trusted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(policy, "MAX_AUTO", 1_000.0)
+    _limites_del_dueno(monkeypatch)
     monkeypatch.setattr(policy, "STOCK_CONFIABLE", False)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
@@ -446,7 +465,7 @@ def test_policy_never_auto_confirms_when_stock_is_not_trusted(
 def test_policy_aggregates_duplicate_lines_per_item_and_warehouse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(policy, "MAX_AUTO", 1_000.0)
+    _limites_del_dueno(monkeypatch)
     monkeypatch.setattr(policy, "STOCK_CONFIABLE", True)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
@@ -585,10 +604,9 @@ def _politica_verde(
     confirmation path — policy, the global lock, the re-read and the submit —
     with the competing-draft lookup answering for real.
     """
-    monkeypatch.setattr(policy, "MAX_AUTO", 1_000.0)
+    _limites_del_dueno(monkeypatch)
     monkeypatch.setattr(policy, "MAX_MULT", 2.0)
     monkeypatch.setattr(policy, "MIN_PEDIDOS", 1)
-    monkeypatch.setattr(policy, "MAX_DEUDA", 0.0)
     monkeypatch.setattr(policy, "STOCK_CONFIABLE", True)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
@@ -727,6 +745,51 @@ def test_competing_drafts_are_re_read_inside_the_submit_lock(
     assert "lee:Sales Order" in dentro
 
 
+def test_the_locked_revalidation_uses_the_limits_in_force_at_that_moment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner can lower a limit while an order is in flight.
+
+    Policy is evaluated twice: once on arrival, once inside the submit lock
+    just before confirming. The second read is the one that decides, so a
+    ceiling lowered in between applies to this order and not to the next one —
+    without a restart, and without the first evaluation's answer being cached.
+    """
+    from conftest import FakeRedis
+
+    from app import locks
+
+    mocks = _politica_verde(monkeypatch, fisico=1_000)
+    dentro_del_lock: list[bool] = []
+
+    class Cambiante(FakeRedis):
+        def hgetall(self, key):
+            # The owner drops the ceiling to $50 exactly while the lock is held.
+            return {"AUTO_CONFIRM_MAX": "50"} if dentro_del_lock else {}
+
+    monkeypatch.setattr(locks, "conexion", lambda: Cambiante())
+
+    @contextmanager
+    def lock():
+        dentro_del_lock.append(True)
+        try:
+            yield
+        finally:
+            pass
+
+    monkeypatch.setattr(policy, "auto_submit_lock", lock)
+    draft = _order()  # $100, which the ceiling of $1000 would have allowed
+
+    result = pedidos._after_create(draft, draft["items"], draft["delivery_date"])
+
+    # The lock was entered at all, so the first evaluation did say "confirm".
+    assert dentro_del_lock == [True]
+    assert result.startswith("PEDIDO_PENDIENTE. Número real: SO-0001")
+    mocks["submit"].assert_not_called()
+    audit = " ".join(str(call) for call in mocks["comment"].call_args_list)
+    assert "supera el tope" in audit
+
+
 def test_standard_price_requires_exact_unscoped_valid_currency_uom_record(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -781,7 +844,7 @@ def test_debt_check_uses_policy_identity_and_due_date(
 def test_policy_delivery_limit_uses_business_date_not_host_date(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(policy, "MAX_AUTO", 1_000.0)
+    _limites_del_dueno(monkeypatch)
     monkeypatch.setattr(policy, "STOCK_CONFIABLE", True)
     monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
     monkeypatch.setattr(policy, "CURRENCY", "ARS")
