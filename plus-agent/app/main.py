@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 import redis
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 
-from app import erpnext
+from app import erpnext, notificar
 from app.aprobacion import manejar_boton
 from app.graph import responder_cliente, responder_gerencia
 from app.outbound_status import record_outbound, update_status
@@ -38,6 +38,13 @@ TEXT_REQUIRED = (
 )
 TECHNICAL_ERROR = (
     "Perdón, tuve un problema técnico. Ya avisé al equipo y te responden en un rato."
+)
+# A model turn can end with no text at all (a provider may return a content
+# list whose only blocks are non-text). Meta rejects an empty body, so the item
+# would retry forever and the customer would hear nothing.
+EMPTY_REPLY_FALLBACK = (
+    "Perdón, no pude armar la respuesta. ¿Me lo escribís de nuevo? "
+    "/ Sorry, I could not put together a reply. Could you send that again?"
 )
 
 MAX_WEBHOOK_BYTES = max(1_024, int(os.getenv("WHATSAPP_WEBHOOK_MAX_BYTES", "1048576")))
@@ -180,6 +187,15 @@ def _contexto(telefono: str) -> tuple[str, str]:
     )
 
 
+def _non_empty(respuesta: object, message_id: str) -> str:
+    """Never hand Meta an empty body: it 400s and the item retries forever."""
+    texto = str(respuesta or "")
+    if texto.strip():
+        return texto
+    print(f"[agent] respuesta vacía msg={_correlation(message_id)}")
+    return EMPTY_REPLY_FALLBACK
+
+
 def _generate_response(item: dict) -> str:
     telefono = item["telefono"]
     message_id = item["message_id"]
@@ -193,12 +209,13 @@ def _generate_response(item: dict) -> str:
         if kind != "text":
             return TEXT_REQUIRED
         if es_equipo(telefono):
-            return str(
-                responder_gerencia(data, thread_id=thread_tag, usuario=thread_tag)
+            return _non_empty(
+                responder_gerencia(data, thread_id=thread_tag, usuario=thread_tag),
+                message_id,
             )
 
         customer_code, contexto = _contexto(telefono)
-        return str(
+        return _non_empty(
             responder_cliente(
                 data,
                 thread_id=thread_tag,
@@ -206,13 +223,20 @@ def _generate_response(item: dict) -> str:
                 customer_code=customer_code,
                 inbound_message_id=message_id,
                 actor_phone=telefono,
-            )
+            ),
+            message_id,
         )
     except Exception as error:
         print(
             f"[agent] error msg={_correlation(message_id)} "
             f"phone={_correlation(telefono)} type={_error_name(error)}"
         )
+        # TECHNICAL_ERROR promises the customer that the team was told. Make it
+        # true. A failure to alert must not mask the original error.
+        try:
+            notificar.avisar_falla_tecnica(telefono, str(data), _error_name(error))
+        except Exception as alert_error:
+            print(f"[agent] alerta al equipo falló type={_error_name(alert_error)}")
         return TECHNICAL_ERROR
 
 

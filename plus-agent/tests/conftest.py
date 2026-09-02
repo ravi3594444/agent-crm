@@ -35,6 +35,11 @@ _DUMMY = {
     "REDIS_URL": "redis://localhost:6379/15",
     "WHATSAPP_PHONE_NUMBER_ID": "test-phone-id",
     "WHATSAPP_TOKEN": "test-token",
+    # app/graph.py builds the chat model at import, and the provider SDK
+    # validates its key eagerly. A dummy lets a test import the real tool lists
+    # (see tests/test_frontera_decisiones.py) without credentials or network.
+    "GOOGLE_API_KEY": "test-google-key",
+    "ANTHROPIC_API_KEY": "test-anthropic-key",
     # opcionales que cambian comportamiento: valores deterministas para tests
     "BUSINESS_TIMEZONE": "America/Argentina/Buenos_Aires",
     "ERPNEXT_COMPANY": "Lacteos Test SA",

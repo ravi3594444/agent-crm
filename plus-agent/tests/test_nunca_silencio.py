@@ -177,16 +177,6 @@ def test_agent_crash_does_not_wedge_the_fifo_for_the_next_customer(
     assert not webhook.r.lists[webhook._PROCESSING_KEY]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GAP in BASE: on an agent exception _generate_response only prints a "
-        "correlation log line and returns TECHNICAL_ERROR, whose text promises "
-        "'Ya avisé al equipo'. Nobody on TELEFONOS_EQUIPO is actually messaged "
-        "(no enviar_mensaje/enviar_plantilla to a staff number, no ERPNext ToDo). "
-        "MINE's test_si_el_agente_explota_el_equipo_SE_ENTERA covers this."
-    ),
-)
 def test_agent_crash_alerts_the_staff_phone_as_the_apology_promises(
     webhook, outbox, monkeypatch
 ) -> None:
@@ -201,16 +191,6 @@ def test_agent_crash_alerts_the_staff_phone_as_the_apology_promises(
     assert staff_alerts, "the customer was told the team was alerted, but nobody was"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GAP in BASE: an agent turn that yields an empty string (Gemini can "
-        "return a content list with no text block; graph._texto then returns "
-        "'') is cached and passed to enviar_mensaje as ''. Meta rejects an "
-        "empty text body with 400, so the item retries forever and the "
-        "customer hears nothing. MINE substitutes a fallback message."
-    ),
-)
 def test_empty_agent_reply_is_replaced_by_a_fallback_not_sent_as_empty(
     webhook, outbox, monkeypatch
 ) -> None:

@@ -194,17 +194,63 @@ def test_unauthorized_phone_cannot_trigger_approval(
     submit.assert_not_called()
 
 
-def test_legacy_reject_button_never_claims_or_changes_order_state(
+def test_reject_tells_the_customer_and_leaves_the_draft_unconfirmed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The customer was told the order was received and would be confirmed.
+
+    Rejecting used to tell only the manager 'no cambié su estado', so the
+    customer waited indefinitely. Now the customer is notified, the rejection is
+    audited, and the draft is deliberately left unconfirmed: a generic ERPNext
+    Sales Order has no durable rejected state and deleting it would destroy the
+    trail of something the customer was already told about.
+    """
+    from app import decisiones
+
     monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
+    monkeypatch.setattr(
+        decisiones, "telefono_del_cliente", lambda nombre: "5493511234567"
+    )
+    monkeypatch.setattr(decisiones, "_avisar_cliente_rechazo", lambda *a: True)
     comment = Mock()
-    monkeypatch.setattr(aprobacion.erpnext, "add_comment", comment)
+    monkeypatch.setattr(decisiones.erpnext, "add_comment", comment)
+    submit = Mock()
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
 
     result = aprobacion.manejar_boton("no:SAL-ORD-0001", "5491100000000")
 
-    assert "no cambié su estado" in result
-    comment.assert_not_called()
+    assert "rechazado" in result.lower()
+    assert "Ya le avisé al cliente" in result
+    submit.assert_not_called()
+    audit = " ".join(str(c) for c in comment.call_args_list)
+    assert "Rechazado manualmente" in audit
+
+
+def test_reject_warns_the_manager_when_the_customer_could_not_be_told(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import decisiones
+
+    monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
+    monkeypatch.setattr(decisiones, "telefono_del_cliente", lambda nombre: "")
+    monkeypatch.setattr(decisiones.erpnext, "add_comment", Mock())
+
+    result = aprobacion.manejar_boton("no:SAL-ORD-0002", "5491100000000")
+
+    assert "NO pude avisarle al cliente" in result
+
+
+def test_unauthorized_phone_cannot_reject(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import decisiones
+
+    monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: False)
+    rechazar = Mock()
+    monkeypatch.setattr(decisiones, "rechazar", rechazar)
+
+    result = aprobacion.manejar_boton("no:SAL-ORD-0001", "5490000000000")
+
+    assert "permiso" in result
+    rechazar.assert_not_called()
 
 
 def test_duplicate_approval_skips_submit_and_recovers_customer_notice(

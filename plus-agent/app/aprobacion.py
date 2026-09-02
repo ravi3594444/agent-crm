@@ -27,45 +27,22 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
     accion, nombre = reply_id.split(":", 1)
 
     if accion == "ok":
-        try:
-            actual = _leer_doc("Sales Order", nombre)
-            ya_confirmado = actual.get("docstatus") == 1
-            if not ya_confirmado and actual.get("docstatus") != 0:
-                return f"No se puede confirmar {nombre} en su estado actual."
-            if not ya_confirmado:
-                try:
-                    erpnext.submit_doc("Sales Order", nombre)
-                except erpnext.ERPNextError:
-                    # A timeout can happen after ERPNext committed. Re-read the
-                    # source of truth before reporting a failed confirmation.
-                    actual = _leer_doc("Sales Order", nombre)
-                    if actual.get("docstatus") != 1:
-                        raise
-                erpnext.add_comment(
-                    "Sales Order",
-                    nombre,
-                    "Confirmado por un integrante autorizado mediante WhatsApp.",
-                )
-        except erpnext.ERPNextError as error:
-            print(f"[approval] {nombre}: {type(error).__name__}")
-            return f"No pude comprobar la confirmación de {nombre}. Revisalo en ERPNext."
-
-        prefix = "ℹ️ Ya estaba confirmado." if ya_confirmado else f"✅ {nombre} confirmado."
-        if _avisar_cliente(nombre):
-            return (
-                f"{prefix} Meta aceptó o ya tenía registrado el aviso al cliente; "
-                "la entrega se controla con sus estados de WhatsApp."
-            )
-        return (
-            f"{prefix} No pude enviar el aviso al cliente; "
-            "contactalo manualmente."
-        )
+        return confirmar_pedido(nombre, telefono)["detalle"]
 
     if accion == "no":
+        # The customer was told the order was received and would be confirmed.
+        # Rejecting must therefore tell them too — see app/decisiones.py.
+        from app import decisiones
+
+        resultado = decisiones.rechazar(nombre, telefono)
+        cola = (
+            "Ya le avisé al cliente."
+            if resultado["aviso_cliente"]
+            else "NO pude avisarle al cliente; contactalo vos."
+        )
         return (
-            "La plantilla actual ya no permite rechazar borradores por WhatsApp, "
-            f"porque ERPNext no tiene un estado de rechazo genérico. Revisá {nombre} "
-            "en ERPNext; no cambié su estado."
+            f"❌ {nombre} rechazado. El borrador queda sin confirmar para que lo "
+            f"revises o lo borres en ERPNext. {cola}"
         )
 
     if accion == "ver":
@@ -84,6 +61,70 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
         )
 
     return "Acción desconocida."
+
+
+def confirmar_pedido(nombre: str, por: str) -> dict:
+    """Confirm one order on behalf of an ALREADY AUTHENTICATED human manager.
+
+    Moved out of manejar_boton unchanged so app/decisiones.py can offer it as
+    the manual-path entry point without duplicating logic that is already
+    proven against duplicate taps and submit timeouts that commit after the
+    HTTP client gives up. Submission still uses the policy credential via
+    erpnext.submit_doc; nothing here is reachable from an LLM tool.
+
+    Returns {"ok", "aviso_cliente", "detalle"} — `detalle` is the text shown to
+    the manager.
+    """
+    try:
+        actual = _leer_doc("Sales Order", nombre)
+        ya_confirmado = actual.get("docstatus") == 1
+        if not ya_confirmado and actual.get("docstatus") != 0:
+            return {
+                "ok": False,
+                "aviso_cliente": False,
+                "detalle": f"No se puede confirmar {nombre} en su estado actual.",
+            }
+        if not ya_confirmado:
+            try:
+                erpnext.submit_doc("Sales Order", nombre)
+            except erpnext.ERPNextError:
+                # A timeout can happen after ERPNext committed. Re-read the
+                # source of truth before reporting a failed confirmation.
+                actual = _leer_doc("Sales Order", nombre)
+                if actual.get("docstatus") != 1:
+                    raise
+            erpnext.add_comment(
+                "Sales Order",
+                nombre,
+                f"Confirmado por un integrante autorizado mediante WhatsApp ({por}).",
+            )
+    except erpnext.ERPNextError as error:
+        print(f"[approval] {nombre}: {type(error).__name__}")
+        return {
+            "ok": False,
+            "aviso_cliente": False,
+            "detalle": (
+                f"No pude comprobar la confirmación de {nombre}. Revisalo en ERPNext."
+            ),
+        }
+
+    prefix = "ℹ️ Ya estaba confirmado." if ya_confirmado else f"✅ {nombre} confirmado."
+    if _avisar_cliente(nombre):
+        return {
+            "ok": True,
+            "aviso_cliente": True,
+            "detalle": (
+                f"{prefix} Meta aceptó o ya tenía registrado el aviso al cliente; "
+                "la entrega se controla con sus estados de WhatsApp."
+            ),
+        }
+    return {
+        "ok": True,
+        "aviso_cliente": False,
+        "detalle": (
+            f"{prefix} No pude enviar el aviso al cliente; contactalo manualmente."
+        ),
+    }
 
 
 def _avisar_cliente(nombre: str) -> bool:
