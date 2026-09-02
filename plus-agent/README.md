@@ -3,12 +3,47 @@
 WhatsApp order agent for the Plus dairy stack. Runs as one container on the
 same server as ERPNext, talking to it over the internal Docker network.
 
+**Before you deploy anything, read [PRUEBAS.md](PRUEBAS.md).** It is a
+staged verification guide — nothing advances until the current stage passes.
+Start with `make test` (about a second, no credentials, no Redis, no network).
+
 ## Architecture
 
 The service keeps the LLM behind narrow ERPNext tools, a deterministic
 auto-confirm policy, a durable Redis-backed webhook queue and signed Meta
 webhooks. ERPNext remains the system of record; neither agent accesses MariaDB
 or invents an order number.
+
+## The files
+
+LangGraph is one line in `requirements.txt`. Everything else here is yours.
+
+| File | What it is |
+|---|---|
+| `app/main.py` | Webhook: signature, size limit, idempotency, durable Redis queue, worker thread with lease/heartbeat, status webhooks |
+| `app/erpnext.py` | REST client with **three credential scopes** (customer / manager / policy) selected through a `contextvars` scope. The agent never touches MariaDB. |
+| `app/runtime_context.py` | Per-request identity (customer code, inbound message, actor phone) that tools read for authorization — the model cannot forge it |
+| `app/router.py` | Phone-based agent routing (`TELEFONOS_EQUIPO`) — a security boundary |
+| `app/graph.py` | The two agents, the Redis checkpointer, tool-error containment |
+| `app/prompts.py`, `app/prompts_gerencia.py` | Rioplatense Spanish system prompts |
+| `app/tools/catalogo.py` | Read tools — products, prices, stock levels, order status |
+| `app/tools/pedidos.py` | Write tools — **drafts only** — then hands the order to the policy |
+| `app/tools/gerencia.py` | Management read tools (owner assistant) |
+| `app/tools/captura.py` | **Offline-sale capture** — the hard part |
+| `app/clientes.py` | Customer lookup by phone (`buscar_por_telefono`), against hand-entered data |
+| `app/policy.py` | **Auto-confirm engine** — deterministic, LLM-proof, fail-closed |
+| `app/locks.py` | Redis distributed locks: evaluate-then-submit is serialized so stock cannot double-sell |
+| `app/notificar.py` | WhatsApp template alerts to staff with approval buttons |
+| `app/aprobacion.py` | Button taps -> ERPNext submit -> templated customer confirmation |
+| `app/outbound_status.py` | Delivery tracking of every outbound message (sent / delivered / read / failed) |
+| `app/whatsapp.py` | Outbound messages and templates |
+| `app/briefing.py` | 07:00 WhatsApp morning briefing (`deploy/crontab`) |
+| `deploy/seed_dairy.py` | Demo catalog and customers for an empty staging ERPNext |
+| `deploy/crontab` | Host cron line for the briefing |
+| `docker-compose.yml` | Agent + Redis Stack (+ `briefing` on demand) |
+| `Dockerfile`, `Makefile`, `.env.example`, `pyproject.toml` | Build, shortcuts, configuration, lint config |
+| `.github/workflows/ci.yml` | Lint, tests, image build, container boot against a real Redis Stack |
+| `tests/` | 74 tests. No ERPNext, no Redis, no LLM, ~1 second. |
 
 ## Two agents, one webhook
 
@@ -23,6 +58,21 @@ This is a **security boundary**, not a convenience. A customer-facing bot with
 full system read is one prompt injection away from leaking the customer list,
 margins and supplier prices. Separate agents, separate ERPNext users,
 separate roles.
+
+## Three ERPNext users, not one
+
+The single most important configuration decision. Each is a separate ERPNext
+user with its own API key, and `make check-env` refuses to proceed if any two
+of them share a key.
+
+| `.env` pair | Who uses it | Can |
+|---|---|---|
+| `ERPNEXT_API_KEY` / `_SECRET` | the **customer agent** (the LLM that talks to customers) | Read + draft Create on Item, Bin, Customer, Lead, Sales Order, ToDo, Item Price, Comment. **No Submit.** |
+| `ERPNEXT_MANAGER_API_KEY` / `_SECRET` | the **management agent** (staff phones), only while a `gerencia`/`captura` tool runs | Broad reads (sales, stock, receivables, customers) + draft Sales Invoice, Stock Reconciliation, Delivery Note, ToDo, Comment. **No Submit.** |
+| `ERPNEXT_POLICY_API_KEY` / `_SECRET` | `app/policy.py` (via `app/tools/pedidos.py`) and `app/aprobacion.py` — **never a tool** | The privileged policy reports and the **only Submit** on Sales Order |
+
+`app/erpnext.py` switches between them with a `contextvars` scope, so a tool
+running for a customer physically cannot reach the manager or policy client.
 
 ## Removing the wait
 
@@ -47,8 +97,14 @@ injection cannot widen the envelope — it can only produce a draft that then
 fails the rules. That is how you get instant confirmation without handing an
 LLM the keys.
 
-Start `AUTO_CONFIRM_MAX=0` (everything reviewed). Raise it week by week as he
-watches the decisions land. By month two most orders never touch him.
+Evaluate-and-submit runs under a Redis lock (`app/locks.py`) and re-reads the
+order while holding it. Without that, two customers ordering the last of
+something both pass the check and both get confirmed — in ERPNext a draft
+Sales Order does not reserve stock; `reserved_qty` only rises on submit.
+
+Start `AUTO_CONFIRM_MAX=0` (everything reviewed). Watch `make decisiones` for
+a week, then raise it a notch at a time (stage 9 of PRUEBAS.md). By month two
+most orders never touch him.
 
 **2. One-tap approval (`app/notificar.py`, `app/aprobacion.py`)**
 Orders that need review can arrive as a WhatsApp utility template with
@@ -107,7 +163,7 @@ holding the business lock.
 
 | When | Who | What |
 |---|---|---|
-| 07:00 | system | Morning briefing to owner |
+| 07:00 | system | Morning briefing to owner (`deploy/crontab`) |
 | 07:15 | whoever opens | Counts key products -> `contar_stock` |
 | all day | counter/truck | Reports sales as they happen |
 | all day | owner | Confirms drafts from his phone |
@@ -120,7 +176,8 @@ If the 07:15 count does not happen, do not flip `STOCK_CONFIABLE` to true.
 1. **No SQL.** Everything goes through `erpnext.py` over REST.
 2. **Draft only.** `create_doc` forces `docstatus: 0`. The agent's ERPNext
    Role has no submit permission, so this is enforced by ERPNext — not by
-   the prompt. Prompt injection cannot escalate it.
+   the prompt. Prompt injection cannot escalate it. Submit lives behind a
+   third identity that no tool can import.
 3. **Idempotency.** Meta retries webhooks. Hashed inbound-message markers in
    Redis plus a deterministic ERPNext purchase-order reference stop one retry
    becoming two orders without storing phone numbers in Redis key names.
@@ -130,21 +187,26 @@ If the 07:15 count does not happen, do not flip `STOCK_CONFIABLE` to true.
 
 ## Setup
 
-1. In ERPNext, create Role "Agente IA" and grant only the reads and draft
-   creates used by the customer tools: Item, Bin, Customer, Lead, Sales Order,
-   ToDo, Item Price and Comment. **Do not grant Submit.** Create a dedicated
-   user, assign the role, and generate its API key and secret. Create a second
-   management user with the required broad reads plus draft-only offline-sale,
-   stock-reconciliation, delivery-note, ToDo and Comment writes, but no Submit.
-   Create a third policy user for the narrowly scoped report/Submit operations.
-   Never reuse the policy key in either LLM-facing agent.
+1. **In ERPNext, create THREE users** (see the table above). This is the most
+   important step.
+   - **a) The customer agent** — Role "Agente IA": grant only the reads and
+     draft creates used by the customer tools: Item, Bin, Customer, Lead,
+     Sales Order, ToDo, Item Price and Comment. **Do not grant Submit.**
+     Generate its API key and secret -> `ERPNEXT_API_KEY` / `ERPNEXT_API_SECRET`.
+   - **b) The management agent** — the required broad reads plus draft-only
+     Sales Invoice, Stock Reconciliation, Delivery Note, ToDo and Comment
+     writes, but **no Submit** -> `ERPNEXT_MANAGER_API_KEY` / `_SECRET`.
+   - **c) The policy** — the narrowly scoped report reads plus Submit on
+     Sales Order, nothing more -> `ERPNEXT_POLICY_API_KEY` / `_SECRET`.
+     Never reuse the policy key in either LLM-facing agent.
 2. `cp .env.example .env`, immediately run `chmod 600 .env`, and fill in every
-   `replace-me` value. Prefer the deployment platform's secret manager. Never
-   commit `.env`, API credentials, or WhatsApp tokens.
+   empty value. Every variable the code reads is documented in `.env.example`.
+   Prefer the deployment platform's secret manager. Never commit `.env`, API
+   credentials, or WhatsApp tokens. Then `make check-env`.
 3. Set `ERPNEXT_COMPANY` and `ERPNEXT_WAREHOUSE` to the exact ERPNext names.
    The warehouse must be enabled, must not be a group, and must belong to that
-   company. Explicit values prevent a new or unrelated warehouse from silently
-   becoming the order default.
+   company. Order creation fails closed without both; explicit values prevent a
+   new or unrelated warehouse from silently becoming the order default.
 4. Set `BUSINESS_TIMEZONE` to the client's IANA timezone, such as
    `America/Argentina/Buenos_Aires`. The host may run in UTC; customer dates and
    business rules must still use the client's local date.
@@ -152,12 +214,19 @@ If the 07:15 count does not happen, do not flip `STOCK_CONFIABLE` to true.
    authorized ERPNext selling price list and currency. Auto-confirmation fails
    closed if either is missing or if a line has a different UOM, rate, validity
    window, customer-specific price or discount.
-6. Add the container to the ERPNext stack's network so that `ERPNEXT_URL` can
-   reach `backend`, and point `REDIS_URL` at Redis Stack as described below.
+6. `make up` — brings up the agent and Redis Stack on port **8081** (8080 is
+   ERPNext) and waits for `/health`. To run inside the existing ERPNext stack
+   instead, copy the `agente` and `redis` services from `docker-compose.yml`
+   into that stack's compose file, on the same network as `backend`, with
+   `ERPNEXT_URL=http://backend:8000`. Standalone against an ERPNext on the
+   host, use `ERPNEXT_URL=http://host.docker.internal:8080`.
 7. Set `TELEFONOS_EQUIPO` to the owner's/test staff number in international
    format. An empty value disables management routing and staff alerts.
 8. Point the Meta callback at `https://…/webhook/whatsapp`, subscribe the WABA
    to the `messages` field, and use the same `META_VERIFY_TOKEN` on both sides.
+9. Install the morning briefing cron: see `deploy/crontab`. **Check the host's
+   timezone** — 07:00 in Argentina is 10:00 UTC.
+10. Work through [PRUEBAS.md](PRUEBAS.md) in order.
 
 ### Required WhatsApp templates
 
@@ -178,48 +247,62 @@ Missing/unapproved templates fail closed: no free-form staff alert is attempted,
 the Sales Order remains in ERPNext, and an audit comment records the required
 manual follow-up.
 
-### Google model-provider migration
+### Models
 
-The default model identifiers are now `google_genai:gemini-2.5-flash` for
-customers and `google_genai:gemini-2.5-pro` for management. Set
-`GOOGLE_API_KEY`; an existing `ANTHROPIC_API_KEY` does not authenticate these
+The default model identifier is `google_genai:gemini-3.5-flash` for both
+agents (the earlier `gemini-2.5-*` defaults were retired by Google and now
+return 404). Set `GOOGLE_API_KEY`; `langchain-google-genai` requires it when
+the model object is built, which happens at import, so the container will not
+start without it. An existing `ANTHROPIC_API_KEY` does not authenticate these
 models. `LLM_MODEL_CLIENTES` and `LLM_MODEL_GERENCIA` can still override the
-provider/model explicitly, but the matching provider package and API key must
-then be present.
+provider/model explicitly, but the matching provider package must be pinned in
+`requirements.txt` and its API key present.
 
 ### Redis Stack is required
 
 `langgraph-checkpoint-redis` stores JSON checkpoints and creates search
-indexes, so it requires both RedisJSON and RediSearch. Redis 8 includes them;
-for older Redis versions use Redis Stack or install both modules. Use a
-dedicated Redis instance at logical database 0 (`.../0`) rather than sharing
-one instance with unrelated applications. Enable AOF persistence on a durable
-volume and use a non-evicting memory policy; otherwise Redis cannot guarantee
-that an HTTP-accepted webhook survives a Redis/container loss. Restrict Redis
-network access because queued events temporarily contain recipient numbers and
-message text. `CONVERSATION_TTL_DAYS` limits how
-long inactive LangGraph conversation checkpoints are retained and refreshes
-the TTL when a conversation continues. A server that reaches `/health` has
-successfully imported the app and initialized the checkpointer; it has not yet
-proved ERPNext or WhatsApp connectivity.
+indexes, so it requires both RedisJSON and RediSearch. A plain `redis:7-alpine`
+dies at boot with `RedisSearchError: unknown command 'FT.INFO'`. Redis 8
+includes the modules; for older versions use Redis Stack — the bundled
+`docker-compose.yml` uses `redis/redis-stack-server` with AOF persistence and a
+non-evicting memory policy. If you point at your own Redis, check it first with
+`redis-cli -u "$REDIS_URL" module list` — it must list `ReJSON` and `search`.
+
+Use a dedicated instance at logical database 0 (`.../0`) rather than sharing
+one with unrelated applications: without durable AOF and `noeviction`, Redis
+cannot guarantee that an HTTP-accepted webhook survives a Redis/container loss.
+Restrict Redis network access because queued events temporarily contain
+recipient numbers and message text. `CONVERSATION_TTL_DAYS` limits how long
+inactive LangGraph conversation checkpoints are retained and refreshes the TTL
+when a conversation continues. A server that reaches `/health` has successfully
+imported the app and initialized the checkpointer; it has not yet proved
+ERPNext or WhatsApp connectivity.
 
 ### Install, test, and start
 
-Run these commands from `plus-agent/` in an isolated client staging environment:
+Dependencies are **pinned** in `requirements.txt` to the exact versions the
+tests and the deployed agent run with (`langgraph>=0.2.60` used to resolve to
+a different major every few months). To upgrade one, bump it, run `make test`,
+then commit.
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements-dev.txt
-python -m pip check
-python -m pytest -q tests
-uvicorn app.main:app --host 0.0.0.0 --port 8080 --no-access-log
+make install       # .venv with requirements-dev.txt
+make test          # 74 tests, ~1s, no credentials needed
+make check         # what CI runs (ruff check + tests)
+make check-env     # is .env complete, are the three ERPNext keys distinct
+make up            # docker compose up, wait for :8081/health
+make logs          # follow the agent
+make decisiones    # what the policy and the notifications did, per order
+make briefing      # send the morning briefing now
+make seed          # demo catalog + customers into a staging ERPNext (see below)
 ```
 
-In another terminal:
+Without Docker, from `plus-agent/` (this is what `start.sh` at the repo root
+does for the Codespace):
 
 ```bash
-curl --fail http://127.0.0.1:8080/health
+.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8081 --no-access-log
+curl --fail http://127.0.0.1:8081/health
 ```
 
 For a client launch, begin with `AUTO_CONFIRM_MAX=0` and
@@ -231,11 +314,12 @@ Only then point Meta's production callback at this server.
 
 `deploy/seed_dairy.py` is a staging/demo bootstrap, not a production migration.
 It creates catalog and customer records and therefore needs a temporary ERPNext
-setup user with more permissions than either runtime agent. Inject that user's
-`ERPNEXT_API_KEY` and `ERPNEXT_API_SECRET` only for the seed process, then revoke
-them; do not store them in the service `.env`. The stock reconciliation remains
-a draft for a person to review and submit, and reruns reuse an identical
-non-cancelled reconciliation instead of creating duplicates.
+setup user with more permissions than any runtime identity. Inject that user's
+`ERPNEXT_API_KEY` and `ERPNEXT_API_SECRET` only for the seed process
+(`ERPNEXT_API_KEY=… ERPNEXT_API_SECRET=… make seed`), then revoke them; do not
+store them in the service `.env`. The stock reconciliation remains a draft for
+a person to review and submit, and reruns reuse an identical non-cancelled
+reconciliation instead of creating duplicates.
 
 ## WhatsApp response and delivery contract
 
@@ -261,9 +345,10 @@ API capability. WhatsApp accepts complete message payloads through its
 and reports lifecycle updates through webhooks; it does not render LLM tokens
 as they are generated. The acknowledgement followed by one complete final
 message is the appropriate UX. `sent`, `delivered`, and `read` status webhooks
-are persisted by hashed outbound ID; terminal failures add an ERPNext follow-up
-comment when the message is correlated to an order. Only the ERPNext order
-number/status proves that the business request itself was recorded.
+are persisted by hashed outbound ID (`app/outbound_status.py`); terminal
+failures add an ERPNext follow-up comment when the message is correlated to an
+order. Only the ERPNext order number/status proves that the business request
+itself was recorded.
 
 The short-lived token generated in Meta's Getting Started dashboard is for
 testing. Before production, replace `WHATSAPP_TOKEN` with a properly scoped
@@ -281,9 +366,11 @@ client's live `.env` into another deployment.
 
 ## Not done yet
 
-- Outbound confirmation when a human submits the order
-  (Frappe Webhook on `Sales Order` `on_submit` -> `POST /hooks/order-confirmed`)
+- Outbound confirmation when a human submits the order **in the ERPNext UI**
+  (Frappe Webhook on `Sales Order` `on_submit` -> `POST /hooks/order-confirmed`).
+  Approving from the WhatsApp button already notifies the customer.
 - Media/audio messages (customers send voice notes constantly in Argentina)
 - Business-hours handling
-- Wire `briefing.py` to cron at 07:00 America/Argentina/Buenos_Aires
+- `ruff format` is not enforced yet (CI runs `ruff check` only); the tree has
+  a handful of lint findings to clean up in a formatting-only commit.
 - Evals: a fixed set of ~30 real customer messages, run on every deploy

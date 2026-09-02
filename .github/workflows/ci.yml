@@ -1,0 +1,73 @@
+name: CI
+
+# Los tests no necesitan Redis, ni ERPNext, ni credenciales de Meta, ni
+# tokens de LLM: son 100% offline (tests/conftest.py fija valores de prueba)
+# y tardan ~1 segundo. Por eso pueden correr en cada push sin fricción.
+#
+# El último job sí levanta un Redis Stack: app/graph.py crea los índices del
+# checkpointer al importar, así que "el contenedor arranca" solo se puede
+# probar con un Redis con RedisJSON + RediSearch al lado.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+defaults:
+  run:
+    working-directory: plus-agent
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: plus-agent/requirements-dev.txt
+
+      - name: Instalar dependencias
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check app tests
+
+      - name: Tests
+        run: pytest -q
+
+      - name: La imagen buildea
+        run: docker build -t plus-agent:ci .
+
+      - name: El contenedor arranca y sirve /health
+        # Prueba lo que ningún test unitario puede: que TODAS las variables
+        # que la app exige al importar estén declaradas, que el checkpointer
+        # arranque contra un Redis Stack real y que uvicorn levante en 8081.
+        # GOOGLE_API_KEY: langchain-google-genai exige que exista al construir
+        # el modelo (al importar); no se llama a Google en el arranque.
+        run: |
+          docker network create ci
+          docker run -d --name redis-ci --network ci redis/redis-stack-server:7.4.0-v1
+          for i in $(seq 1 30); do
+            docker exec redis-ci redis-cli ping 2>/dev/null | grep -q PONG && break
+            sleep 1
+          done
+          docker run -d --name agente-ci --network ci -p 8081:8081 \
+            -e ERPNEXT_URL=http://erpnext.invalid \
+            -e ERPNEXT_API_KEY=k -e ERPNEXT_API_SECRET=s \
+            -e ERPNEXT_MANAGER_API_KEY=mk -e ERPNEXT_MANAGER_API_SECRET=ms \
+            -e ERPNEXT_POLICY_API_KEY=pk -e ERPNEXT_POLICY_API_SECRET=ps \
+            -e META_APP_SECRET=x -e META_VERIFY_TOKEN=y \
+            -e REDIS_URL=redis://redis-ci:6379/0 \
+            -e WHATSAPP_PHONE_NUMBER_ID=1 -e WHATSAPP_TOKEN=t \
+            -e GOOGLE_API_KEY=noop \
+            plus-agent:ci
+          for i in $(seq 1 30); do
+            if curl -fsS localhost:8081/health; then echo; echo "OK"; exit 0; fi
+            sleep 1
+          done
+          echo "el contenedor no respondió /health"
+          docker logs agente-ci
+          exit 1

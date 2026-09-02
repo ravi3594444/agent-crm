@@ -1,0 +1,31 @@
+# Configuración de herramientas. La de pytest sigue en pytest.ini (pytest la
+# prefiere sobre pyproject.toml cuando existen las dos, así que no se duplica).
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["deploy"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # bugbear
+    "UP",   # pyupgrade
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "RUF",
+]
+ignore = [
+    "E501",    # el largo de línea lo maneja el formatter
+    "B008",    # Depends()/Field() en defaults es el idioma de FastAPI
+    "RUF001",  # comillas y guiones unicode: los docstrings están en español
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Los tests importan la app después de setear el entorno: el import no puede
+# estar arriba del todo (ver tests/conftest.py).
+"tests/*.py" = ["E402"]

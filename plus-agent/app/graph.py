@@ -77,11 +77,11 @@ _checkpointer.setup()
 
 # Cheap+fast for the high-volume customer bot; stronger model for analysis.
 _modelo_clientes = init_chat_model(
-    os.getenv("LLM_MODEL_CLIENTES", "google_genai:gemini-2.5-flash"),
+    os.getenv("LLM_MODEL_CLIENTES", "google_genai:gemini-3.5-flash"),
     temperature=0.3,
 )
 _modelo_gerencia = init_chat_model(
-    os.getenv("LLM_MODEL_GERENCIA", "google_genai:gemini-2.5-pro"),
+    os.getenv("LLM_MODEL_GERENCIA", "google_genai:gemini-3.5-flash"),
     temperature=0.1,
 )
 

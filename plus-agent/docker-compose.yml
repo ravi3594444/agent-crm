@@ -1,0 +1,94 @@
+# plus-agent como un servicio más del stack de ERPNext.
+#
+# Sirve de las dos formas:
+#
+#   A) SOLO (para probar): trae su propio Redis Stack y se conecta al ERPNext
+#      que le pongas en ERPNEXT_URL. Si ERPNext corre en el host (como en el
+#      Codespace, en :8080), usá ERPNEXT_URL=http://host.docker.internal:8080
+#           docker compose up -d --build
+#
+#   B) DENTRO del stack de ERPNext: copiá el bloque `agente` (y `redis`) a tu
+#      compose y poné `ERPNEXT_URL=http://backend:8000`, en la misma red que
+#      `backend`.
+#
+# Puerto 8081, el mismo que usa start.sh: 8080 ya es ERPNext.
+# Verificá que arrancó:  curl localhost:8081/health
+
+services:
+  agente:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Dentro de esta compose, Redis es el de abajo.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    ports:
+      # Detrás de tu reverse proxy: el webhook de Meta tiene que llegar por
+      # HTTPS a /webhook/whatsapp.
+      - "${PUERTO_AGENTE:-8081}:8081"
+    extra_hosts:
+      # Para el modo A: que host.docker.internal resuelva al host también en Linux.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # /health es liveness: la app importó, el checkpointer creó sus índices
+      # en Redis y uvicorn atiende. No prueba ERPNext ni WhatsApp.
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8081/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  redis:
+    # OJO: TIENE QUE SER REDIS STACK, NO REDIS PELADO.
+    # El checkpointer de LangGraph (RedisSaver) guarda los checkpoints con
+    # RedisJSON y los consulta con RediSearch: hace `redis.json().set(...)` y
+    # crea índices con FT.CREATE. Con `redis:7-alpine` el proceso muere en el
+    # arranque, en `setup()`, con "unknown command 'FT.INFO'".
+    image: redis/redis-stack-server:7.4.0-v1
+    restart: unless-stopped
+    # appendonly + noeviction: la cola durable de webhooks, los locks, las
+    # marcas de idempotencia y el seguimiento de entregas viven acá. Sin
+    # persistencia, un restart de Redis hace que los reintentos de Meta
+    # puedan duplicar pedidos; con eviction, se pierden mensajes aceptados.
+    # En redis-stack-server la config va por REDIS_ARGS, no por `command`:
+    # `command` le pisaría el entrypoint que carga los módulos.
+    environment:
+      REDIS_ARGS: >-
+        --appendonly yes
+        --maxmemory ${REDIS_MAXMEMORY:-256mb}
+        --maxmemory-policy noeviction
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Briefing de la mañana (app/briefing.py). No corre solo: se dispara por
+  # cron del host, ver deploy/crontab.
+  #   0 10 * * * cd /srv/plus-agent && docker compose run --rm briefing
+  # (10:00 UTC = 07:00 en America/Argentina/Buenos_Aires)
+  briefing:
+    build: .
+    profiles: ["manual"]
+    env_file: .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["python", "-m", "app.briefing"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis-data:
