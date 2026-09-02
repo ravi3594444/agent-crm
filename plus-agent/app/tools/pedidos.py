@@ -17,6 +17,14 @@ from app.locks import CoordinationError, distributed_lock
 from app.notificar import notificar_equipo
 from app.runtime_context import RuntimeContextError, actor_context, require_customer
 
+_MESES = {
+    "ene": 1, "enero": 1, "feb": 2, "febrero": 2, "mar": 3, "marzo": 3,
+    "abr": 4, "abril": 4, "may": 5, "mayo": 5, "jun": 6, "junio": 6,
+    "jul": 7, "julio": 7, "ago": 8, "agosto": 8, "sep": 9, "sept": 9,
+    "septiembre": 9, "set": 9, "setiembre": 9, "oct": 10, "octubre": 10,
+    "nov": 11, "noviembre": 11, "dic": 12, "diciembre": 12,
+}
+
 _DIAS = {
     "lunes": 0,
     "martes": 1,
@@ -82,6 +90,33 @@ def _parse_fecha(text: str, *, hoy: date | None = None) -> str:
         if weekday in normalized:
             delta = (index - today.weekday()) % 7
             return (today + timedelta(days=delta or 7)).isoformat()
+
+    # "2 de septiembre", "el 2 de sep", "2 septiembre 2026" — como escribe la
+    # gente por WhatsApp. Sin esto el parser solo aceptaba ISO y DD/MM.
+    match_mes = re.search(
+        r"(\d{1,2})\s*(?:de\s+)?("
+        + "|".join(_MESES)
+        + r")[a-z]*\.?(?:\s+(?:de\s+)?(\d{4}))?",
+        normalized,
+    )
+    if match_mes:
+        day = int(match_mes.group(1))
+        month = _MESES[match_mes.group(2)]
+        year_text = match_mes.group(3)
+        if year_text:
+            try:
+                candidate = date(int(year_text), month, day)
+            except ValueError as exc:
+                raise FechaEntregaInvalida("la fecha de entrega no existe") from exc
+            return _validar_fecha(candidate, today)
+        for year in range(today.year, today.year + 9):
+            try:
+                candidate = date(year, month, day)
+            except ValueError:
+                continue
+            if candidate >= today:
+                return candidate.isoformat()
+        raise FechaEntregaInvalida("la fecha de entrega no existe")
 
     match = re.fullmatch(
         r"(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?", normalized

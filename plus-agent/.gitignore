@@ -5,3 +5,8 @@ __pycache__/
 *.py[cod]
 frappe_docker/
 
+
+# secrets — every variant, including backups
+.env
+.env.*
+!.env.example

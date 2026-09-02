@@ -160,6 +160,7 @@ def responder_cliente(
         NEGOCIO=os.getenv("NOMBRE_NEGOCIO", "la empresa"),
         CONTEXTO_CLIENTE=minimal_context,
         HORARIO=os.getenv("HORARIO_ATENCION", "lunes a viernes de 8 a 17"),
+        HOY=_business_today(),
     )
     with erpnext.customer_scope():
         out = agente_clientes.invoke(

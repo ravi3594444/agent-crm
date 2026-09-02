@@ -1,1 +1,6 @@
 plus-agent/.env.example
+
+# secrets — every variant, including backups
+.env
+.env.*
+!.env.example
