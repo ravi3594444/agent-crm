@@ -20,6 +20,22 @@ STOCK_CONFIABLE = os.getenv("STOCK_CONFIABLE", "false").strip().lower() == "true
 PRICE_LIST = os.getenv("AUTO_CONFIRM_PRICE_LIST", "").strip()
 CURRENCY = os.getenv("AUTO_CONFIRM_CURRENCY", "").strip()
 
+# The three states in which ERPNext itself stops counting an order against
+# stock: its get_reserved_qty (erpnext/stock/stock_balance.py) sums Sales Order
+# Item rows `where docstatus = 1 and status not in ('On Hold', 'Closed')`, and
+# a cancelled order consumes nothing. Spelled as ERPNext spells them, because
+# the list is also sent as a filter.
+ESTADOS_SIN_RESERVA = ("Closed", "Cancelled", "On Hold")
+_SIN_RESERVA = frozenset(estado.lower() for estado in ESTADOS_SIN_RESERVA)
+
+# Truncation guards. A silently cut list reads as "less is promised", which
+# oversells, so both reads ask for one row more than they will accept.
+MAX_BORRADORES = 500
+MAX_RENGLONES_POR_PEDIDO = 20
+# Parent names travel in a GET query string; a few hundred of them exceed the
+# default gunicorn request-line limit and come back as a 414.
+LOTE_BORRADORES = 50
+
 
 @dataclass
 class Decision:
@@ -49,6 +65,61 @@ def _float(value: object) -> float:
 
 def _zero(value: object) -> bool:
     return abs(_float(value)) < 0.000001
+
+
+def sin_reserva(status: object) -> bool:
+    """True when ERPNext itself does not count this order against stock."""
+    return str(status or "").strip().lower() in _SIN_RESERVA
+
+
+def _es_borrador(fila: dict) -> bool:
+    return abs(_float(fila.get("docstatus"))) < 0.000001
+
+
+def _mas_nuevo_que(creacion: object, referencia: str) -> bool:
+    """True when ``creacion`` is strictly later than ``referencia``.
+
+    An unreadable timestamp on either side means "I cannot tell who asked
+    first", and then the conservative answer is to treat the other draft as a
+    live claim — so this says False.
+    """
+    try:
+        return datetime.fromisoformat(str(creacion)) > datetime.fromisoformat(referencia)
+    except (TypeError, ValueError):
+        return False
+
+
+def _cantidad_en_stock_uom(item: dict) -> float:
+    """Quantity of one order line expressed in the item's STOCK unit.
+
+    Bin.actual_qty and Bin.reserved_qty are stored in the stock unit, so a line
+    sold by the box cannot be compared against them as it stands. ERPNext keeps
+    the converted figure in ``stock_qty``; when that is absent the only safe
+    readings are an explicit conversion factor, or a line whose unit already IS
+    the stock unit. Anything else raises, which every caller turns into "I
+    could not verify the stock" — never into a confirmation.
+    """
+    qty = _float(item.get("qty"))
+    stock_qty = _float(item.get("stock_qty"))
+    if stock_qty > 0:
+        return stock_qty
+    if stock_qty < 0:
+        raise erpnext.ERPNextError("ERPNext devolvió una cantidad de stock negativa")
+
+    factor_declarado = item.get("conversion_factor")
+    if factor_declarado not in (None, ""):
+        factor = _float(factor_declarado)
+        if factor <= 0:
+            raise erpnext.ERPNextError("factor de conversión inválido")
+        return qty * factor
+
+    uom = str(item.get("uom") or "").strip()
+    stock_uom = str(item.get("stock_uom") or "").strip()
+    if uom and stock_uom and uom != stock_uom:
+        raise erpnext.ERPNextError(
+            "no puedo comparar unidades distintas sin factor de conversión"
+        )
+    return qty
 
 
 def evaluar(sales_order: dict) -> Decision:
@@ -140,7 +211,7 @@ def evaluar(sales_order: dict) -> Decision:
             motivos.append("producto o depósito ausente")
             continue
         try:
-            qty = _float(item.get("qty"))
+            qty = _cantidad_en_stock_uom(item)
         except erpnext.ERPNextError:
             motivos.append(f"cantidad inválida para {code}")
             continue
@@ -151,11 +222,28 @@ def evaluar(sales_order: dict) -> Decision:
         cantidades[key] = cantidades.get(key, 0) + qty
 
     if STOCK_CONFIABLE:
+        # This order's own quantity is the one being checked, so it must not be
+        # counted as competition against itself; and an order that was asked
+        # for LATER cannot take units away from this one.
+        este_pedido = str(sales_order.get("name") or "").strip()
+        empresa = str(sales_order.get("company") or "").strip()
+        pedido_desde = str(sales_order.get("creation") or "").strip()
         for (code, warehouse), qty in cantidades.items():
             try:
-                if not _hay_stock(code, qty, warehouse):
+                if not _hay_stock(
+                    code,
+                    qty,
+                    warehouse,
+                    excluir=este_pedido,
+                    company=empresa,
+                    desde=pedido_desde,
+                ):
                     motivos.append(f"stock insuficiente de {code}")
-            except erpnext.ERPNextError:
+            except erpnext.ERPNextError as exc:
+                # The reason the team gets is deliberately the same for every
+                # cause, so log the real one: a row cap or a 414 looks exactly
+                # like an ERPNext outage from the outside.
+                print(f"[policy] stock no verificable item={code} causa={exc}")
                 motivos.append(f"no se pudo verificar stock de {code}")
 
     order_day = _order_day(sales_order, motivos)
@@ -227,9 +315,149 @@ def _saldo_vencido(cliente: str) -> float | None:
         return None
 
 
-def _hay_stock(item_code: str, qty: float, warehouse: str) -> bool:
+def _borradores_que_reservan(company: str, desde: str) -> list[str]:
+    """The draft orders that still hold the stock they promised.
+
+    Asks ERPNext for the ORDERS first, and only for the ones that still
+    reserve. Counting item rows first and discarding most of them afterwards
+    let orders that reserve nothing — above all the rejected ones
+    app/decisiones.py keeps for ever — fill the truncation cap, and once it
+    filled, that product could never auto-confirm again.
+
+    Skipped, and why:
+      * ``docstatus != 0`` — a submitted order is already inside
+        Bin.reserved_qty, and counting it here would subtract it twice; a
+        cancelled one consumes nothing.
+      * ``status`` in ESTADOS_SIN_RESERVA — the same states ERPNext itself does
+        not count, which is where a manual rejection leaves the draft.
+      * another company.
+      * created AFTER the order being evaluated. Without this, two drafts for
+        the last 8 units each defer to the other, and a dairy that has the
+        stock sells it to nobody. First to ask keeps the claim.
+    """
+    filtros: list[list] = [
+        ["docstatus", "=", 0],
+        ["status", "not in", list(ESTADOS_SIN_RESERVA)],
+    ]
+    if company:
+        filtros.append(["company", "=", company])
+    padres = erpnext.policy_get_list(
+        "Sales Order",
+        filters=filtros,
+        fields=["name", "docstatus", "status", "company", "creation"],
+        limit=MAX_BORRADORES + 1,
+    )
+    if len(padres) > MAX_BORRADORES:
+        raise erpnext.ERPNextError(
+            "demasiados pedidos en borrador para verificar el stock"
+        )
+
+    # Re-check locally what was asked of the server: the answer to "can this
+    # confirm with nobody watching" cannot rest on the filters having been
+    # honoured.
+    vivos: list[str] = []
+    for fila in padres:
+        nombre = str(fila.get("name") or "").strip()
+        if not nombre:
+            raise erpnext.ERPNextError("ERPNext devolvió un pedido sin número")
+        if not _es_borrador(fila):
+            continue
+        if company and str(fila.get("company") or "").strip() != company:
+            continue
+        if sin_reserva(fila.get("status")):
+            continue
+        if desde and _mas_nuevo_que(fila.get("creation"), desde):
+            continue
+        vivos.append(nombre)
+    return vivos
+
+
+def _comprometido_en_borradores(
+    item_code: str, warehouse: str, *, excluir: str, company: str, desde: str
+) -> float:
+    """How much of this product is already promised in OTHER draft orders.
+
+    ERPNext only raises Bin.reserved_qty when a Sales Order is SUBMITTED. Two
+    drafts created minutes apart therefore both saw the same last units as
+    free, and both passed the stock rule — one of those customers was going to
+    find out on delivery day. Those units are already promised to somebody, so
+    they are treated here as a virtual reservation.
+
+    Raises rather than guessing. An unreadable or truncated answer must never
+    be read as "nothing is promised": the caller turns the error into an order
+    that waits for a person, which is the safe direction.
+    """
+    vivos = [nombre for nombre in _borradores_que_reservan(company, desde) if nombre != excluir]
+    if not vivos:
+        return 0.0
+
+    total = 0.0
+    for inicio in range(0, len(vivos), LOTE_BORRADORES):
+        lote = vivos[inicio : inicio + LOTE_BORRADORES]
+        tope = len(lote) * MAX_RENGLONES_POR_PEDIDO
+        filas = erpnext.policy_get_list(
+            "Sales Order Item",
+            filters=[
+                ["item_code", "=", item_code],
+                ["warehouse", "=", warehouse],
+                ["docstatus", "=", 0],
+                ["parent", "in", lote],
+            ],
+            fields=[
+                "parent",
+                "item_code",
+                "warehouse",
+                "docstatus",
+                "qty",
+                "stock_qty",
+                "uom",
+                "stock_uom",
+                "conversion_factor",
+            ],
+            limit=tope + 1,
+            parent="Sales Order",
+        )
+        if len(filas) > tope:
+            raise erpnext.ERPNextError(
+                f"demasiados renglones de {item_code} para verificar el stock"
+            )
+        permitidos = set(lote)
+        for fila in filas:
+            codigo = str(fila.get("item_code") or item_code).strip()
+            deposito = str(fila.get("warehouse") or warehouse).strip()
+            if codigo != item_code or deposito != warehouse:
+                continue
+            if not _es_borrador(fila):
+                continue
+            pedido = str(fila.get("parent") or "").strip()
+            if pedido not in permitidos:
+                continue
+            promesa = _cantidad_en_stock_uom(fila)
+            if promesa < 0:
+                raise erpnext.ERPNextError(
+                    f"cantidad negativa en un borrador de {item_code}"
+                )
+            total += promesa
+    return total
+
+
+def _hay_stock(
+    item_code: str,
+    qty: float,
+    warehouse: str,
+    *,
+    excluir: str = "",
+    company: str = "",
+    desde: str = "",
+) -> bool:
+    """True only when ``qty`` fits above the safety buffer, drafts included."""
     if not warehouse or qty <= 0:
         return False
+    # A misconfigured buffer is refused before anything is read: it would
+    # otherwise turn the whole rule upside down.
+    buffer = float(os.getenv("STOCK_BUFFER_PCT", "20")) / 100.0
+    if buffer < 0 or buffer >= 1:
+        raise erpnext.ERPNextError("STOCK_BUFFER_PCT fuera de rango")
     bins = erpnext.get_list(
         "Bin",
         filters=[
@@ -243,9 +471,15 @@ def _hay_stock(item_code: str, qty: float, warehouse: str) -> bool:
         _float(row.get("actual_qty")) - _float(row.get("reserved_qty"))
         for row in bins
     )
-    buffer = float(os.getenv("STOCK_BUFFER_PCT", "20")) / 100.0
-    if buffer < 0 or buffer >= 1:
-        raise erpnext.ERPNextError("STOCK_BUFFER_PCT fuera de rango")
+    disponible -= _comprometido_en_borradores(
+        item_code, warehouse, excluir=excluir, company=company, desde=desde
+    )
+    # One subtraction per competing draft accumulates binary error: 10 minus
+    # three promises of 1.1 is 6.699999999999999, which refused an order for
+    # exactly 6.7 that the dairy could fill. Quantising the availability keeps
+    # the never-oversell direction — it moves by less than a millionth of a
+    # unit, far below anything a dairy weighs.
+    disponible = round(disponible, 6)
     return disponible * (1 - buffer) >= qty
 
 

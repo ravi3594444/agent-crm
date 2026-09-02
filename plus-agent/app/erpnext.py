@@ -120,28 +120,49 @@ def _resource_path(doctype: str, name: str | None = None) -> str:
     return f"{path}/{quote(name, safe='')}" if name is not None else path
 
 
-def get_list(
+def _list(
+    client: httpx.Client,
     doctype: str,
-    filters: list | None = None,
-    fields: list[str] | None = None,
-    limit: int = 20,
+    filters: list | None,
+    fields: list[str] | None,
+    limit: int,
+    parent: str | None,
 ) -> list[dict]:
     params: dict[str, Any] = {"limit_page_length": limit}
     if filters:
         params["filters"] = json.dumps(filters, ensure_ascii=False)
     if fields:
         params["fields"] = json.dumps(fields, ensure_ascii=False)
+    if parent:
+        # Frappe refuses to list a child doctype (a table row such as "Sales
+        # Order Item") without being told which parent doctype it belongs to.
+        params["parent"] = parent
     body = _request(
-        _active_client(),
+        client,
         "GET",
         _resource_path(doctype),
         operation=f"la consulta de {doctype}",
         params=params,
     )
-    data = body.get("data") or []
+    data = body.get("data")
+    # An answer with no list in it is NOT "zero rows". This used to coalesce
+    # with `or []`, so a 200 carrying {"data": null}, {} or someone else's
+    # envelope read as "nothing found" — and app/policy.py reads "nothing
+    # found" as "nothing is promised", which is how the last units get sold
+    # twice. Absence of an answer has to be an error.
     if not isinstance(data, list):
         raise ERPNextError(f"ERPNext devolvió datos inválidos para {doctype}")
     return data
+
+
+def get_list(
+    doctype: str,
+    filters: list | None = None,
+    fields: list[str] | None = None,
+    limit: int = 20,
+    parent: str | None = None,
+) -> list[dict]:
+    return _list(_active_client(), doctype, filters, fields, limit, parent)
 
 
 def get_doc(doctype: str, name: str) -> dict:
@@ -278,6 +299,55 @@ def policy_get_doc(doctype: str, name: str) -> dict:
     data = body.get("data")
     if not isinstance(data, dict):
         raise ERPNextError(f"ERPNext devolvió datos inválidos para {doctype}")
+    return data
+
+
+def policy_get_list(
+    doctype: str,
+    filters: list | None = None,
+    fields: list[str] | None = None,
+    limit: int = 20,
+    parent: str | None = None,
+) -> list[dict]:
+    """List documents with the policy identity, for policy checks only.
+
+    The restricted customer-agent user must not be able to enumerate other
+    customers' orders. app/policy.py needs exactly that to know how much stock
+    is already promised, so the read runs under the non-LLM policy identity.
+    """
+    return _list(_policy(), doctype, filters, fields, limit, parent)
+
+
+def policy_update_status(doctype: str, name: str, status: str) -> dict:
+    """Set only the workflow ``status`` field, with the policy identity.
+
+    Used by the manual rejection path so a draft nobody will fulfil stops
+    holding stock. It writes one Select field: it cannot submit, cancel, or
+    change quantities, prices or amounts. Submitting is still submit_doc alone.
+
+    A Frappe PUT is a save, not a field write: the doctype's own validate() can
+    recompute the field and still answer 200 carrying the OLD value. Reporting
+    that as success would be a lie the caller acts on, so the saved value is
+    checked and a silent reset is raised as an error.
+    """
+    body = _request(
+        _policy(),
+        "PUT",
+        _resource_path(doctype, name),
+        operation=f"la actualización de estado de {doctype}",
+        json={"status": status},
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(
+            f"ERPNext devolvió datos inválidos al actualizar {doctype}"
+        )
+    guardado = str(data.get("status") or "").strip()
+    if guardado != status:
+        raise ERPNextError(
+            f"ERPNext no dejó {doctype} {name} en estado {status}: "
+            f"quedó en {guardado or 'un estado desconocido'}"
+        )
     return data
 
 

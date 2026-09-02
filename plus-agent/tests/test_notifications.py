@@ -200,10 +200,10 @@ def test_reject_tells_the_customer_and_leaves_the_draft_unconfirmed(
     """The customer was told the order was received and would be confirmed.
 
     Rejecting used to tell only the manager 'no cambié su estado', so the
-    customer waited indefinitely. Now the customer is notified, the rejection is
-    audited, and the draft is deliberately left unconfirmed: a generic ERPNext
-    Sales Order has no durable rejected state and deleting it would destroy the
-    trail of something the customer was already told about.
+    customer waited indefinitely. Now the customer is notified and the
+    rejection is audited. The draft is never deleted and never cancelled —
+    that trail is of something the customer was already told about — but it IS
+    marked Closed, so it stops holding stock the next customer could have.
     """
     from app import decisiones
 
@@ -214,6 +214,11 @@ def test_reject_tells_the_customer_and_leaves_the_draft_unconfirmed(
     monkeypatch.setattr(decisiones, "_avisar_cliente_rechazo", lambda *a: True)
     comment = Mock()
     monkeypatch.setattr(decisiones.erpnext, "add_comment", comment)
+    monkeypatch.setattr(
+        decisiones, "_leer_doc", Mock(return_value={"docstatus": 0, "status": "Draft"})
+    )
+    estado = Mock(return_value={"name": "SAL-ORD-0001", "status": "Closed"})
+    monkeypatch.setattr(decisiones.erpnext, "policy_update_status", estado)
     submit = Mock()
     monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
 
@@ -224,6 +229,113 @@ def test_reject_tells_the_customer_and_leaves_the_draft_unconfirmed(
     submit.assert_not_called()
     audit = " ".join(str(c) for c in comment.call_args_list)
     assert "Rechazado manualmente" in audit
+    # policy._borradores_que_reservan reads this status: without it the
+    # rejected draft keeps the product away from live orders for ever.
+    estado.assert_called_once_with("Sales Order", "SAL-ORD-0001", "Closed")
+    assert "ya no compromete stock" in audit
+
+
+def test_a_rejection_that_cannot_be_closed_says_so_instead_of_pretending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing the draft is best effort: an older ERPNext may refuse to close a
+    document that was never submitted, and a Frappe PUT can even answer 200
+    having quietly recomputed the field back. The rejection still stands, and
+    the audit trail says the stock is still committed so somebody can act."""
+    from app import decisiones
+
+    monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
+    monkeypatch.setattr(
+        decisiones, "telefono_del_cliente", lambda nombre: "5493511234567"
+    )
+    monkeypatch.setattr(decisiones, "_avisar_cliente_rechazo", lambda *a: True)
+    comment = Mock()
+    monkeypatch.setattr(decisiones.erpnext, "add_comment", comment)
+    monkeypatch.setattr(
+        decisiones, "_leer_doc", Mock(return_value={"docstatus": 0, "status": "Draft"})
+    )
+    monkeypatch.setattr(
+        decisiones.erpnext,
+        "policy_update_status",
+        Mock(side_effect=decisiones.erpnext.ERPNextError("ERPNext rechazó")),
+    )
+    submit = Mock()
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
+
+    result = aprobacion.manejar_boton("no:SAL-ORD-0003", "5491100000000")
+
+    assert "rechazado" in result.lower()
+    submit.assert_not_called()
+    audit = " ".join(str(c) for c in comment.call_args_list)
+    assert "sigue comprometiendo stock" in audit
+
+
+def test_rejecting_never_touches_an_order_somebody_already_confirmed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both buttons live in the same WhatsApp message, so [Rechazar] can be
+    tapped after [Confirmar]. Stamping Closed on a submitted order would
+    release the stock ERPNext reserved for it and drop it out of the delivery
+    queue — ERPNext does not count a Closed order in reserved_qty."""
+    from app import decisiones
+
+    monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
+    monkeypatch.setattr(decisiones, "telefono_del_cliente", lambda nombre: "")
+    monkeypatch.setattr(decisiones.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(
+        decisiones,
+        "_leer_doc",
+        Mock(return_value={"docstatus": 1, "status": "To Deliver and Bill"}),
+    )
+    estado = Mock()
+    monkeypatch.setattr(decisiones.erpnext, "policy_update_status", estado)
+
+    aprobacion.manejar_boton("no:SAL-ORD-0004", "5491100000000")
+
+    estado.assert_not_called()
+
+
+def test_a_status_that_did_not_stick_is_reported_as_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Frappe PUT is a save, not a field write: the doctype's validate() can
+    recompute status and still answer 200 with the old value. Trusting the 200
+    would tell the manager the stock was released when it was not."""
+    from app import erpnext as cliente
+
+    monkeypatch.setattr(
+        cliente, "_request", Mock(return_value={"data": {"status": "Draft"}})
+    )
+    with pytest.raises(cliente.ERPNextError):
+        cliente.policy_update_status("Sales Order", "SAL-ORD-0005", "Closed")
+
+    monkeypatch.setattr(
+        cliente, "_request", Mock(return_value={"data": {"status": "Closed"}})
+    )
+    assert cliente.policy_update_status("Sales Order", "SAL-ORD-0005", "Closed") == {
+        "status": "Closed"
+    }
+
+
+def test_a_rejected_order_is_not_submittable_by_a_later_tap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Submitting a Closed order would promise units no reservation system can
+    see: ERPNext leaves status Closed across a submit and its get_reserved_qty
+    skips exactly that state. Reopening it has to be a deliberate act."""
+    monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
+    monkeypatch.setattr(
+        aprobacion,
+        "_leer_doc",
+        Mock(return_value={"docstatus": 0, "status": "Closed"}),
+    )
+    submit = Mock()
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
+
+    result = aprobacion.manejar_boton("ok:SAL-ORD-0006", "5491100000000")
+
+    submit.assert_not_called()
+    assert "reabrilo en ERPNext" in result
 
 
 def test_reject_warns_the_manager_when_the_customer_could_not_be_told(
@@ -234,6 +346,14 @@ def test_reject_warns_the_manager_when_the_customer_could_not_be_told(
     monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
     monkeypatch.setattr(decisiones, "telefono_del_cliente", lambda nombre: "")
     monkeypatch.setattr(decisiones.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(
+        decisiones, "_leer_doc", Mock(return_value={"docstatus": 0, "status": "Draft"})
+    )
+    monkeypatch.setattr(
+        decisiones.erpnext,
+        "policy_update_status",
+        Mock(return_value={"status": "Closed"}),
+    )
 
     result = aprobacion.manejar_boton("no:SAL-ORD-0002", "5491100000000")
 

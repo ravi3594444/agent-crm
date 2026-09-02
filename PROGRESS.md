@@ -52,10 +52,11 @@ submit** (`erpnext.submit_doc`, `erpnext.policy_get_doc`).
    manager "no cambié su estado" while the customer — already told the order was
    received — waited indefinitely. Free text first, approved template
    (`WHATSAPP_CUSTOMER_REJECTED_TEMPLATE`) only if Meta closed the 24 h window.
-   The draft is **left unconfirmed on purpose**: a generic ERPNext Sales Order has
-   no durable "rejected" state, and deleting it would destroy the audit trail of
-   something the customer was told about. The manager is told whether the customer
-   was actually reached.
+   The draft is **never deleted and never cancelled**: deleting it would destroy
+   the audit trail of something the customer was told about, and ERPNext cannot
+   cancel a document that was never submitted. Stage 2a added the missing half —
+   it is now marked `status = "Closed"` so it stops holding stock. The manager is
+   told whether the customer was actually reached.
 3. **The manager is really alerted.** `notificar.alertar_excepcion()` is the single
    funnel; `avisar_falla_tecnica` (a crash — the apology text claims the team was
    told, so now it is) and `avisar_escalamiento` (an ERPNext ToDo is invisible until
@@ -74,17 +75,99 @@ Result: **277 passed, 1 xfailed**, lint clean.
 
 ---
 
-## Stage 2 — NEXT, in this order
+## Stage 2a — DONE: two drafts can no longer sell the same last units
 
-### 2a. Stock: subtract what other drafts already promised
-Converts the last strict xfail:
-`tests/test_policy_reglas.py::test_quantity_promised_in_other_draft_orders_is_subtracted_from_stock`
-(it documents the gap — read its `reason=`). In ERPNext a **draft does not touch
-`Bin.reserved_qty`**, so today two drafts can auto-confirm the same last units.
-In `policy._hay_stock`, subtract qty from other **draft** `Sales Order Item` rows
-(`docstatus = 0`), excluding the order being evaluated. A lookup failure must fail
-**closed** (rule fails → human). Remove the xfail marker when it passes.
-Reference implementation: `git show origin/claude/architecture-review-testing-j1xc5z:plus-agent/app/policy.py`.
+The gap: in ERPNext a **draft does not touch `Bin.reserved_qty`** — that only
+rises on submit. Reading `Bin` alone, two drafts minutes apart both saw the same
+last units as free and both auto-confirmed. One of those customers was going to
+find out on delivery day.
+
+**The formula**, in `policy._hay_stock`, all in the item's **stock** unit
+(`_cantidad_en_stock_uom`, because `Bin` is):
+
+```
+disponible = Σ(Bin.actual_qty − Bin.reserved_qty)       submitted orders, once
+           − Σ(stock qty promised in other live orders) the new virtual reservation
+confirma solo  ⇔  round(disponible, 6) × (1 − STOCK_BUFFER_PCT) ≥ qty
+```
+
+**Which orders hold stock** — `_borradores_que_reservan` asks ERPNext for the
+ORDERS first (`docstatus = 0`, same `company`, `status not in ("Closed",
+"Cancelled", "On Hold")`), then `_comprometido_en_borradores` reads the item rows
+for those orders in batches of 50. Both reads use the **policy identity**
+(`erpnext.policy_get_list`): the customer agent must not be able to enumerate
+other customers' orders. Order matters — asking for rows first and discarding
+most of them afterwards let rejected drafts (kept for ever on purpose) fill the
+truncation cap, which would have switched auto-confirmation off permanently for
+a busy product. Batching matters too: a few hundred order names in one `in`
+filter exceed gunicorn's default request-line limit and come back as a 414.
+
+That status list is not a guess: ERPNext's own `get_reserved_qty`
+(`erpnext/stock/stock_balance.py`) sums `where docstatus = 1 and status not in
+('On Hold', 'Closed')`. `policy.ESTADOS_SIN_RESERVA` is the same set.
+
+**Two exclusions matter as much as the subtraction:**
+- the order being evaluated (`excluir=`) — its quantity is the one being checked;
+- any order asked for **later** (`desde=` its `creation`) — without it, two
+  drafts for the last 8 units each defer to the other and the dairy sells to
+  neither. First to ask keeps the claim.
+
+**Rejected drafts stopped holding stock.** `decisiones.rechazar` marks the draft
+`Closed` via `erpnext.policy_update_status` — one Select field, policy identity,
+never a submit, and **only ever on a draft** (a `no:` tap can arrive after a
+`ok:` tap, and stamping Closed on a submitted order would release the stock
+ERPNext reserved and drop it out of the delivery queue). Best effort and audited
+either way: the comment says `ya no compromete stock` or `sigue comprometiendo
+stock`. A Frappe PUT is a *save*, so the doctype can recompute the field and
+still answer 200 — the saved value is compared, not trusted.
+And `aprobacion.confirmar_pedido` now refuses to submit an order in one of those
+states, because ERPNext keeps the status across a submit and then counts no
+reservation for it at all.
+
+**Fails closed** (raises → `evaluar` records "no se pudo verificar stock de X" →
+draft → existing exception flow, and the real cause is logged as
+`[policy] stock no verificable`): lookup error or timeout, more live drafts than
+`MAX_BORRADORES`, more rows than `MAX_RENGLONES_POR_PEDIDO` per order, a negative
+quantity, a quantity not convertible to the stock unit — and, new in the client,
+an ERPNext answer with no list in it (`{"data": null}`, `{}`) which used to
+coalesce to `[]` and read as "nothing is promised".
+
+Everything stays inside the existing lock: `_after_create` still re-reads and
+re-runs `policy.evaluar` under `policy.auto_submit_lock()`, and the draft lookup
+now happens in there with it
+(`test_competing_drafts_are_re_read_inside_the_submit_lock`).
+
+Files: `app/policy.py`, `app/erpnext.py` (`_list` + `policy_get_list` +
+`policy_update_status`; `get_list` gained `parent=` because Frappe refuses to
+list a child doctype without naming its parent), `app/decisiones.py`,
+`app/aprobacion.py`, `README.md`, and the three test files.
+
+Result: **315 passed, 0 xfailed** (was 277 + 1 strict xfail), lint clean. Every
+guard was mutation-tested: removing any one of them fails at least one test.
+
+### Known ERPNext ambiguity, worth knowing before touching this
+1. **`status = "Closed"` on a draft is version-dependent.** Frappe's
+   `StatusUpdater.set_status()` keeps it only while `status_map`'s Closed row is
+   `eval:self.status=='Closed'`. If a build recomputes it back to Draft, the PUT
+   still answers 200 — which is exactly why the saved value is checked and the
+   failure is surfaced instead of assumed away.
+2. **A submitted order whose status is Closed or On Hold reserves nothing in
+   ERPNext either.** Nothing here can see those units: the child rows are read
+   with `docstatus = 0`. It is ERPNext's own accounting choice and it predates
+   this change; the guard in `aprobacion.confirmar_pedido` closes the route this
+   app could have taken into that state.
+3. **Listing a child doctype needs `parent=`** on Frappe v14+. Sent always;
+   harmless where it is ignored.
+
+**Left open on purpose:** `app/tools/catalogo.py::consultar_stock` — the
+DISPONIBLE / POCO / SIN STOCK answer the customer agent gives — still reads `Bin`
+alone, so it can say DISPONIBLE for units another draft has promised. It is
+orientative by design and cannot confirm anything, but it should get the same
+deduction. Same for the `gerencia.py` / `captura.py` readouts.
+
+---
+
+## Stage 2 — NEXT, in this order
 
 ### 2b. Manager-configured limits (all read per call, no restart)
 Existing: `AUTO_CONFIRM_MAX`, `STOCK_BUFFER_PCT`, `AUTO_CONFIRM_MAX_DEBT`,

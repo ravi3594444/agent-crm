@@ -33,6 +33,12 @@ from app import erpnext, telefono
 
 _PURPOSE_RECHAZO = "customer_order_rejected"
 
+# ERPNext has no "rejected" docstatus, and a draft cannot be cancelled. The
+# closest durable state it does understand is status "Closed", which is one of
+# the states its own get_reserved_qty does not count — see
+# policy.ESTADOS_SIN_RESERVA.
+_ESTADO_SIN_RESERVA = "Closed"
+
 
 def _resultado(ok: bool, aviso_cliente: bool, detalle: str) -> dict:
     return {"ok": ok, "aviso_cliente": aviso_cliente, "detalle": detalle}
@@ -85,14 +91,15 @@ def rechazar(nombre: str, por: str, motivo: str = "") -> dict:
     That is the worst outcome this system can produce, so the customer notice
     comes first and its success is reported back to the manager.
 
-    The draft is NOT deleted or cancelled. A generic ERPNext Sales Order has no
-    durable "rejected" state, and inventing one by deleting the document would
-    destroy the audit trail of something the customer was already told about.
-    The rejection is recorded as a Comment and the manager is told the draft is
-    still there to amend or remove in ERPNext.
+    The draft is NOT deleted and NOT cancelled: deleting it would destroy the
+    audit trail of something the customer was already told about, and ERPNext
+    cannot cancel a document that was never submitted. It is marked "Closed"
+    instead, so it stops holding stock a live order could use, and the manager
+    is told it is still there to amend or remove in ERPNext.
     """
     razon = (motivo or "").strip()
     tel = telefono_del_cliente(nombre)
+    sin_reserva = _marcar_sin_reserva(nombre)
 
     avisado = False
     if tel:
@@ -109,7 +116,14 @@ def rechazar(nombre: str, por: str, motivo: str = "") -> dict:
         f"Rechazado manualmente por un integrante autorizado ({por}). "
         f"Motivo: {razon or 'sin detalle'}. "
         f"Aviso al cliente: {'enviado' if avisado else 'NO enviado'}. "
-        "El borrador queda sin confirmar para revisión en ERPNext.",
+        "El borrador queda sin confirmar para revisión en ERPNext. "
+        + (
+            f"Marcado como {_ESTADO_SIN_RESERVA}: ya no compromete stock."
+            if sin_reserva
+            else "ATENCIÓN: no pude marcarlo como "
+            f"{_ESTADO_SIN_RESERVA}, sigue comprometiendo stock hasta que lo "
+            "cierres o lo borres a mano."
+        ),
     )
 
     if avisado:
@@ -119,6 +133,38 @@ def rechazar(nombre: str, por: str, motivo: str = "") -> dict:
     else:
         detalle = "Rechazo registrado; el cliente no tiene teléfono cargado."
     return _resultado(True, avisado, detalle)
+
+
+def _marcar_sin_reserva(nombre: str) -> bool:
+    """Stop a rejected draft from holding stock nobody is going to deliver.
+
+    Without this the order still counts as a promise in
+    policy._comprometido_en_borradores, and a product the dairy actually has
+    stays unavailable to the next customer until somebody remembers the draft.
+
+    Only ever touches a DRAFT. A [Rechazar] tap can arrive for an order
+    somebody already confirmed — the same message carries both buttons — and
+    stamping "Closed" on a submitted order would release the stock ERPNext had
+    reserved for it and drop it out of the delivery queue.
+
+    Best effort, and audited either way: an older ERPNext build may refuse to
+    close a document that was never submitted. The rejection does not depend on
+    it, so a failure here never changes what the manager or the customer is
+    told.
+    """
+    try:
+        actual = _leer_doc("Sales Order", nombre)
+        if int(actual.get("docstatus") or 0) != 0:
+            print(f"[decisiones] {nombre}: no lo cierro, ya no es un borrador")
+            return False
+        erpnext.policy_update_status("Sales Order", nombre, _ESTADO_SIN_RESERVA)
+        return True
+    except Exception as exc:
+        print(
+            f"[decisiones] {nombre}: no pude marcarlo como "
+            f"{_ESTADO_SIN_RESERVA} ({type(exc).__name__})"
+        )
+        return False
 
 
 def _comentar(nombre: str, texto: str) -> None:

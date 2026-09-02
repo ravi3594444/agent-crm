@@ -88,7 +88,7 @@ Those confirm INSTANTLY. Only unusual ones wake a human. Every rule must pass:
 | Not wildly above customer's own average | 2x |
 | Customer has real order history | 3+ confirmed orders |
 | No overdue balance | 0 |
-| Stock verified above safety buffer | — |
+| Stock above the buffer, minus what other open orders already promised | — |
 | List price, no negotiated rate | — |
 
 **The safety property:** `policy.py` is deterministic Python. It never sees the
@@ -101,6 +101,21 @@ Evaluate-and-submit runs under a Redis lock (`app/locks.py`) and re-reads the
 order while holding it. Without that, two customers ordering the last of
 something both pass the check and both get confirmed — in ERPNext a draft
 Sales Order does not reserve stock; `reserved_qty` only rises on submit.
+
+The lock serializes the check, but it cannot make visible a promise ERPNext
+does not count. So the rule also subtracts, as a virtual reservation, the
+quantity promised in every OTHER order that still holds it
+(`policy._comprometido_en_borradores`, read with the policy identity, inside
+the same lock). Which orders those are is asked of ERPNext first: `docstatus`
+0, same company, and `status` not in Closed / Cancelled / On Hold — the same
+three ERPNext's own `get_reserved_qty` skips, and where a manual rejection
+leaves the draft. Two exclusions matter as much as the subtraction: the order
+being evaluated (its quantity is the one being checked) and any order asked
+for *later*, so that two customers wanting the last 8 units do not each defer
+to the other and leave the dairy selling to neither. If the lookup fails, is
+truncated, or returns a quantity that cannot be converted to the item's stock
+unit, the order stays a draft for a person — uncertain stock is never a
+confirmation.
 
 Start `AUTO_CONFIRM_MAX=0` (everything reviewed). Watch `make decisiones` for
 a week, then raise it a notch at a time (stage 9 of PRUEBAS.md). By month two
@@ -155,9 +170,10 @@ No data entry, no new app, no training. The same WhatsApp they already use.
 
 Even then the bot answers in **levels, not numbers** — DISPONIBLE /
 POCO STOCK / SIN STOCK — with `STOCK_BUFFER_PCT` (default 20%) absorbing
-sales not yet loaded. Submitted Sales Orders contribute to ERPNext's
-`reserved_qty`; bot auto-confirmations are serialized and recheck stock while
-holding the business lock.
+sales not yet loaded. That orientative answer reads ERPNext's `Bin` alone.
+The rule that actually confirms an order with nobody watching is stricter: it
+subtracts submitted orders (`reserved_qty`), the safety buffer, AND everything
+promised in other open orders, all while holding the business lock.
 
 **Daily rhythm that makes it work**
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import date
 from datetime import datetime as RealDateTime
 from pathlib import Path
@@ -463,7 +463,9 @@ def test_policy_aggregates_duplicate_lines_per_item_and_warehouse(
     decision = policy.evaluar(_order(items=[first, second]))
 
     assert decision.auto is True
-    stock.assert_called_once_with("LECHE-1L", 9.0, "Depósito A - LP")
+    stock.assert_called_once_with(
+        "LECHE-1L", 9.0, "Depósito A - LP", excluir="SO-0001", company="", desde=""
+    )
 
 
 def test_policy_stock_query_is_scoped_to_assigned_warehouse(
@@ -472,8 +474,10 @@ def test_policy_stock_query_is_scoped_to_assigned_warehouse(
     monkeypatch.setenv("STOCK_BUFFER_PCT", "0")
     get_list = Mock(return_value=[{"actual_qty": 8, "reserved_qty": 2}])
     monkeypatch.setattr(erpnext, "get_list", get_list)
+    monkeypatch.setattr(erpnext, "policy_get_list", Mock(return_value=[]))
 
     assert policy._hay_stock("LECHE-1L", 5, "Depósito A - LP") is True
+    # Still exactly one read on the restricted identity, and still that one.
     get_list.assert_called_once_with(
         "Bin",
         filters=[
@@ -483,6 +487,163 @@ def test_policy_stock_query_is_scoped_to_assigned_warehouse(
         fields=["actual_qty", "reserved_qty"],
         limit=10,
     )
+
+
+def _politica_verde(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fisico: float = 10.0,
+    renglones: tuple[dict, ...] = (),
+    padres: tuple[dict, ...] = (),
+    borradores_fallan: bool = False,
+    rastro: list[str] | None = None,
+) -> dict:
+    """Every rule green EXCEPT that the real _hay_stock runs against ERPNext.
+
+    Nothing here mocks _hay_stock: the point of these tests is the whole
+    confirmation path — policy, the global lock, the re-read and the submit —
+    with the competing-draft lookup answering for real.
+    """
+    monkeypatch.setattr(policy, "MAX_AUTO", 1_000.0)
+    monkeypatch.setattr(policy, "MAX_MULT", 2.0)
+    monkeypatch.setattr(policy, "MIN_PEDIDOS", 1)
+    monkeypatch.setattr(policy, "MAX_DEUDA", 0.0)
+    monkeypatch.setattr(policy, "STOCK_CONFIABLE", True)
+    monkeypatch.setattr(policy, "PRICE_LIST", "Standard Selling")
+    monkeypatch.setattr(policy, "CURRENCY", "ARS")
+    monkeypatch.setattr(policy, "_hoy_del_negocio", lambda: date(2026, 8, 29))
+    monkeypatch.setattr(policy, "_saldo_vencido", Mock(return_value=0.0))
+    monkeypatch.setattr(policy, "_precio_estandar", Mock(return_value=True))
+    monkeypatch.setenv("STOCK_BUFFER_PCT", "0")
+
+    def get_list(doctype, filters=None, fields=None, limit=20, parent=None):
+        if doctype == "Bin":
+            return [{"actual_qty": fisico, "reserved_qty": 0}]
+        if doctype == "Sales Order":  # the customer's order history
+            return [{"grand_total": 100}]
+        return []
+
+    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None):
+        if rastro is not None:
+            rastro.append(f"lee:{doctype}")
+        if borradores_fallan:
+            raise erpnext.ERPNextError("ERPNext no disponible")
+        if doctype == "Sales Order":
+            return [dict(row) for row in padres]
+        if doctype == "Sales Order Item":
+            return [dict(row) for row in renglones]
+        return []
+
+    monkeypatch.setattr(erpnext, "get_list", Mock(side_effect=get_list))
+    monkeypatch.setattr(erpnext, "policy_get_list", Mock(side_effect=policy_get_list))
+    monkeypatch.setattr(erpnext, "get_doc", Mock(return_value=_order()))
+    comment = Mock()
+    monkeypatch.setattr(erpnext, "add_comment", comment)
+    submit = Mock(return_value=_order(docstatus=1))
+    monkeypatch.setattr(erpnext, "submit_doc", submit)
+    notify = Mock(return_value=True)
+    monkeypatch.setattr(pedidos, "notificar_equipo", notify)
+    return {"submit": submit, "comment": comment, "notify": notify}
+
+
+def test_an_order_with_no_competing_draft_still_auto_confirms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reservation rule must not quietly switch auto-confirmation off."""
+    mocks = _politica_verde(monkeypatch, fisico=10, renglones=())
+    draft = _order()
+
+    result = pedidos._after_create(draft, draft["items"], draft["delivery_date"])
+
+    assert result.startswith("PEDIDO_CONFIRMADO. Número real: SO-0001")
+    mocks["submit"].assert_called_once_with("Sales Order", "SO-0001")
+
+
+def test_a_competing_draft_sends_the_second_order_to_a_human(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both customers asked for 5 of the last 8. The first one keeps them; the
+    second waits for a person instead of being promised what is gone."""
+    mocks = _politica_verde(
+        monkeypatch,
+        fisico=8,
+        renglones=(
+            {
+                "parent": "SO-OTHER",
+                "item_code": "LECHE-1L",
+                "warehouse": "Depósito A - LP",
+                "docstatus": 0,
+                "qty": 5,
+                "stock_qty": 5,
+                "uom": "Unidad",
+                "stock_uom": "Unidad",
+                "conversion_factor": 1,
+            },
+        ),
+        padres=(
+            {
+                "name": "SO-OTHER",
+                "docstatus": 0,
+                "status": "Draft",
+                "creation": "2026-08-28 09:00:00",
+            },
+        ),
+    )
+    draft = _order()
+
+    result = pedidos._after_create(draft, draft["items"], draft["delivery_date"])
+
+    assert result.startswith("PEDIDO_PENDIENTE. Número real: SO-0001")
+    mocks["submit"].assert_not_called()
+    audit = " ".join(str(call) for call in mocks["comment"].call_args_list)
+    assert "stock insuficiente de LECHE-1L" in audit
+    assert mocks["notify"].call_args.kwargs["auto"] is False
+
+
+def test_a_failed_draft_lookup_leaves_the_order_pending_and_unsubmitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uncertain stock is not a green light. The order stays a draft and the
+    reason travels the existing exception route to the team."""
+    mocks = _politica_verde(monkeypatch, fisico=1_000, borradores_fallan=True)
+    draft = _order()
+
+    result = pedidos._after_create(draft, draft["items"], draft["delivery_date"])
+
+    assert result.startswith("PEDIDO_PENDIENTE. Número real: SO-0001")
+    mocks["submit"].assert_not_called()
+    audit = " ".join(str(call) for call in mocks["comment"].call_args_list)
+    assert "no se pudo verificar stock de LECHE-1L" in audit
+    assert mocks["notify"].call_args.kwargs["auto"] is False
+    assert "no se pudo verificar stock" in mocks["notify"].call_args.kwargs["motivos"]
+
+
+def test_competing_drafts_are_re_read_inside_the_submit_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two workers can hold two drafts for the same last units at the same
+    time. Only a lookup INSIDE the global lock, after the re-read, can see the
+    other one; a lookup before the lock is a race, not a check."""
+    rastro: list[str] = []
+    mocks = _politica_verde(monkeypatch, fisico=10, rastro=rastro)
+
+    @contextmanager
+    def lock():
+        rastro.append("lock-in")
+        try:
+            yield
+        finally:
+            rastro.append("lock-out")
+
+    monkeypatch.setattr(policy, "auto_submit_lock", lock)
+    draft = _order()
+
+    result = pedidos._after_create(draft, draft["items"], draft["delivery_date"])
+
+    assert result.startswith("PEDIDO_CONFIRMADO")
+    mocks["submit"].assert_called_once_with("Sales Order", "SO-0001")
+    dentro = rastro[rastro.index("lock-in") : rastro.index("lock-out")]
+    assert "lee:Sales Order" in dentro
 
 
 def test_standard_price_requires_exact_unscoped_valid_currency_uom_record(

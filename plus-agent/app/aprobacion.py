@@ -5,7 +5,7 @@ button payload gets nothing.
 """
 import os
 
-from app import erpnext
+from app import erpnext, policy
 from app.formato import pesos
 from app.outbound_status import has_accepted, record_outbound
 from app.router import es_equipo
@@ -83,6 +83,21 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
                 "ok": False,
                 "aviso_cliente": False,
                 "detalle": f"No se puede confirmar {nombre} en su estado actual.",
+            }
+        if not ya_confirmado and policy.sin_reserva(actual.get("status")):
+            # A rejected draft is left Closed so it stops holding stock.
+            # ERPNext does not count a Closed order in reserved_qty even after
+            # a submit, so submitting this one would promise units that no
+            # reservation system can see, and it would never reach the
+            # delivery queue either. Reopening it is a deliberate act.
+            return {
+                "ok": False,
+                "aviso_cliente": False,
+                "detalle": (
+                    f"{nombre} está {actual.get('status')} — se rechazó antes y ya "
+                    "no reserva stock. Si lo querés confirmar, reabrilo en ERPNext "
+                    "(estado Draft) y volvé a tocar Confirmar."
+                ),
             }
         if not ya_confirmado:
             try:
