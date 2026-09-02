@@ -147,6 +147,17 @@ def consultar_stock(item_code: str) -> str:
         float(row.get("actual_qty") or 0) - float(row.get("reserved_qty") or 0)
         for row in bins
     )
+    try:
+        # The same deduction the auto-confirmation rule makes. A draft holds
+        # units ERPNext has not reserved yet, so on Bin alone this tool
+        # answered "hay stock" for milk another customer is already waiting
+        # for — and the customer heard that as a promise.
+        available -= policy.comprometido_en_borradores(item_code, warehouse)
+    except erpnext.ERPNextError:
+        return (
+            f"No pude verificar cuánto de {item_code} ya está comprometido. "
+            "No confirmes disponibilidad."
+        )
     buffer = float(os.getenv("STOCK_BUFFER_PCT", "20")) / 100.0
     if buffer < 0 or buffer >= 1:
         return f"{item_code}: configuración de stock inválida. No confirmes disponibilidad."

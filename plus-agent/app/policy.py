@@ -469,6 +469,26 @@ def _comprometido_en_borradores(
     return total
 
 
+def comprometido_en_borradores(item_code: str, warehouse: str) -> float:
+    """Units of this product already promised in orders nobody confirmed yet.
+
+    Public entry point for read-only callers that just want the figure — the
+    orientative level the customer agent answers with. It counts EVERY live
+    claim: there is no order of our own to exclude and no place in the queue to
+    respect, because nobody has ordered anything yet.
+
+    The auto-confirmation rule uses the keyword form directly instead; it has
+    both of those to take into account.
+    """
+    return _comprometido_en_borradores(
+        item_code,
+        warehouse,
+        excluir="",
+        company=erpnext.default_company(),
+        desde="",
+    )
+
+
 def _hay_stock(
     item_code: str,
     qty: float,

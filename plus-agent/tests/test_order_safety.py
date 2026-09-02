@@ -489,6 +489,87 @@ def test_policy_stock_query_is_scoped_to_assigned_warehouse(
     )
 
 
+def _catalogo_erp(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fisico: float,
+    prometido: float = 0.0,
+    borradores_fallan: bool = False,
+) -> None:
+    """Wire consultar_stock's two reads: Bin, and what other drafts hold."""
+    monkeypatch.setattr(catalogo, "STOCK_CONFIABLE", True)
+    monkeypatch.setenv("STOCK_BUFFER_PCT", "0")
+    monkeypatch.setenv("STOCK_POCO", "20")
+    monkeypatch.setattr(erpnext, "default_warehouse", lambda: "Depósito A - LP")
+    monkeypatch.setattr(erpnext, "default_company", lambda: "Lácteos Plus SA")
+    monkeypatch.setattr(
+        erpnext,
+        "get_list",
+        Mock(return_value=[{"warehouse": "Depósito A - LP", "actual_qty": fisico, "reserved_qty": 0}]),
+    )
+
+    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None):
+        if borradores_fallan:
+            raise erpnext.ERPNextError("ERPNext no disponible")
+        if doctype == "Sales Order":
+            return [
+                {
+                    "name": "SO-OTHER",
+                    "docstatus": 0,
+                    "status": "Draft",
+                    "company": "Lácteos Plus SA",
+                    "creation": "2026-08-28 09:00:00",
+                }
+            ]
+        return [
+            {
+                "parent": "SO-OTHER",
+                "item_code": "LECHE-1L",
+                "warehouse": "Depósito A - LP",
+                "docstatus": 0,
+                "qty": prometido,
+                "stock_qty": prometido,
+                "uom": "Unidad",
+                "stock_uom": "Unidad",
+                "conversion_factor": 1,
+            }
+        ]
+
+    monkeypatch.setattr(erpnext, "policy_get_list", Mock(side_effect=policy_get_list))
+
+
+def test_the_customer_answer_deducts_what_other_drafts_already_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Bin alone this said "stock registrado" for units another customer is
+    already waiting for, and the customer heard a promise. 30 in the fridge
+    with 25 promised is not 30."""
+    _catalogo_erp(monkeypatch, fisico=30, prometido=25)
+
+    assert "POCO STOCK" in catalogo.consultar_stock.invoke({"item_code": "LECHE-1L"})
+
+
+def test_the_customer_answer_says_sin_stock_when_drafts_hold_it_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _catalogo_erp(monkeypatch, fisico=10, prometido=10)
+
+    assert "SIN STOCK" in catalogo.consultar_stock.invoke({"item_code": "LECHE-1L"})
+
+
+def test_the_customer_answer_promises_nothing_when_the_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uncertainty must reach the customer as "I am not confirming", never as
+    availability."""
+    _catalogo_erp(monkeypatch, fisico=1_000, borradores_fallan=True)
+
+    answer = catalogo.consultar_stock.invoke({"item_code": "LECHE-1L"})
+
+    assert "No confirmes disponibilidad" in answer
+    assert "stock registrado" not in answer
+
+
 def _politica_verde(
     monkeypatch: pytest.MonkeyPatch,
     *,

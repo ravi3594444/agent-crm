@@ -183,11 +183,22 @@ guard was mutation-tested: removing any one of them fails at least one test.
 3. **Listing a child doctype needs `parent=`** on Frappe v14+. Sent always;
    harmless where it is ignored.
 
-**Left open on purpose:** `app/tools/catalogo.py::consultar_stock` — the
-DISPONIBLE / POCO / SIN STOCK answer the customer agent gives — still reads `Bin`
-alone, so it can say DISPONIBLE for units another draft has promised. It is
-orientative by design and cannot confirm anything, but it should get the same
-deduction. Same for the `gerencia.py` / `captura.py` readouts.
+## Stage 2a.1 — DONE: the customer answer deducts the same drafts
+
+`app/tools/catalogo.py::consultar_stock` — the DISPONIBLE / POCO / SIN STOCK
+level the Sales Agent answers with — read `Bin` alone, so it could say there is
+stock for units another draft had already promised, and a customer hears that
+as a promise. It now subtracts the same figure through
+`policy.comprometido_en_borradores(item_code, warehouse)`, a public wrapper that
+counts EVERY live claim: nobody has ordered anything yet, so there is no order
+of our own to exclude and no queue position to respect. A failed lookup answers
+"No pude verificar cuánto ya está comprometido. No confirmes disponibilidad" —
+uncertainty reaches the customer as a refusal to promise, never as availability.
+
+**Still open:** the `gerencia.py` and `captura.py` stock readouts (what the
+OWNER sees) are `Bin`-only. That is arguably right — the owner wants the
+physical count, not the net — but the briefing should show both, and that
+belongs with 2e.
 
 ---
 
