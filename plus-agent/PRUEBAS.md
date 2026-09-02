@@ -33,7 +33,7 @@ cd plus-agent
 make test
 ```
 
-**Expect:** `74 passed`.
+**Expect:** `260 passed, 3 xfailed`. The 3 xfails are strict and deliberate: each documents a known gap in the code (see the `reason=` in the test). If one of them ever *passes*, the gap was fixed and the marker must be removed.
 
 Also run the full check that CI runs:
 
