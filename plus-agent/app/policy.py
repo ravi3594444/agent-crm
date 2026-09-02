@@ -9,6 +9,7 @@ from typing import Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app import erpnext
+from app.formato import pesos
 from app.locks import distributed_lock
 
 MAX_AUTO = float(os.getenv("AUTO_CONFIRM_MAX", "0"))
@@ -75,7 +76,7 @@ def evaluar(sales_order: dict) -> Decision:
     if total <= 0:
         motivos.append("total no positivo")
     elif total > MAX_AUTO:
-        motivos.append(f"monto ${total:,.0f} supera el tope de ${MAX_AUTO:,.0f}")
+        motivos.append(f"monto {pesos(total)} supera el tope de {pesos(MAX_AUTO)}")
 
     if PRICE_LIST and str(sales_order.get("selling_price_list") or "") != PRICE_LIST:
         motivos.append("lista de precios distinta de la autorizada")
@@ -113,7 +114,7 @@ def evaluar(sales_order: dict) -> Decision:
                     motivos.append("historial sin un promedio positivo")
                 elif total > promedio * MAX_MULT:
                     motivos.append(
-                        f"pedido ${total:,.0f} supera {MAX_MULT:g}x su promedio"
+                        f"pedido {pesos(total)} supera {MAX_MULT:g}x su promedio"
                     )
         except (erpnext.ERPNextError, KeyError):
             motivos.append("no se pudo verificar el historial")
@@ -122,7 +123,7 @@ def evaluar(sales_order: dict) -> Decision:
         if deuda is None:
             motivos.append("no se pudo verificar la deuda vencida")
         elif deuda > MAX_DEUDA:
-            motivos.append(f"tiene ${deuda:,.0f} vencidos")
+            motivos.append(f"tiene {pesos(deuda)} vencidos")
 
     items = sales_order.get("items") or []
     if not isinstance(items, list) or not items:

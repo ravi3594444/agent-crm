@@ -6,6 +6,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 from app import erpnext, policy
+from app.formato import pesos
 from app.runtime_context import RuntimeContextError, actor_context, require_customer
 
 STOCK_CONFIABLE = os.getenv("STOCK_CONFIABLE", "false").strip().lower() == "true"
@@ -216,6 +217,6 @@ def pedido_habitual(config: RunnableConfig) -> str:
     )
     return (
         f"Último pedido ({order['name']}, {order.get('transaction_date')}):\n{lines}\n"
-        f"Total ${order.get('grand_total', 0):,.0f}. Confirmá productos, cantidades, "
+        f"Total {pesos(order.get('grand_total', 0))}. Confirmá productos, cantidades, "
         "unidades y una nueva fecha de entrega antes de crear otro pedido."
     )

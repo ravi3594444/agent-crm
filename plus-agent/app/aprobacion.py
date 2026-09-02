@@ -6,6 +6,7 @@ button payload gets nothing.
 import os
 
 from app import erpnext
+from app.formato import pesos
 from app.outbound_status import has_accepted, record_outbound
 from app.router import es_equipo
 from app.whatsapp import enviar_plantilla
@@ -74,12 +75,12 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
             return f"No pude abrir {nombre}. Revisalo en ERPNext."
         detalle = "\n".join(
             f"  · {i['qty']:g} x {i.get('item_name') or i['item_code']} "
-            f"= ${i.get('amount', 0):,.0f}"
+            f"= {pesos(i.get('amount', 0))}"
             for i in so.get("items", [])
         )
         return (
             f"{nombre} — {so.get('customer_name') or so['customer']}\n{detalle}\n"
-            f"Total ${so.get('grand_total', 0):,.0f} · entrega {so.get('delivery_date')}"
+            f"Total {pesos(so.get('grand_total', 0))} · entrega {so.get('delivery_date')}"
         )
 
     return "Acción desconocida."

@@ -13,6 +13,7 @@ from datetime import date, timedelta
 from langchain_core.tools import tool
 
 from app import erpnext
+from app.formato import pesos
 
 
 @tool
@@ -47,7 +48,7 @@ def pedidos_pendientes() -> str:
     if not sos:
         return "No hay pedidos pendientes de confirmación."
     lineas = [
-        f"- {s['name']} · {s['customer']} · ${s['grand_total']:,.0f} · entrega {s['delivery_date']}"
+        f"- {s['name']} · {s['customer']} · {pesos(s['grand_total'])} · entrega {s['delivery_date']}"
         for s in sos
     ]
     return f"{len(sos)} pedidos pendientes de confirmar:\n" + "\n".join(lineas)
@@ -66,7 +67,7 @@ def ventas_del_periodo(dias: int = 7) -> str:
     total = sum(s["grand_total"] for s in sos)
     return (
         f"Últimos {dias} días: {len(sos)} pedidos confirmados, "
-        f"total ${total:,.0f}. Promedio ${total / len(sos):,.0f} por pedido."
+        f"total {pesos(total)}. Promedio {pesos(total / len(sos))} por pedido."
         if sos
         else f"Sin pedidos confirmados en los últimos {dias} días."
     )
@@ -106,10 +107,10 @@ def cobranzas_vencidas() -> str:
     total = sum(r["outstanding_amount"] for r in vencidas)
     top = sorted(vencidas, key=lambda r: -r["outstanding_amount"])[:10]
     lineas = [
-        f"- {r.get('customer_name') or r.get('party')}: ${r['outstanding_amount']:,.0f}"
+        f"- {r.get('customer_name') or r.get('party')}: {pesos(r['outstanding_amount'])}"
         for r in top
     ]
-    return f"Total a cobrar ${total:,.0f} en {len(vencidas)} facturas.\n" + "\n".join(lineas)
+    return f"Total a cobrar {pesos(total)} en {len(vencidas)} facturas.\n" + "\n".join(lineas)
 
 
 @tool
@@ -131,7 +132,7 @@ def ficha_cliente(nombre_o_codigo: str) -> str:
         limit=10,
     )
     hist = "\n".join(
-        f"  · {s['transaction_date']} {s['name']} ${s['grand_total']:,.0f} ({s['status']})"
+        f"  · {s['transaction_date']} {s['name']} {pesos(s['grand_total'])} ({s['status']})"
         for s in sos
     ) or "  · sin pedidos confirmados"
     return (

@@ -8,6 +8,8 @@ import os
 
 import httpx
 
+from app.formato import whatsapp_texto
+
 PHONE_ID = os.environ["WHATSAPP_PHONE_NUMBER_ID"]
 TOKEN = os.environ["WHATSAPP_TOKEN"]
 
@@ -47,6 +49,9 @@ def _post(payload: dict) -> dict:
 
 
 def enviar_mensaje(telefono: str, texto: str) -> dict:
+    # El modelo escribe Markdown; WhatsApp no. Traducir aquí cubre todas
+    # las salidas de texto libre sin tocar graph.py ni main.py.
+    texto = whatsapp_texto(texto)
     return _post({
         "messaging_product": "whatsapp",
         "to": telefono,
@@ -57,6 +62,7 @@ def enviar_mensaje(telefono: str, texto: str) -> dict:
 
 def enviar_botones(telefono: str, texto: str, botones: list[dict]) -> dict:
     """Free-form reply buttons for a recipient with an open 24-hour window."""
+    texto = whatsapp_texto(texto)
     return _post({
         "messaging_product": "whatsapp",
         "to": telefono,
