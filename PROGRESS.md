@@ -108,11 +108,23 @@ That status list is not a guess: ERPNext's own `get_reserved_qty`
 
 **Two exclusions matter as much as the subtraction:**
 - the order being evaluated (`excluir=`) — its quantity is the one being checked;
-- any order asked for **later** (`desde=` its `creation`) — without it, two
-  drafts for the last 8 units each defer to the other and the dairy sells to
-  neither. First to ask keeps the claim.
+- any order asked for **later** — FIFO on **`(creation, order id)`**, passed as
+  `desde=` and `excluir=`. Without the rule, two drafts for the last 8 units
+  each defer to the other and the dairy sells to neither. Without the **order
+  id** in the key the same deadlock returns whenever two drafts share a
+  timestamp, which they can: one queue worker per inbound message, both writing
+  to the same ERPNext. The id breaks the tie identically in both evaluations,
+  so exactly one claims and it does not depend on which worker runs first. An
+  order with no id, or an unreadable timestamp on either side, defers — it
+  cannot prove it was first.
 
-**Rejected drafts stopped holding stock.** `decisiones.rechazar` marks the draft
+**Rejected drafts are asked to stop holding stock — NOT yet proven to.** The
+code path is complete and the policy side is tested, but whether ERPNext keeps
+`status = "Closed"` on a draft is version-dependent and **has not been verified
+on our installation** (see ambiguity 1 below). Until it is, do not tell the
+client that rejecting an order releases its stock; the audit comment on each
+rejection is the honest record of what actually happened.
+`decisiones.rechazar` marks the draft
 `Closed` via `erpnext.policy_update_status` — one Select field, policy identity,
 never a submit, and **only ever on a draft** (a `no:` tap can arrive after a
 `ok:` tap, and stamping Closed on a submitted order would release the stock
@@ -146,11 +158,23 @@ Result: **315 passed, 0 xfailed** (was 277 + 1 strict xfail), lint clean. Every
 guard was mutation-tested: removing any one of them fails at least one test.
 
 ### Known ERPNext ambiguity, worth knowing before touching this
-1. **`status = "Closed"` on a draft is version-dependent.** Frappe's
-   `StatusUpdater.set_status()` keeps it only while `status_map`'s Closed row is
-   `eval:self.status=='Closed'`. If a build recomputes it back to Draft, the PUT
-   still answers 200 — which is exactly why the saved value is checked and the
-   failure is surfaced instead of assumed away.
+1. **`status = "Closed"` on a draft is version-dependent — UNVERIFIED HERE.**
+   Frappe's `StatusUpdater.set_status()` keeps it only while `status_map`'s
+   Closed row is `eval:self.status=='Closed'`. If a build recomputes it back to
+   Draft, the PUT still answers 200 — which is exactly why the saved value is
+   compared and the failure surfaced instead of assumed away. **Nobody has run
+   this against our ERPNext yet**, so the claim "a rejected order releases its
+   stock" is not established. To settle it, on the live instance: reject a test
+   order with the [Rechazar] button, then read the document back —
+
+   ```bash
+   curl -s -H "Authorization: token $ERPNEXT_POLICY_API_KEY:$ERPNEXT_POLICY_API_SECRET" \
+     "$ERPNEXT_URL/api/resource/Sales%20Order/<NAME>?fields=\\[\"status\",\"docstatus\"\\]"
+   ```
+
+   `status: "Closed"`, `docstatus: 0` means it works on this version. Anything
+   else means rejected drafts keep holding stock here, and the audit comment
+   will already have said so (`sigue comprometiendo stock`).
 2. **A submitted order whose status is Closed or On Hold reserves nothing in
    ERPNext either.** Nothing here can see those units: the child rows are read
    with `docstatus = 0`. It is ERPNext's own accounting choice and it predates

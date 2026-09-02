@@ -76,17 +76,35 @@ def _es_borrador(fila: dict) -> bool:
     return abs(_float(fila.get("docstatus"))) < 0.000001
 
 
-def _mas_nuevo_que(creacion: object, referencia: str) -> bool:
-    """True when ``creacion`` is strictly later than ``referencia``.
-
-    An unreadable timestamp on either side means "I cannot tell who asked
-    first", and then the conservative answer is to treat the other draft as a
-    live claim — so this says False.
-    """
+def _clave_fifo(creacion: object, nombre: str) -> tuple[datetime, str] | None:
+    """Position in the queue: when it was asked for, then which order it is."""
     try:
-        return datetime.fromisoformat(str(creacion)) > datetime.fromisoformat(referencia)
+        return (datetime.fromisoformat(str(creacion)), nombre)
     except (TypeError, ValueError):
-        return False
+        return None
+
+
+def _reclamo_previo(
+    creacion: object, nombre: str, desde: str, propio: str
+) -> bool:
+    """True when that order's claim on these units comes before ours.
+
+    FIFO on (creation, order id). The timestamp alone is not enough: two
+    drafts can be saved in the same instant — one queue worker per inbound
+    message, both writing through the same ERPNext — and then each would read
+    the other as the earlier claim and defer to it. Both customers wait, and
+    the dairy that HAS the stock for one of them sells it to neither. The order
+    id breaks the tie identically in both evaluations, so exactly one of the
+    two claims the units and the other genuinely waits.
+
+    An unreadable timestamp on either side means "I cannot tell who was
+    first", and then the safe answer is that the other order has the claim.
+    """
+    otra = _clave_fifo(creacion, nombre)
+    mia = _clave_fifo(desde, propio)
+    if otra is None or mia is None:
+        return True
+    return otra < mia
 
 
 def _cantidad_en_stock_uom(item: dict) -> float:
@@ -315,7 +333,7 @@ def _saldo_vencido(cliente: str) -> float | None:
         return None
 
 
-def _borradores_que_reservan(company: str, desde: str) -> list[str]:
+def _borradores_que_reservan(company: str, desde: str, propio: str) -> list[str]:
     """The draft orders that still hold the stock they promised.
 
     Asks ERPNext for the ORDERS first, and only for the ones that still
@@ -331,9 +349,11 @@ def _borradores_que_reservan(company: str, desde: str) -> list[str]:
       * ``status`` in ESTADOS_SIN_RESERVA — the same states ERPNext itself does
         not count, which is where a manual rejection leaves the draft.
       * another company.
-      * created AFTER the order being evaluated. Without this, two drafts for
-        the last 8 units each defer to the other, and a dairy that has the
-        stock sells it to nobody. First to ask keeps the claim.
+      * asked for AFTER the order being evaluated, FIFO on
+        (creation, order id). Without it, two drafts for the last 8 units each
+        defer to the other and a dairy that has the stock sells it to nobody;
+        without the id in the key, the same happens whenever two drafts share a
+        timestamp.
     """
     filtros: list[list] = [
         ["docstatus", "=", 0],
@@ -366,7 +386,11 @@ def _borradores_que_reservan(company: str, desde: str) -> list[str]:
             continue
         if sin_reserva(fila.get("status")):
             continue
-        if desde and _mas_nuevo_que(fila.get("creation"), desde):
+        if (
+            desde
+            and propio
+            and not _reclamo_previo(fila.get("creation"), nombre, desde, propio)
+        ):
             continue
         vivos.append(nombre)
     return vivos
@@ -387,7 +411,11 @@ def _comprometido_en_borradores(
     be read as "nothing is promised": the caller turns the error into an order
     that waits for a person, which is the safe direction.
     """
-    vivos = [nombre for nombre in _borradores_que_reservan(company, desde) if nombre != excluir]
+    vivos = [
+        nombre
+        for nombre in _borradores_que_reservan(company, desde, excluir)
+        if nombre != excluir
+    ]
     if not vivos:
         return 0.0
 

@@ -479,11 +479,17 @@ def test_a_draft_asked_for_later_has_no_claim_on_these_units(
 
     # The earlier order ignores the later one and takes the units.
     assert (
-        policy._hay_stock("LECHE-1L", 5, "Depósito A - LP", desde=ANTES) is True
+        policy._hay_stock(
+            "LECHE-1L", 5, "Depósito A - LP", excluir="SO-MINE", desde=ANTES
+        )
+        is True
     )
-    # The later order still sees the earlier claim (roles reversed below).
+    # An order asked for after SO-LATER still sees SO-LATER's claim.
     assert (
-        policy._hay_stock("LECHE-1L", 5, "Depósito A - LP", desde=DESPUES) is False
+        policy._hay_stock(
+            "LECHE-1L", 5, "Depósito A - LP", excluir="SO-MINE", desde="2026-08-30 07:00:00"
+        )
+        is False
     )
 
 
@@ -499,7 +505,64 @@ def test_an_unreadable_creation_date_counts_the_other_draft(
         pedidos=(_pedido("SO-OTHER", creation="cuando sea"),),
     )
 
-    assert policy._hay_stock("LECHE-1L", 5, "Depósito A - LP", desde=ANTES) is False
+    assert (
+        policy._hay_stock(
+            "LECHE-1L", 5, "Depósito A - LP", excluir="SO-MINE", desde=ANTES
+        )
+        is False
+    )
+
+
+def test_two_drafts_saved_in_the_same_instant_do_not_both_lose_the_stock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One queue worker per inbound message, both writing to the same ERPNext:
+    two drafts CAN carry the same creation timestamp. On the timestamp alone
+    each reads the other as the earlier claim and defers, so both customers
+    wait and the dairy sells the 8 units it has to neither of them. FIFO is
+    therefore keyed on (creation, order id), which breaks the tie the same way
+    in both evaluations — exactly one claims, the other genuinely waits.
+    """
+    monkeypatch.setenv("STOCK_BUFFER_PCT", "0")
+    mismo = "2026-08-29 10:00:00.500000"
+
+    def puede(yo: str, otro: str) -> bool:
+        _stock_erp(
+            monkeypatch,
+            fisico=8,
+            renglones=(_renglon(otro, 5),),
+            pedidos=(_pedido(otro, creation=mismo),),
+        )
+        return policy._hay_stock(
+            "LECHE-1L", 5, "Depósito A - LP", excluir=yo, desde=mismo
+        )
+
+    primero = puede("SAL-ORD-0001", "SAL-ORD-0002")
+    segundo = puede("SAL-ORD-0002", "SAL-ORD-0001")
+
+    # Not both False (the dairy loses a sale it could fill) and not both True
+    # (the same units promised twice). The lower id is the deterministic
+    # winner, so it does not depend on which worker evaluates first.
+    assert [primero, segundo] == [True, False]
+
+
+def test_an_order_with_no_id_defers_to_every_other_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without an order number there is no position in the queue to compare,
+    and an order that cannot prove it was first does not get the units."""
+    monkeypatch.setenv("STOCK_BUFFER_PCT", "0")
+    _stock_erp(
+        monkeypatch,
+        fisico=8,
+        renglones=(_renglon("SO-OTHER", 5),),
+        pedidos=(_pedido("SO-OTHER", creation=DESPUES),),
+    )
+
+    assert (
+        policy._hay_stock("LECHE-1L", 5, "Depósito A - LP", excluir="", desde=ANTES)
+        is False
+    )
 
 
 def test_exact_stock_boundary_confirms_and_one_unit_more_does_not(

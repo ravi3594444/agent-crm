@@ -109,10 +109,13 @@ quantity promised in every OTHER order that still holds it
 the same lock). Which orders those are is asked of ERPNext first: `docstatus`
 0, same company, and `status` not in Closed / Cancelled / On Hold — the same
 three ERPNext's own `get_reserved_qty` skips, and where a manual rejection
-leaves the draft. Two exclusions matter as much as the subtraction: the order
-being evaluated (its quantity is the one being checked) and any order asked
-for *later*, so that two customers wanting the last 8 units do not each defer
-to the other and leave the dairy selling to neither. If the lookup fails, is
+tries to leave the draft (whether ERPNext keeps that status on a draft is
+version-dependent and unverified on this installation — the rejection's audit
+comment records what actually happened). Two exclusions matter as much as the
+subtraction: the order being evaluated (its quantity is the one being checked)
+and any order asked for *later* — FIFO on `(creation, order id)`, because two
+drafts can share a timestamp and on the timestamp alone each would defer to the
+other, leaving two customers waiting for units the dairy has. If the lookup fails, is
 truncated, or returns a quantity that cannot be converted to the item's stock
 unit, the order stays a draft for a person — uncertain stock is never a
 confirmation.
