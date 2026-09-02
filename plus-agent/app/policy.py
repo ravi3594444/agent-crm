@@ -84,6 +84,34 @@ def activa() -> bool:
     return _num("AUTO_CONFIRM_MAX") > 0
 
 
+# Techo del colchón. 95% deja un 5% vendible; más que eso es "nunca hay
+# stock", que también es un error de configuración pero al menos es el
+# lado seguro.
+BUFFER_MAXIMO = 0.95
+
+
+def buffer_stock() -> float:
+    """El colchón de stock como fracción, ACOTADO a [0, BUFFER_MAXIMO].
+
+    Sin la cota, un typo en .env ensancha el criterio en silencio:
+    STOCK_BUFFER_PCT=-20 hace `disponible * 1.2 >= qty`, así que con 9
+    unidades físicas se auto-confirma un pedido de 10. Un colchón negativo
+    no significa nada; se trata como cero y se deja en el log.
+    """
+    crudo = _num("STOCK_BUFFER_PCT") / 100.0
+    if crudo < 0:
+        _log.warning("STOCK_BUFFER_PCT negativo (%s); uso 0", crudo * 100)
+        return 0.0
+    if crudo > BUFFER_MAXIMO:
+        _log.warning(
+            "STOCK_BUFFER_PCT=%s es mayor que el máximo %s%%; uso el máximo",
+            crudo * 100,
+            BUFFER_MAXIMO * 100,
+        )
+        return BUFFER_MAXIMO
+    return crudo
+
+
 def evaluar(sales_order: dict) -> Decision:
     """Every rule must pass. Any single failure sends it to a human."""
     motivos: list[str] = []
@@ -273,7 +301,7 @@ def _hay_stock(item_code: str, qty: float, pedido_actual: str | None = None) -> 
     en_borradores = _comprometido_en_borradores(item_code, pedido_actual)
 
     disponible = fisico - reservado - en_borradores
-    buffer = _num("STOCK_BUFFER_PCT") / 100.0
+    buffer = buffer_stock()
     seguro = disponible * (1 - buffer)
     if seguro >= qty:
         return True, ""

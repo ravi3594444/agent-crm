@@ -1,0 +1,9 @@
+# Artefactos de pip/venv y cachés en la raíz del repo. Nada de esto va al repo.
+*.whl
+*.tar.gz
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv*/

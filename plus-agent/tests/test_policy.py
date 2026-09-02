@@ -403,3 +403,45 @@ def test_una_perilla_con_basura_usa_el_default_y_no_explota(erp_ok, auto_confirm
 def test_una_perilla_vacia_usa_el_default(erp_ok, auto_confirm_on, monkeypatch):
     monkeypatch.setenv("AUTO_CONFIRM_MULT", "")
     assert policy.evaluar(pedido()).auto
+
+
+# --------------------------------------------------------------------------
+# El colchón de stock está acotado: un typo en .env no puede sobrevender
+# --------------------------------------------------------------------------
+
+
+def test_buffer_negativo_no_sobrevende(erp_ok, auto_confirm_on, monkeypatch):
+    """Sin la cota, STOCK_BUFFER_PCT=-20 hacía `disponible * 1.2 >= qty`:
+    con 9 unidades físicas se auto-confirmaba un pedido de 10. Un colchón
+    negativo se trata como cero."""
+    erp_ok.listas["Bin"] = [{"actual_qty": 9.0, "reserved_qty": 0.0}]
+    monkeypatch.setenv("STOCK_BUFFER_PCT", "-20")
+    decision = policy.evaluar(pedido())  # pide 10
+    assert not decision.auto
+    assert any("stock insuficiente" in m for m in decision.motivos)
+
+
+def test_buffer_cero_vende_todo_lo_fisico(erp_ok, auto_confirm_on, monkeypatch):
+    erp_ok.listas["Bin"] = [{"actual_qty": 10.0, "reserved_qty": 0.0}]
+    monkeypatch.setenv("STOCK_BUFFER_PCT", "0")
+    assert policy.evaluar(pedido()).auto
+
+
+def test_buffer_mayor_a_100_se_acota_y_frena(erp_ok, auto_confirm_on, monkeypatch):
+    """Más de 100% no significa nada; se acota al máximo, que deja un 5%
+    vendible. Con 1000 unidades, el 5% (50) alcanza para 10 -> pasa."""
+    erp_ok.listas["Bin"] = [{"actual_qty": 1000.0, "reserved_qty": 0.0}]
+    monkeypatch.setenv("STOCK_BUFFER_PCT", "150")
+    assert policy.evaluar(pedido()).auto
+    # ...pero con 100 unidades, el 5% (5) no alcanza para 10 -> frena.
+    erp_ok.listas["Bin"] = [{"actual_qty": 100.0, "reserved_qty": 0.0}]
+    assert not policy.evaluar(pedido()).auto
+
+
+@pytest.mark.parametrize(
+    "crudo,esperado",
+    [("-20", 0.0), ("0", 0.0), ("20", 0.2), ("95", 0.95), ("150", 0.95), ("basura", 0.2)],
+)
+def test_buffer_stock_acotado(monkeypatch, crudo, esperado):
+    monkeypatch.setenv("STOCK_BUFFER_PCT", crudo)
+    assert policy.buffer_stock() == pytest.approx(esperado)

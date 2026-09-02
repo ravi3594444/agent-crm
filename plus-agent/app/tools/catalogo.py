@@ -12,7 +12,7 @@ import os
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from app import erpnext, formato, log
+from app import erpnext, formato, log, policy
 from app.tools import alcance
 
 _log = log.get("catalogo")
@@ -96,7 +96,7 @@ def consultar_stock(item_code: str) -> str:
     fisico = sum(float(b.get("actual_qty") or 0) for b in bins)
     reservado = sum(float(b.get("reserved_qty") or 0) for b in bins)
     disponible = fisico - reservado
-    buffer = float(os.getenv("STOCK_BUFFER_PCT", "20")) / 100.0
+    buffer = policy.buffer_stock()
     seguro = disponible * (1 - buffer)
 
     if seguro <= 0:
