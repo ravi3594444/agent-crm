@@ -1,12 +1,19 @@
 name: CI
 
-# Los tests no necesitan Redis, ni ERPNext, ni credenciales de Meta, ni
-# tokens de LLM: son 100% offline (tests/conftest.py fija valores de prueba)
-# y tardan ~1 segundo. Por eso pueden correr en cada push sin fricción.
+# Los tests no llaman a ERPNext, ni a Meta, ni a ningún LLM: eso lo fija
+# tests/conftest.py con valores de prueba y dobles en memoria.
 #
-# El último job sí levanta un Redis Stack: app/graph.py crea los índices del
-# checkpointer al importar, así que "el contenedor arranca" solo se puede
-# probar con un Redis con RedisJSON + RediSearch al lado.
+# SÍ necesitan un Redis Stack, y decir que no lo necesitaban costó todo el
+# valor de este job. app/graph.py construye el checkpointer y llama a setup()
+# AL IMPORTAR, y eso crea índices de RediSearch contra un servidor real. Sin
+# Redis, dos módulos de test explotan al colectarse — y pytest aborta toda la
+# corrida con "Interrupted: 2 errors during collection". CI quedaba en rojo
+# habiendo corrido CERO tests, y el rojo se leía como "un test falla".
+#
+# Por eso el job de tests levanta su propio Redis Stack (RedisJSON +
+# RediSearch, no un Redis pelado) en una base dedicada, y pone
+# REDIS_OBLIGATORIO para que "Redis no está" sea una FALLA y no un skip
+# silencioso: un skip es exactamente cómo la suite deja de ser la suite.
 
 on:
   push:
@@ -20,6 +27,26 @@ defaults:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    services:
+      redis:
+        # RedisJSON + RediSearch. langgraph-checkpoint-redis needs both, and a
+        # plain `redis:7` image fails at import with a module-not-loaded error.
+        image: redis/redis-stack-server:7.4.0-v1
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
+    env:
+      # Its own database, so nothing in the suite can be confused by another
+      # job's leftovers, and REDIS_OBLIGATORIO turns "no Redis" into a failure.
+      REDIS_URL: redis://localhost:6379/15
+      REDIS_OBLIGATORIO: "1"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -36,7 +63,9 @@ jobs:
         run: ruff check app tests
 
       - name: Tests
-        run: pytest -q
+        # -rs lists every skip in the log. A suite whose coverage quietly
+        # shrinks by one skipped test is the failure this job just had.
+        run: pytest -q -rs
 
       - name: La imagen buildea
         run: docker build -t plus-agent:ci .

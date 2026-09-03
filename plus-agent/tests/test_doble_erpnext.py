@@ -107,3 +107,39 @@ def test_the_rows_handed_back_are_copies() -> None:
     (fila,) = listar(FILAS, [["reference_name", "=", "SO-2"]], limit=1)
     fila["content"] = "manoseado"
     assert FILAS[1]["content"] == "[solicitud] b"
+
+
+# ---------------------------------------------------------------------------
+# The suite has to BE the suite.
+# ---------------------------------------------------------------------------
+
+
+def test_no_test_in_this_suite_is_shadowed_by_another() -> None:
+    """Two functions with one name in a module: the second wins, the first is
+    dead, and nothing says so.
+
+    It happened. `test_an_unreadable_order_is_never_read_as_a_live_draft` was
+    defined twice in test_solicitudes.py, so one of the invariants about closing
+    a draft nobody had proven released never ran — and removing the duplicate is
+    what turned up a real surviving defect. ruff cannot catch it: tests/* ignores
+    F811 on purpose, because a fixture used as a test argument reads as a
+    redefinition.
+
+    So the suite checks itself. This is about silent LOSS of coverage, which is
+    the same failure as a test that is never executed at all.
+    """
+    import ast
+
+    tests = Path(__file__).resolve().parent
+    duplicados: list[str] = []
+    for archivo in sorted(tests.glob("*.py")):
+        arbol = ast.parse(archivo.read_text(), filename=str(archivo))
+        vistos: set[str] = set()
+        for nodo in arbol.body:
+            if not isinstance(nodo, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            if nodo.name in vistos:
+                duplicados.append(f"{archivo.name}:{nodo.lineno} {nodo.name}")
+            vistos.add(nodo.name)
+
+    assert duplicados == [], "definiciones que tapan a otra: " + ", ".join(duplicados)

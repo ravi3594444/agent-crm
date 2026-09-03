@@ -282,15 +282,28 @@ def test_what_the_owner_set_beats_the_bootstrap_environment(
     assert fila["origen"] == "dueño"
 
 
-@pytest.mark.skipif(
-    not os.getenv("REDIS_URL", "").strip(), reason="sin REDIS_URL configurado"
-)
+def _sin_redis(motivo: str) -> None:
+    """A missing Redis is a skip on a laptop and a FAILURE in CI.
+
+    CI runs a Redis Stack service on purpose. Without this, losing that service
+    turns the one test that talks to a real Redis into a silent skip and CI goes
+    green having not run it — which is exactly how this suite quietly stopped
+    being the whole suite.
+    """
+    if os.getenv("REDIS_OBLIGATORIO", "").strip():
+        pytest.fail(f"REDIS_OBLIGATORIO está puesto y {motivo}")
+    pytest.skip(motivo)
+
+
 def test_a_change_really_survives_in_redis(monkeypatch: pytest.MonkeyPatch) -> None:
     """The one test that talks to a real Redis: writes a limit, drops every
-    connection and object, and reads it back. Skipped when Redis is absent."""
+    connection and object, and reads it back."""
     import redis
 
     from app import router
+
+    if not os.getenv("REDIS_URL", "").strip():
+        _sin_redis("no hay REDIS_URL configurada")
 
     monkeypatch.setattr(router, "STAFF", [EQUIPO])
     monkeypatch.setattr(limites, "_codigo", lambda: "4242")
@@ -305,7 +318,7 @@ def test_a_change_really_survives_in_redis(monkeypatch: pytest.MonkeyPatch) -> N
     try:
         locks.conexion().ping()
     except redis.exceptions.RedisError:
-        pytest.skip("Redis no responde")
+        _sin_redis("Redis no responde")
     # The code now goes out over WhatsApp. No test may reach Meta.
     monkeypatch.setattr(whatsapp, "enviar_mensaje", lambda tel, texto: {"ok": True})
     cliente_directo = redis.Redis.from_url(os.environ["REDIS_URL"])
@@ -1057,10 +1070,16 @@ def test_money_reads_the_way_the_owner_writes_it(
 
 
 @pytest.mark.parametrize("dicho,esperado", [("1.5", 1.5), ("20", 20.0), ("1,5", 1.5)])
-def test_a_percentage_or_an_hour_count_is_never_regrouped(
+def test_a_percentage_confirmed_end_to_end_is_never_regrouped(
     almacen: FakeRedis, dicho: str, esperado: float
 ) -> None:
-    """The thousands rule is for money only: 1.5% is one and a half percent."""
+    """The thousands rule is for money only: 1.5% is one and a half percent.
+
+    Renamed: this shared a name with the validar()-level test further down, so
+    the second definition shadowed it and this one never ran. ruff cannot see
+    it — tests/* ignores F811, because a fixture used as an argument reads as a
+    redefinition. See test_no_test_in_this_suite_is_shadowed_by_another.
+    """
     _proponer("colchón de stock", dicho)
     _confirmar()
 
