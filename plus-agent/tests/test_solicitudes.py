@@ -1509,8 +1509,9 @@ def test_a_fallback_that_expires_gets_no_fallback_of_its_own(
     # The draft was already out of the way, so it is not written to again.
     assert mundo["estados"] == ["Closed"]
     texto = _mensaje_cliente(mundo)
-    # Their silence, not ours: the text says so.
-    assert "no tuve tu respuesta" in texto
+    # The OFFER ran out — never "you did not answer", which is not knowable
+    # (see texto_respaldo_vencido_cliente) — and never our own silence either.
+    assert "se venció el plazo de esa opción" in texto
     assert "no llegué a tener una respuesta del encargado" not in texto
 
 
@@ -1688,6 +1689,18 @@ def test_a_date_the_clock_cannot_read_keeps_the_plain_timeout(monkeypatch) -> No
 # counting that draft's lines by default — app/policy.py only ever SUBTRACTS
 # holds it is told about — so a review with no deadline reserved milk until
 # somebody noticed by hand. Everything below is about that never happening.
+
+
+def _drenar(mundo) -> None:
+    """Deliver and forget everything queued so far.
+
+    _mensaje_cliente joins the whole transcript, so a test about what is said
+    NEXT has to clear what was already said — otherwise the earlier fallback
+    offer satisfies almost any assertion about customer text.
+    """
+    for _ in range(6):
+        avisos.procesar()
+    mundo["enviados"].clear()
 
 
 def _a_revision(mundo, monkeypatch, lunes):
@@ -1993,22 +2006,112 @@ def test_resolving_a_request_that_is_not_in_review_does_nothing(
 # --- never claim a release without proof; never leave an unbounded draft ----
 
 
-def test_a_release_the_erpnext_re_read_disproves_is_not_claimed(
+def test_a_draft_that_could_not_be_closed_keeps_its_deadline(
     mundo, monkeypatch, lunes
 ) -> None:
-    """soltar_reserva's contract, on the review path: the sweep must not tell
-    anybody the stock is free unless a re-read agrees."""
+    """THE invariant: a terminal state means "no deadline", so writing one for
+    an order that is still a live draft hands the units back to nobody. When
+    soltar_reserva cannot PROVE the release, the review is re-armed instead."""
     revision = _a_revision(mundo, monkeypatch, lunes)
+    _drenar(mundo)
+    # ERPNext takes the write and the re-read disagrees: still a live draft.
     monkeypatch.setattr(
         erpnext, "policy_update_status", lambda dt, n, s: {"name": n, "status": "Draft"}
     )
 
     assert solicitudes._vencer(SO, revision.vence_en + 1) is True
 
-    cerrada = solicitudes.leer(SO)
-    assert cerrada.estado == solicitudes.REVISION_VENCIDA
-    assert "sigue comprometiendo stock" in cerrada.motivo
-    assert "sigue comprometiendo stock" in _mensaje_equipo(mundo)
+    reintentada = solicitudes.leer(SO)
+    assert reintentada.estado == solicitudes.REVISION_HUMANA
+    assert reintentada.estado not in solicitudes.TERMINALES
+    assert "no pude cerrar el borrador" in reintentada.motivo
+    # Still a live draft, and STILL reported to policy as holding its units.
+    assert mundo["so"]["docstatus"] == 0 and mundo["so"]["status"] == "Draft"
+    assert solicitudes.vencimientos([SO]) == {SO: reintentada.vence_en}
+    assert reintentada.vence_en == pytest.approx(
+        revision.vence_en + 1 + solicitudes.REINTENTO_REVISION_SEGUNDOS, abs=2
+    )
+    # The moment the review OPENED survives the retry, so the plazo stays true.
+    assert reintentada.decidida_en == revision.decidida_en
+    equipo = _mensaje_equipo(mundo)
+    assert "NO pude cerrar el borrador" in equipo
+    assert "Sigue reservando stock" in equipo
+    # The customer is told nothing: nothing has been decided.
+    assert _mensaje_cliente(mundo) == ""
+
+
+def test_a_draft_that_cannot_be_closed_is_not_re_reported_every_sweep(
+    mundo, monkeypatch, lunes
+) -> None:
+    """A week-long ERPNext problem must cost one message a day, not 672."""
+    revision = _a_revision(mundo, monkeypatch, lunes)
+    monkeypatch.setattr(
+        erpnext, "policy_update_status", lambda dt, n, s: {"name": n, "status": "Draft"}
+    )
+
+    momento = revision.vence_en + 1
+    for _ in range(5):
+        actual = solicitudes.leer(SO)
+        solicitudes._vencer(SO, momento)
+        momento = actual.vence_en + solicitudes.REINTENTO_REVISION_SEGUNDOS + 1
+
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_HUMANA
+    avisos.procesar()
+    avisos.procesar()
+    avisos.procesar()
+    escalaciones = [
+        t for tel, t in mundo["enviados"] if tel == STAFF and "Sigue reservando" in t
+    ]
+    assert len(escalaciones) == 1  # same day, one notice
+
+
+def test_a_manager_confirming_inside_the_release_window_is_not_contradicted(
+    mundo, monkeypatch, lunes
+) -> None:
+    """He submitted the order while the sweep was closing its draft. Telling
+    the customer it is off would be false."""
+    revision = _a_revision(mundo, monkeypatch, lunes)
+    _drenar(mundo)
+
+    def confirma_mientras_cierro(dt, n, s):
+        mundo["so"]["docstatus"] = 1
+        return {"name": n, "status": "Draft"}
+
+    monkeypatch.setattr(erpnext, "policy_update_status", confirma_mientras_cierro)
+
+    assert solicitudes._vencer(SO, revision.vence_en + 1) is True
+
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_RESUELTA
+    assert "confirmó el pedido" in solicitudes.leer(SO).motivo
+    assert _mensaje_cliente(mundo) == ""
+
+
+def test_the_plazo_reported_is_the_one_that_applied_not_todays(
+    mundo, monkeypatch, lunes
+) -> None:
+    monkeypatch.setenv("REVISION_TIMEOUT_HORAS", "6")
+    revision = _a_revision(mundo, monkeypatch, lunes)
+    # The owner changes his mind after the review opened.
+    monkeypatch.setenv("REVISION_TIMEOUT_HORAS", "48")
+
+    solicitudes._vencer(SO, revision.vence_en + 1)
+
+    assert "nadie la revisó en 6 h" in solicitudes.leer(SO).motivo
+    assert "48 h" not in _mensaje_equipo(mundo)
+
+
+def test_an_unreadable_order_is_never_read_as_a_live_draft(
+    mundo, monkeypatch, lunes
+) -> None:
+    """None is not 0: closing a document somebody confirmed, because the read
+    came back malformed, is the worst available outcome."""
+    revision = _a_revision(mundo, monkeypatch, lunes)
+    monkeypatch.setattr(erpnext, "policy_get_doc", lambda dt, n: "no es un documento")
+
+    assert solicitudes._vencer(SO, revision.vence_en + 1) is False
+
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_HUMANA
+    assert mundo["estados"] == ["Closed", "Draft"]  # nothing was written
 
 
 def test_a_review_that_erpnext_will_not_record_releases_the_stock_at_once(
@@ -2091,3 +2194,131 @@ def test_the_review_deadline_shows_up_in_what_the_manager_reads(
     assert solicitudes.REVISION_HUMANA in texto
     assert "Vence:" in texto
     assert "24 h" in _mensaje_equipo(mundo)
+
+
+def test_a_customer_who_accepted_is_never_told_they_did_not_answer(
+    mundo, monkeypatch, lunes
+) -> None:
+    """The record could not be updated, so it still reads as an open offer.
+    The sweep must not turn that into "I did not get your reply" — the one
+    customer this could reach is the one who definitely did reply."""
+    _respaldo(mundo, monkeypatch)
+    mundo["stock"] = False
+    original = erpnext.registrar_comentario
+
+    def falla_la_revision(doctype, name, text):
+        if '"evento":"revision_humana"' in text:
+            raise erpnext.ERPNextError("no")
+        return original(doctype, name, text)
+
+    monkeypatch.setattr(erpnext, "registrar_comentario", falla_la_revision)
+    solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+    estado = solicitudes.leer(SO)
+    avisos.procesar()
+    avisos.procesar()
+    avisos.procesar()
+    mundo["enviados"].clear()
+
+    # The sweep DOES still reach it — the record reads as an open offer, and
+    # reconstruir_indice would rebuild that from ERPNext even if the index were
+    # cleared. So the wording is what has to be true, not the bookkeeping.
+    assert solicitudes.tick(ahora=estado.vence_en + 1) == 1
+
+    cliente = _mensaje_cliente(mundo)
+    assert "no tuve tu respuesta" not in cliente
+    assert "I did not get your reply" not in cliente
+    assert "se venció el plazo de esa opción" in cliente
+    assert "nada confirmado a tu nombre" in cliente
+
+
+def test_a_fallback_nobody_answered_still_says_the_offer_lapsed(
+    mundo, monkeypatch, lunes
+) -> None:
+    """The ordinary case still gets a clear ending, just not an accusation."""
+    _, respaldo = _respaldo(mundo, monkeypatch)
+    avisos.procesar()
+    avisos.procesar()
+    mundo["enviados"].clear()
+
+    solicitudes.tick(ahora=respaldo.vence_en + 1)
+
+    assert "se venció el plazo de esa opción" in _mensaje_cliente(mundo)
+    assert solicitudes.leer(SO).estado == solicitudes.VENCIDA
+
+
+
+def test_a_customer_writing_back_does_not_replace_a_pending_review(
+    mundo, monkeypatch, lunes
+) -> None:
+    """A review is not `abierta`, so without a guard the next request would
+    overwrite it — losing why a person was asked, and putting the order back
+    into a state where "confirmar" means "approve the exception" again."""
+    revision = _a_revision(mundo, monkeypatch, lunes)
+
+    otra = solicitudes.crear(
+        dict(mundo["so"]), solicitado={"metodo": "entrega"}, nota_cliente="y el jueves?"
+    )
+
+    assert otra is None
+    actual = solicitudes.leer(SO)
+    assert actual.id == revision.id
+    assert actual.estado == solicitudes.REVISION_HUMANA
+    assert actual.motivo == revision.motivo
+    assert actual.vence_en == revision.vence_en
+
+
+def test_the_customer_never_reads_an_internal_state_name(mundo, monkeypatch, lunes) -> None:
+    """"ya está cerrada (revision_humana)" is vocabulary from a state machine,
+    and the customer did not ask about one."""
+    _a_revision(mundo, monkeypatch, lunes)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert solicitudes.REVISION_HUMANA not in respuesta
+    assert "está mirándolo una persona" in respuesta
+    assert mundo["submits"] == []
+
+    solicitudes.registrar(solicitudes.leer(SO), "x", estado=solicitudes.REVISION_VENCIDA)
+    cerrado = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+    assert solicitudes.REVISION_VENCIDA not in cerrado
+    assert "ya no tengo nada pendiente" in cerrado
+
+
+def test_the_sweep_and_a_manager_command_never_both_close_one_review(
+    mundo, monkeypatch, lunes
+) -> None:
+    """resolver_revision runs under the order's lock now, so the two are
+    mutually exclusive rather than accidentally convergent."""
+    _a_revision(mundo, monkeypatch, lunes)
+    tomados: list[str] = []
+    from contextlib import contextmanager
+
+    @contextmanager
+    def ocupado(nombre, **kwargs):
+        tomados.append(nombre)
+        from app.locks import CoordinationError
+
+        raise CoordinationError("lo tiene el barrido")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("app.locks.distributed_lock", ocupado)
+
+    assert solicitudes.resolver_revision(SO, STAFF) is False
+
+    assert tomados == [f"solicitud:{SO}"]
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_HUMANA
+
+
+def test_cancelling_a_confirmed_order_also_closes_its_review(
+    mundo, monkeypatch, lunes
+) -> None:
+    _a_revision(mundo, monkeypatch, lunes)
+
+    assert decisiones.cerrar_revision_si_hay(SO, STAFF, "una persona canceló el pedido")
+
+    cerrada = solicitudes.leer(SO)
+    assert cerrada.estado == solicitudes.REVISION_RESUELTA
+    assert cerrada.decidida_por == STAFF
+    assert solicitudes.vencimientos([SO]) == {}
+    # ...and it is a no-op on an order with no review, so it is safe everywhere.
+    assert decisiones.cerrar_revision_si_hay(SO, STAFF, "otra vez") is False

@@ -36,10 +36,9 @@ def _cerrar_revision(nombre: str, telefono: str, motivo: str) -> None:
     review is closed here rather than left for the sweep — and if this fails,
     the sweep still reaches it, which is why nothing is escalated.
     """
-    try:
-        solicitudes.resolver_revision(nombre, telefono, motivo)
-    except Exception as exc:
-        print(f"[approval] {nombre}: cierre de revisión falló ({type(exc).__name__})")
+    from app import decisiones
+
+    decisiones.cerrar_revision_si_hay(nombre, telefono, motivo)
 
 
 def _leer_doc(doctype: str, name: str) -> dict:
