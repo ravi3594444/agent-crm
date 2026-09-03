@@ -153,12 +153,33 @@ the order stays visible as a draft in ERPNext with an audit comment saying so.
 The owner can also act by text, without buttons and without the LLM:
 
 ```
-ver SAL-ORD-2026-00008           (also: detalle)
-confirmar SAL-ORD-2026-00008     (also: ok / aprobar / apruebo)
-rechazar SAL-ORD-2026-00008      (also: rechazo / no) — the customer is told
-preparar SAL-ORD-2026-00008      draft Delivery Note for a CONFIRMED order
-despachar SAL-ORD-2026-00008     submits that draft: a separate human step
+ver SAL-ORD-2026-00008                       (also: detalle)
+confirmar SAL-ORD-2026-00008                 (also: ok / aprobar / apruebo)
+rechazar SAL-ORD-2026-00008                  (also: rechazo / no) — the customer is told
+preparar SAL-ORD-2026-00008                  draft Delivery Note for a CONFIRMED order
+despachar SAL-ORD-2026-00008                 submits that draft: a separate human step
+cancelar SAL-ORD-2026-00008 <reason>         confirmed order, within CANCELACION_HORAS (24 h)
 ```
+
+`cancelar` (`app/decisiones.py`) re-checks the sender, requires a reason, and
+under the distributed lock re-reads the order with the policy identity: it must
+be submitted, confirmed by this system less than 24 hours ago (a confirmation
+made directly in ERPNext cannot be proven and is refused), and have no Delivery
+Note or Sales Invoice, draft or submitted, linked to it — nothing is ever
+cancelled in cascade. The cancellation is audited with the reason, repeated
+commands are idempotent, and the customer is told once: free text inside their
+24-hour window, `WHATSAPP_CUSTOMER_CANCELLED_TEMPLATE` outside it if configured,
+otherwise the notice is parked and one ERPNext ToDo is opened.
+
+**Templates are optional in the pilot.** Customers always write first, so every
+reply to them (acknowledgement, confirmation, rejection, cancellation) goes out
+as free text inside their own 24-hour window. The owner keeps their window open
+by writing to the bot each day, which is enough for alerts and the 18:00 digest.
+A template is only needed when someone lets more than 24 hours pass; a missing
+template is an AVISO in `make check-env`, never a blocker. The confirmed-order
+alert is informational: nothing to answer, the order stays confirmed, and a
+customer who read "confirmado" in the conversation never gets a second
+confirmation message.
 
 Every command runs a deterministic handler in `app/aprobacion.py` /
 `app/decisiones.py` after `router.es_equipo()` authenticates the sender; none

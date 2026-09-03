@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -305,3 +306,67 @@ def contar_pendientes() -> dict:
     except Exception as exc:
         print(f"[notify] contadores no disponibles type={type(exc).__name__}")
     return counts
+
+
+# ---------------------------------------------------------------------------
+# Confirmation markers (manual cancellation window; no duplicate confirmation).
+# ---------------------------------------------------------------------------
+
+CONFIRMACION_TTL_SEGUNDOS = 7 * 24 * 60 * 60
+
+
+def _clave_confirmacion(order_name: str) -> str:
+    return f"wa:{{inbound}}:confirmado-en:{_digest(order_name)}"
+
+
+def _clave_cliente_informado(order_name: str) -> str:
+    return f"wa:{{inbound}}:cliente-informado:{_digest(order_name)}"
+
+
+def marcar_confirmacion(order_name: str, *, informado_en_chat: bool = False) -> None:
+    """Record WHEN this process confirmed the order (first write wins).
+
+    ``informado_en_chat`` says the customer already read "confirmado" in the
+    same conversation turn, so no later path should send a second notice.
+    Best effort: a marker problem never changes the confirmation itself.
+    """
+    if not order_name:
+        return
+    try:
+        client = _redis()
+        client.set(_clave_confirmacion(order_name), f"{time.time():.3f}", nx=True, ex=CONFIRMACION_TTL_SEGUNDOS)
+        if informado_en_chat:
+            client.set(_clave_cliente_informado(order_name), "1", ex=CONFIRMACION_TTL_SEGUNDOS)
+    except Exception as exc:
+        print(f"[notify] marca de confirmación no guardada type={type(exc).__name__}")
+
+
+def momento_confirmacion(order_name: str) -> float | None:
+    """Epoch seconds of the confirmation this system performed, or None.
+
+    None also covers "Redis unavailable" and "confirmed elsewhere": the caller
+    cannot prove the 24-hour window and must refuse.
+    """
+    if not order_name:
+        return None
+    try:
+        valor = _redis().get(_clave_confirmacion(order_name))
+    except Exception as exc:
+        print(f"[notify] marca de confirmación no legible type={type(exc).__name__}")
+        return None
+    if isinstance(valor, bytes):
+        valor = valor.decode()
+    try:
+        return float(valor) if valor else None
+    except (TypeError, ValueError):
+        return None
+
+
+def cliente_informado(order_name: str) -> bool:
+    """Whether the customer already received the confirmation in the conversation."""
+    if not order_name:
+        return False
+    try:
+        return _redis().get(_clave_cliente_informado(order_name)) is not None
+    except Exception:
+        return False

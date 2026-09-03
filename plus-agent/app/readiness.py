@@ -33,6 +33,7 @@ PLANTILLAS = (
     "WHATSAPP_STAFF_CONFIRMED_TEMPLATE",
     "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE",
     "WHATSAPP_CUSTOMER_REJECTED_TEMPLATE",
+    "WHATSAPP_CUSTOMER_CANCELLED_TEMPLATE",
     "WHATSAPP_STAFF_ALERT_TEMPLATE",
 )
 ROLES_SUBMIT_PROHIBIDOS = ("agente", "gerencia")
@@ -254,7 +255,9 @@ def chequear_plantillas(env: Mapping[str, str], reporte: Reporte, http: Http | N
     for variable, nombre in configuradas.items():
         if not nombre:
             reporte.aviso(
-                variable, "vacía: ese aviso sólo sale como texto libre si el destinatario escribió en las últimas 24 h"
+                variable,
+                "vacía (opcional en el piloto): ese aviso sale como texto libre mientras el "
+                "destinatario haya escrito en las últimas 24 h",
             )
     con_nombre = {v: n for v, n in configuradas.items() if n}
     if not con_nombre:

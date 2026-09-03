@@ -12,7 +12,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app import clientes, entrega, erpnext, policy
+from app import clientes, entrega, erpnext, outbound_status, policy
 from app.locks import CoordinationError, distributed_lock
 from app.notificar import notificar_confirmacion, notificar_equipo
 from app.runtime_context import RuntimeContextError, actor_context
@@ -340,7 +340,16 @@ def _safe_notify(name: str, order: dict, *, auto: bool, reasons: str = "") -> bo
 
 
 def _notificar_confirmada(order: dict) -> None:
-    """Stage 2e: the manager hears about every confirmed order exactly once."""
+    """Stage 2e: the manager hears about every confirmed order exactly once.
+
+    The customer reads PEDIDO_CONFIRMADO in this same turn, so the order is
+    marked as already communicated: no later path sends a second confirmation.
+    The marker also opens the manual cancellation window.
+    """
+    try:
+        outbound_status.marcar_confirmacion(str(order.get("name") or ""), informado_en_chat=True)
+    except Exception as exc:
+        print(f"[orders] marca de confirmación falló ({type(exc).__name__})")
     try:
         notificar_confirmacion(order, "automática (política)")
     except Exception as exc:

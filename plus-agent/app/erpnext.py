@@ -397,6 +397,29 @@ def policy_create_doc(doctype: str, payload: dict) -> dict:
     return data
 
 
+def policy_cancel_doc(doctype: str, name: str) -> dict:
+    """Cancel ONE submitted document with the policy identity (docstatus 2).
+
+    ERPNext itself refuses when a submitted document links to it, and this
+    never cancels linked documents: the manual path checks them first and
+    refuses. The saved docstatus is verified; a 200 that left the document
+    submitted is reported as an error, never as a cancellation.
+    """
+    body = _request(
+        _policy(),
+        "PUT",
+        _resource_path(doctype, name),
+        operation=f"la cancelación de {doctype}",
+        json={"docstatus": 2},
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(f"ERPNext devolvió datos inválidos al cancelar {doctype}")
+    if int(data.get("docstatus") or 0) != 2:
+        raise ERPNextError(f"ERPNext no dejó {doctype} {name} cancelado")
+    return data
+
+
 def submit_doc(doctype: str, name: str) -> dict:
     body = _request(
         _policy(),

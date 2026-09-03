@@ -7,7 +7,13 @@ import os
 
 from app import erpnext, notificar, policy
 from app.formato import pesos
-from app.outbound_status import has_accepted, record_outbound, window_open
+from app.outbound_status import (
+    cliente_informado,
+    has_accepted,
+    marcar_confirmacion,
+    record_outbound,
+    window_open,
+)
 from app.router import es_equipo
 from app.whatsapp import enviar_mensaje, enviar_plantilla
 
@@ -63,6 +69,14 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
         from app import decisiones
 
         return decisiones.despachar(nombre, telefono)["detalle"]
+
+    if accion == "cancelar":
+        # "cancelar:<pedido>:<motivo>" — a confirmed order, within the window,
+        # with a reason. Everything is re-checked in app/decisiones.py.
+        from app import decisiones
+
+        pedido, _, motivo = nombre.partition(":")
+        return decisiones.cancelar(pedido.strip(), telefono, motivo)["detalle"]
 
     if accion == "ver":
         try:
@@ -132,6 +146,8 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
                 nombre,
                 f"Confirmado por un integrante autorizado mediante WhatsApp ({por}).",
             )
+            # Opens the manual cancellation window (cancelar <pedido> <motivo>).
+            marcar_confirmacion(nombre)
     except erpnext.ERPNextError as error:
         print(f"[approval] {nombre}: {type(error).__name__}")
         return {
@@ -147,6 +163,14 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
     _notificar_confirmada(nombre, actual)
 
     prefix = "ℹ️ Ya estaba confirmado." if ya_confirmado else f"✅ {nombre} confirmado."
+    if cliente_informado(nombre):
+        # The customer read "confirmado" in the conversation itself (automatic
+        # path). A second confirmation, template or not, is never sent.
+        return {
+            "ok": True,
+            "aviso_cliente": True,
+            "detalle": f"{prefix} El cliente ya recibió la confirmación en la conversación.",
+        }
     if _avisar_cliente(nombre):
         return {
             "ok": True,

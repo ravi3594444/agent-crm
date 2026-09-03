@@ -278,10 +278,20 @@ _STAFF_ACTIONS = {
     "despacho": "despachar",
 }
 _ORDER_IN_TEXT = re.compile(r"\b[A-Z]{2,6}(?:-[A-Z]{2,6})?-\d{2,}[0-9-]*\b")
+# "cancelar SAL-ORD-2026-00009 el cliente se arrepintió": the reason is the rest
+# of the line and travels in the payload after a second colon.
+_CANCEL_RE = re.compile(
+    r"^\s*(?P<verb>[^\W\d_]+)\s+" + _ORDER_REF + r"(?:\s+(?P<motivo>.*))?\s*$", re.DOTALL
+)
+_CANCEL_VERBS = frozenset({"cancelar", "cancela", "cancelo", "anular", "anula", "anulo"})
 
 
 def _staff_command(text: str) -> str | None:
     """Map a short manager message to a button payload, or None."""
+    cancel = _CANCEL_RE.match(text or "")
+    if cancel and _sin_tildes(cancel.group("verb")) in _CANCEL_VERBS:
+        motivo = " ".join((cancel.group("motivo") or "").split())
+        return f"cancelar:{cancel.group('order').upper()}:{motivo}"
     match = _STAFF_COMMAND_RE.match(text or "")
     if not match:
         return None
@@ -1003,8 +1013,8 @@ def _config_warnings() -> list[str]:
     ):
         if not os.getenv(variable, "").strip():
             warnings.append(
-                f"{variable} vacío: {efecto} solo sale como mensaje libre si el "
-                "destinatario escribió en las últimas 24 h"
+                f"{variable} vacío (opcional en el piloto): {efecto} sale como mensaje "
+                "libre mientras el destinatario haya escrito en las últimas 24 h"
             )
     if (
         not os.getenv("AUTO_CONFIRM_PRICE_LIST", "").strip()

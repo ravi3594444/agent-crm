@@ -243,6 +243,9 @@ def texto_confirmacion(so: dict, fuente: str, momento: str | None = None) -> str
             f"Entrega: {entrega_txt}",
             f"Origen: {fuente}",
             f"Confirmado: {momento or _momento_negocio()}",
+            "Informativo: no hace falta responder, el pedido queda confirmado.",
+            f"Para anularlo dentro de las {os.getenv('CANCELACION_HORAS', '24')} h: "
+            f"cancelar {so.get('name')} <motivo>",
         ]
     )[:3500]
 

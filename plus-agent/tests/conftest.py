@@ -198,3 +198,47 @@ def limites_sin_redis(monkeypatch):
     # reach a real one; the tests about that record assert on this mock.
     monkeypatch.setattr(limites.erpnext, "registrar_comentario", Mock())
     return vacio
+
+
+class _MarcasSinRedis:
+    """Enough of Redis for app/outbound_status.py's markers and claims."""
+
+    def __init__(self) -> None:
+        self.values: dict = {}
+        self.lists: dict = {}
+
+    def set(self, key, value, nx=False, ex=None):
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def delete(self, key):
+        self.values.pop(key, None)
+        return 1
+
+    def rpush(self, key, value):
+        self.lists.setdefault(key, []).append(value)
+
+    def llen(self, key):
+        return len(self.lists.get(key, []))
+
+    def scan_iter(self, match="*", count=100):
+        return iter([k for k in self.values if k.startswith(match.rstrip("*"))])
+
+    def eval(self, *args):
+        return "accepted_by_meta"
+
+
+@pytest.fixture(autouse=True)
+def marcas_sin_redis(monkeypatch):
+    """Every test starts with an empty, in-memory marker store; tests that need
+    their own fake (the webhook harness) override it."""
+    from app import outbound_status
+
+    marcas = _MarcasSinRedis()
+    monkeypatch.setattr(outbound_status, "_client", marcas)
+    return marcas

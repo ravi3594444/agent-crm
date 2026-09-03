@@ -68,3 +68,22 @@ The gate commit (this one) tightens two things and adds the readiness tooling:
 
 Live testing was deliberately NOT run: `.env` still needs the owner's values
 (DashScope key, staff phones, zones, templates, three distinct ERPNext users).
+
+## Pilot workflow clarifications (after the release gate)
+
+- Templates are an optional fallback: `make check-env` reports a missing
+  template as AVISO; every customer-facing message uses the customer's own
+  24-hour window first. The owner keeps their window open by writing to the bot.
+- The confirmed-order alert is informational ("no hace falta responder"); if the
+  manager does nothing the order stays confirmed. A customer who read
+  "confirmado" in the conversation (`outbound_status.marcar_confirmacion(...,
+  informado_en_chat=True)` from the automatic path) never receives a second
+  confirmation, template or not.
+- New human-only command `cancelar <pedido> <motivo>` (`decisiones.cancelar`):
+  staff phones only (re-checked), reason required, submitted orders only and
+  only within `CANCELACION_HORAS` of a confirmation THIS system recorded, refused
+  when any Delivery Note or Sales Invoice (draft or submitted) is linked, no
+  cascade, everything re-read under `distributed_lock`, policy identity only
+  (`erpnext.policy_cancel_doc`), audited, idempotent, customer told once (free
+  text in window / optional template / dead-letter + one ToDo). Not an LLM tool.
+  `tests/test_cancelacion.py` has a test per rule.

@@ -28,10 +28,21 @@ HONESTY RULES
 from __future__ import annotations
 
 import os
+import time
 
 from app import erpnext, telefono
+from app.locks import CoordinationError, distributed_lock
+from app.outbound_status import (
+    has_accepted,
+    momento_confirmacion,
+    record_outbound,
+    registrar_aviso_fallido,
+    window_open,
+)
+from app.router import es_equipo
 
 _PURPOSE_RECHAZO = "customer_order_rejected"
+_PURPOSE_CANCELACION = "customer_order_cancelled"
 
 # ERPNext has no "rejected" docstatus, and a draft cannot be cancelled. The
 # closest durable state it does understand is status "Closed", which is one of
@@ -484,3 +495,194 @@ def despachar(nombre: str, por: str) -> dict:
         f"Remito {remito} despachado (confirmado) por un integrante autorizado ({por}).",
     )
     return _resultado(True, False, f"🚚 Remito {remito} despachado. {nombre} queda en reparto.")
+
+
+# ---------------------------------------------------------------------------
+# cancelar <pedido> <motivo> — a CONFIRMED order, by a human, within the window.
+#
+# Twelve rules, all here and in tests/test_cancelacion.py:
+#   1. only TELEFONOS_EQUIPO (checked again here, not just in the router);
+#   2. only a SUBMITTED Sales Order, within CANCELACION_HORAS (24) of the
+#      confirmation THIS system recorded — no record, no cancellation;
+#   3. refused when a Delivery Note or Sales Invoice exists for it;
+#   4. never cancels linked documents; 5. re-read and validated under the
+#   distributed lock; 6. policy identity only; 7. reason required, audited;
+#   8. idempotent; 9-11. the customer is told once — free text inside the
+#   window, optional template outside, otherwise dead-letter + one ToDo;
+#   12. not an LLM tool (tests/test_frontera_decisiones.py).
+# ---------------------------------------------------------------------------
+
+
+def horas_cancelacion() -> float:
+    try:
+        horas = float(os.getenv("CANCELACION_HORAS", "24"))
+    except (TypeError, ValueError):
+        return 24.0
+    return horas if horas > 0 else 24.0
+
+
+def _documentos_vinculados(nombre: str) -> list[str]:
+    """Delivery Notes and Sales Invoices (draft or submitted) tied to the order.
+
+    Raises on a read failure: not knowing is not "there are none".
+    """
+    vinculados: list[str] = []
+    for doctype, campo, etiqueta in (
+        ("Delivery Note", "against_sales_order", "remito"),
+        ("Sales Invoice", "sales_order", "factura"),
+    ):
+        filas = erpnext.policy_get_list(
+            f"{doctype} Item",
+            filters=[[campo, "=", nombre], ["docstatus", "in", [0, 1]]],
+            fields=["parent", campo, "docstatus"],
+            limit=20,
+            parent=doctype,
+        )
+        vistos: set[str] = set()
+        for fila in filas:
+            if str(fila.get(campo) or nombre).strip() != nombre:
+                continue
+            padre = str(fila.get("parent") or "").strip()
+            if not padre or padre in vistos:
+                continue
+            vistos.add(padre)
+            estado = "confirmado" if int(float(fila.get("docstatus") or 0)) == 1 else "borrador"
+            vinculados.append(f"{etiqueta} {padre} ({estado})")
+    return vinculados
+
+
+def cancelar(nombre: str, por: str, motivo: str) -> dict:
+    """Cancel a confirmed order by hand. HUMAN MANAGER ONLY, within the window."""
+    if not es_equipo(por):
+        return _resultado(False, False, "No tenés permiso para cancelar pedidos.")
+    razon = " ".join(str(motivo or "").split())
+    if len(razon) < 3:
+        return _resultado(
+            False, False, f"Falta el motivo. Escribí: cancelar {nombre} <motivo>"
+        )
+
+    ya_cancelado = False
+    try:
+        with distributed_lock(f"cancelar:{nombre}", lease_seconds=60, wait_seconds=10):
+            so = _leer_doc("Sales Order", nombre)
+            estado = int(so.get("docstatus") or 0)
+            if estado == 2:
+                ya_cancelado = True
+            else:
+                if estado != 1:
+                    return _resultado(
+                        False,
+                        False,
+                        f"{nombre} no está confirmado; un borrador se rechaza con "
+                        f"'rechazar {nombre}'.",
+                    )
+                momento = momento_confirmacion(nombre)
+                if momento is None:
+                    return _resultado(
+                        False,
+                        False,
+                        f"No puedo establecer cuándo se confirmó {nombre} (no lo confirmó este "
+                        "sistema o la marca venció). Cancelalo en ERPNext.",
+                    )
+                horas = (time.time() - momento) / 3600.0
+                if horas > horas_cancelacion():
+                    return _resultado(
+                        False,
+                        False,
+                        f"{nombre} se confirmó hace {horas:.0f} h; el límite para cancelar por "
+                        f"WhatsApp es {horas_cancelacion():g} h. Cancelalo en ERPNext.",
+                    )
+                vinculados = _documentos_vinculados(nombre)
+                if vinculados:
+                    return _resultado(
+                        False,
+                        False,
+                        f"No cancelo {nombre}: ya tiene {', '.join(vinculados)}. No cancelo "
+                        "documentos vinculados en cascada; resolvelo en ERPNext.",
+                    )
+                try:
+                    erpnext.policy_cancel_doc("Sales Order", nombre)
+                except erpnext.ERPNextError:
+                    # A timeout can commit anyway: trust ERPNext, not the client.
+                    actual = _leer_doc("Sales Order", nombre)
+                    if int(actual.get("docstatus") or 0) != 2:
+                        raise
+                _comentar(
+                    nombre,
+                    f"Cancelado por un integrante autorizado ({por}). Motivo: {razon}.",
+                )
+    except CoordinationError:
+        return _resultado(
+            False, False, f"No pude coordinar la cancelación de {nombre}; reintentá en un momento."
+        )
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: cancelación falló ({type(exc).__name__})")
+        return _resultado(False, False, f"No pude cancelar {nombre}. Revisalo en ERPNext.")
+
+    if ya_cancelado:
+        return _resultado(True, False, f"{nombre} ya estaba cancelado; no cambié nada.")
+
+    tel = telefono_del_cliente(nombre)
+    avisado = _avisar_cliente_cancelacion(nombre, tel, razon) if tel else False
+    if not tel:
+        _comentar(nombre, "Cancelación no avisada al cliente: no tiene teléfono cargado.")
+    _comentar(
+        nombre,
+        f"Aviso de cancelación al cliente: {'enviado' if avisado else 'NO enviado'}.",
+    )
+    if avisado:
+        return _resultado(True, True, f"🛑 {nombre} cancelado. Ya le avisé al cliente.")
+    return _resultado(
+        True, False, f"🛑 {nombre} cancelado. NO pude avisarle al cliente; quedó una tarea para hacerlo."
+    )
+
+
+def _texto_cancelacion(nombre: str, razon: str) -> str:
+    return (
+        f"Hola! Tu pedido {nombre} quedó cancelado ({razon}). Si fue un error, escribinos "
+        "y lo revisamos.\n\n"
+        f"Hi! Your order {nombre} has been cancelled ({razon}). If this is a mistake, "
+        "message us and we will sort it out."
+    )
+
+
+def _avisar_cliente_cancelacion(nombre: str, tel: str, razon: str) -> bool:
+    """Once per order. Free text inside the customer's window; a template only
+    outside it and only if configured; otherwise dead-letter + one ToDo."""
+    from app import whatsapp
+
+    try:
+        if has_accepted(nombre, _PURPOSE_CANCELACION):
+            return True
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: has_accepted falló ({type(exc).__name__})")
+
+    texto = _texto_cancelacion(nombre, razon)
+    wamid = ""
+    try:
+        if window_open(tel):
+            wamid = _wamid(whatsapp.enviar_mensaje(tel, texto))
+        else:
+            plantilla = os.getenv("WHATSAPP_CUSTOMER_CANCELLED_TEMPLATE", "").strip()
+            if plantilla:
+                wamid = _wamid(
+                    whatsapp.enviar_plantilla(
+                        tel,
+                        plantilla,
+                        os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR",
+                        [nombre, razon],
+                    )
+                )
+            else:
+                print(f"[decisiones] {nombre}: ventana cerrada y sin WHATSAPP_CUSTOMER_CANCELLED_TEMPLATE")
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: aviso de cancelación falló ({type(exc).__name__})")
+
+    if not wamid:
+        registrar_aviso_fallido(_PURPOSE_CANCELACION, nombre, texto)
+        return False
+    try:
+        record_outbound(wamid, _PURPOSE_CANCELACION, order_name=nombre)
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: tracking de la cancelación falló ({type(exc).__name__})")
+    return True
