@@ -323,7 +323,7 @@ def _staff_command(text: str) -> str | None:
         resto = " ".join((con_argumento.group("resto") or "").split())
         if accion and (resto or accion[1]):
             pedido = con_argumento.group("order").upper()
-            return f"{accion[0]}:{pedido}:{resto}" if (resto or accion[1]) else None
+            return f"{accion[0]}:{pedido}:{resto}"
     match = _STAFF_COMMAND_RE.match(text or "")
     if not match:
         return None
