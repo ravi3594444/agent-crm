@@ -1248,7 +1248,17 @@ app = FastAPI(title="Plus Agent", lifespan=_lifespan)
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    """Alive, plus the one number that is invisible everywhere else.
+
+    A draft ERPNext will not close is not a failed message and not a pending
+    decision — it is stock nobody can sell, and until it showed up here the only
+    way to find one was to notice the sales going missing. None means the
+    counter could not be read; it never makes /health fail, because a monitor
+    that goes red for an unreadable counter stops being watched.
+    """
+    from app import solicitudes
+
+    return {"ok": True, "borradores_trabados": solicitudes.trabadas()}
 
 
 @app.get("/webhook/whatsapp")

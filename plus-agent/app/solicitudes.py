@@ -195,10 +195,20 @@ _ESTADO_SIN_RESERVA = "Closed"
 # ... and the state it came from, so an accepted fallback can be confirmed on
 # the same document instead of asking the customer to order again.
 _ESTADO_BORRADOR = "Draft"
-# How soon to try again when the draft could not be closed. Short, because the
-# units are still held; not zero, because a 60-second sweep would otherwise
-# spin on the same failing order.
-REINTENTO_REVISION_SEGUNDOS = 900.0
+# How soon to try again when the draft could not be closed, and how that grows.
+# The first wait is short because the units are still held, and not zero because
+# a 60-second sweep would otherwise spin on the same failing order. It stops
+# growing at six hours: something has to keep coming back for those units.
+ESPERAS_REINTENTO = (900.0, 3600.0, 21600.0)  # 15 min, 1 h, 6 h
+REINTENTO_REVISION_SEGUNDOS = ESPERAS_REINTENTO[0]
+# After this many consecutive failures the draft is not going to close by
+# itself. One durable ToDo is opened so a person deals with it, once per day.
+INTENTOS_PARA_ESCALAR = 3
+ESCALACION_TTL_SEGUNDOS = 24 * 60 * 60
+# Drafts ERPNext will not close, so /health, readiness and the daily digest can
+# say how many there are. A stuck draft is invisible otherwise: it is not a
+# failed message and not a pending decision, it is just stock nobody can sell.
+CLAVE_TRABADAS = "wa:{inbound}:solicitudes-trabadas"
 
 _JSON = re.compile(re.escape(MARCA) + r"\s*(\{.*\})\s*$", re.DOTALL)
 
@@ -234,6 +244,10 @@ class Solicitud:
     # what makes acceptance re-open the draft its predecessor closed.
     es_respaldo: bool = False
     origen: str = ""
+    # Consecutive times the sweep could not prove the draft stopped reserving
+    # stock. It drives the retry backoff, and it is on the RECORD rather than in
+    # memory because the process that failed is not always the one that retries.
+    intentos_cierre: int = 0
 
     @property
     def abierta(self) -> bool:
@@ -280,6 +294,7 @@ class Solicitud:
             "reabierta_en": self.reabierta_en,
             "es_respaldo": self.es_respaldo,
             "origen": self.origen,
+            "intentos_cierre": self.intentos_cierre,
         }
 
 
@@ -402,6 +417,7 @@ def _desde_dict(datos: dict) -> Solicitud | None:
             reabierta_en=float(datos.get("reabierta_en") or 0),
             es_respaldo=bool(datos.get("es_respaldo") or False),
             origen=str(datos.get("origen") or ""),
+            intentos_cierre=int(datos.get("intentos_cierre") or 0),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -436,6 +452,11 @@ def _cachear(solicitud: Solicitud) -> None:
             cliente.zadd(CLAVE_INDICE, {solicitud.pedido: solicitud.vence_en})
         else:
             cliente.zrem(CLAVE_INDICE, solicitud.pedido)
+            # A request that reached an ending is not a stuck draft any more,
+            # whichever ending it was and whoever wrote it. Every terminal
+            # write goes through here, so this is the one place that has to
+            # know — not each of the five callers that can end one.
+            cliente.zrem(CLAVE_TRABADAS, solicitud.pedido)
     except Exception as exc:
         print(f"[solicitudes] {solicitud.pedido}: caché no guardada ({type(exc).__name__})")
 
@@ -1197,6 +1218,87 @@ def _resuelta_por_persona(
     return True
 
 
+def _espera_reintento(intentos: int) -> float:
+    """The wait before the Nth retry (1-based), bounded by ESPERAS_REINTENTO."""
+    indice = min(max(1, intentos), len(ESPERAS_REINTENTO)) - 1
+    return ESPERAS_REINTENTO[indice]
+
+
+def _marcar_trabada(pedido: str, ahora: float) -> float:
+    """Remember this draft is stuck, and return when it FIRST was.
+
+    The first-failure moment is what buckets the escalation notice by day. It
+    cannot come from ``decidida_en``: that is 0 for a request nobody has decided
+    yet, so the ordinary path would bucket by the UTC calendar day instead of by
+    how long the problem has lasted, and a failure just before midnight would
+    send two notices in an hour.
+    """
+    try:
+        cliente = _redis()
+        desde = cliente.zscore(CLAVE_TRABADAS, pedido)
+        if desde is None:
+            cliente.zadd(CLAVE_TRABADAS, {pedido: ahora})
+            return ahora
+        return float(desde)
+    except Exception as exc:
+        print(f"[solicitudes] {pedido}: no pude marcarlo trabado ({type(exc).__name__})")
+        return ahora
+
+
+def trabadas() -> int | None:
+    """How many drafts ERPNext will not close. None means "could not read".
+
+    A stuck draft is invisible in every other counter the owner has: it is not
+    a failed message and not a pending decision, it is stock nobody can sell.
+    """
+    try:
+        return int(_redis().zcard(CLAVE_TRABADAS))
+    except Exception as exc:
+        print(f"[solicitudes] contador de trabadas no legible ({type(exc).__name__})")
+        return None
+
+
+def _escalar_trabada(solicitud: Solicitud, detalle: str) -> None:
+    """Ask a PERSON, durably, once a day. Never raises.
+
+    Three failures apart in time is not a hiccup — the draft is not going to
+    close by itself, and a WhatsApp notice can be missed. A ToDo in ERPNext is
+    where the owner's own work already lives and it outlives every process here.
+    """
+    from app import outbound_status
+
+    try:
+        if not outbound_status.claim_once(
+            f"revision-trabada:{solicitud.pedido}", ESCALACION_TTL_SEGUNDOS
+        ):
+            return
+    except Exception as exc:
+        print(f"[solicitudes] {solicitud.pedido}: dedupe de escalación no disponible ({type(exc).__name__})")
+        return
+    try:
+        erpnext.create_doc(
+            "ToDo",
+            {
+                "description": (
+                    f"[WhatsApp] No puedo cerrar el borrador de "
+                    f"{solicitud.pedido} y sigue reservando stock. "
+                    f"{solicitud.intentos_cierre} intentos fallidos; último "
+                    f"motivo: {detalle[:200]}. Cerralo o confirmalo a mano en "
+                    f"ERPNext — hasta entonces esas unidades no se pueden vender."
+                ),
+                "priority": "High",
+                "reference_type": "Sales Order",
+                "reference_name": solicitud.pedido,
+            },
+        )
+    except Exception as exc:
+        print(f"[solicitudes] {solicitud.pedido}: ToDo de trabada no creado ({type(exc).__name__})")
+        try:
+            outbound_status.release_claim(f"revision-trabada:{solicitud.pedido}")
+        except Exception:
+            pass
+
+
 def _sin_soltar(solicitud: Solicitud, detalle: str, ahora: float) -> bool:
     """The draft is still live and we could not prove otherwise. Try again.
 
@@ -1212,29 +1314,59 @@ def _sin_soltar(solicitud: Solicitud, detalle: str, ahora: float) -> bool:
     not touched, so the moment a review opened survives every retry and
     _plazo_horas keeps telling the truth.
 
-    The deadline it writes is DURABLE: a Redis-only retry would disappear with
-    Redis and leave the live draft with no deadline at all, which is the same
-    permanent hold by another route.
+    BOUNDED BACKOFF, AND A QUIET AUDIT TRAIL
+    Retrying every 15 minutes for a week is 672 retries, and every one of them
+    used to append a durable event to the Sales Order: a thousand-comment order
+    nobody can read, in the same list the manager uses to see what happened.
+    The wait grows 15 min -> 1 h -> 6 h, and a durable event is written only
+    when that STEP changes — three of them, then silence. The retries in between
+    move the deadline in the cache alone.
+
+    That is safe because of which way it fails. If Redis is lost, the last
+    durable event is what is left: a live request with a deadline already in the
+    past, which the next sweep retries at once. A quiet retry can only ever cost
+    an extra attempt, never a lost deadline.
+
+    Three failures in, a ToDo asks a person — once a day, durably, because a
+    WhatsApp notice can be missed and these units cannot be sold until somebody
+    acts.
     """
-    reintentada = registrar(
-        solicitud,
-        "reintento_cierre",
-        estado=solicitud.estado,
-        motivo=f"no pude cerrar el borrador; {detalle}",
-        vence_en=ahora + REINTENTO_REVISION_SEGUNDOS,
-    )
-    if reintentada is None:
-        return False
+    intentos = solicitud.intentos_cierre + 1
+    espera = _espera_reintento(intentos)
+    motivo = f"no pude cerrar el borrador; {detalle}"
+    cambios = {
+        "estado": solicitud.estado,
+        "motivo": motivo,
+        "vence_en": ahora + espera,
+        "intentos_cierre": intentos,
+    }
+    # The step changed (or this is the first failure): make it durable.
+    if intentos == 1 or espera != _espera_reintento(intentos - 1):
+        reintentada = registrar(solicitud, "reintento_cierre", **cambios)
+        if reintentada is None:
+            return False
+    else:
+        # Same step as last time: the durable record already says "live, with a
+        # deadline", which is everything a restart needs. Only the schedule
+        # moves, and it moves in the cache.
+        reintentada = replace(solicitud, evento="reintento_cierre", sello=ahora, **cambios)  # type: ignore[arg-type]
+        _cachear(reintentada)
+
+    trabada_desde = _marcar_trabada(solicitud.pedido, ahora)
+    if intentos >= INTENTOS_PARA_ESCALAR:
+        _escalar_trabada(reintentada, detalle)
+
     # Bucketed by the DAY of failure, so an ERPNext outage costs one message a
     # day instead of one every sweep.
-    dia = int(max(0.0, ahora - solicitud.decidida_en) // 86400)
+    dia = int(max(0.0, ahora - trabada_desde) // 86400)
     que_vencio = "la revisión" if solicitud.en_revision else "la solicitud"
     _avisar_equipo(
         reintentada,
         evento=f"revision_sin_soltar:{dia}",
         texto=f"🚨 {solicitud.pedido}: venció {que_vencio} {solicitud.id} y NO "
         f"pude cerrar el borrador — {detalle}. Sigue reservando stock, así que "
-        f"lo dejo con plazo y reintento. Cerralo o confirmalo a mano en ERPNext.",
+        f"lo dejo con plazo y reintento (intento {intentos}, próximo en "
+        f"{espera / 60:g} min). Cerralo o confirmalo a mano en ERPNext.",
     )
     return True
 

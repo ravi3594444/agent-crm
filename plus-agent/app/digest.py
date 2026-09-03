@@ -202,6 +202,22 @@ def seccion_fallos() -> str:
     )
 
 
+def seccion_trabadas() -> str:
+    """Drafts ERPNext will not close. Nothing else in this digest shows them."""
+    from app import solicitudes
+
+    cuantas = solicitudes.trabadas()
+    if cuantas is None:
+        return "🔒 Borradores trabados: no pude leer el contador"
+    if not cuantas:
+        return "🔒 Borradores trabados: ninguno"
+    return (
+        f"🔒 Borradores trabados ({cuantas}): ERPNext no los deja cerrar y "
+        "siguen reservando stock que no se puede vender. Hay un ToDo por cada "
+        "uno; cerralos o confirmalos a mano en ERPNext."
+    )
+
+
 def resumen(dia: date | None = None) -> str:
     dia = dia or _ahora().date()
     return "\n\n".join(
@@ -210,6 +226,7 @@ def resumen(dia: date | None = None) -> str:
             seccion_despacho(),
             seccion_pendientes(),
             seccion_conteos(),
+            seccion_trabadas(),
             seccion_fallos(),
         ]
     )

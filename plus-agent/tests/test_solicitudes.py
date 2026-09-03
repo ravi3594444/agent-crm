@@ -103,6 +103,7 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
         "cargos": [],
         "submits": [],
         "estados": [],
+        "todos": [],
         "consultas": [],
         "stock": True,
         # A strictly increasing `creation` per recorded event. ERPNext orders by
@@ -179,7 +180,12 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
         return dict(estado["so"])
 
     monkeypatch.setattr(erpnext, "submit_doc", submit_doc)
-    monkeypatch.setattr(erpnext, "create_doc", lambda dt, payload: {"name": "TD-1"})
+    monkeypatch.setattr(
+        erpnext,
+        "create_doc",
+        lambda dt, payload: estado["todos"].append((dt, dict(payload)))
+        or {"name": f"TD-{len(estado['todos'])}"},
+    )
 
     @contextmanager
     def lock(nombre, **kwargs):
@@ -2081,6 +2087,17 @@ def _no_cierra(monkeypatch) -> None:
     )
 
 
+def _si_cierra(mundo, monkeypatch) -> None:
+    """ERPNext starts cooperating again: the status write sticks."""
+
+    def policy_update_status(dt, name, status):
+        mundo["estados"].append(status)
+        mundo["so"]["status"] = status
+        return {"name": name, "status": status}
+
+    monkeypatch.setattr(erpnext, "policy_update_status", policy_update_status)
+
+
 def test_a_draft_that_could_not_be_closed_keeps_its_deadline(
     mundo, monkeypatch, con_plazo
 ) -> None:
@@ -2138,9 +2155,8 @@ def test_a_draft_that_cannot_be_closed_is_not_re_reported_every_sweep(
 
     momento = con_plazo.vence_en + 1
     for _ in range(5):
-        actual = solicitudes.leer(SO)
-        solicitudes._vencer(SO, momento)
-        momento = actual.vence_en + solicitudes.REINTENTO_REVISION_SEGUNDOS + 1
+        assert solicitudes._vencer(SO, momento) is True
+        momento = solicitudes.leer(SO).vence_en + 1
 
     assert solicitudes.leer(SO).estado == con_plazo.estado
     for _ in range(3):
@@ -2652,3 +2668,197 @@ def test_a_truncated_budget_never_invents_an_answer_it_could_not_read(
 
     assert SO not in plazos
     assert solicitudes._leer_cache(SO) != solicitudes.SIN_SOLICITUD
+
+
+# ---------------------------------------------------------------------------
+# A stuck draft has to keep being retried without becoming the loudest thing
+# in the system.
+# ---------------------------------------------------------------------------
+
+
+def _eventos_de_reintento(mundo) -> list[dict]:
+    return [f for f in mundo["durables"] if '"evento":"reintento_cierre"' in f["content"]]
+
+
+def _reintentar(mundo, veces: int, desde: float) -> list[float]:
+    """Sweep past the deadline `veces` times. Returns the waits it chose."""
+    momento = desde
+    esperas = []
+    for _ in range(veces):
+        assert solicitudes._vencer(SO, momento) is True
+        nueva = solicitudes.leer(SO)
+        esperas.append(round(nueva.vence_en - momento, 3))
+        momento = nueva.vence_en + 1
+    return esperas
+
+
+def test_the_retry_backs_off_15_minutes_then_an_hour_then_six(
+    mundo, monkeypatch, con_plazo
+) -> None:
+    """The units are still held, so the first retry is soon. A problem that
+    lasts a week must not cost 672 of them."""
+    _no_cierra(monkeypatch)
+
+    esperas = _reintentar(mundo, 5, con_plazo.vence_en + 1)
+
+    assert esperas == [900.0, 3600.0, 21600.0, 21600.0, 21600.0]
+    assert solicitudes.leer(SO).intentos_cierre == 5
+    assert solicitudes.leer(SO).estado == con_plazo.estado
+
+
+def test_a_stuck_draft_does_not_append_an_erpnext_event_every_fifteen_minutes(
+    mundo, monkeypatch, con_plazo
+) -> None:
+    """Every retry used to append a durable event to the Sales Order — a
+    thousand-comment order nobody can read, in the same list the manager uses to
+    see what happened. One event per BACKOFF STEP: three, then silence."""
+    _no_cierra(monkeypatch)
+
+    _reintentar(mundo, 8, con_plazo.vence_en + 1)
+
+    assert len(_eventos_de_reintento(mundo)) == len(solicitudes.ESPERAS_REINTENTO)
+
+
+def test_a_quiet_retry_still_moves_the_hold_policy_can_see(
+    mundo, monkeypatch, con_plazo
+) -> None:
+    """The retries that write nothing durable still have to be real retries."""
+    _no_cierra(monkeypatch)
+
+    _reintentar(mundo, 6, con_plazo.vence_en + 1)
+
+    actual = solicitudes.leer(SO)
+    assert solicitudes.vencimientos([SO]) == {SO: actual.vence_en}
+    assert solicitudes._indice_pendientes(actual.vence_en + 1) == [SO]
+
+
+def test_losing_redis_after_a_quiet_retry_never_leaves_the_draft_unbounded(
+    mundo, monkeypatch, con_plazo
+) -> None:
+    """This is why the quiet retries are safe. What survives a flush is the last
+    DURABLE event: a live request whose deadline has already passed, which the
+    next sweep picks up at once. A quiet retry can cost an extra attempt; it can
+    never cost the deadline."""
+    _no_cierra(monkeypatch)
+    _reintentar(mundo, 6, con_plazo.vence_en + 1)
+    quieta = solicitudes.leer(SO)
+    _sin_redis()
+
+    recuperada = solicitudes.leer(SO)
+
+    assert recuperada.estado == con_plazo.estado
+    assert recuperada.estado not in solicitudes.TERMINALES
+    # The deadline it falls back to is the last DURABLE one, which is never
+    # LATER than the quiet retry's — so the sweep comes back no later than it
+    # would have, and it always comes back.
+    assert recuperada.vence_en <= quieta.vence_en
+    assert solicitudes.reconstruir_indice() == 1
+    assert solicitudes._indice_pendientes(recuperada.vence_en + 1) == [SO]
+
+
+def test_three_failures_open_one_durable_todo_for_a_person(
+    mundo, monkeypatch, con_plazo
+) -> None:
+    """A WhatsApp notice can be missed, and these units cannot be sold until
+    somebody acts. The ToDo lives where the owner's own work already lives."""
+    _no_cierra(monkeypatch)
+
+    _reintentar(mundo, 2, con_plazo.vence_en + 1)
+    assert mundo["todos"] == []  # two failures is still a hiccup
+
+    _reintentar(mundo, 6, solicitudes.leer(SO).vence_en + 1)
+
+    (doctype, payload), = mundo["todos"]
+    assert doctype == "ToDo"
+    assert payload["reference_name"] == SO
+    assert payload["priority"] == "High"
+    assert "sigue reservando stock" in payload["description"]
+    assert "no se pueden vender" in payload["description"]
+
+
+def test_the_escalation_is_one_todo_a_day_not_one_a_retry(
+    mundo, monkeypatch, con_plazo
+) -> None:
+    _no_cierra(monkeypatch)
+
+    _reintentar(mundo, 12, con_plazo.vence_en + 1)
+
+    assert len(mundo["todos"]) == 1
+
+
+def test_a_stuck_draft_is_counted_where_a_person_will_see_it(
+    mundo, monkeypatch, con_plazo
+) -> None:
+    """A stuck draft is not a failed message and not a pending decision. Before
+    this counter the only way to find one was to notice the sales going missing."""
+    from app import digest, readiness
+
+    assert solicitudes.trabadas() == 0
+    _no_cierra(monkeypatch)
+
+    _reintentar(mundo, 3, con_plazo.vence_en + 1)
+
+    assert solicitudes.trabadas() == 1
+    assert main.health()["borradores_trabados"] == 1
+    assert "Borradores trabados (1)" in digest.seccion_trabadas()
+    # And it is actually WIRED into the digest he gets at 18:00, not just
+    # available to anyone who thinks to call it.
+    assert "Borradores trabados (1)" in digest.resumen()
+    reporte = readiness.Reporte()
+    readiness.chequear_solicitudes(reporte)
+    assert [(n, c) for n, c, _ in reporte.lineas] == [
+        (readiness.AVISO, "Borradores trabados")
+    ]
+
+
+def test_the_count_clears_when_the_draft_finally_closes(
+    mundo, monkeypatch, con_plazo
+) -> None:
+    _no_cierra(monkeypatch)
+    _reintentar(mundo, 3, con_plazo.vence_en + 1)
+    assert solicitudes.trabadas() == 1
+    _si_cierra(mundo, monkeypatch)
+
+    trabada = solicitudes.leer(SO)
+
+    assert solicitudes._vencer(SO, trabada.vence_en + 1) is True
+
+    # The stuck request reached an ending. On the ordinary path a fallback offer
+    # is opened on the same order straight afterwards — that is a live request
+    # again, but it is not a stuck DRAFT, and the counter has to tell them apart.
+    assert mundo["so"]["status"] == "Closed"
+    terminales = ('"estado":"vencida"', '"estado":"revision_vencida"')
+    assert any(
+        f'"id":"{trabada.id}"' in f["content"]
+        and any(t in f["content"] for t in terminales)
+        for f in mundo["durables"]
+    )
+    assert solicitudes.trabadas() == 0
+
+
+def test_the_count_clears_when_a_person_deals_with_the_order(
+    mundo, monkeypatch, con_plazo
+) -> None:
+    _no_cierra(monkeypatch)
+    _reintentar(mundo, 3, con_plazo.vence_en + 1)
+    assert solicitudes.trabadas() == 1
+    mundo["so"]["docstatus"] = 1
+
+    assert solicitudes._vencer(SO, solicitudes.leer(SO).vence_en + 1) is True
+
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_RESUELTA
+    assert solicitudes.trabadas() == 0
+
+
+def test_an_unreadable_counter_is_never_reported_as_zero(mundo, monkeypatch) -> None:
+    """"Nothing is stuck" and "I could not look" are different answers, and only
+    one of them means nobody has to do anything."""
+    from app import digest
+
+    monkeypatch.setattr(
+        outbound_status._client, "caido", True, raising=False
+    )
+
+    assert solicitudes.trabadas() is None
+    assert main.health() == {"ok": True, "borradores_trabados": None}
+    assert "no pude leer el contador" in digest.seccion_trabadas()

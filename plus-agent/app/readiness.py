@@ -549,6 +549,30 @@ def chequear_entrega(env: Mapping[str, str], reporte: Reporte, resumen_limites: 
             reporte.ok("ENTREGA_CARGO_CUENTA", "presente")
 
 
+def chequear_solicitudes(reporte: Reporte) -> None:
+    """Drafts the sweep could not get ERPNext to stop reserving.
+
+    An AVISO, not a blocker: nothing is oversold by a draft that holds too much.
+    But those units cannot be sold either, and this is the only place the number
+    is visible before a customer is told there is no stock.
+    """
+    from app import solicitudes
+
+    cuantas = solicitudes.trabadas()
+    if cuantas is None:
+        reporte.aviso(
+            "Borradores trabados", "no pude leer el contador (Redis)"
+        )
+    elif cuantas:
+        reporte.aviso(
+            "Borradores trabados",
+            f"{cuantas}: ERPNext no los deja cerrar y siguen reservando stock. "
+            "Hay un ToDo por cada uno; cerralos o confirmalos a mano",
+        )
+    else:
+        reporte.ok("Borradores trabados", "ninguno")
+
+
 # ------------------------------------------------------------------- entry
 
 
@@ -571,6 +595,8 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
             reporte.aviso("Límites", f"módulo de límites no disponible ({type(exc).__name__})")
     chequear_stock_y_limites(env, reporte, resumen)
     chequear_entrega(env, reporte, resumen)
+    if _valor(env, "REDIS_URL"):
+        chequear_solicitudes(reporte)
     return reporte
 
 
