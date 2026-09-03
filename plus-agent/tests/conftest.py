@@ -32,7 +32,14 @@ _DUMMY = {
     "ERPNEXT_POLICY_API_SECRET": "policy-secret",
     "META_APP_SECRET": "test-app-secret",
     "META_VERIFY_TOKEN": "test-verify-token",
-    "REDIS_URL": "redis://localhost:6379/15",
+    # DATABASE 0, and not by preference: RediSearch refuses FT.CREATE on any
+    # other one ("Cannot create index on db != 0"), and app/graph.py creates the
+    # checkpointer's indices AT IMPORT. This used to say /15, which looked like
+    # isolation and worked on any machine that happened to have those indices
+    # left on db 15 from before — and failed at COLLECTION on every clean Redis
+    # Stack, which is every CI run and every new checkout. Isolation comes from
+    # the server being a throwaway one, not from the database number.
+    "REDIS_URL": "redis://localhost:6379/0",
     "WHATSAPP_PHONE_NUMBER_ID": "test-phone-id",
     "WHATSAPP_TOKEN": "test-token",
     # app/graph.py builds the chat models at import (app/modelos.py refuses to

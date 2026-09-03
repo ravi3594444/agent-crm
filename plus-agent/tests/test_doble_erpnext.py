@@ -143,3 +143,27 @@ def test_no_test_in_this_suite_is_shadowed_by_another() -> None:
             vistos.add(nodo.name)
 
     assert duplicados == [], "definiciones que tapan a otra: " + ", ".join(duplicados)
+
+
+def test_the_test_redis_url_points_at_the_only_database_that_can_hold_the_index() -> None:
+    """RediSearch refuses FT.CREATE on any database but 0.
+
+    app/graph.py creates the checkpointer's indices AT IMPORT, so a REDIS_URL
+    pointing anywhere else makes two test modules fail to COLLECT and pytest
+    abort the whole run. It said /15 for a long time and nobody noticed, because
+    a machine that already had those indices on db 15 skips the create — so it
+    passed everywhere except on a clean Redis, which is every CI run and every
+    new checkout.
+
+    Isolation has to come from the server being a throwaway one. Pinning it here
+    so "let's put the tests on their own database" cannot silently take the
+    whole suite out again.
+    """
+    import os
+    from urllib.parse import urlparse
+
+    ruta = urlparse(os.environ["REDIS_URL"]).path.strip("/")
+    assert ruta in ("", "0"), (
+        f"REDIS_URL apunta a la base {ruta!r}; RediSearch sólo indexa la 0 y "
+        "app/graph.py crea los índices al importar"
+    )

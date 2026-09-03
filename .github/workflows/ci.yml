@@ -11,9 +11,9 @@ name: CI
 # habiendo corrido CERO tests, y el rojo se leía como "un test falla".
 #
 # Por eso el job de tests levanta su propio Redis Stack (RedisJSON +
-# RediSearch, no un Redis pelado) en una base dedicada, y pone
-# REDIS_OBLIGATORIO para que "Redis no está" sea una FALLA y no un skip
-# silencioso: un skip es exactamente cómo la suite deja de ser la suite.
+# RediSearch, no un Redis pelado) y pone REDIS_OBLIGATORIO para que "Redis no
+# está" sea una FALLA y no un skip silencioso: un skip es exactamente cómo la
+# suite deja de ser la suite.
 
 on:
   push:
@@ -42,9 +42,12 @@ jobs:
           --health-retries 12
 
     env:
-      # Its own database, so nothing in the suite can be confused by another
-      # job's leftovers, and REDIS_OBLIGATORIO turns "no Redis" into a failure.
-      REDIS_URL: redis://localhost:6379/15
+      # Database 0 is not a choice: RediSearch refuses FT.CREATE on any other
+      # one, and app/graph.py creates the checkpointer's indices at import.
+      # Isolation comes from the service being a throwaway container that dies
+      # with the job — not from the database number.
+      # REDIS_OBLIGATORIO turns "no Redis" into a failure instead of a skip.
+      REDIS_URL: redis://localhost:6379/0
       REDIS_OBLIGATORIO: "1"
 
     steps:
