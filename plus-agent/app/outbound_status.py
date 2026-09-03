@@ -308,46 +308,17 @@ def contar_pendientes() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# The "customer already read it in the chat" flag, and shared Redis access.
+# Shared access for the notice queue (app/avisos.py).
 #
-# The confirmation TIMESTAMP is NOT here any more. Redis is a cache of it and
-# cannot be its source of truth: a flush, an eviction or a restart with a fresh
-# volume silently closed a cancellation window the business still had.
-# app/confirmacion.py owns the durable ERPNext record and uses this module only
-# for the cache.
+# The confirmation TIMESTAMP no longer lives here. Redis is a cache of it and
+# cannot be its source of truth, because a flush or a restart would silently
+# close a cancellation window the business still has; app/confirmacion.py owns
+# the durable ERPNext record and uses this module only for the cache.
 # ---------------------------------------------------------------------------
-
-CONFIRMACION_TTL_SEGUNDOS = 7 * 24 * 60 * 60
-
-
-def _clave_cliente_informado(order_name: str) -> str:
-    return f"wa:{{inbound}}:cliente-informado:{_digest(order_name)}"
-
-
-def marcar_cliente_informado(order_name: str) -> None:
-    """Say the customer already read the confirmation in the conversation."""
-    if not order_name:
-        return
-    try:
-        _redis().set(
-            _clave_cliente_informado(order_name), "1", ex=CONFIRMACION_TTL_SEGUNDOS
-        )
-    except Exception as exc:
-        print(f"[notify] marca de cliente informado no guardada type={type(exc).__name__}")
-
-
-def cliente_informado(order_name: str) -> bool:
-    """Whether the customer already received the confirmation in the conversation."""
-    if not order_name:
-        return False
-    try:
-        return _redis().get(_clave_cliente_informado(order_name)) is not None
-    except Exception:
-        return False
 
 
 def cliente():
-    """The same Redis this module uses, for the confirmation cache.
+    """The same Redis this module uses, for the notice queue and the cache.
 
     One client, one place tests patch (``outbound_status._client``), so a test
     can never accidentally reach a real server through a second connection.

@@ -124,7 +124,7 @@ def test_manual_confirmation_uses_the_policy_credential_not_the_agent_one(
     submit = Mock(return_value={"name": "SAL-ORD-0001", "docstatus": 1})
     monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
     monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
-    monkeypatch.setattr(aprobacion, "_avisar_cliente", lambda nombre: True)
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
     monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
 
     resultado = decisiones.confirmar("SAL-ORD-0001", "5493511111111")

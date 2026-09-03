@@ -12,7 +12,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app import clientes, confirmacion, entrega, erpnext, outbound_status, policy
+from app import avisos, clientes, confirmacion, entrega, erpnext, policy
 from app.locks import CoordinationError, distributed_lock
 from app.notificar import notificar_confirmacion, notificar_equipo
 from app.runtime_context import RuntimeContextError, actor_context
@@ -340,22 +340,32 @@ def _safe_notify(name: str, order: dict, *, auto: bool, reasons: str = "") -> bo
 
 
 def _notificar_confirmada(order: dict) -> None:
-    """Stage 2e: the manager hears about every confirmed order exactly once.
+    """Everything a confirmed order owes the world, none of it up to the model.
 
-    The customer reads PEDIDO_CONFIRMADO in this same turn, so the order is
-    marked as already communicated: no later path sends a second confirmation.
-    The DURABLE record of when it was confirmed (app/confirmacion.py) opens the
-    manual cancellation window and survives a restart of this process or of
-    Redis.
+    Three independent facts, in the order that makes each one safe:
+
+      1. the DURABLE confirmation timestamp (app/confirmacion.py), an ERPNext
+         comment that opens the manual cancellation window and survives any
+         restart of this process or of Redis;
+      2. the customer's authoritative confirmation, queued once per order by
+         app/avisos.py. This used to be the PEDIDO_CONFIRMADO token below,
+         which only reached the customer if the model chose to repeat it, and
+         the "already informed" marker was set whether it did or not. The model
+         may still say something conversational; the fact now travels as data,
+         with retries, dead-lettering and a follow-up ERPNext task of its own;
+      3. the manager's informational notice, exactly once per order.
+
+    Every step is best effort and none can undo the confirmation itself: the
+    order IS confirmed in ERPNext by the time this runs.
     """
     try:
         confirmacion.registrar(str(order.get("name") or ""), "automática (política)")
     except Exception as exc:
         print(f"[orders] marca durable de confirmación falló ({type(exc).__name__})")
     try:
-        outbound_status.marcar_cliente_informado(str(order.get("name") or ""))
+        avisos.confirmacion_cliente(order)
     except Exception as exc:
-        print(f"[orders] marca de cliente informado falló ({type(exc).__name__})")
+        print(f"[orders] aviso al cliente no encolado ({type(exc).__name__})")
     try:
         notificar_confirmacion(order, "automática (política)")
     except Exception as exc:

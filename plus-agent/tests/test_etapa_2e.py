@@ -115,7 +115,7 @@ def test_the_manager_hears_about_a_confirmed_order_exactly_once_across_both_path
     monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: phone == STAFF)
     monkeypatch.setattr(aprobacion, "_leer_doc", lambda dt, name: dict(SO))
     monkeypatch.setattr(aprobacion.erpnext, "submit_doc", Mock(side_effect=AssertionError("ya confirmado")))
-    monkeypatch.setattr(aprobacion, "_avisar_cliente", lambda nombre: True)
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
     monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
     aprobacion.manejar_boton(f"ok:{SO['name']}", STAFF)
     aprobacion.manejar_boton(f"ok:{SO['name']}", STAFF)
@@ -130,7 +130,7 @@ def test_a_human_confirmation_notifies_once_and_a_later_automatic_path_is_silent
     monkeypatch.setattr(aprobacion, "_leer_doc", lambda dt, name: next(lecturas))
     submit = Mock(return_value=dict(SO))
     monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
-    monkeypatch.setattr(aprobacion, "_avisar_cliente", lambda nombre: True)
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
     monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
 
     respuesta = aprobacion.manejar_boton(f"ok:{SO['name']}", STAFF)

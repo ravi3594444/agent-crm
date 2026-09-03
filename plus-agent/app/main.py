@@ -62,6 +62,7 @@ _STATE_TTL_SECONDS = 30 * 24 * 60 * 60
 _WORKER_LOCK_TTL_SECONDS = 90
 _ITEM_LEASE_TTL_SECONDS = 90
 _WORKER_POLL_SECONDS = 1.0
+_AVISOS_POLL_SECONDS = 5.0
 _RETRY_SECONDS = 2.0
 _ACK_CLAIM_TTL_SECONDS = 30
 _ACK_WAIT_SECONDS = 16
@@ -1042,6 +1043,29 @@ def _startup_checks() -> None:
     print(f"[whatsapp] {'OK' if ok else 'ERROR'} {detail}")
 
 
+def _avisos_worker(stop: threading.Event) -> None:
+    """Drain the durable notice queue (app/avisos.py).
+
+    Its own thread, so a customer confirmation is never coupled to the inbound
+    FIFO: a notice cannot delay somebody else's reply and a quiet system still
+    delivers what is already queued. ``avisos.despertar`` is set by every
+    enqueue, so the usual latency is milliseconds; the timeout is only the
+    floor for retries and for a process that missed the wake-up.
+    """
+    from app import avisos
+
+    while not stop.is_set():
+        avisos.despertar.clear()
+        try:
+            hechos = avisos.procesar()
+        except Exception as error:
+            print(f"[avisos] ciclo type={_error_name(error)}")
+            hechos = 0
+        if hechos:
+            continue
+        avisos.despertar.wait(_AVISOS_POLL_SECONDS)
+
+
 def _digest_scheduler(stop: threading.Event) -> None:
     """Once a minute, let app/digest.py decide whether today's 18:00 summary is due."""
     from app import digest
@@ -1061,6 +1085,9 @@ async def _lifespan(application: FastAPI):
         threading.Thread(
             target=_digest_scheduler, args=(stop,), daemon=True, name="digest-scheduler"
         ).start()
+    threading.Thread(
+        target=_avisos_worker, args=(stop,), daemon=True, name="avisos-worker"
+    ).start()
     worker = threading.Thread(
         target=_worker_supervisor,
         args=(stop,),

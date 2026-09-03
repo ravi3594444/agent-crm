@@ -227,6 +227,16 @@ def _renglones(so: dict) -> str:
     return "; ".join(partes) or "sin renglones"
 
 
+def renglones(so: dict) -> str:
+    """The order's lines as a person reads them. Same text for every channel."""
+    return _renglones(so)
+
+
+def direccion_de_entrega(so: dict) -> str:
+    """The order's delivery address as a person reads it, or ''."""
+    return _direccion_de_entrega(so)
+
+
 def texto_confirmacion(so: dict, fuente: str, momento: str | None = None) -> str:
     """What the manager reads: every field the client asked for, in order."""
     direccion = _direccion_de_entrega(so)

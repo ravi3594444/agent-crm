@@ -3,18 +3,9 @@
 Only phones on the staff list can approve. A stranger who somehow guesses a
 button payload gets nothing.
 """
-import os
-
-from app import confirmacion, erpnext, notificar, policy
+from app import avisos, confirmacion, erpnext, notificar, policy
 from app.formato import pesos
-from app.outbound_status import (
-    cliente_informado,
-    has_accepted,
-    record_outbound,
-    window_open,
-)
 from app.router import es_equipo
-from app.whatsapp import enviar_mensaje, enviar_plantilla
 
 
 def _leer_doc(doctype: str, name: str) -> dict:
@@ -163,30 +154,32 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
     _notificar_confirmada(nombre, actual)
 
     prefix = "ℹ️ Ya estaba confirmado." if ya_confirmado else f"✅ {nombre} confirmado."
-    if cliente_informado(nombre):
-        # The customer read "confirmado" in the conversation itself (automatic
-        # path). A second confirmation, template or not, is never sent.
-        return {
-            "ok": True,
-            "aviso_cliente": True,
-            "detalle": f"{prefix} El cliente ya recibió la confirmación en la conversación.",
-        }
-    if _avisar_cliente(nombre):
-        return {
-            "ok": True,
-            "aviso_cliente": True,
-            "detalle": (
-                f"{prefix} Meta aceptó o ya tenía registrado el aviso al cliente; "
-                "la entrega se controla con sus estados de WhatsApp."
-            ),
-        }
-    return {
-        "ok": True,
-        "aviso_cliente": False,
-        "detalle": (
-            f"{prefix} No pude enviar el aviso al cliente; contactalo manualmente."
-        ),
-    }
+    estado_aviso = _encolar_confirmacion(nombre, actual)
+    return {"ok": True, "aviso_cliente": estado_aviso[0], "detalle": f"{prefix} {estado_aviso[1]}"}
+
+
+def _encolar_confirmacion(nombre: str, conocido: dict) -> tuple[bool, str]:
+    """Queue the customer's authoritative confirmation. Never raises.
+
+    Returns (the customer is covered, what to tell the manager). "Covered"
+    includes a notice queued by the automatic path minutes earlier: the queue
+    is keyed on (event, order), so the customer is told exactly once no matter
+    how many paths reach this point or how many times a button is tapped.
+    """
+    try:
+        completo = _leer_doc("Sales Order", nombre)
+    except Exception:
+        completo = conocido
+    try:
+        nuevo = avisos.confirmacion_cliente(completo)
+    except Exception as exc:
+        print(f"[approval] {nombre}: no pude encolar el aviso ({type(exc).__name__})")
+        return False, (
+            "NO pude poner en cola el aviso al cliente; contactalo vos."
+        )
+    if nuevo:
+        return True, "El aviso al cliente quedó en cola y sale enseguida."
+    return True, "El cliente ya tenía su confirmación; no le mando otra."
 
 
 def _notificar_confirmada(nombre: str, conocido: dict) -> None:
@@ -199,81 +192,3 @@ def _notificar_confirmada(nombre: str, conocido: dict) -> None:
         notificar.notificar_confirmacion(completo, "manual (confirmación humana)")
     except Exception as exc:
         print(f"[approval] {nombre}: aviso de confirmación falló ({type(exc).__name__})")
-
-
-def _avisar_cliente(nombre: str) -> bool:
-    """Prefer a template: approval may happen after the 24-hour window.
-
-    Without a configured template, a free-form confirmation is sent only while
-    the customer's own window is still open (they wrote within 24 hours).
-    """
-    try:
-        purpose = "customer_order_confirmation"
-        if has_accepted(nombre, purpose):
-            return True
-        plantilla = os.getenv("WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE", "").strip()
-
-        so = _leer_doc("Sales Order", nombre)
-        cliente = _leer_doc("Customer", so["customer"])
-        tel = cliente.get("mobile_no")
-        if not tel:
-            erpnext.add_comment(
-                "Sales Order",
-                nombre,
-                "Aviso de confirmación no enviado: el cliente no tiene teléfono.",
-            )
-            return False
-        entrega = str(so.get("delivery_date") or "a coordinar")
-        if plantilla:
-            result = enviar_plantilla(
-                tel,
-                plantilla,
-                os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR",
-                [nombre, entrega],
-            )
-        elif window_open(tel):
-            result = enviar_mensaje(
-                tel,
-                f"✅ Tu pedido {nombre} quedó confirmado. Entrega: {entrega}. "
-                "¡Gracias!",
-            )
-        else:
-            print(
-                f"[customer-notify] {nombre}: falta "
-                "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE y la ventana de 24 h cerró"
-            )
-            erpnext.add_comment(
-                "Sales Order",
-                nombre,
-                "Aviso de confirmación no enviado: falta la plantilla de WhatsApp "
-                "y la ventana de 24 h del cliente está cerrada. Avisarle manualmente.",
-            )
-            return False
-        wamid = result["messages"][0]["id"]
-        try:
-            record_outbound(wamid, purpose, order_name=nombre)
-        except Exception as tracking_error:
-            print(
-                f"[customer-notify] {nombre}: tracking falló "
-                f"({type(tracking_error).__name__})"
-            )
-            erpnext.add_comment(
-                "Sales Order",
-                nombre,
-                "Meta aceptó la confirmación, pero no se pudo guardar su "
-                "seguimiento de entrega.",
-            )
-        erpnext.add_comment(
-            "Sales Order",
-            nombre,
-            "Meta aceptó el aviso de confirmación para el cliente.",
-        )
-        return True
-    except Exception as e:
-        print(f"[customer-notify] {nombre}: falló ({type(e).__name__})")
-        erpnext.add_comment(
-            "Sales Order",
-            nombre,
-            "Aviso de confirmación no enviado; requiere seguimiento manual.",
-        )
-        return False

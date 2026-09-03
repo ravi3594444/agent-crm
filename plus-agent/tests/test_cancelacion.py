@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import aprobacion, confirmacion, decisiones, erpnext, outbound_status
+from app import aprobacion, avisos, confirmacion, decisiones, erpnext, outbound_status
 from tests.fakes import FakeMarcas
 
 STAFF = "5493511111111"
@@ -321,22 +321,31 @@ def test_cancelar_is_not_reachable_from_any_llm_tool() -> None:
             assert "docstatus\": 2" not in inspect.getsource(fn)
 
 
-# the clarified workflow around confirmations
+# The customer's confirmation is queued once per order by whichever path
+# confirms it, so it never depends on the model repeating a token and a second
+# path never sends a second message.
 def test_an_auto_confirmed_order_never_gets_a_second_customer_confirmation(monkeypatch) -> None:
     marcas = FakeMarcas()
     monkeypatch.setattr(outbound_status, "_client", marcas)
-    outbound_status.marcar_cliente_informado(SO)  # what pedidos._after_create does
+    pedido = {"name": SO, "docstatus": 1, "customer": "CUST-001"}
+    monkeypatch.setattr(
+        erpnext, "policy_get_doc", lambda dt, name: {"name": name, "mobile_no": CUSTOMER_PHONE}
+    )
+    monkeypatch.setattr(erpnext, "add_comment", Mock())
+    # What the automatic path does in app/tools/pedidos.py::_notificar_confirmada.
+    assert avisos.confirmacion_cliente(pedido) is True
+
     monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
-    monkeypatch.setattr(aprobacion, "_leer_doc", lambda dt, name: {"name": SO, "docstatus": 1, "customer": "CUST-001"})
-    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", Mock(side_effect=AssertionError("ya confirmado")))
+    monkeypatch.setattr(aprobacion, "_leer_doc", lambda dt, name: dict(pedido))
+    monkeypatch.setattr(
+        aprobacion.erpnext, "submit_doc", Mock(side_effect=AssertionError("ya confirmado"))
+    )
     monkeypatch.setattr(aprobacion, "_notificar_confirmada", lambda *a, **k: None)
-    aviso = Mock(side_effect=AssertionError("segunda confirmación al cliente"))
-    monkeypatch.setattr(aprobacion, "_avisar_cliente", aviso)
 
     respuesta = aprobacion.manejar_boton(f"ok:{SO}", STAFF)
 
-    assert "ya recibió la confirmación en la conversación" in respuesta
-    aviso.assert_not_called()
+    assert "ya tenía su confirmación" in respuesta
+    assert marcas.zcard(avisos.COLA) == 1
 
 
 def test_the_manager_alert_is_informational_and_says_so(monkeypatch) -> None:
