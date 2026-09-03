@@ -169,6 +169,41 @@ def encolar(
     return nuevo
 
 
+def encolar_equipo(evento: str, pedido: str, texto: str) -> bool:
+    """Queue one notice per staff phone. True when at least one was queued.
+
+    A decision request must never be delivered inline: the sales turn that
+    opened it has to answer the customer now, and a manager notice that Meta
+    happens to reject must not take the request down with it. The idempotency
+    key carries the recipient tag, so each phone is told exactly once and a
+    second staff member is not skipped as a duplicate.
+    """
+    from app.router import STAFF
+
+    if not STAFF:
+        print(f"[avisos] {pedido}: TELEFONOS_EQUIPO vacío, nadie recibe la solicitud")
+        return False
+    telefonos = sorted(STAFF)
+    if os.getenv("NOTIFICAR_SOLO_PRIMERO", "true").strip().lower() == "true":
+        telefonos = telefonos[:1]
+    encolados = 0
+    for telefono in telefonos:
+        etiqueta = digest_recipiente(telefono)[:12]
+        try:
+            if encolar(
+                f"{evento}:{etiqueta}",
+                pedido,
+                telefono,
+                texto,
+                plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE",
+                parametros=[pedido, texto[:512]],
+            ):
+                encolados += 1
+        except Exception as exc:
+            print(f"[avisos] {pedido}: aviso al equipo no encolado ({type(exc).__name__})")
+    return bool(encolados)
+
+
 def pendientes() -> int:
     """Notices still queued. -1 when Redis cannot answer."""
     try:

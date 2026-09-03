@@ -63,6 +63,7 @@ _WORKER_LOCK_TTL_SECONDS = 90
 _ITEM_LEASE_TTL_SECONDS = 90
 _WORKER_POLL_SECONDS = 1.0
 _AVISOS_POLL_SECONDS = 5.0
+_SOLICITUDES_TICK_SECONDS = 60.0
 _RETRY_SECONDS = 2.0
 _ACK_CLAIM_TTL_SECONDS = 30
 _ACK_WAIT_SECONDS = 16
@@ -285,20 +286,44 @@ _STAFF_ACTIONS = {
     "desprepare": "despreparar",
 }
 _ORDER_IN_TEXT = re.compile(r"\b[A-Z]{2,6}(?:-[A-Z]{2,6})?-\d{2,}[0-9-]*\b")
-# "cancelar SAL-ORD-2026-00009 el cliente se arrepintió": the reason is the rest
-# of the line and travels in the payload after a second colon.
-_CANCEL_RE = re.compile(
-    r"^\s*(?P<verb>[^\W\d_]+)\s+" + _ORDER_REF + r"(?:\s+(?P<motivo>.*))?\s*$", re.DOTALL
+# Commands that carry something after the order number: a reason, or the terms
+# of a counter-offer. "cancelar SAL-ORD-2026-00009 el cliente se arrepintió",
+# "contraoferta SAL-ORD-2026-00009 mañana 18:00 1500". The rest of the line
+# travels in the payload after a second colon and is parsed deterministically
+# by app/solicitudes.py — never by a model.
+_ARG_RE = re.compile(
+    r"^\s*(?P<verb>[^\W\d_]+)\s+" + _ORDER_REF + r"(?:\s+(?P<resto>.*))?\s*$", re.DOTALL
 )
-_CANCEL_VERBS = frozenset({"cancelar", "cancela", "cancelo", "anular", "anula", "anulo"})
+# verb -> (action, does the payload keep an empty argument?)
+_ARG_ACTIONS = {
+    "cancelar": ("cancelar", True),
+    "cancela": ("cancelar", True),
+    "cancelo": ("cancelar", True),
+    "anular": ("cancelar", True),
+    "anula": ("cancelar", True),
+    "anulo": ("cancelar", True),
+    # Decision requests (app/solicitudes.py). "rechazar" carries the reason the
+    # customer is told, so it belongs here too.
+    "rechazar": ("no", False),
+    "rechaza": ("no", False),
+    "rechazo": ("no", False),
+    "contraoferta": ("contraoferta", True),
+    "contraofertar": ("contraoferta", True),
+    "contraoferto": ("contraoferta", True),
+    "retiro": ("retiro", True),
+    "retirar": ("retiro", True),
+}
 
 
 def _staff_command(text: str) -> str | None:
     """Map a short manager message to a button payload, or None."""
-    cancel = _CANCEL_RE.match(text or "")
-    if cancel and _sin_tildes(cancel.group("verb")) in _CANCEL_VERBS:
-        motivo = " ".join((cancel.group("motivo") or "").split())
-        return f"cancelar:{cancel.group('order').upper()}:{motivo}"
+    con_argumento = _ARG_RE.match(text or "")
+    if con_argumento:
+        accion = _ARG_ACTIONS.get(_sin_tildes(con_argumento.group("verb")))
+        resto = " ".join((con_argumento.group("resto") or "").split())
+        if accion and (resto or accion[1]):
+            pedido = con_argumento.group("order").upper()
+            return f"{accion[0]}:{pedido}:{resto}" if (resto or accion[1]) else None
     match = _STAFF_COMMAND_RE.match(text or "")
     if not match:
         return None
@@ -306,6 +331,84 @@ def _staff_command(text: str) -> str | None:
     if not action:
         return None
     return f"{action}:{match.group('order').upper()}"
+
+
+# A customer accepting or refusing an offer is a DECISION about money and a
+# delivery date. It is matched here, before any model sees the message, so the
+# answer cannot depend on a paraphrase.
+_ACEPTA_RE = re.compile(
+    r"^\s*(?P<no>no\s+)?(?:acepto|acepta|aceptar|de\s*acuerdo|dale)\b"
+    r"(?:[^A-Za-z0-9]*(?P<order>[A-Za-z]{1,6}(?:-[A-Za-z]{1,6})?-\d[\w-]*))?",
+    re.IGNORECASE,
+)
+_RECHAZA_RE = re.compile(
+    r"^\s*(?:no\s+(?:acepto|acepta|aceptar|gracias)|rechazo|no\s+me\s+sirve)\b"
+    r"(?:[^A-Za-z0-9]*(?P<order>[A-Za-z]{1,6}(?:-[A-Za-z]{1,6})?-\d[\w-]*))?",
+    re.IGNORECASE,
+)
+
+
+def _customer_command(text: str, telefono: str, customer_code: str) -> str | None:
+    """A customer's explicit yes or no to a pending offer, or None.
+
+    Deterministic on purpose: this is where a price and a delivery date get
+    agreed. With no order number in the message it is resolved only when the
+    customer has exactly ONE offer waiting; otherwise they are asked which
+    order, because guessing would confirm the wrong one.
+    """
+    from app import solicitudes
+
+    crudo = str(text or "")
+    rechaza = _RECHAZA_RE.match(crudo)
+    acepta = None if rechaza else _ACEPTA_RE.match(crudo)
+    if not rechaza and not acepta:
+        return None
+    if acepta is not None and acepta.group("no"):
+        rechaza, acepta = acepta, None
+
+    encontrado = rechaza or acepta
+    pedido = (encontrado.group("order") or "").upper() if encontrado else ""
+    try:
+        if not pedido:
+            esperando = solicitudes.esperando_para(customer_code)
+            if esperando is None:
+                return None
+            pedido = esperando.pedido
+        if rechaza is not None:
+            return solicitudes.rechazar_cliente(pedido, telefono)
+        return solicitudes.aceptar_cliente(pedido, telefono)
+    except Exception as error:
+        print(
+            f"[solicitudes] respuesta de cliente falló phone={_correlation(telefono)} "
+            f"type={_error_name(error)}"
+        )
+        return None
+
+
+def _resumen_de_solicitud(text: str) -> str | None:
+    """An ambiguous instruction about a pending decision, answered with facts.
+
+    The management model is never asked to interpret "dale, mandáselo" into an
+    approval: it has no tool that could, and this path does not give it the
+    chance. The manager gets the request as a summary and the exact commands
+    that would execute, and confirms with one of them.
+    """
+    from app import solicitudes
+
+    for referencia in sorted(set(_ORDER_IN_TEXT.findall(str(text or "")))):
+        try:
+            solicitud = solicitudes.leer(referencia)
+        except Exception as error:
+            print(f"[solicitudes] {referencia}: no legible type={_error_name(error)}")
+            continue
+        if solicitud is None or not solicitud.abierta:
+            continue
+        return (
+            "No ejecuto una instrucción que no sea exacta: esto cambia una fecha "
+            "y un precio que después hay que cumplir.\n\n"
+            f"{solicitudes.texto_para_equipo(solicitud)}"
+        )
+    return None
 
 
 def _alert_technical_failure(error: Exception, telefono: str, data: object) -> bool:
@@ -373,12 +476,18 @@ def _generate_response(item: dict) -> str:
             command = _staff_command(data)
             if command:
                 return str(manejar_boton(command, telefono))
+            ambiguo = _resumen_de_solicitud(data)
+            if ambiguo:
+                return ambiguo
             return _non_empty(
                 responder_gerencia(data, thread_id=thread_tag, usuario=thread_tag),
                 message_id,
             )
 
         customer_code, contexto = _contexto(telefono)
+        acuerdo = _customer_command(data, telefono, customer_code)
+        if acuerdo:
+            return acuerdo
         return _non_empty(
             responder_cliente(
                 data,
@@ -1072,6 +1181,22 @@ def _avisos_worker(stop: threading.Event) -> None:
         avisos.despertar.wait(_AVISOS_POLL_SECONDS)
 
 
+def _solicitudes_scheduler(stop: threading.Event) -> None:
+    """Expire decision requests whose time is up, and free the stock they held.
+
+    Its own thread: a pending decision must not depend on another customer
+    writing in, and the sweep must not sit in front of the inbound FIFO. A
+    failure only skips one round.
+    """
+    from app import solicitudes
+
+    while not stop.wait(_SOLICITUDES_TICK_SECONDS):
+        try:
+            solicitudes.tick()
+        except Exception as error:
+            print(f"[solicitudes] tick type={_error_name(error)}")
+
+
 def _digest_scheduler(stop: threading.Event) -> None:
     """Once a minute, let app/digest.py decide whether today's 18:00 summary is due."""
     from app import digest
@@ -1093,6 +1218,12 @@ async def _lifespan(application: FastAPI):
         ).start()
     threading.Thread(
         target=_avisos_worker, args=(stop,), daemon=True, name="avisos-worker"
+    ).start()
+    threading.Thread(
+        target=_solicitudes_scheduler,
+        args=(stop,),
+        daemon=True,
+        name="solicitudes-scheduler",
     ).start()
     worker = threading.Thread(
         target=_worker_supervisor,

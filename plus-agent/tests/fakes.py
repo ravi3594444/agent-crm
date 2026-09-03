@@ -92,6 +92,15 @@ class FakeMarcas:
         self._vivo()
         return self.zsets.get(key, {}).get(member)
 
+    def zrangebyscore(self, key, minimo, maximo):
+        miembros = self.zsets.get(key, {})
+        piso = float("-inf") if str(minimo) == "-inf" else float(minimo)
+        techo = float("inf") if str(maximo) == "+inf" else float(maximo)
+        return sorted(
+            (m for m, s in miembros.items() if piso <= s <= techo),
+            key=lambda m: miembros[m],
+        )
+
     def _due(self, key, tope: float) -> list[str]:
         miembros = self.zsets.get(key, {})
         return sorted(

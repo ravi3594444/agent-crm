@@ -52,6 +52,7 @@ from app.tools.pedidos import (
     crear_lead,
     crear_pedido,
     escalar_a_humano,
+    pedir_excepcion_de_entrega,
 )
 
 TOOLS_CLIENTES = [
@@ -60,6 +61,9 @@ TOOLS_CLIENTES = [
     # acepta un teléfono como argumento, así que ningún mensaje puede pedir
     # el alta de otra persona.
     crear_cliente, crear_lead, crear_pedido, escalar_a_humano,
+    # Pide una excepción de entrega. NO decide: o el dueño la dejó autorizada
+    # de antemano, o abre una solicitud para una persona (app/solicitudes.py).
+    pedir_excepcion_de_entrega,
 ]
 
 TOOLS_GERENCIA = [

@@ -3,9 +3,29 @@
 Only phones on the staff list can approve. A stranger who somehow guesses a
 button payload gets nothing.
 """
-from app import avisos, confirmacion, erpnext, notificar, policy
+from app import avisos, confirmacion, erpnext, notificar, policy, solicitudes
 from app.formato import pesos
 from app.router import es_equipo
+
+
+def _solicitud_abierta(nombre: str):
+    """The order's open decision request, or None. Never raises."""
+    try:
+        solicitud = solicitudes.leer(nombre)
+    except Exception as exc:
+        print(f"[approval] {nombre}: solicitud no legible ({type(exc).__name__})")
+        return None
+    return solicitud if solicitud is not None and solicitud.abierta else None
+
+
+def _texto_solicitud(nombre: str) -> str:
+    from app import decisiones
+
+    try:
+        return decisiones.ver_solicitud(nombre)
+    except Exception as exc:
+        print(f"[approval] {nombre}: estado de solicitud no legible ({type(exc).__name__})")
+        return ""
 
 
 def _leer_doc(doctype: str, name: str) -> dict:
@@ -23,14 +43,61 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
     accion, nombre = reply_id.split(":", 1)
 
     if accion == "ok":
+        # An order with an OPEN decision request is not confirmed by "aprobar":
+        # that word means "approve what the customer asked for", and the terms
+        # still have to be put to the customer before anything is submitted.
+        # See app/solicitudes.py.
+        pendiente = _solicitud_abierta(nombre)
+        if pendiente is not None:
+            from app import decisiones
+
+            return decisiones.aprobar_solicitud(nombre, telefono)["detalle"]
         return confirmar_pedido(nombre, telefono)["detalle"]
+
+    if accion == "contraoferta":
+        # "contraoferta:<pedido>:<fecha> <hora> <cargo>"
+        from app import decisiones
+
+        pedido, _, crudo = nombre.partition(":")
+        terminos = solicitudes.parsear_terminos(crudo)
+        if terminos is None:
+            return (
+                f"No entendí los términos. Escribí: contraoferta {pedido.strip()} "
+                "<fecha> <hora> <cargo>, por ejemplo "
+                f"'contraoferta {pedido.strip()} mañana 18:00 1500'."
+            )
+        return decisiones.contraofertar(pedido.strip(), telefono, terminos)["detalle"]
+
+    if accion == "retiro":
+        # "retiro:<pedido>:<fecha> <hora>" — pickup instead of a delivery.
+        from app import decisiones
+
+        pedido, _, crudo = nombre.partition(":")
+        terminos = solicitudes.parsear_terminos(crudo, con_cargo=False)
+        if terminos is None:
+            return (
+                f"No entendí los términos. Escribí: retiro {pedido.strip()} "
+                "<fecha> <hora>, por ejemplo "
+                f"'retiro {pedido.strip()} jueves 10:00'."
+            )
+        return decisiones.ofrecer_retiro(pedido.strip(), telefono, terminos)["detalle"]
 
     if accion == "no":
         # The customer was told the order was received and would be confirmed.
         # Rejecting must therefore tell them too — see app/decisiones.py.
         from app import decisiones
 
-        resultado = decisiones.rechazar(nombre, telefono)
+        # With an open request, "rechazar" refuses the EXCEPTION the customer
+        # asked for and frees the stock its draft was holding; the draft itself
+        # stays for the manager to amend.
+        pedido, _, motivo_libre = nombre.partition(":")
+        pendiente = _solicitud_abierta(pedido.strip())
+        if pendiente is not None:
+            return decisiones.rechazar_solicitud(
+                pedido.strip(), telefono, motivo_libre or "sin detalle"
+            )["detalle"]
+        nombre = pedido.strip()
+        resultado = decisiones.rechazar(nombre, telefono, motivo_libre)
         cola = (
             "Ya le avisé al cliente."
             if resultado["aviso_cliente"]
@@ -82,15 +149,17 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
             so = _leer_doc("Sales Order", nombre)
         except erpnext.ERPNextError:
             return f"No pude abrir {nombre}. Revisalo en ERPNext."
+        estado_solicitud = _texto_solicitud(nombre)
         detalle = "\n".join(
             f"  · {i['qty']:g} x {i.get('item_name') or i['item_code']} "
             f"= {pesos(i.get('amount', 0))}"
             for i in so.get("items", [])
         )
-        return (
+        cuerpo = (
             f"{nombre} — {so.get('customer_name') or so['customer']}\n{detalle}\n"
             f"Total {pesos(so.get('grand_total', 0))} · entrega {so.get('delivery_date')}"
         )
+        return f"{cuerpo}\n\n{estado_solicitud}" if estado_solicitud else cuerpo
 
     return "Acción desconocida."
 

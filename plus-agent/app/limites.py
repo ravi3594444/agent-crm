@@ -69,8 +69,9 @@ class Definicion:
     booleano: bool = False
 
 
-# Los seis. `maximo` no es una preferencia: arriba de eso el número es un error
-# de tipeo, no una decisión, y aplicarlo sería peor que rechazarlo.
+# Los que fija el dueño. `maximo` no es una preferencia: arriba de eso el
+# número es un error de tipeo, no una decisión, y aplicarlo sería peor que
+# rechazarlo.
 LIMITES: dict[str, Definicion] = {
     "AUTO_CONFIRM_MAX": Definicion(
         nombre="AUTO_CONFIRM_MAX",
@@ -141,6 +142,26 @@ LIMITES: dict[str, Definicion] = {
         # que pueda tomar un sistema sin nadie mirando.
         maximo=50.0,
     ),
+    "APROBACION_TIMEOUT_HORAS": Definicion(
+        nombre="APROBACION_TIMEOUT_HORAS",
+        alias=(
+            "timeout de aprobacion",
+            "timeout de aprobación",
+            "espera de aprobacion",
+            "espera de aprobación",
+            "horas para decidir",
+        ),
+        significado=(
+            "Cuánto espera una decisión pendiente antes de vencer. Es también "
+            "lo que un borrador esperando respuesta puede retener stock: "
+            "vencido el plazo, el pedido deja de competir con los pedidos vivos"
+        ),
+        unidad="h",
+        default="4",
+        # Más de una semana no es una espera, es un pedido olvidado que
+        # retiene stock que otro cliente podía llevarse.
+        maximo=168.0,
+    ),
     "AUTO_CONFIRM_DESCUENTOS_APRUEBAN": Definicion(
         nombre="AUTO_CONFIRM_DESCUENTOS_APRUEBAN",
         alias=("descuentos", "aprobar descuentos", "descuentos aprueban"),
@@ -161,7 +182,7 @@ _FALSOS = frozenset({"false", "no", "0", "off", "n"})
 
 @dataclass(frozen=True)
 class Configuracion:
-    """Los seis límites ya validados, para una evaluación."""
+    """Los límites ya validados, para una evaluación."""
 
     tope: float
     tope_qty_por_producto: float
@@ -170,6 +191,10 @@ class Configuracion:
     tope_deuda: float
     descuentos_aprueban: bool
     tope_descuento_pct: float  # fracción 0..0.5, ya dividida por 100
+    # Horas que espera una decisión pendiente, y que su borrador puede retener
+    # stock. Lo lee app/solicitudes.py; nunca es 0 (un plazo de 0 vencería
+    # todo al instante y un plazo infinito congelaría el stock).
+    timeout_aprobacion: float = 4.0
 
 
 def _texto(valor: object) -> str:
@@ -314,7 +339,18 @@ def configuracion() -> Configuracion:
             crudos["AUTO_CONFIRM_MAX_DESCUENTO_PCT"],
         )
         / 100.0,
+        timeout_aprobacion=_timeout(
+            _numero(
+                LIMITES["APROBACION_TIMEOUT_HORAS"],
+                crudos["APROBACION_TIMEOUT_HORAS"],
+            )
+        ),
     )
+
+
+def _timeout(horas: float) -> float:
+    """Un plazo de 0 vencería cada solicitud al instante: vuelve al default."""
+    return horas if horas > 0 else float(LIMITES["APROBACION_TIMEOUT_HORAS"].default)
 
 
 def resumen() -> list[dict]:

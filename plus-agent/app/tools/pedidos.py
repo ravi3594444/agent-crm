@@ -12,7 +12,16 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app import avisos, clientes, confirmacion, entrega, erpnext, policy
+from app import (
+    avisos,
+    clientes,
+    confirmacion,
+    entrega,
+    erpnext,
+    excepciones,
+    policy,
+    solicitudes,
+)
 from app.locks import CoordinationError, distributed_lock
 from app.notificar import notificar_confirmacion, notificar_equipo
 from app.runtime_context import RuntimeContextError, actor_context
@@ -720,3 +729,112 @@ def escalar_a_humano(motivo: str, config: RunnableConfig) -> str:
     except erpnext.ERPNextError:
         return "No pude crear la tarea de derivación; avisá que el equipo revisará el caso."
     return f"Derivado al equipo (tarea {doc['name']})."
+
+
+@tool
+def pedir_excepcion_de_entrega(
+    numero_de_pedido: str,
+    lo_que_pidio_el_cliente: str,
+    config: RunnableConfig,
+) -> str:
+    """Pide una entrega fuera de los días de reparto para un pedido ya creado.
+
+    Usala cuando el cliente ya tiene un pedido en borrador y pide algo que las
+    reglas no permiten solas: que se lo lleven un día sin reparto, otra fecha,
+    otro horario. NO decide nada y NO confirma el pedido: o el dueño ya dejó
+    autorizada esa excepción, o queda una solicitud para que la resuelva una
+    persona. Pasá en `lo_que_pidio_el_cliente` sus palabras, sin interpretarlas.
+    """
+    try:
+        actor = actor_context(config)
+    except RuntimeContextError:
+        return "No pude autenticar la conversación; no registré el pedido especial."
+    if actor.scope != "customer" or not actor.actor_phone:
+        return "No pude autenticar la conversación; no registré el pedido especial."
+
+    nombre = str(numero_de_pedido or "").strip().upper()
+    if not nombre:
+        return "Falta el número real del pedido; no inventes uno."
+    try:
+        so = erpnext.get_doc("Sales Order", nombre)
+    except erpnext.ERPNextError:
+        return f"No pude leer {nombre}. No prometas nada sobre ese pedido."
+
+    # The order has to be the sender's own: the phone comes from the signed
+    # webhook, so no message can open a request on somebody else's order.
+    if not actor.customer_code or str(so.get("customer") or "") != actor.customer_code:
+        return "Ese pedido no es de esta cuenta; no registré nada."
+    estado = int(so.get("docstatus") or 0)
+    if estado != 0:
+        return (
+            f"{nombre} ya no es un borrador (estado {estado}); no corresponde una "
+            "solicitud de excepción."
+        )
+
+    evaluacion = excepciones.evaluar_entrega(so)
+    if evaluacion.preautorizada and evaluacion.oferta is not None:
+        # The owner already decided this case. The offer is HIS, not the
+        # model's: it is recorded and sent to the customer as data, and it still
+        # needs an explicit yes because it changes the date and the money.
+        solicitud = solicitudes.crear(
+            so,
+            solicitado=evaluacion.oferta.como_dict(),
+            nota_cliente=lo_que_pidio_el_cliente,
+        )
+        if solicitud is None:
+            return (
+                "No pude registrar la solicitud. Pedile disculpas y usá "
+                "escalar_a_humano."
+            )
+        ofrecida = solicitudes.registrar(
+            solicitud,
+            "preautorizada",
+            estado=solicitudes.ESPERANDO_CLIENTE,
+            decision="preautorizada",
+            ofrecido=evaluacion.oferta.como_dict(),
+            motivo="condiciones que el dueño dejó autorizadas",
+        )
+        if ofrecida is None:
+            return (
+                "No pude registrar la solicitud. Pedile disculpas y usá "
+                "escalar_a_humano."
+            )
+        solicitudes.ofrecer_al_cliente(ofrecida)
+        condiciones = excepciones.texto_oferta(
+            evaluacion.oferta, str(so.get("currency") or "")
+        )
+        return (
+            "EXCEPCION_PREAUTORIZADA. Le estoy enviando al cliente las condiciones "
+            f"exactas en un mensaje aparte: {condiciones}. Decile que puede "
+            f"aceptarlas respondiendo 'acepto {nombre}'. NO cambies ninguna cifra "
+            "ni prometas otra cosa."
+        )
+
+    solicitud = solicitudes.crear(
+        so, solicitado={"metodo": "entrega"}, nota_cliente=lo_que_pidio_el_cliente
+    )
+    if solicitud is None:
+        return "No pude registrar la solicitud. Pedile disculpas y usá escalar_a_humano."
+    solicitudes.notificar_equipo_nueva(solicitud)
+    _comentar_solicitud(nombre, solicitud, evaluacion.motivo)
+    return (
+        "SOLICITUD_PENDIENTE. Ya le pregunté al encargado y la respuesta no está "
+        "todavía. Decile al cliente exactamente esto: el pedido quedó registrado, "
+        "la excepción la tiene que aprobar el encargado, le contestamos en cuanto "
+        "responda, y el stock se vuelve a verificar en ese momento. NO le digas "
+        "que está confirmado, NO prometas día, hora ni precio, y NO le digas que "
+        "le guardamos la mercadería."
+    )
+
+
+def _comentar_solicitud(nombre: str, solicitud, motivo: str) -> None:
+    try:
+        erpnext.add_comment(
+            "Sales Order",
+            nombre,
+            f"Solicitud {solicitud.id} abierta desde WhatsApp: el cliente pide una "
+            "entrega de excepción y no está pre-autorizada "
+            f"({motivo or 'sin regla que la cubra'}). Espera una decisión humana.",
+        )
+    except Exception as exc:
+        print(f"[orders] comentario de solicitud falló ({type(exc).__name__})")

@@ -162,6 +162,18 @@ cancelar SAL-ORD-2026-00008 <reason>         confirmed order, within CANCELACION
 despreparar SAL-ORD-2026-00008               deletes the agent's own draft Delivery Note
 ```
 
+When an order has an **open decision request**, three of those words mean
+something else, because the context is a durable record rather than a guess:
+
+```
+aprobar SAL-ORD-2026-00008                        approve what the customer asked for
+contraoferta SAL-ORD-2026-00008 mañana 18:00 1500 other date / time / fee
+retiro SAL-ORD-2026-00008 jueves 10:00            pickup instead of a delivery
+rechazar SAL-ORD-2026-00008 <reason>              refuse it; the customer is told
+ver SAL-ORD-2026-00008                            the order plus the request
+```
+
+
 `cancelar` (`app/decisiones.py`) re-checks the sender, requires a reason, and
 under the distributed lock re-reads the order with the policy identity: it must
 be submitted and confirmed by this system less than 24 hours ago. That deadline
@@ -203,6 +215,55 @@ template is an AVISO in `make check-env`, never a blocker. The confirmed-order
 alert is informational: nothing to answer, the order stays confirmed, and a
 customer who read "confirmado" in the conversation never gets a second
 confirmation message.
+
+## Asking a person: the decision workflow
+
+> "Necesito 5 kg de leche. Hoy no hay reparto, ¿pero me lo pueden traer?"
+
+The sales agent may **ask** for an exception and repeat what was decided. It
+never decides, and neither does the management agent.
+
+1. **The owner's own rules go first** (`app/excepciones.py`). If off-day
+   delivery is pre-authorized — the switch, the days, the time, the fee, the
+   minimum order, and the address inside the normal zones — the configured
+   date, time and fee are offered straight away, as data, with nobody asked.
+2. **Otherwise a DecisionRequest is opened** (`app/solicitudes.py`): a durable
+   record on the Sales Order carrying the request id, the order, the type, the
+   requested terms, the customer and item summary, the total, the status, when
+   it was created, when it expires, the human decision and reason, and a
+   timestamp per event. Each event is an append-only ERPNext comment, so a
+   Redis flush loses nothing and resurrects nothing.
+3. **The customer is answered immediately**: a person has been asked, nothing
+   is confirmed, and stock will be re-checked when the answer comes. No hold is
+   promised, because none can be guaranteed.
+4. **Nothing waits.** The manager's notice goes through the durable queue, no
+   lock is held across a human decision, and both agents stay free for every
+   other conversation. The two models never talk to each other: what crosses
+   between them is the record's fields.
+5. **The manager answers with an exact command.** Prose gets the request
+   summarized back with the commands that would execute — the management model
+   has no tool that could approve anything, and that path does not give it the
+   chance.
+6. **A decision that changes the date, the method or the money needs the
+   customer's explicit yes** (`acepto <pedido>` / `no acepto <pedido>`, matched
+   before any model sees the message). On acceptance, the order is re-read and
+   stock, quantities, prices, discount, delivery and order state are all
+   re-validated under the distributed lock with `app/policy.py`'s own rules
+   before it is confirmed. If anything moved, nobody is told a half-truth: the
+   order stays a draft and a person is asked.
+7. **A pending draft holds its stock only until the request expires**, on the
+   owner's `APROBACION_TIMEOUT_HORAS`. The expiry is part of the durable
+   record, so `app/policy.py` stops counting a lapsed hold even before the
+   sweep runs, and the sweep marks the draft so ERPNext itself stops reserving
+   — reported as released only when a re-read proves it. A late decision does
+   not revive an expired request.
+8. **Whatever the customer wrote is data.** It travels in one field, quoted and
+   labelled, and is never part of a prompt or an instruction.
+
+A delivery fee is only written into the order when `ENTREGA_CARGO_CUENTA` names
+the account to book it against. Without it the order is not confirmed and a
+person is asked to add the charge: a stock ERPNext has no plain fee field, and
+inventing a total is worse than waiting.
 
 Every command runs a deterministic handler in `app/aprobacion.py` /
 `app/decisiones.py` after `router.es_equipo()` authenticates the sender; none

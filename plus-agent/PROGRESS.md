@@ -114,3 +114,29 @@ Three commits on `feat/decision-workflow`, based on `ccda363`:
    created and nobody edited, audits it on the order first, and never cascades.
 
 708 tests pass, ruff clean. No model, key or provider change; no live test.
+
+## Phase B — the Sales-to-Management decision workflow
+
+New modules: `app/excepciones.py` (the owner's pre-authorized exceptions) and
+`app/solicitudes.py` (the DecisionRequest: durable, event-sourced on ERPNext
+comments, with its own expiry sweep). One new customer tool,
+`pedir_excepcion_de_entrega`, which can only ask.
+
+- A pre-authorized case is offered from configuration, with no person involved
+  and no model inventing terms; everything else opens a request and the
+  customer is answered in the same turn.
+- Manager actions: `aprobar`, `contraoferta <fecha> <hora> <cargo>`,
+  `retiro <fecha> <hora>`, `rechazar <motivo>`, `ver` — only TELEFONOS_EQUIPO,
+  exact commands only, prose summarized and sent back for confirmation.
+- The customer's `acepto` / `no acepto` is matched deterministically before any
+  model sees it; acceptance re-validates stock, quantities, prices, discount,
+  delivery and order state under the lock and only then submits.
+- The approval timeout is a manager-configurable limit
+  (`APROBACION_TIMEOUT_HORAS`), and it is also how long a pending draft may
+  hold stock. `app/policy.py` drops a lapsed hold from the draft-stock
+  calculation; the sweep closes the draft in ERPNext and only claims the stock
+  was freed when a re-read proves it.
+- A delivery fee is written only when `ENTREGA_CARGO_CUENTA` is configured;
+  otherwise the order waits for a person rather than carrying an invented total.
+
+791 tests pass, ruff clean. No model, key or provider change; no live test.

@@ -420,6 +420,128 @@ def policy_cancel_doc(doctype: str, name: str) -> dict:
     return data
 
 
+def policy_aplicar_terminos(
+    doctype: str,
+    name: str,
+    *,
+    delivery_date: str = "",
+    descuento_pct: float | None = None,
+) -> dict:
+    """Write ONLY the agreed delivery date and/or document discount on a DRAFT.
+
+    The narrowest write that the decision workflow needs (app/solicitudes.py,
+    after the customer accepted the terms and every rule was re-checked). It
+    cannot submit, cancel, change a quantity, a rate or a line.
+
+    A Frappe PUT is a save, not a field write: the doctype's own validate() can
+    recompute what was sent and still answer 200 carrying the old value. So the
+    saved values are read back and a silent reset is raised as an error, the
+    same way policy_update_status does — a caller that believes an unapplied
+    discount would confirm an order at the wrong price.
+    """
+    payload: dict[str, Any] = {}
+    if delivery_date:
+        payload["delivery_date"] = delivery_date
+    if descuento_pct is not None:
+        payload["additional_discount_percentage"] = float(descuento_pct)
+    if not payload:
+        return policy_get_doc(doctype, name)
+
+    actual = policy_get_doc(doctype, name)
+    if int(actual.get("docstatus") or 0) != 0:
+        raise ERPNextError(
+            f"{doctype} {name} no es un borrador: no le cambio los términos"
+        )
+    body = _request(
+        _policy(),
+        "PUT",
+        _resource_path(doctype, name),
+        operation=f"la aplicación de los términos de {doctype}",
+        json=payload,
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(
+            f"ERPNext devolvió datos inválidos al aplicar los términos de {doctype}"
+        )
+    if delivery_date and str(data.get("delivery_date") or "") != delivery_date:
+        raise ERPNextError(
+            f"ERPNext no guardó la fecha de entrega {delivery_date} en {name}"
+        )
+    if descuento_pct is not None:
+        guardado = float(data.get("additional_discount_percentage") or 0)
+        if abs(guardado - float(descuento_pct)) > 0.000001:
+            raise ERPNextError(
+                f"ERPNext no guardó el descuento acordado en {name}"
+            )
+    return data
+
+
+def policy_agregar_cargo(
+    name: str, account_head: str, description: str, amount: float
+) -> dict:
+    """Add ONE delivery charge row to a DRAFT Sales Order, and prove it landed.
+
+    A stock ERPNext has no plain "delivery fee" field: a charge is a Sales
+    Taxes and Charges row of type "Actual" against an account head, and this
+    system cannot invent which account a business uses. So the owner names it
+    (ENTREGA_CARGO_CUENTA) and this write is refused without it, rather than
+    the total being quietly wrong.
+
+    The grand total is read back and must have risen by the amount. Anything
+    else — a validate() that dropped the row, a tax template that recomputed
+    the total differently — is an error, because the customer already agreed to
+    a number and that number has to be the one in the document.
+    """
+    if not account_head.strip():
+        raise ERPNextError("falta la cuenta contable del cargo de envío")
+    importe = round(float(amount), 2)
+    if importe <= 0:
+        raise ERPNextError("el cargo de envío tiene que ser positivo")
+
+    actual = policy_get_doc("Sales Order", name)
+    if int(actual.get("docstatus") or 0) != 0:
+        raise ERPNextError(f"Sales Order {name} no es un borrador: no le agrego cargos")
+    antes = float(actual.get("grand_total") or 0)
+    filas = [
+        fila for fila in (actual.get("taxes") or []) if isinstance(fila, dict)
+    ]
+    if any(
+        str(fila.get("description") or "") == description
+        and abs(float(fila.get("tax_amount") or 0) - importe) < 0.01
+        for fila in filas
+    ):
+        return actual
+
+    body = _request(
+        _policy(),
+        "PUT",
+        _resource_path("Sales Order", name),
+        operation="el cargo de envío del pedido",
+        json={
+            "taxes": [
+                *filas,
+                {
+                    "charge_type": "Actual",
+                    "account_head": account_head.strip(),
+                    "description": description or "Envío",
+                    "tax_amount": importe,
+                },
+            ]
+        },
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError("ERPNext devolvió datos inválidos al agregar el cargo")
+    despues = float(data.get("grand_total") or 0)
+    if abs(despues - (antes + importe)) > 0.01:
+        raise ERPNextError(
+            f"ERPNext no dejó el cargo de {importe:.2f} en {name}: el total pasó de "
+            f"{antes:.2f} a {despues:.2f}"
+        )
+    return data
+
+
 def policy_delete_doc(doctype: str, name: str) -> None:
     """Delete ONE DRAFT document with the policy identity. Nothing else.
 
