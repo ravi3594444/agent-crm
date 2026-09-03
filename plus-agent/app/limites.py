@@ -485,11 +485,17 @@ def _resolver(nombre: str, almacen: dict[str, str]) -> tuple[str, str]:
 # narrow — groups of exactly three digits — so "1.5" stays 1.5 and a percentage
 # or a number of hours is never touched.
 _MILES = re.compile(r"^\d{1,3}(\.\d{3})+$")
+# Which units a "." can be a THOUSANDS separator in. An owner writing "1.000"
+# means a thousand pesos and a thousand litres, but "1.5" hours and "1.5" per
+# cent are decimals — and in es-AR nobody groups a percentage. Getting this
+# wrong on a ceiling is a 1000x error in the direction that oversells, so the
+# rule is a list of units rather than a guess about the digits.
+_CON_MILES = frozenset({"$", "unidad de stock"})
 
 
 def _numero(defi: Definicion, crudo: str) -> float:
     texto = str(crudo).strip().replace("$", "").strip()
-    if defi.unidad == "$":
+    if defi.unidad in _CON_MILES:
         entero, coma, decimales = texto.partition(",")
         if _MILES.match(entero):
             entero = entero.replace(".", "")
@@ -655,27 +661,41 @@ class Entrega:
     excepcion_dias: tuple[int, ...] = ()
     excepcion_hora: str = ""
     excepcion_cargo: float | None = None
-    excepcion_minimo: float = 0.0
+    # None means "configured but unreadable", and it is NOT the same as 0.
+    # Every other field here can only WIDEN what the system offers by itself,
+    # so failing soft on them offers less. The minimum is the one field that
+    # NARROWS — it is what stops a $200 order earning a free off-day trip — so
+    # losing it would fail OPEN. None therefore blocks the exception outright.
+    excepcion_minimo: float | None = 0.0
     retiro_activo: bool = False
     retiro_dias: tuple[int, ...] = ()
     retiro_hora: str = ""
 
 
-def _crudo(nombre: str, almacen: dict[str, str]) -> str:
-    """The normalized value of one delivery setting, or '' if it is unusable.
+def _bruto(nombre: str, almacen: dict[str, str]) -> tuple[str, bool]:
+    """(normalized value or '', whether it could be read at all).
 
     Validation happens on the way IN (validar, behind the confirmation code),
     but a bootstrap environment variable never went through it and a stored
     value can predate a rule. So it is re-normalized here and a bad one reads
     as absent rather than raising into the deterministic path.
+
+    The second element exists because "unset" and "unreadable" are the same
+    thing for a widening setting and OPPOSITE things for a narrowing one — see
+    Entrega.excepcion_minimo. Callers that do not care use ``_crudo``.
     """
     crudo, _ = _resolver(nombre, almacen)
     try:
         valor = validar(nombre, crudo)
     except LimiteError as exc:
         print(f"[limites] {nombre} no usable: {exc}")
-        return ""
-    return "" if valor == NINGUNO else valor
+        return "", False
+    return ("" if valor == NINGUNO else valor), True
+
+
+def _crudo(nombre: str, almacen: dict[str, str]) -> str:
+    """The normalized value of one delivery setting, or '' if it is unusable."""
+    return _bruto(nombre, almacen)[0]
 
 
 def _indices(valor: str) -> tuple[int, ...]:
@@ -707,7 +727,14 @@ def entrega() -> Entrega:
         # exception nobody was promised, not an order that cannot confirm.
         print(f"[limites] reglas de entrega no legibles: {exc}")
         return Entrega()
-    minimo = _plata(_crudo("ENTREGA_EXCEPCION_MIN_TOTAL", almacen))
+    # Read through _bruto, not _crudo: a minimum nobody can parse must not
+    # read as "no minimum". See Entrega.excepcion_minimo.
+    minimo_texto, minimo_legible = _bruto("ENTREGA_EXCEPCION_MIN_TOTAL", almacen)
+    if minimo_legible:
+        minimo = _plata(minimo_texto)
+        minimo = 0.0 if minimo is None else minimo
+    else:
+        minimo = None
     return Entrega(
         dias_reparto=_indices(_crudo("ENTREGA_DIAS", almacen)),
         hora_reparto=_crudo("ENTREGA_HORA", almacen),
@@ -715,7 +742,7 @@ def entrega() -> Entrega:
         excepcion_dias=_indices(_crudo("ENTREGA_EXCEPCION_DIAS", almacen)),
         excepcion_hora=_crudo("ENTREGA_EXCEPCION_HORA", almacen),
         excepcion_cargo=_plata(_crudo("ENTREGA_EXCEPCION_CARGO", almacen)),
-        excepcion_minimo=minimo if minimo is not None else 0.0,
+        excepcion_minimo=minimo,
         retiro_activo=_crudo("RETIRO_LOCAL_ACTIVO", almacen) == "true",
         retiro_dias=_indices(_crudo("RETIRO_LOCAL_DIAS", almacen)),
         retiro_hora=_crudo("RETIRO_LOCAL_HORA", almacen),

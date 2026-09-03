@@ -1019,3 +1019,119 @@ def test_a_percentage_or_an_hour_count_is_never_regrouped(
     _confirmar()
 
     assert limites.configuracion().buffer == pytest.approx(esperado / 100.0)
+
+
+# ---------------------------------------------------------------------------
+# Lo que salió de la revisión adversarial de las reglas de entrega.
+# ---------------------------------------------------------------------------
+
+
+def test_an_unreadable_order_minimum_blocks_the_exception_instead_of_removing_it(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one delivery setting that NARROWS. Failing soft on it fails OPEN.
+
+    Every other value in Entrega can only widen what the system offers, so an
+    unreadable one offers less. The order minimum is what stops a $200 order
+    earning a free off-day trip, so losing it has to block the exception.
+    """
+    from app import excepciones
+
+    entrega_autorizada(monkeypatch)
+    almacen.hashes[limites.CLAVE_VALORES] = {
+        "ENTREGA_EXCEPCION_ACTIVA": "true",
+        "ENTREGA_EXCEPCION_DIAS": "sabado",
+        "ENTREGA_EXCEPCION_HORA": "10:00",
+        "ENTREGA_EXCEPCION_CARGO": "1500",
+        "ENTREGA_EXCEPCION_MIN_TOTAL": "ocho mil",
+    }
+
+    assert limites.entrega().excepcion_minimo is None
+
+    evaluacion = excepciones.evaluar_entrega({"grand_total": 200})
+
+    assert evaluacion.preautorizada is False
+    assert "no se pudo leer" in evaluacion.motivo
+    # ...and a big order does not get through either: the rule is unknown, not
+    # absent, so nothing is pre-authorized until a person fixes the value.
+    assert excepciones.evaluar_entrega({"grand_total": 999_999}).preautorizada is False
+
+
+def test_no_minimum_configured_still_means_no_minimum(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0 and "unreadable" must not be confused: 0 is a real answer."""
+    from app import excepciones
+
+    entrega_autorizada(monkeypatch)
+    almacen.hashes[limites.CLAVE_VALORES] = {
+        "ENTREGA_EXCEPCION_ACTIVA": "true",
+        "ENTREGA_EXCEPCION_DIAS": "sabado",
+        "ENTREGA_EXCEPCION_HORA": "10:00",
+        "ENTREGA_EXCEPCION_CARGO": "1500",
+        "ENTREGA_EXCEPCION_MIN_TOTAL": "0",
+    }
+
+    assert limites.entrega().excepcion_minimo == 0.0
+    assert excepciones.evaluar_entrega({"grand_total": 200}).preautorizada is True
+
+
+def test_a_thousands_separator_is_read_the_same_way_for_everything_countable(
+    almacen: FakeRedis,
+) -> None:
+    """"1.000" is a thousand litres exactly as much as a thousand pesos."""
+    assert limites.validar("AUTO_CONFIRM_MAX", "50.000") == "50000"
+    assert limites.validar("AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO", "1.000") == "1000"
+    assert limites.validar("AUTO_CONFIRM_MAX_DEBT", "2.000.000") == "2000000"
+
+
+@pytest.mark.parametrize(
+    "nombre,dicho,esperado",
+    [
+        # Nobody groups a percentage in es-AR, so the dot is a decimal point.
+        ("STOCK_BUFFER_PCT", "12.5", "12.5"),
+        ("AUTO_CONFIRM_MAX_DESCUENTO_PCT", "7.5", "7.5"),
+        # Neither is an hour count.
+        ("APROBACION_TIMEOUT_HORAS", "1.5", "1.5"),
+        ("REVISION_TIMEOUT_HORAS", "0.5", "0.5"),
+    ],
+)
+def test_a_percentage_or_an_hour_count_is_never_regrouped(
+    almacen: FakeRedis, nombre: str, dicho: str, esperado: str
+) -> None:
+    assert limites.validar(nombre, dicho) == esperado
+
+
+@pytest.mark.parametrize(
+    "dicho,esperado",
+    [
+        ("cargo de envío", "ENTREGA_EXCEPCION_CARGO"),
+        ("pedido mínimo", "ENTREGA_EXCEPCION_MIN_TOTAL"),
+        ("días de reparto", "ENTREGA_DIAS"),
+        ("dias de reparto", "ENTREGA_DIAS"),
+        ("HORA DE RETIRO", "RETIRO_LOCAL_HORA"),
+        ("colchón de stock", "STOCK_BUFFER_PCT"),
+        ("colchon de stock", "STOCK_BUFFER_PCT"),
+    ],
+)
+def test_the_owner_may_write_the_accents_or_not(
+    almacen: FakeRedis, dicho: str, esperado: str
+) -> None:
+    """Every alias carries both spellings, so neither has to be guessed.
+
+    A regression test, not a fix: this already works. It is here because the
+    obvious tidy-up is to drop one spelling from each alias tuple, and that
+    would send the owner a list of technical names to copy instead of
+    understanding what he wrote.
+    """
+    assert limites.definicion(dicho).nombre == esperado
+
+
+def test_a_vague_word_is_still_asked_about_rather_than_guessed(
+    almacen: FakeRedis,
+) -> None:
+    """"Cambiá la hora" matches six settings across both registries."""
+    for vago in ("hora", "dias", "retiro"):
+        with pytest.raises(limites.LimiteError) as caido:
+            limites.definicion(vago)
+        assert "puede ser varias cosas" in str(caido.value)

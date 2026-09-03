@@ -142,8 +142,12 @@ def cargo_configurado() -> float | None:
     return reglas().excepcion_cargo
 
 
-def minimo_configurado() -> float:
-    """Order total below which no exception is pre-authorized. 0 means none."""
+def minimo_configurado() -> float | None:
+    """Order total below which no exception is pre-authorized.
+
+    0 means there is no minimum; None means one is configured and could not be
+    read, which blocks the exception rather than removing the minimum.
+    """
     return reglas().excepcion_minimo
 
 
@@ -220,6 +224,15 @@ def evaluar_entrega(sales_order: dict, *, hoy: date | None = None) -> Evaluacion
     except (TypeError, ValueError):
         return Evaluacion(False, None, "el total del pedido no se pudo leer")
     minimo = cfg.excepcion_minimo
+    if minimo is None:
+        # Configured but unreadable. The minimum is the condition that keeps a
+        # small order from earning a free off-day trip, so losing it has to
+        # block the exception, not silently remove it.
+        return Evaluacion(
+            False,
+            None,
+            "el mínimo configurado para una excepción no se pudo leer",
+        )
     if minimo > 0 and total < minimo:
         return Evaluacion(
             False,
