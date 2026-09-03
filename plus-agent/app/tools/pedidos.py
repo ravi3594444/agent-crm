@@ -548,8 +548,10 @@ def crear_pedido(
                 # El pedido dice a dónde va. Si ERPNext lo dedujera solo,
                 # dos pedidos del mismo cliente podrían salir con direcciones
                 # distintas; y sin dirección la política no puede verificar la
-                # entrega, así que el pedido queda en borrador (bien).
-                envio = clientes.direccion_principal(cuenta)
+                # entrega, así que el pedido queda en borrador (bien). Si el
+                # cliente acaba de dar una dirección en esta conversación, va a
+                # ESA: es la que la política tiene que mirar.
+                envio = clientes.direccion_para_pedido(cuenta, actor.actor_phone)
                 if envio:
                     payload["customer_address"] = envio
                     payload["shipping_address_name"] = envio

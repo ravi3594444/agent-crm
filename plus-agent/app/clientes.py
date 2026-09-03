@@ -22,9 +22,10 @@ falso positivo acá significa cargarle un pedido a otra persona.
 
 from __future__ import annotations
 
+import hashlib
 import os
 
-from app import erpnext, telefono
+from app import erpnext, locks, telefono
 from app.entrega import normalizar_cp, normalizar_localidad
 from app.locks import distributed_lock
 
@@ -145,6 +146,82 @@ def direccion_principal(cliente: str) -> str:
     return nombres[0] if nombres else ""
 
 
+# ---------------------------------------------------------------------------
+# La dirección que el cliente dio EN ESTA CONVERSACIÓN
+#
+# EL DEFECTO QUE ESTO CORRIGE. Un cliente conocido que estrena dirección pasa
+# por crear_cliente, que le cuelga una segunda Address. Pero el pedido tomaba
+# `direccion_principal` —la primera por orden alfabético—, que en ERPNext es la
+# VIEJA ("X-Shipping" ordena antes que "X-Shipping-1"). El pedido salía a la
+# dirección anterior, la verificación de entrega miraba esa (ya aprobada por
+# historial) y la nueva nunca se evaluaba: justo lo que la etapa 2d prometía
+# evitar.
+#
+# La dirección recién dada se recuerda por teléfono verificado, en el mismo
+# Redis de los locks, por unas horas. crear_pedido la usa sólo si sigue siendo
+# una dirección de ESE cliente; si no hay nada recordado, o Redis no contesta,
+# vuelve al comportamiento anterior. Nunca decide si se entrega: eso sigue en
+# app/entrega.py, que ahora mira la dirección correcta.
+# ---------------------------------------------------------------------------
+
+DIRECCION_TURNO_HORAS_DEFAULT = 24.0
+
+
+def _horas_direccion_turno() -> float:
+    try:
+        horas = float(os.getenv("DIRECCION_TURNO_HORAS", str(DIRECCION_TURNO_HORAS_DEFAULT)))
+    except (TypeError, ValueError):
+        return DIRECCION_TURNO_HORAS_DEFAULT
+    return horas if horas > 0 else DIRECCION_TURNO_HORAS_DEFAULT
+
+
+def _clave_direccion_turno(canonico: str) -> str:
+    # Hashed: the phone number never appears in a Redis key name.
+    return f"plus-agent:direccion-turno:{hashlib.sha256(canonico.encode()).hexdigest()}"
+
+
+def recordar_direccion(numero: str, direccion: str) -> None:
+    """Recuerda la Address que este teléfono acaba de dar. Best effort."""
+    canonico = telefono.normalizar(numero)
+    nombre = str(direccion or "").strip()
+    if not canonico or not nombre:
+        return
+    try:
+        locks.conexion().setex(
+            _clave_direccion_turno(canonico),
+            int(_horas_direccion_turno() * 3600),
+            nombre,
+        )
+    except Exception as exc:
+        print(f"[clientes] no pude recordar la dirección del turno ({type(exc).__name__})")
+
+
+def direccion_recordada(numero: str) -> str:
+    """La Address que este teléfono dio hace poco, o "" (también si Redis falla)."""
+    canonico = telefono.normalizar(numero)
+    if not canonico:
+        return ""
+    try:
+        valor = locks.conexion().get(_clave_direccion_turno(canonico))
+    except Exception as exc:
+        print(f"[clientes] no pude leer la dirección del turno ({type(exc).__name__})")
+        return ""
+    if isinstance(valor, bytes):
+        valor = valor.decode()
+    return str(valor or "").strip()
+
+
+def direccion_para_pedido(cliente: str, numero: str) -> str:
+    """A dónde va el pedido: la dirección dada en esta conversación si es de
+    este cliente; si no, la elección determinística de siempre."""
+    nombres = direcciones_de(cliente)
+    recordada = direccion_recordada(numero) if numero else ""
+    if recordada and recordada in nombres:
+        return recordada
+    ordenadas = sorted(nombres)
+    return ordenadas[0] if ordenadas else ""
+
+
 def asegurar_direccion(cliente: str, direccion: dict) -> str:
     """La Address del cliente con esos datos, creándola sólo si no está.
 
@@ -202,11 +279,7 @@ def crear(nombre_negocio: str, numero: str, direccion: dict) -> dict:
     ):
         existente = buscar_por_telefono(canonico)
         if existente:
-            return {
-                "cliente": existente["name"],
-                "direccion": asegurar_direccion(existente["name"], direccion),
-                "creado": False,
-            }
+            return _alta_resuelta(existente["name"], canonico, direccion, creado=False)
 
         payload = {"customer_name": nombre, "mobile_no": canonico}
         for variable, campo in (
@@ -224,11 +297,7 @@ def crear(nombre_negocio: str, numero: str, direccion: dict) -> dict:
             reintento = buscar_por_telefono(canonico)
             if not reintento:
                 raise
-            return {
-                "cliente": reintento["name"],
-                "direccion": asegurar_direccion(reintento["name"], direccion),
-                "creado": False,
-            }
+            return _alta_resuelta(reintento["name"], canonico, direccion, creado=False)
 
         cliente = str(doc.get("name") or "").strip()
         if not cliente:
@@ -236,8 +305,10 @@ def crear(nombre_negocio: str, numero: str, direccion: dict) -> dict:
         erpnext.add_comment(
             "Customer", cliente, "Alta por WhatsApp: el número lo verificó el webhook."
         )
-        return {
-            "cliente": cliente,
-            "direccion": asegurar_direccion(cliente, direccion),
-            "creado": True,
-        }
+        return _alta_resuelta(cliente, canonico, direccion, creado=True)
+
+
+def _alta_resuelta(cliente: str, canonico: str, direccion: dict, *, creado: bool) -> dict:
+    nombre_direccion = asegurar_direccion(cliente, direccion)
+    recordar_direccion(canonico, nombre_direccion)
+    return {"cliente": cliente, "direccion": nombre_direccion, "creado": creado}

@@ -122,6 +122,16 @@ def locks_tomados(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return tomados
 
 
+@pytest.fixture
+def memoria_de_direcciones(monkeypatch: pytest.MonkeyPatch):
+    """The 'address given in this conversation' marker, without a Redis server."""
+    from conftest import FakeRedis
+
+    falso = FakeRedis()
+    monkeypatch.setattr(clientes.locks, "conexion", lambda: falso)
+    return falso
+
+
 # ------------------------------------------------ the phone is not a parameter
 def test_the_model_cannot_name_a_phone_number() -> None:
     """The parameter does not exist, so no prompt can supply one."""
@@ -346,3 +356,138 @@ def test_the_order_never_takes_a_customer_from_anywhere_but_the_phone(erp, locks
     campos = set(pedidos.crear_pedido.args_schema.model_json_schema()["properties"])
 
     assert campos == {"lineas", "fecha_entrega"}
+
+
+# --------------------------------------------- the order goes where he just said
+def _pedido_capturado(monkeypatch: pytest.MonkeyPatch, erp: _ErpDePrueba) -> list[dict]:
+    from datetime import date
+
+    monkeypatch.setattr(pedidos, "_hoy_del_negocio", lambda: date(2026, 8, 29))
+    monkeypatch.setattr(pedidos, "_find_existing", lambda customer, key: None)
+    monkeypatch.setattr(
+        pedidos,
+        "_validated_lines",
+        lambda lineas: ([{"item_code": "LECHE-1L", "qty": 5, "uom": "Unidad"}], None),
+    )
+    monkeypatch.setattr(erpnext, "default_context", lambda: ("Lácteos Plus SA", "Depósito A - LP"))
+    monkeypatch.setattr(
+        pedidos, "_after_create", lambda order, validated, delivery: "PEDIDO_PENDIENTE. Número real: SO-NEW."
+    )
+    creados: list[dict] = []
+    crear_original = erp.create_doc
+
+    def create_doc(doctype, payload):
+        if doctype == "Sales Order":
+            creados.append(dict(payload))
+            return {"name": "SO-NEW", "docstatus": 0, **payload}
+        return crear_original(doctype, payload)
+
+    monkeypatch.setattr(erpnext, "create_doc", create_doc)
+    return creados
+
+
+def _pedir(customer: str = "") -> str:
+    return pedidos.crear_pedido.invoke(
+        {
+            "lineas": [{"item_code": "LECHE-1L", "cantidad": 5, "unidad": "unidad"}],
+            "fecha_entrega": "2026-08-30",
+        },
+        config=_config(customer=customer),
+    )
+
+
+def test_a_known_customer_who_gives_a_new_address_gets_the_order_sent_there(
+    erp, locks_tomados, memoria_de_direcciones, monkeypatch
+) -> None:
+    """He moved. The second Address sorts AFTER the first in ERPNext
+    ("X-Shipping-1" < "X-Shipping-2"), so the alphabetical default would have
+    sent the order — and the delivery check — to the OLD address, and the new
+    one would never have been evaluated."""
+    pedidos.crear_cliente.invoke(
+        {"nombre": "Almacén Don José", "direccion": DIRECCION}, config=_config()
+    )
+    vieja = next(iter(erp.addresses))
+    pedidos.crear_cliente.invoke(
+        {
+            "nombre": "Almacén Don José",
+            "direccion": {**DIRECCION, "calle": "Ruta 9 km 300", "localidad": "Villa Rara", "codigo_postal": "X9999"},
+        },
+        config=_config(),
+    )
+    nueva = next(n for n in erp.addresses if n != vieja)
+    assert sorted([vieja, nueva])[0] == vieja  # the old one IS the alphabetical default
+
+    creados = _pedido_capturado(monkeypatch, erp)
+    assert _pedir(customer="CUST-001").startswith("PEDIDO_PENDIENTE")
+
+    assert creados[0]["shipping_address_name"] == nueva
+    assert creados[0]["customer_address"] == nueva
+
+
+def test_restating_the_old_address_sends_the_order_to_the_old_address(
+    erp, locks_tomados, memoria_de_direcciones, monkeypatch
+) -> None:
+    """Two addresses on file; today he repeats the first one. No new Address
+    is created, and the order goes to the one he named — not to the newest."""
+    pedidos.crear_cliente.invoke(
+        {"nombre": "Almacén Don José", "direccion": DIRECCION}, config=_config()
+    )
+    primera = next(iter(erp.addresses))
+    pedidos.crear_cliente.invoke(
+        {
+            "nombre": "Almacén Don José",
+            "direccion": {**DIRECCION, "calle": "Ruta 9 km 300", "localidad": "Villa Rara", "codigo_postal": "X9999"},
+        },
+        config=_config(),
+    )
+    pedidos.crear_cliente.invoke(
+        {"nombre": "Almacén Don José", "direccion": DIRECCION}, config=_config()
+    )
+    assert len(erp.addresses) == 2
+
+    creados = _pedido_capturado(monkeypatch, erp)
+    _pedir(customer="CUST-001")
+    assert creados[0]["shipping_address_name"] == primera
+
+
+def test_without_a_remembered_address_the_deterministic_default_still_applies(
+    erp, locks_tomados, memoria_de_direcciones, monkeypatch
+) -> None:
+    """Nothing said in this conversation (or the marker expired): the order
+    carries the same alphabetical default as before, never no address."""
+    pedidos.crear_cliente.invoke(
+        {"nombre": "Almacén Don José", "direccion": DIRECCION}, config=_config()
+    )
+    memoria_de_direcciones.strings.clear()
+
+    creados = _pedido_capturado(monkeypatch, erp)
+    _pedir(customer="CUST-001")
+    assert creados[0]["shipping_address_name"] == sorted(erp.addresses)[0]
+
+
+def test_a_remembered_address_of_another_customer_is_ignored(
+    erp, locks_tomados, memoria_de_direcciones, monkeypatch
+) -> None:
+    """The marker is only a hint: it must belong to THIS customer's addresses
+    or it is not used. Fail-safe towards the deterministic default."""
+    pedidos.crear_cliente.invoke(
+        {"nombre": "Almacén Don José", "direccion": DIRECCION}, config=_config()
+    )
+    clientes.recordar_direccion(TELEFONO, "Otro Cliente-Shipping-9")
+
+    creados = _pedido_capturado(monkeypatch, erp)
+    _pedir(customer="CUST-001")
+    assert creados[0]["shipping_address_name"] == sorted(erp.addresses)[0]
+
+
+def test_a_redis_outage_never_blocks_the_order_or_leaks_the_phone(
+    erp, locks_tomados, memoria_de_direcciones, monkeypatch, capsys
+) -> None:
+    memoria_de_direcciones.caido = True
+    pedidos.crear_cliente.invoke(
+        {"nombre": "Almacén Don José", "direccion": DIRECCION}, config=_config()
+    )
+    creados = _pedido_capturado(monkeypatch, erp)
+    assert _pedir(customer="CUST-001").startswith("PEDIDO_PENDIENTE")
+    assert creados[0]["shipping_address_name"] == sorted(erp.addresses)[0]
+    assert TELEFONO not in capsys.readouterr().out
