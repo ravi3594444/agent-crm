@@ -87,3 +87,30 @@ Live testing was deliberately NOT run: `.env` still needs the owner's values
   (`erpnext.policy_cancel_doc`), audited, idempotent, customer told once (free
   text in window / optional template / dead-letter + one ToDo). Not an LLM tool.
   `tests/test_cancelacion.py` has a test per rule.
+
+## Phase A — the three release blockers (before the decision workflow)
+
+Three commits on `feat/decision-workflow`, based on `ccda363`:
+
+1. **The cancellation deadline is durable.** It lived in one Redis string with a
+   seven-day TTL, so a flush or a restart silently closed a window the business
+   still had. `app/confirmacion.py` writes an append-only ERPNext comment
+   (`[confirmado-por-agente] <UTC>`) on both confirmation paths and reads it
+   back; Redis is only a cache of it, written after the durable write succeeds.
+   The earliest record wins. No durable record means no WhatsApp cancellation,
+   which is the safe direction.
+2. **The customer's confirmation no longer depends on the model.** It used to be
+   the `PEDIDO_CONFIRMADO` token that the prompt asked the model to relay, while
+   the "already informed" marker was set whether it did or not. `app/avisos.py`
+   is a durable notice queue: the text is built from the document, the entry and
+   its (event, order) idempotency key are written in one Lua script, a claimed
+   entry is leased rather than removed, transient failures retry with bounded
+   backoff, and giving up dead-letters the notice and opens one ERPNext ToDo.
+3. **A prepared order can still be cancelled.** `cancelar` used to refuse for any
+   linked document, draft included, so one `preparar` stranded the order for
+   good. Now a submitted Delivery Note or Sales Invoice blocks it, a draft
+   invoice goes to ERPNext, and a draft Delivery Note is undone by the new
+   human-only `despreparar <pedido>` — which deletes only a draft the agent
+   created and nobody edited, audits it on the order first, and never cascades.
+
+708 tests pass, ruff clean. No model, key or provider change; no live test.

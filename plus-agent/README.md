@@ -159,17 +159,40 @@ rechazar SAL-ORD-2026-00008                  (also: rechazo / no) — the custom
 preparar SAL-ORD-2026-00008                  draft Delivery Note for a CONFIRMED order
 despachar SAL-ORD-2026-00008                 submits that draft: a separate human step
 cancelar SAL-ORD-2026-00008 <reason>         confirmed order, within CANCELACION_HORAS (24 h)
+despreparar SAL-ORD-2026-00008               deletes the agent's own draft Delivery Note
 ```
 
 `cancelar` (`app/decisiones.py`) re-checks the sender, requires a reason, and
 under the distributed lock re-reads the order with the policy identity: it must
-be submitted, confirmed by this system less than 24 hours ago (a confirmation
-made directly in ERPNext cannot be proven and is refused), and have no Delivery
-Note or Sales Invoice, draft or submitted, linked to it — nothing is ever
-cancelled in cascade. The cancellation is audited with the reason, repeated
-commands are idempotent, and the customer is told once: free text inside their
-24-hour window, `WHATSAPP_CUSTOMER_CANCELLED_TEMPLATE` outside it if configured,
-otherwise the notice is parked and one ERPNext ToDo is opened.
+be submitted and confirmed by this system less than 24 hours ago. That deadline
+is a durable ERPNext comment on the order (`app/confirmacion.py`), not a Redis
+key, so it survives a restart or an empty Redis; an order confirmed directly in
+ERPNext has no such record and is refused. Linked documents get three different
+answers, and none of them is a cascade: a **submitted** Delivery Note or Sales
+Invoice blocks the cancellation outright, a **draft** Delivery Note sends the
+manager to `despreparar` first, and a **draft** Sales Invoice goes to ERPNext.
+The cancellation is audited with the reason, repeated commands are idempotent,
+and the customer is told once.
+
+`despreparar` undoes a preparation, and it is the only command allowed to remove
+a linked draft. It deletes ONE draft Delivery Note and only if the agent created
+it (`preparar` stamps a marker in its remarks) and nobody has edited it: same
+customer, same company, exactly the order's own lines and quantities. Several
+drafts, a hand-made one, an edited one, any invoice or anything submitted are
+refused and sent to ERPNext. The reason and the draft's lines are written onto
+the Sales Order **before** the deletion, since a deleted document cannot be
+commented on. `erpnext.policy_delete_doc` re-reads the document and refuses
+anything that is not a draft.
+
+**The customer's confirmation is data, not a prompt.** After a successful
+confirmation — automatic or human — the order id, lines, total and fulfilment
+details are built from the ERPNext document and queued in `app/avisos.py` under
+an idempotency key of (event, order). A worker thread delivers it inside the
+customer's own 24-hour window, falls back to an optional template outside it,
+retries transient failures with bounded backoff, and after
+`AVISOS_MAX_INTENTOS` parks the notice and opens one deduplicated ERPNext ToDo.
+The model may add conversational text in the same turn; it is never responsible
+for the confirmation itself.
 
 **Templates are optional in the pilot.** Customers always write first, so every
 reply to them (acknowledgement, confirmation, rejection, cancellation) goes out
