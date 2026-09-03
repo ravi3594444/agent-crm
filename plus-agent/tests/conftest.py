@@ -185,6 +185,12 @@ def limites_sin_redis(monkeypatch):
         "AUTO_CONFIRM_MAX_DESCUENTO_PCT",
         "STOCK_CONFIABLE",
         "STOCK_CONFIABLE_HORAS",
+        # The two hold deadlines. Without them here, a developer machine with a
+        # real .env resolves them from that file and a test that says "the
+        # owner's number decides" proves nothing — the exact leak this
+        # conftest's docstring exists to describe.
+        "APROBACION_TIMEOUT_HORAS",
+        "REVISION_TIMEOUT_HORAS",
     ):
         monkeypatch.delenv(nombre, raising=False)
     vacio = FakeRedis()

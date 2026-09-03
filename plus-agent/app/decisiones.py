@@ -809,6 +809,11 @@ def cancelar(nombre: str, por: str, motivo: str) -> dict:
     if ya_cancelado:
         return _resultado(True, False, f"{nombre} ya estaba cancelado; no cambié nada.")
 
+    # Outside the cancelar lock (never nested), and a no-op unless the order was
+    # in review: otherwise the manager keeps reading a "Vence:" line for a
+    # document that no longer exists to review.
+    cerrar_revision_si_hay(nombre, por, "una persona canceló el pedido")
+
     tel = telefono_del_cliente(nombre)
     avisado = _avisar_cliente_cancelacion(nombre, tel, razon) if tel else False
     if not tel:
@@ -1054,6 +1059,20 @@ def rechazar_solicitud(nombre: str, por: str, motivo: str) -> dict:
         else "NO pude avisarle al cliente; quedó una tarea para contactarlo."
     )
     return _resultado(True, avisado, f"❌ {nombre}: solicitud rechazada. {detalle.capitalize()}. {cola}")
+
+
+def cerrar_revision_si_hay(nombre: str, por: str, motivo: str) -> bool:
+    """Close a human review a manager's command has just settled. Never raises.
+
+    Called after cancelar/confirmar/rechazar succeed. A no-op unless the order
+    really is in review (app/solicitudes.py::resolver_revision), so it is safe
+    on every order and idempotent on repeats.
+    """
+    try:
+        return solicitudes.resolver_revision(nombre, por, motivo)
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: cierre de revisión falló ({type(exc).__name__})")
+        return False
 
 
 def ver_solicitud(nombre: str) -> str:

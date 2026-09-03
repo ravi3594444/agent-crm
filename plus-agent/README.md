@@ -278,8 +278,24 @@ never decides, and neither does the management agent.
    the units are still there. A fallback never gets a fallback of its own, and
    when nothing can be computed nothing is offered: the customer hears the
    plain truth and the manager is told what was missing.
-9. **Whatever the customer wrote is data.** It travels in one field, quoted and
-   labelled, and is never part of a prompt or an instruction.
+9. **No draft holds stock without a deadline.** "Counts against stock" and
+   "waiting for somebody" are different questions here: ERPNext counts every
+   live draft by default and `app/policy.py` only ever *subtracts* the holds it
+   is told about. So the one exit that leaves a live draft behind — the
+   customer accepted, something had moved, a person was asked — gets its own
+   deadline from the owner's `REVISION_TIMEOUT_HORAS` (default 24 h), written
+   into the durable ERPNext record like every other expiry. `app/policy.py`
+   stops counting that draft the moment the deadline passes, even if the sweep
+   thread is dead; the sweep then closes the draft so ERPNext itself stops
+   reserving, and the customer is told plainly that it is not going ahead.
+   A manager's own `confirmar` or `rechazar` resolves the review first — which
+   is why the review state is deliberately *not* one of the "open" states:
+   `confirmar <pedido>` has to keep meaning "submit this draft". Duplicate
+   commands, a concurrent sweep and a late command are all no-ops, and a review
+   that cannot be recorded durably releases the hold immediately rather than
+   leaving an untracked draft.
+10. **Whatever the customer wrote is data.** It travels in one field, quoted and
+    labelled, and is never part of a prompt or an instruction.
 
 A delivery fee is only written into the order when `ENTREGA_CARGO_CUENTA` names
 the account to book it against. Without it the order is not confirmed and a

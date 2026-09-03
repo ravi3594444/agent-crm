@@ -162,6 +162,26 @@ LIMITES: dict[str, Definicion] = {
         # retiene stock que otro cliente podía llevarse.
         maximo=168.0,
     ),
+    "REVISION_TIMEOUT_HORAS": Definicion(
+        nombre="REVISION_TIMEOUT_HORAS",
+        alias=(
+            "plazo de revision",
+            "plazo de revisión",
+            "revision manual",
+            "revisión manual",
+            "plazo para revisar",
+        ),
+        significado=(
+            "Cuánto puede quedar un pedido esperando que una persona lo revise "
+            "—después de que el cliente aceptó y algo había cambiado— antes de "
+            "que el borrador se cierre y deje de retener stock"
+        ),
+        unidad="h",
+        default="24",
+        # A review nobody does is a draft holding units another customer could
+        # have had. A week is already generous; more is a forgotten order.
+        maximo=168.0,
+    ),
     "AUTO_CONFIRM_DESCUENTOS_APRUEBAN": Definicion(
         nombre="AUTO_CONFIRM_DESCUENTOS_APRUEBAN",
         alias=("descuentos", "aprobar descuentos", "descuentos aprueban"),
@@ -195,6 +215,10 @@ class Configuracion:
     # stock. Lo lee app/solicitudes.py; nunca es 0 (un plazo de 0 vencería
     # todo al instante y un plazo infinito congelaría el stock).
     timeout_aprobacion: float = 4.0
+    # Lo mismo para un pedido que quedó esperando que lo revise una persona.
+    # Sin plazo, ese borrador retendría stock para siempre: es la única salida
+    # del flujo que no la tenía.
+    timeout_revision: float = 24.0
 
 
 def _texto(valor: object) -> str:
@@ -343,14 +367,22 @@ def configuracion() -> Configuracion:
             _numero(
                 LIMITES["APROBACION_TIMEOUT_HORAS"],
                 crudos["APROBACION_TIMEOUT_HORAS"],
-            )
+            ),
+            "APROBACION_TIMEOUT_HORAS",
+        ),
+        timeout_revision=_timeout(
+            _numero(
+                LIMITES["REVISION_TIMEOUT_HORAS"],
+                crudos["REVISION_TIMEOUT_HORAS"],
+            ),
+            "REVISION_TIMEOUT_HORAS",
         ),
     )
 
 
-def _timeout(horas: float) -> float:
-    """Un plazo de 0 vencería cada solicitud al instante: vuelve al default."""
-    return horas if horas > 0 else float(LIMITES["APROBACION_TIMEOUT_HORAS"].default)
+def _timeout(horas: float, nombre: str) -> float:
+    """Un plazo de 0 vencería todo al instante: vuelve al default del límite."""
+    return horas if horas > 0 else float(LIMITES[nombre].default)
 
 
 def resumen() -> list[dict]:

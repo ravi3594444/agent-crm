@@ -28,6 +28,19 @@ def _texto_solicitud(nombre: str) -> str:
         return ""
 
 
+def _cerrar_revision(nombre: str, telefono: str, motivo: str) -> None:
+    """End a human review a manager has just dealt with. Never raises.
+
+    The review's own deadline exists so a draft cannot reserve stock for ever
+    (app/solicitudes.py). A manager acting on the order settles it, so the
+    review is closed here rather than left for the sweep — and if this fails,
+    the sweep still reaches it, which is why nothing is escalated.
+    """
+    from app import decisiones
+
+    decisiones.cerrar_revision_si_hay(nombre, telefono, motivo)
+
+
 def _leer_doc(doctype: str, name: str) -> dict:
     """Approval runs outside the LLM and may use the policy credential."""
     getter = getattr(erpnext, "policy_get_doc", erpnext.get_doc)
@@ -52,7 +65,16 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
             from app import decisiones
 
             return decisiones.aprobar_solicitud(nombre, telefono)["detalle"]
-        return confirmar_pedido(nombre, telefono)["detalle"]
+        resultado = confirmar_pedido(nombre, telefono)
+        # "confirmar" is also the documented way out of a human review, and it
+        # is why REVISION_HUMANA is deliberately NOT one of solicitudes.ABIERTOS
+        # — this word has to keep meaning "submit this draft". Closing the
+        # review here takes the draft out of the expiry index at once instead
+        # of waiting for the sweep to notice; it is a no-op when there is no
+        # review, so a manager typing it three times costs three reads.
+        if resultado.get("ok"):
+            _cerrar_revision(nombre, telefono, "una persona confirmó el pedido")
+        return resultado["detalle"]
 
     if accion == "contraoferta":
         # "contraoferta:<pedido>:<fecha> <hora> <cargo>"
@@ -98,6 +120,8 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
             )["detalle"]
         nombre = pedido.strip()
         resultado = decisiones.rechazar(nombre, telefono, motivo_libre)
+        if resultado.get("ok"):
+            _cerrar_revision(nombre, telefono, "una persona rechazó el pedido")
         cola = (
             "Ya le avisé al cliente."
             if resultado["aviso_cliente"]

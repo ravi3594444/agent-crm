@@ -54,6 +54,39 @@ fallback of its own, so there is no chain; and when nothing can be computed
 nothing is offered, which is the direction that never promises a delivery
 nobody can make.
 
+NO DRAFT LIVES WITHOUT A DEADLINE
+"Counts against stock" and "waiting for somebody" are NOT the same question
+here. ERPNext counts every live draft by default; app/policy.py only ever
+SUBTRACTS the ones whose hold has lapsed, and it learns which those are from
+``vencimientos``. So a request state that reports no expiry does not stop
+holding units — it holds them for ever. REVISION_HUMANA used to be exactly
+that: the customer accepted, something had moved, a person was asked, and the
+draft sat there reserving milk with nothing that could ever release it.
+
+Hence ``CON_PLAZO``, which is deliberately WIDER than ``ABIERTOS``:
+
+  * ABIERTOS  — somebody still has to answer. Drives every DECISION path
+    (which manager command applies, whether an offer can be accepted).
+  * CON_PLAZO — has a live deadline the sweep must honour. Drives the index,
+    ``vencimientos`` and the sweep.
+
+REVISION_HUMANA is in the second and not the first, on purpose: "confirmar
+<pedido>" must keep meaning "submit this draft" while a person is reviewing it,
+not "approve the exception again". The review's deadline is the owner's own
+number (REVISION_TIMEOUT_HORAS), it is written into the durable record like
+every other expiry, and when it lapses the draft is closed so ERPNext itself
+stops reserving.
+
+WHICH MAKES ONE RULE ABSOLUTE
+A TERMINAL state is, by definition, a request with no deadline. So recording
+one for an order that is still a live draft is the bug — it hands the units
+back to nobody. A terminal write is therefore only licensed when the draft is
+gone: either it is no longer a draft, or ``soltar_reserva`` PROVED the release
+by re-reading it. When neither holds, REVISION_HUMANA is written again with a
+nearer deadline. It is the one re-entrant state in the module, and that is what
+makes "a live draft always bears a deadline" true by construction instead of by
+luck.
+
 CUSTOMER TEXT IS DATA
 Whatever the customer wrote travels in one field, quoted, and is shown to the
 manager as a quotation. It is never a line of the management agent's prompt and
@@ -92,9 +125,26 @@ RECHAZADA = "rechazada"
 RECHAZADA_CLIENTE = "rechazada_cliente"
 VENCIDA = "vencida"
 REVISION_HUMANA = "revision_humana"
+# How a human review ENDS. Two states, because the two endings are not the same
+# fact: somebody dealt with it, or nobody did and the draft had to be closed.
+REVISION_RESUELTA = "revision_resuelta"
+REVISION_VENCIDA = "revision_vencida"
+
+# Waiting for somebody to answer. Drives the DECISION paths only.
 ABIERTOS = frozenset({PENDIENTE, ESPERANDO_CLIENTE})
+# Carrying a live deadline the sweep has to honour. Wider than ABIERTOS: a
+# human review is nobody's pending decision, but its draft is still reserving
+# stock and something must eventually let go of it. See the module docstring.
+CON_PLAZO = ABIERTOS | frozenset({REVISION_HUMANA})
 TERMINALES = frozenset(
-    {CUMPLIDA, RECHAZADA, RECHAZADA_CLIENTE, VENCIDA, REVISION_HUMANA}
+    {
+        CUMPLIDA,
+        RECHAZADA,
+        RECHAZADA_CLIENTE,
+        VENCIDA,
+        REVISION_RESUELTA,
+        REVISION_VENCIDA,
+    }
 )
 
 # Decisions a human can take on a pending request.
@@ -125,6 +175,10 @@ _ESTADO_SIN_RESERVA = "Closed"
 # ... and the state it came from, so an accepted fallback can be confirmed on
 # the same document instead of asking the customer to order again.
 _ESTADO_BORRADOR = "Draft"
+# How soon to try again when the draft could not be closed. Short, because the
+# units are still held; not zero, because a 60-second sweep would otherwise
+# spin on the same failing order.
+REINTENTO_REVISION_SEGUNDOS = 900.0
 
 _JSON = re.compile(re.escape(MARCA) + r"\s*(\{.*\})\s*$", re.DOTALL)
 
@@ -163,10 +217,21 @@ class Solicitud:
 
     @property
     def abierta(self) -> bool:
+        """Somebody still has to answer. NOT the same as "holds stock"."""
         return self.estado in ABIERTOS
 
+    @property
+    def con_plazo(self) -> bool:
+        """Has a live deadline: the sweep must reach it and it may hold stock."""
+        return self.estado in CON_PLAZO
+
+    @property
+    def en_revision(self) -> bool:
+        return self.estado == REVISION_HUMANA
+
     def vencida(self, ahora: float | None = None) -> bool:
-        return self.abierta and (ahora or time.time()) >= self.vence_en
+        """Past its deadline while it still had one."""
+        return self.con_plazo and (ahora or time.time()) >= self.vence_en
 
     def como_dict(self) -> dict:
         return {
@@ -214,6 +279,23 @@ def timeout_horas() -> float:
         # Not a guess at a business number: the shortest sane hold, so a
         # misconfiguration cannot park stock for ever.
         return 4.0
+
+
+def revision_horas() -> float:
+    """How long a draft may wait for a PERSON to review it.
+
+    Same contract as ``timeout_horas``: never raises, and an unreadable
+    configuration falls back to a bounded number rather than to no bound at
+    all. This is the only thing standing between a failed revalidation and a
+    draft that reserves stock for ever.
+    """
+    from app import limites
+
+    try:
+        return limites.configuracion().timeout_revision
+    except Exception as exc:
+        print(f"[solicitudes] plazo de revisión no legible ({type(exc).__name__})")
+        return float(limites.LIMITES["REVISION_TIMEOUT_HORAS"].default)
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +412,7 @@ def _cachear(solicitud: Solicitud) -> None:
     try:
         cliente = _redis()
         cliente.set(_clave_cache(solicitud.pedido), cuerpo, ex=CACHE_TTL_SEGUNDOS)
-        if solicitud.abierta:
+        if solicitud.con_plazo:
             cliente.zadd(CLAVE_INDICE, {solicitud.pedido: solicitud.vence_en})
         else:
             cliente.zrem(CLAVE_INDICE, solicitud.pedido)
@@ -466,6 +548,14 @@ def crear(
         return None
 
     existente = leer(pedido)
+    if existente is not None and existente.en_revision:
+        # A review is not `abierta`, so without this a customer writing back
+        # would REPLACE it with a fresh PENDIENTE: the reason a person was
+        # asked would be lost, the deadline would be re-armed as an offer's,
+        # and "confirmar <pedido>" would start meaning "approve the exception"
+        # again. There is one record per order; the person has to finish first.
+        print(f"[solicitudes] {pedido}: en revisión humana, no abro otra solicitud")
+        return None
     if existente is not None and existente.abierta and not existente.vencida():
         return existente
 
@@ -531,7 +621,7 @@ def vencimientos(pedidos: list[str]) -> dict[str, float]:
         cacheada = _leer_cache(nombre)
         if cacheada is None:
             faltan.append(nombre)
-        elif isinstance(cacheada, Solicitud) and cacheada.abierta:
+        elif isinstance(cacheada, Solicitud) and cacheada.con_plazo:
             pendientes[nombre] = cacheada.vence_en
     if not faltan:
         return pendientes
@@ -562,7 +652,7 @@ def vencimientos(pedidos: list[str]) -> dict[str, float]:
         ultimas[candidata.pedido] = candidata
     for nombre, candidata in ultimas.items():
         _cachear(candidata)
-        if candidata.abierta:
+        if candidata.con_plazo:
             pendientes[nombre] = candidata.vence_en
     for nombre in faltan:
         if nombre not in ultimas:
@@ -700,7 +790,7 @@ def reconstruir_indice() -> int:
     recuperadas = 0
     for candidata in ultimas.values():
         _cachear(candidata)
-        if candidata.abierta:
+        if candidata.con_plazo:
             recuperadas += 1
     return recuperadas
 
@@ -741,7 +831,7 @@ def _vencer(pedido: str, ahora: float) -> bool:
     try:
         with distributed_lock(f"solicitud:{pedido}", lease_seconds=60, wait_seconds=5):
             solicitud = leer(pedido)
-            if solicitud is None or not solicitud.abierta:
+            if solicitud is None or not solicitud.con_plazo:
                 try:
                     _redis().zrem(CLAVE_INDICE, pedido)
                 except Exception:
@@ -749,6 +839,12 @@ def _vencer(pedido: str, ahora: float) -> bool:
                 return False
             if not solicitud.vencida(ahora):
                 return False
+            if solicitud.en_revision:
+                # A different ending, and it must not reach _respaldar: the
+                # customer already accepted and was already told a person
+                # would look at it. Offering them a machine-picked date on top
+                # of that would be the system talking to itself.
+                return _vencer_revision(solicitud, ahora)
             liberado, detalle = soltar_reserva(pedido)
             cerrada = registrar(
                 solicitud,
@@ -789,6 +885,210 @@ def _vencer(pedido: str, ahora: float) -> bool:
         f"No pude ofrecerle nada concreto en su lugar: {sin_respaldo}.\n"
         f"Si querés hacerlo igual, reabrí el pedido en ERPNext y confirmalo.",
     )
+    return True
+
+
+def _vencer_revision(solicitud: Solicitud, ahora: float) -> bool:
+    """The review deadline ran out — or a person already dealt with it.
+
+    Called with the order's lock held. Reads the CURRENT document first,
+    because the manager's own commands act on the Sales Order directly
+    (``confirmar`` submits it, ``cancelar`` cancels it) and this sweep must
+    recognise their work instead of overwriting it. That makes a late command
+    and a concurrent expiry two orderings of the same safe pair rather than a
+    race: whichever runs second observes what the first did.
+
+    Nothing here claims the stock was freed on its own account — ``soltar_reserva``
+    is the only thing allowed to say that, and only when a re-read agrees.
+    """
+    pedido = solicitud.pedido
+    estado_doc = _docstatus(pedido)
+    if estado_doc is None:
+        # Leave it in the index: the next tick asks again. Guessing here would
+        # either close a draft somebody confirmed or free stock we cannot see.
+        return False
+    if estado_doc != 0:
+        # Confirmed or cancelled by a person. The review is over and the draft
+        # is no longer a draft, so there is nothing to release.
+        return _revision_resuelta_por_persona(solicitud, estado_doc, ahora)
+
+    liberado, detalle = soltar_reserva(pedido)
+    if not liberado:
+        # Did a person confirm it inside the release window? Then the draft is
+        # gone for a good reason and the customer must not be told it is off.
+        despues_doc = _docstatus(pedido)
+        if despues_doc is not None and despues_doc != 0:
+            return _revision_resuelta_por_persona(solicitud, despues_doc, ahora)
+        return _revision_sin_soltar(solicitud, detalle, ahora)
+
+    plazo = _plazo_horas(solicitud)
+    cerrada = registrar(
+        solicitud,
+        "revision_vencida",
+        estado=REVISION_VENCIDA,
+        motivo=f"nadie la revisó en {plazo:g} h; {detalle}",
+        decidida_en=ahora,
+    )
+    if cerrada is None:
+        return False
+    _encolar_cliente(
+        cerrada, "revision_vencida", texto_revision_vencida_cliente(cerrada)
+    )
+    _avisar_equipo(
+        cerrada,
+        f"⏰ {pedido}: la revisión {solicitud.id} venció sin que nadie la mirara "
+        f"({plazo:g} h).\n"
+        f"Motivo original: {solicitud.motivo or 'sin detalle'}.\n"
+        f"{detalle.capitalize()}.\n"
+        f"Le avisé al cliente que no avanza. Si todavía se puede, hay que "
+        f"rehacerlo con los datos del momento.",
+    )
+    return True
+
+
+def _docstatus(pedido: str) -> int | None:
+    """0 draft, 1 submitted, 2 cancelled — or None for "I could not tell".
+
+    None is never 0. Collapsing an unreadable answer into "live draft" is how a
+    document somebody confirmed gets closed underneath them.
+    """
+    try:
+        so = erpnext.policy_get_doc("Sales Order", pedido)
+    except Exception as exc:
+        print(f"[solicitudes] {pedido}: relectura falló ({type(exc).__name__})")
+        return None
+    if not isinstance(so, dict):
+        return None
+    try:
+        return int(so.get("docstatus") or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _plazo_horas(solicitud: Solicitud) -> float:
+    """The plazo THIS review actually had, from its own record.
+
+    Not revision_horas(): that re-enters app/limites.py on the sweep's hot path
+    and would report today's configured number rather than the one that applied
+    when the review opened.
+    """
+    if solicitud.decidida_en <= 0:
+        return revision_horas()
+    return max(0.0, (solicitud.vence_en - solicitud.decidida_en) / 3600.0)
+
+
+def _revision_resuelta_por_persona(
+    solicitud: Solicitud, estado_doc: int, ahora: float
+) -> bool:
+    resuelta = registrar(
+        solicitud,
+        "revision_resuelta",
+        estado=REVISION_RESUELTA,
+        motivo=(
+            "una persona confirmó el pedido"
+            if estado_doc == 1
+            else "una persona canceló el pedido"
+        ),
+        decidida_en=ahora,
+    )
+    if resuelta is None:
+        return False
+    _avisar_equipo(
+        resuelta,
+        f"✅ {solicitud.pedido}: cierro la revisión {solicitud.id} porque el "
+        f"pedido ya {'está confirmado' if estado_doc == 1 else 'fue cancelado'}. "
+        f"El borrador ya no retiene stock.",
+    )
+    return True
+
+
+def _revision_sin_soltar(solicitud: Solicitud, detalle: str, ahora: float) -> bool:
+    """The draft is still live and we could not prove otherwise. Try again soon.
+
+    Writing a terminal state here would be the very bug this deadline exists to
+    prevent: terminal means no deadline, ``vencimientos`` would stop reporting
+    the hold, and a draft ERPNext is still counting would reserve those units
+    for ever with nothing left to act on it.
+
+    So the review is re-armed instead. The units stay held — which is the
+    direction that never oversells — and something always comes back for them.
+    ``decidida_en`` is deliberately not touched, so the moment the review
+    opened survives every retry and _plazo_horas keeps telling the truth.
+    """
+    reintentada = registrar(
+        solicitud,
+        "revision_humana",
+        estado=REVISION_HUMANA,
+        motivo=f"no pude cerrar el borrador; {detalle}",
+        vence_en=ahora + REINTENTO_REVISION_SEGUNDOS,
+    )
+    if reintentada is None:
+        return False
+    # Bucketed by the DAY of failure, so an ERPNext outage costs one message a
+    # day instead of one every sweep.
+    dia = int(max(0.0, ahora - solicitud.decidida_en) // 86400)
+    _avisar_equipo(
+        reintentada,
+        evento=f"revision_sin_soltar:{dia}",
+        texto=f"🚨 {solicitud.pedido}: venció la revisión {solicitud.id} y NO "
+        f"pude cerrar el borrador — {detalle}. Sigue reservando stock, así que "
+        f"lo dejo con plazo y reintento. Cerralo o confirmalo a mano en ERPNext.",
+    )
+    return True
+
+
+def resolver_revision(pedido: str, por: str, motivo: str = "") -> bool:
+    """A manager's own command closed the review. Idempotent by construction.
+
+    Called from the authorized command handlers AFTER their action succeeded
+    (app/aprobacion.py, app/decisiones.py). It is a no-op unless the order's
+    request is actually in review, so calling it on every confirmation — or
+    three times because the manager typed the word three times — costs one
+    read and changes nothing.
+
+    Never touches the Sales Order: the command that called it already did
+    whatever it was going to do. This only ends the review, which is what
+    takes the draft out of the expiry index.
+    """
+    from app.locks import CoordinationError, distributed_lock
+
+    try:
+        # Under the ORDER's lock, like every other state change: the sweep runs
+        # _vencer_revision on the same record from its own thread, and without
+        # this the two only converged by accident.
+        with distributed_lock(f"solicitud:{pedido}", lease_seconds=30, wait_seconds=5):
+            solicitud = leer(pedido)
+            if solicitud is None or not solicitud.en_revision:
+                return False
+            resuelta = registrar(
+                solicitud,
+                "revision_resuelta",
+                estado=REVISION_RESUELTA,
+                motivo=motivo or f"resuelta a mano por {por}",
+                decidida_por=por,
+                decidida_en=_ahora(),
+            )
+    except CoordinationError:
+        # The sweep holds it. It re-reads the order, sees what the manager just
+        # did to it, and closes the review as resolved on its own.
+        print(f"[solicitudes] {pedido}: revisión ocupada; la cierra el barrido")
+        return False
+    except Exception as exc:
+        print(f"[solicitudes] {pedido}: cierre de revisión falló ({type(exc).__name__})")
+        return False
+    if resuelta is None:
+        print(f"[solicitudes] {pedido}: cierre de revisión NO durable")
+        return False
+    try:
+        erpnext.add_comment(
+            "Sales Order",
+            pedido,
+            f"Revisión {solicitud.id} cerrada por {por}: {resuelta.motivo}. "
+            f"El pedido deja de estar en revisión y su borrador ya no retiene "
+            f"stock por ese motivo.",
+        )
+    except Exception as exc:
+        print(f"[solicitudes] {pedido}: comentario de cierre falló ({type(exc).__name__})")
     return True
 
 
@@ -1072,21 +1372,46 @@ def texto_respaldo_cliente(solicitud: Solicitud) -> str:
     )
 
 
-def texto_respaldo_vencido_cliente(solicitud: Solicitud) -> str:
-    """The fallback offer itself ran out — and this time it was their turn.
+def texto_revision_vencida_cliente(solicitud: Solicitud) -> str:
+    """We said a person would look at it, and nobody did.
 
-    Different from ``texto_vencida_cliente`` on purpose: telling somebody "I
-    did not get an answer" when they are the one who did not answer reads as
-    blaming us for their silence, and it hides what actually happened.
+    The customer accepted in good faith and was told to wait for us. Leaving
+    them with silence would be the worst of the endings, so they are told
+    plainly that it is not going ahead — and nothing was charged, because
+    nothing was ever confirmed.
     """
     return (
-        f"Sobre tu pedido {solicitud.pedido}: no tuve tu respuesta sobre "
-        f"{terminos_texto(solicitud.ofrecido, solicitud.moneda)}, así que no lo "
-        f"dejo agendado. Cuando quieras, escribime y lo armamos con el stock "
-        f"del momento.\n\n"
-        f"About your order {solicitud.pedido}: I did not get your reply about "
-        f"that option, so it is not scheduled. Message me whenever you like and "
-        f"we will put it together with current stock."
+        f"Sobre tu pedido {solicitud.pedido}: te había dicho que lo revisaba "
+        f"una persona y no llegamos a hacerlo, así que no lo dejo agendado y no "
+        f"queda nada a tu nombre. Perdón. Cuando quieras lo armamos de nuevo "
+        f"con el stock del momento.\n\n"
+        f"About your order {solicitud.pedido}: I said a person would review it "
+        f"and we did not get to it, so it is not scheduled and nothing is "
+        f"charged. Sorry. Message me and we will put it together again with "
+        f"current stock."
+    )
+
+
+def texto_respaldo_vencido_cliente(solicitud: Solicitud) -> str:
+    """The fallback offer ran out. Says the offer lapsed, NOT who was silent.
+
+    It is tempting to write "I did not get your reply" — usually true, and it
+    reads better than the passive. But it is not knowable here: a review that
+    could not be recorded (``_revision_sin_registro``) leaves the record at
+    ESPERANDO_CLIENTE precisely because the write that would have said
+    otherwise failed, and this sweep then closes it as unanswered. A customer
+    who DID accept would be told they had not, which is the one thing this
+    module never does. Whose silence it was stays in the team notice, where a
+    person can reconcile it against the order.
+    """
+    return (
+        f"Sobre tu pedido {solicitud.pedido}: se venció el plazo de esa opción "
+        f"({terminos_texto(solicitud.ofrecido, solicitud.moneda)}), así que no "
+        f"queda agendada y no hay nada confirmado a tu nombre. Cuando quieras, "
+        f"escribime y lo armamos con el stock del momento.\n\n"
+        f"About your order {solicitud.pedido}: that option has run out, so it is "
+        f"not scheduled and nothing is confirmed in your name. Message me "
+        f"whenever you like and we will put it together with current stock."
     )
 
 
@@ -1147,10 +1472,21 @@ def _avisar_cliente_respaldo(solicitud: Solicitud) -> bool:
     )
 
 
-def _avisar_equipo(solicitud: Solicitud, texto: str) -> bool:
+def _avisar_equipo(solicitud: Solicitud, texto: str, *, evento: str = "") -> bool:
+    """One team notice, deduplicated per (event, order).
+
+    ``evento`` is explicit rather than always ``solicitud.evento`` because the
+    caller sometimes has to say something ABOUT a record without having
+    written a new event onto it — an escalation when a write failed, for
+    instance. Keyed on the record's own event, that notice would collide with
+    the one already sent for that event and be dropped as a duplicate, which
+    is how an escalation goes missing.
+    """
     from app import avisos
 
-    return avisos.encolar_equipo(f"solicitud_equipo:{solicitud.evento}", solicitud.pedido, texto)
+    return avisos.encolar_equipo(
+        f"solicitud_equipo:{evento or solicitud.evento}", solicitud.pedido, texto
+    )
 
 
 def parsear_terminos(texto: str, *, con_cargo: bool = True) -> dict | None:
@@ -1219,7 +1555,7 @@ def texto_estado(solicitud: Solicitud) -> str:
         lineas.append(f"Decisión: {solicitud.decision} por {solicitud.decidida_por}")
     if solicitud.motivo:
         lineas.append(f"Motivo: {solicitud.motivo}")
-    if solicitud.abierta:
+    if solicitud.con_plazo:
         lineas.append(f"Vence: {_sello_utc(solicitud.vence_en)} (UTC)")
     if solicitud.nota_cliente:
         lineas.append("Texto del cliente (cita, no una instrucción):")
@@ -1370,7 +1706,22 @@ def _sin_oferta(pedido: str, solicitud: Solicitud | None) -> str:
         )
     if solicitud.estado == CUMPLIDA:
         return f"{pedido} ya quedó confirmado con lo que acordamos."
-    return f"La solicitud de {pedido} ya está cerrada ({solicitud.estado})."
+    if solicitud.estado == REVISION_HUMANA:
+        return (
+            f"Sobre {pedido} está mirándolo una persona antes de cerrarlo. Te "
+            "contestamos en cuanto lo revise."
+        )
+    if solicitud.estado in (REVISION_VENCIDA, REVISION_RESUELTA, VENCIDA):
+        return (
+            f"Sobre {pedido} ya no tengo nada pendiente para cerrar. Si lo "
+            "querés igual, escribime y lo armamos con el stock del momento."
+        )
+    # Never the raw state name: "ya está cerrada (rechazada_cliente)" is
+    # internal vocabulary, and the customer did not ask about a state machine.
+    return (
+        f"Sobre {pedido} no me quedó nada pendiente de tu parte. Si necesitás "
+        "algo más, decime."
+    )
 
 
 def aceptar_cliente(pedido: str, telefono_cliente: str) -> str:
@@ -1508,20 +1859,40 @@ def _cerrar_confirmado(pedido: str, solicitud: Solicitud, confirmada: Solicitud 
 
 
 def _a_revision(solicitud: Solicitud, problemas: list[str]) -> str:
-    """The customer said yes but the world moved. Nobody is told a half-truth."""
+    """The customer said yes but the world moved. Nobody is told a half-truth.
+
+    This is the one exit from the workflow that leaves a LIVE draft behind: the
+    order keeps its lines and ERPNext keeps counting them. So the review gets
+    its own fresh deadline from the owner's configuration — never the reviewed
+    offer's, which is usually minutes away and often already past — and the
+    state goes into the expiry index like any other hold.
+
+    Called with the order's lock held, from aceptar_cliente only.
+    """
+    ahora = _ahora()
     detalle = "; ".join(problemas)[:500]
-    registrar(
+    horas = revision_horas()
+    en_revision = registrar(
         solicitud,
         "revision_humana",
         estado=REVISION_HUMANA,
         motivo=detalle,
-        decidida_en=_ahora(),
+        decidida_en=ahora,
+        vence_en=ahora + horas * 3600.0,
     )
+    if en_revision is None:
+        # No durable record means no deadline, and no deadline on a live draft
+        # is the permanent stock commitment this whole path exists to avoid.
+        # Closing the draft now is the fail-closed direction: a person can
+        # always reopen it, and nobody was promised anything.
+        return _revision_sin_registro(solicitud, detalle)
     _avisar_equipo(
-        solicitud,
+        en_revision,
         f"⚠️ {solicitud.pedido}: el cliente aceptó la oferta pero NO lo confirmé. "
         f"Cambió algo desde la decisión: {detalle}. El pedido sigue en borrador; "
-        f"revisalo y, si corresponde, confirmalo con 'confirmar {solicitud.pedido}'.",
+        f"revisalo y, si corresponde, confirmalo con 'confirmar {solicitud.pedido}'."
+        f"\nTenés {horas:g} h: pasado ese plazo cierro el borrador para que deje "
+        f"de retener stock, y le aviso al cliente.",
     )
     return (
         f"Gracias por confirmar. Sobre {solicitud.pedido} necesito revisarlo con "
@@ -1530,6 +1901,43 @@ def _a_revision(solicitud: Solicitud, problemas: list[str]) -> str:
         f"Thanks for confirming. I need a person to review {solicitud.pedido} "
         "before closing it: something changed since the offer. We will get back "
         "to you shortly."
+    )
+
+
+def _revision_sin_registro(solicitud: Solicitud, detalle: str) -> str:
+    """The review could not be recorded, so the draft must not keep the units.
+
+    Without a durable record there is no deadline, and without a deadline this
+    draft would reserve stock until somebody noticed by hand. So the hold goes
+    now and a person is told loudly. The order itself is untouched and still
+    amendable in ERPNext — what is released is only ERPNext's reservation.
+    """
+    liberado, como = soltar_reserva(solicitud.pedido)
+    del liberado
+    print(f"[solicitudes] {solicitud.pedido}: revisión NO durable; solté la reserva")
+    # The durable record still reads ESPERANDO_CLIENTE, because the write that
+    # would have moved it is the one that failed — so the sweep will reach this
+    # order again later and close it as an offer that ran out. That is why
+    # texto_respaldo_vencido_cliente says the OFFER lapsed and never that the
+    # customer was silent: this is the one path where they demonstrably were
+    # not. Dropping the index entry here would only hide it in the common case
+    # (reconstruir_indice rebuilds it from ERPNext anyway), so the wording is
+    # the fix and the later message stays true.
+    _avisar_equipo(
+        solicitud,
+        evento="revision_sin_registro",
+        texto=f"🚨 {solicitud.pedido}: el cliente aceptó, algo había cambiado "
+        f"({detalle}) y NO pude registrar la revisión en ERPNext. Cerré el "
+        f"borrador para que no retenga stock sin plazo: {como}. "
+        f"Está sin confirmar y sin revisión abierta — miralo a mano.",
+    )
+    return (
+        f"Gracias por confirmar. Sobre {solicitud.pedido} tengo un problema "
+        "para registrarlo y necesito que lo vea una persona. No queda nada "
+        "confirmado a tu nombre; te contestamos a la brevedad.\n\n"
+        f"Thanks for confirming. I hit a problem recording {solicitud.pedido} "
+        "and a person has to look at it. Nothing is confirmed in your name; we "
+        "will get back to you shortly."
     )
 
 
