@@ -1677,3 +1677,417 @@ def test_a_date_the_clock_cannot_read_keeps_the_plain_timeout(monkeypatch) -> No
     vence = solicitudes._vence_respaldo(ahora, "no es una fecha", "08:00")
 
     assert vence == pytest.approx(ahora + 6 * 3600, abs=2)
+
+
+# ---------------------------------------------------------------------------
+# The human review has a deadline, so no draft holds stock for ever.
+# ---------------------------------------------------------------------------
+#
+# This is the one exit from the workflow that leaves a LIVE draft behind: the
+# customer accepted, the world had moved, and a person was asked. ERPNext keeps
+# counting that draft's lines by default — app/policy.py only ever SUBTRACTS
+# holds it is told about — so a review with no deadline reserved milk until
+# somebody noticed by hand. Everything below is about that never happening.
+
+
+def _a_revision(mundo, monkeypatch, lunes):
+    """Accept a fallback offer whose stock has gone. Returns the review."""
+    _respaldo(mundo, monkeypatch)
+    mundo["stock"] = False
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+    assert "necesito revisarlo con una persona" in respuesta
+    revision = solicitudes.leer(SO)
+    assert revision.estado == solicitudes.REVISION_HUMANA
+    return revision
+
+
+def test_a_failed_fallback_acceptance_cannot_hold_stock_for_ever(
+    mundo, monkeypatch, lunes
+) -> None:
+    """The headline. Three independent layers, checked in order."""
+    revision = _a_revision(mundo, monkeypatch, lunes)
+
+    # 1. The draft really is live again — this is what makes the bug possible.
+    assert mundo["estados"] == ["Closed", "Draft"]
+    assert mundo["so"]["status"] == "Draft"
+    assert mundo["so"]["docstatus"] == 0
+    assert mundo["submits"] == []
+
+    # 2. It carries a DEADLINE, so app/policy.py drops it the moment the plazo
+    #    passes — even if the sweep thread is dead.
+    assert revision.vence_en == pytest.approx(revision.decidida_en + 24 * 3600, abs=2)
+    assert solicitudes.vencimientos([SO]) == {SO: revision.vence_en}
+    vencido = solicitudes.registrar(revision, "prueba", vence_en=time.time() - 1)
+    assert solicitudes.vencimientos([SO])[SO] < time.time()
+
+    # 3. And the sweep closes the draft, so ERPNext itself stops reserving.
+    assert solicitudes.tick(ahora=time.time() + 1) == 1
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_VENCIDA
+    assert mundo["estados"] == ["Closed", "Draft", "Closed"]
+    assert mundo["so"]["status"] == "Closed"
+    # Terminal now: nothing left to expire, and nothing left holding units.
+    assert solicitudes.vencimientos([SO]) == {}
+    assert vencido is not None
+
+
+def test_the_review_deadline_is_the_owners_number(mundo, monkeypatch, lunes) -> None:
+    """Asserted at both layers: 'the owner's number' and 'limites blew up and
+    we fell back to 24' are otherwise indistinguishable."""
+    monkeypatch.setenv("REVISION_TIMEOUT_HORAS", "6")
+
+    revision = _a_revision(mundo, monkeypatch, lunes)
+
+    assert limites.configuracion().timeout_revision == 6.0
+    assert revision.vence_en == pytest.approx(revision.decidida_en + 6 * 3600, abs=2)
+
+
+def test_a_review_deadline_of_zero_falls_back_instead_of_never_expiring(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("REVISION_TIMEOUT_HORAS", "0")
+    assert limites.configuracion().timeout_revision == 24.0
+    assert solicitudes.revision_horas() == 24.0
+
+
+def test_an_unreadable_limit_still_bounds_the_review(mundo, monkeypatch, lunes) -> None:
+    """No configuration is ever read as 'no deadline'."""
+    monkeypatch.setattr(
+        limites, "configuracion", Mock(side_effect=limites.LimiteError("no"))
+    )
+
+    assert solicitudes.revision_horas() == 24.0
+
+
+def test_the_review_survives_a_restart_with_an_empty_redis(
+    mundo, monkeypatch, lunes
+) -> None:
+    revision = _a_revision(mundo, monkeypatch, lunes)
+    outbound_status._client.values.clear()
+    outbound_status._client.zsets.clear()
+
+    recuperada = solicitudes.leer(SO)
+
+    assert recuperada is not None
+    assert recuperada.estado == solicitudes.REVISION_HUMANA
+    assert recuperada.vence_en == revision.vence_en
+    # Rebuilt into the expiry index, so the deadline still means something.
+    assert solicitudes.reconstruir_indice() == 1
+    assert solicitudes.vencimientos([SO]) == {SO: revision.vence_en}
+    assert solicitudes.tick(ahora=revision.vence_en + 1) == 1
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_VENCIDA
+    assert mundo["so"]["status"] == "Closed"
+
+
+def test_a_flush_between_the_two_writes_still_leaves_the_draft_bounded(
+    mundo, monkeypatch, lunes
+) -> None:
+    """The deadline lives in ERPNext, not in Redis: losing Redis loses nothing."""
+    revision = _a_revision(mundo, monkeypatch, lunes)
+    outbound_status._client.values.clear()
+    outbound_status._client.zsets.clear()
+
+    # Nothing in the index; the sweep asks the system of record instead.
+    assert solicitudes._indice_vacio() is True
+    assert solicitudes.tick(ahora=revision.vence_en + 1) == 1
+    assert mundo["estados"][-1] == "Closed"
+
+
+def test_the_customer_is_told_the_review_lapsed_and_promised_nothing(
+    mundo, monkeypatch, lunes
+) -> None:
+    revision = _a_revision(mundo, monkeypatch, lunes)
+    mundo["enviados"].clear()
+
+    solicitudes.tick(ahora=revision.vence_en + 1)
+
+    cliente = _mensaje_cliente(mundo)
+    assert "no llegamos a hacerlo" in cliente
+    assert "no queda nada a tu nombre" in cliente
+    equipo = _mensaje_equipo(mundo)
+    assert "venció sin que nadie la mirara" in equipo
+    assert mundo["submits"] == []
+
+
+def test_a_lapsed_review_never_gets_a_machine_fallback_offer(
+    mundo, monkeypatch, lunes
+) -> None:
+    """The customer already accepted and was already told a person would look.
+    A third machine-picked date on top of that is the system talking to itself."""
+    revision = _a_revision(mundo, monkeypatch, lunes)
+    antes = len([f for f in mundo["durables"] if '"evento":"respaldo"' in f["content"]])
+    avisos.procesar()
+    mundo["enviados"].clear()
+
+    solicitudes.tick(ahora=revision.vence_en + 1)
+
+    despues = [f for f in mundo["durables"] if '"evento":"respaldo"' in f["content"]]
+    assert len(despues) == antes == 1  # only the original fallback, none added
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_VENCIDA
+    # Nothing new asking the customer to accept anything.
+    assert f"acepto {SO}" not in _mensaje_cliente(mundo)
+
+
+# --- the manager's own commands resolve it ----------------------------------
+
+
+def test_confirming_still_submits_the_draft_while_it_is_in_review(
+    mundo, monkeypatch, lunes
+) -> None:
+    """REVISION_HUMANA is deliberately NOT one of ABIERTOS: 'confirmar' has to
+    keep meaning 'submit this draft', which is what _a_revision tells the
+    manager to do."""
+    _a_revision(mundo, monkeypatch, lunes)
+
+    respuesta = aprobacion.manejar_boton(f"ok:{SO}", STAFF)
+
+    assert mundo["submits"] == [SO]
+    assert "confirmado" in respuesta.lower() or "✅" in respuesta
+    # ...and the review is closed, so it leaves the expiry index at once.
+    cerrada = solicitudes.leer(SO)
+    assert cerrada.estado == solicitudes.REVISION_RESUELTA
+    assert cerrada.decidida_por == STAFF
+    assert solicitudes.vencimientos([SO]) == {}
+
+
+def test_rejecting_resolves_the_review_and_stops_holding_stock(
+    mundo, monkeypatch, lunes
+) -> None:
+    _a_revision(mundo, monkeypatch, lunes)
+
+    aprobacion.manejar_boton(f"no:{SO}:no llego con el stock", STAFF)
+
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_RESUELTA
+    assert mundo["so"]["status"] == "Closed"
+    assert solicitudes.vencimientos([SO]) == {}
+    assert mundo["submits"] == []
+
+
+def test_approving_the_exception_again_is_still_refused_in_review(
+    mundo, monkeypatch, lunes
+) -> None:
+    """A review is nobody's pending decision: aprobar/contraoferta/retiro have
+    nothing to act on and must not re-offer anything to the customer."""
+    _a_revision(mundo, monkeypatch, lunes)
+
+    for resultado in (
+        decisiones.aprobar_solicitud(SO, STAFF),
+        decisiones.contraofertar(SO, STAFF, {"fecha": MARTES, "hora": "18:00", "cargo": 0}),
+        decisiones.ofrecer_retiro(SO, STAFF, {"fecha": MARTES, "hora": "10:00"}),
+        decisiones.rechazar_solicitud(SO, STAFF, "lo hago igual"),
+    ):
+        assert resultado["ok"] is False
+
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_HUMANA
+    assert mundo["submits"] == []
+
+
+def test_an_unauthorized_phone_cannot_resolve_a_review(
+    mundo, monkeypatch, lunes
+) -> None:
+    revision = _a_revision(mundo, monkeypatch, lunes)
+
+    respuesta = aprobacion.manejar_boton(f"ok:{SO}", OTRO)
+
+    assert "No tenés permiso" in respuesta
+    assert mundo["submits"] == []
+    assert solicitudes.leer(SO).id == revision.id
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_HUMANA
+
+
+# --- idempotency: duplicates, concurrency, late commands --------------------
+
+
+def test_a_manager_typing_the_command_three_times_resolves_it_once(
+    mundo, monkeypatch, lunes
+) -> None:
+    _a_revision(mundo, monkeypatch, lunes)
+
+    aprobacion.manejar_boton(f"ok:{SO}", STAFF)
+    aprobacion.manejar_boton(f"ok:{SO}", STAFF)
+    aprobacion.manejar_boton(f"ok:{SO}", STAFF)
+
+    cierres = [
+        f for f in mundo["durables"] if '"evento":"revision_resuelta"' in f["content"]
+    ]
+    assert len(cierres) == 1
+    assert mundo["submits"] == [SO]  # confirmar_pedido is idempotent on its own
+
+
+def test_two_sweeps_at_once_expire_a_review_once(mundo, monkeypatch, lunes) -> None:
+    revision = _a_revision(mundo, monkeypatch, lunes)
+
+    resultados = [
+        solicitudes._vencer(SO, revision.vence_en + 1),
+        solicitudes._vencer(SO, revision.vence_en + 1),
+    ]
+
+    assert resultados == [True, False]
+    assert len(
+        [f for f in mundo["durables"] if '"evento":"revision_vencida"' in f["content"]]
+    ) == 1
+    # The draft is closed once, not twice: soltar_reserva short-circuits.
+    assert mundo["estados"] == ["Closed", "Draft", "Closed"]
+
+
+def test_a_late_manager_command_after_the_review_lapsed_changes_no_state(
+    mundo, monkeypatch, lunes
+) -> None:
+    revision = _a_revision(mundo, monkeypatch, lunes)
+    solicitudes.tick(ahora=revision.vence_en + 1)
+
+    # He can still confirm the ORDER by hand — that is his call and the draft is
+    # still amendable in ERPNext. What must not happen is the review reopening.
+    aprobacion.manejar_boton(f"ok:{SO}", STAFF)
+
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_VENCIDA
+    assert not [
+        f for f in mundo["durables"] if '"evento":"revision_resuelta"' in f["content"]
+    ]
+    assert solicitudes.vencimientos([SO]) == {}
+
+
+def test_a_sweep_after_a_manager_confirmed_out_of_band_closes_it_as_resolved(
+    mundo, monkeypatch, lunes
+) -> None:
+    """The two orderings of the same pair, not a race: whichever runs second
+    observes what the first did."""
+    revision = _a_revision(mundo, monkeypatch, lunes)
+    # Confirmed directly in ERPNext, so resolver_revision never ran.
+    mundo["so"]["docstatus"] = 1
+
+    assert solicitudes._vencer(SO, revision.vence_en + 1) is True
+
+    cerrada = solicitudes.leer(SO)
+    assert cerrada.estado == solicitudes.REVISION_RESUELTA
+    assert "confirmó el pedido" in cerrada.motivo
+    # Nothing was released and nothing claimed: it is not a draft any more.
+    assert mundo["estados"] == ["Closed", "Draft"]
+    assert "ya está confirmado" in _mensaje_equipo(mundo)
+
+
+def test_a_sweep_after_a_cancellation_closes_it_as_resolved(
+    mundo, monkeypatch, lunes
+) -> None:
+    revision = _a_revision(mundo, monkeypatch, lunes)
+    mundo["so"]["docstatus"] = 2
+
+    assert solicitudes._vencer(SO, revision.vence_en + 1) is True
+
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_RESUELTA
+    assert "canceló el pedido" in solicitudes.leer(SO).motivo
+
+
+def test_resolving_a_request_that_is_not_in_review_does_nothing(
+    mundo, monkeypatch, lunes
+) -> None:
+    _respaldo(mundo, monkeypatch)
+    antes = len(mundo["durables"])
+
+    assert solicitudes.resolver_revision(SO, STAFF) is False
+    assert solicitudes.resolver_revision("SAL-ORD-NO-EXISTE", STAFF) is False
+
+    assert len(mundo["durables"]) == antes
+    assert solicitudes.leer(SO).estado == solicitudes.ESPERANDO_CLIENTE
+
+
+# --- never claim a release without proof; never leave an unbounded draft ----
+
+
+def test_a_release_the_erpnext_re_read_disproves_is_not_claimed(
+    mundo, monkeypatch, lunes
+) -> None:
+    """soltar_reserva's contract, on the review path: the sweep must not tell
+    anybody the stock is free unless a re-read agrees."""
+    revision = _a_revision(mundo, monkeypatch, lunes)
+    monkeypatch.setattr(
+        erpnext, "policy_update_status", lambda dt, n, s: {"name": n, "status": "Draft"}
+    )
+
+    assert solicitudes._vencer(SO, revision.vence_en + 1) is True
+
+    cerrada = solicitudes.leer(SO)
+    assert cerrada.estado == solicitudes.REVISION_VENCIDA
+    assert "sigue comprometiendo stock" in cerrada.motivo
+    assert "sigue comprometiendo stock" in _mensaje_equipo(mundo)
+
+
+def test_a_review_that_erpnext_will_not_record_releases_the_stock_at_once(
+    mundo, monkeypatch, lunes
+) -> None:
+    """No durable record means no deadline, and no deadline on a live draft is
+    exactly the permanent commitment. So the hold goes NOW."""
+    _respaldo(mundo, monkeypatch)
+    mundo["stock"] = False
+    original = erpnext.registrar_comentario
+
+    def falla_la_revision(doctype, name, text):
+        if '"evento":"revision_humana"' in text:
+            raise erpnext.ERPNextError("no")
+        return original(doctype, name, text)
+
+    monkeypatch.setattr(erpnext, "registrar_comentario", falla_la_revision)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert "necesito que lo vea una persona" in respuesta
+    assert "No queda nada confirmado" in respuesta
+    # Reopened to be revalidated, then closed again because it cannot be tracked.
+    assert mundo["estados"] == ["Closed", "Draft", "Closed"]
+    assert mundo["so"]["status"] == "Closed"
+    assert mundo["submits"] == []
+    assert "NO pude registrar la revisión" in _mensaje_equipo(mundo)
+    # No open review was invented either.
+    assert solicitudes.leer(SO).estado != solicitudes.REVISION_HUMANA
+
+
+def test_a_review_from_the_ordinary_offer_path_is_bounded_too(mundo, lunes) -> None:
+    """Not only the fallback path: any failed acceptance gets the deadline."""
+    _aprobar_y_esperar(mundo)
+    mundo["stock"] = False
+
+    solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    revision = solicitudes.leer(SO)
+    assert revision.estado == solicitudes.REVISION_HUMANA
+    assert revision.vence_en > time.time()
+    assert solicitudes.vencimientos([SO]) == {SO: revision.vence_en}
+    assert solicitudes.tick(ahora=revision.vence_en + 1) == 1
+    assert mundo["so"]["status"] == "Closed"
+
+
+def test_an_unreadable_order_leaves_the_review_in_the_index_to_retry(
+    mundo, monkeypatch, lunes
+) -> None:
+    """Guessing here would either close a draft somebody confirmed or claim
+    stock we cannot see. So it stays and the next tick asks again."""
+    revision = _a_revision(mundo, monkeypatch, lunes)
+    caido = {"si": True}
+    sano = erpnext.policy_get_doc
+
+    def a_veces(doctype, name):
+        if caido["si"] and doctype == "Sales Order":
+            raise erpnext.ERPNextError("caído")
+        return sano(doctype, name)
+
+    monkeypatch.setattr(erpnext, "policy_get_doc", a_veces)
+
+    assert solicitudes._vencer(SO, revision.vence_en + 1) is False
+
+    # Still in review, still in the index: the next tick tries again.
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_HUMANA
+    assert solicitudes.vencimientos([SO]) == {SO: revision.vence_en}
+    caido["si"] = False
+    assert solicitudes._vencer(SO, revision.vence_en + 2) is True
+    assert mundo["so"]["status"] == "Closed"
+
+
+def test_the_review_deadline_shows_up_in_what_the_manager_reads(
+    mundo, monkeypatch, lunes
+) -> None:
+    revision = _a_revision(mundo, monkeypatch, lunes)
+
+    texto = solicitudes.texto_estado(revision)
+
+    assert solicitudes.REVISION_HUMANA in texto
+    assert "Vence:" in texto
+    assert "24 h" in _mensaje_equipo(mundo)

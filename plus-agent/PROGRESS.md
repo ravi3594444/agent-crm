@@ -170,3 +170,47 @@ So the sweep now answers them with something concrete.
   manager is told what was missing.
 
 824 tests pass, ruff clean. No model, key or provider change; no live test.
+
+## Phase B follow-up 2 — the human review gets a deadline
+
+The failure path had a permanent stock commitment in it. Accepting a fallback
+offer re-opens the draft its predecessor closed, then revalidates; when
+revalidation failed, `_a_revision` wrote the terminal `revision_humana` and
+returned, leaving a LIVE draft with nothing that could ever release it.
+
+The reason it was invisible: "counts against stock" and "waiting for somebody"
+are not the same predicate. ERPNext counts every live draft by DEFAULT, and
+`app/policy.py` only ever subtracts the holds `solicitudes.vencimientos()`
+reports. A state that reports no expiry does not stop holding units — it holds
+them for ever.
+
+- New `CON_PLAZO`, deliberately wider than `ABIERTOS`: `revision_humana` now
+  carries a live deadline (the index, `vencimientos()`, the sweep) while
+  staying out of the decision paths. That is load-bearing — `confirmar
+  <pedido>` is the documented way out of a review and works only because the
+  state is not "open"; adding it to `ABIERTOS` silently re-routes that word
+  from "submit this draft" to "approve the exception again". There is now a
+  test that fails if anyone does.
+- The deadline is the owner's `REVISION_TIMEOUT_HORAS` (default 24 h, max 168),
+  resolved Redis → env → default like every other limit, and `_a_revision`
+  writes a FRESH one — it used to inherit the reviewed offer's, which is
+  usually minutes away and often already past.
+- The sweep dispatches on state: a review is never routed into `_respaldar`,
+  so a customer who already accepted is not sent a third machine-picked date.
+  It re-reads the order first, so a manager who confirmed or cancelled out of
+  band is recognised (`revision_resuelta`) instead of overwritten.
+- Two new terminals, because the two endings are different facts:
+  `revision_resuelta` (somebody dealt with it) and `revision_vencida` (nobody
+  did, the draft was closed, the customer was told).
+- `confirmar` / `rechazar` close the review through `resolver_revision`, which
+  is a no-op unless the request is actually in review — so duplicates,
+  concurrent expiry and late commands are all idempotent.
+- A review that ERPNext will not record releases the hold at once: no durable
+  record means no deadline, and that is the bug.
+- `_avisar_equipo` now takes an explicit event key. It derived one from
+  `solicitud.evento`, so the escalation notice collided with the notice already
+  sent for that event and was dropped as a duplicate.
+
+23 new tests, including the three-layer proof that a failed fallback acceptance
+cannot retain stock (live draft -> deadline reported to policy -> draft closed
+by the sweep). 847 pass, ruff clean. No model, key or provider change.
