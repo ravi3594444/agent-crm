@@ -265,6 +265,17 @@ _STAFF_ACTIONS = {
     "detalle": "ver",
     "detalles": "ver",
     "mostrar": "ver",
+    # Stage 2e: reject, prepare the dispatch (draft Delivery Note), dispatch it.
+    "rechazar": "no",
+    "rechaza": "no",
+    "rechazo": "no",
+    "no": "no",
+    "preparar": "preparar",
+    "prepara": "preparar",
+    "preparo": "preparar",
+    "despachar": "despachar",
+    "despacha": "despachar",
+    "despacho": "despachar",
 }
 _ORDER_IN_TEXT = re.compile(r"\b[A-Z]{2,6}(?:-[A-Z]{2,6})?-\d{2,}[0-9-]*\b")
 
@@ -1021,10 +1032,25 @@ def _startup_checks() -> None:
     print(f"[whatsapp] {'OK' if ok else 'ERROR'} {detail}")
 
 
+def _digest_scheduler(stop: threading.Event) -> None:
+    """Once a minute, let app/digest.py decide whether today's 18:00 summary is due."""
+    from app import digest
+
+    while not stop.wait(60):
+        try:
+            digest.tick()
+        except Exception as error:
+            print(f"[digest] tick type={_error_name(error)}")
+
+
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
     threading.Thread(target=_startup_checks, daemon=True, name="startup-checks").start()
     stop = threading.Event()
+    if os.getenv("DIGEST_ACTIVO", "true").strip().lower() in {"true", "1", "yes", "si", "sí"}:
+        threading.Thread(
+            target=_digest_scheduler, args=(stop,), daemon=True, name="digest-scheduler"
+        ).start()
     worker = threading.Thread(
         target=_worker_supervisor,
         args=(stop,),

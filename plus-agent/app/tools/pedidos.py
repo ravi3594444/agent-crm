@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from app import clientes, entrega, erpnext, policy
 from app.locks import CoordinationError, distributed_lock
-from app.notificar import notificar_equipo
+from app.notificar import notificar_confirmacion, notificar_equipo
 from app.runtime_context import RuntimeContextError, actor_context
 
 _MESES = {
@@ -339,6 +339,14 @@ def _safe_notify(name: str, order: dict, *, auto: bool, reasons: str = "") -> bo
         return False
 
 
+def _notificar_confirmada(order: dict) -> None:
+    """Stage 2e: the manager hears about every confirmed order exactly once."""
+    try:
+        notificar_confirmacion(order, "automática (política)")
+    except Exception as exc:
+        print(f"[orders] aviso de confirmación falló ({type(exc).__name__})")
+
+
 def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
     name = str(order.get("name") or "").strip()
     if not name:
@@ -372,7 +380,7 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
                         name,
                         "Auto-confirmado después de revalidación bajo lock distribuido.",
                     )
-                    _safe_notify(name, complete, auto=True)
+                    _notificar_confirmada(complete)
                     return _order_result(complete, validated, delivery)
                 decision = final_decision
         except Exception as exc:
@@ -387,7 +395,7 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
             except erpnext.ERPNextError:
                 pass
             if int(complete.get("docstatus") or 0) == 1:
-                _safe_notify(name, complete, auto=True)
+                _notificar_confirmada(complete)
                 return _order_result(complete, validated, delivery)
             decision = policy.Decision(False, ["auto-confirmación no disponible"])
 

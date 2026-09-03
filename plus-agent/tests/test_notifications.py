@@ -32,6 +32,12 @@ def _clean_templates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(aprobacion, "has_accepted", lambda *args: False)
     monkeypatch.setattr(aprobacion, "record_outbound", Mock())
     monkeypatch.setattr(aprobacion, "window_open", lambda phone: False)
+    # Stage 2e pieces are tested in tests/test_etapa_2e.py; keep these
+    # focused and independent of Redis.
+    monkeypatch.setattr(notificar, "claim_once", lambda *args, **kwargs: True)
+    monkeypatch.setattr(notificar, "release_claim", lambda *args, **kwargs: None)
+    monkeypatch.setattr(notificar, "registrar_aviso_fallido", lambda *args, **kwargs: False)
+    monkeypatch.setattr(aprobacion, "_notificar_confirmada", lambda *args, **kwargs: None)
 
 
 def test_template_quick_replies_use_approved_template_components(

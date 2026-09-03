@@ -378,6 +378,25 @@ def policy_update_status(doctype: str, name: str, status: str) -> dict:
     return data
 
 
+def policy_create_doc(doctype: str, payload: dict) -> dict:
+    """Create a DRAFT with the policy identity, for the manual (human) path.
+
+    Same forced ``docstatus: 0`` as create_doc: this can prepare a Delivery
+    Note, never dispatch it. Dispatch is submit_doc, a separate human step.
+    """
+    body = _request(
+        _policy(),
+        "POST",
+        _resource_path(doctype),
+        operation=f"la creación de {doctype} (política)",
+        json={**payload, "docstatus": 0},
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(f"ERPNext devolvió datos inválidos al crear {doctype}")
+    return data
+
+
 def submit_doc(doctype: str, name: str) -> dict:
     body = _request(
         _policy(),

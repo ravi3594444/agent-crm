@@ -193,3 +193,115 @@ def _audit_failed(
     except Exception:
         client.delete(audit_key)
         raise
+
+
+# ---------------------------------------------------------------------------
+# Stage 2e — exactly-once claims, parked notifications, digest counters.
+# ---------------------------------------------------------------------------
+
+DEAD_NOTIFY_KEY = "wa:{inbound}:dead-notify"
+NOTIFY_TODO_TTL_SECONDS = 24 * 60 * 60
+
+
+def claim_once(name: str, ttl_seconds: int) -> bool:
+    """First caller wins for ``ttl_seconds``; everybody else gets False.
+
+    Raises on a Redis failure: the caller decides whether that means "skip"
+    or "notify anyway", and it must never look like a successful claim.
+    """
+    return bool(
+        _redis().set(f"wa:{{inbound}}:once:{_digest(name)}", "1", nx=True, ex=ttl_seconds)
+    )
+
+
+def release_claim(name: str) -> None:
+    """Give a claim back when the claimed action did not actually happen."""
+    try:
+        _redis().delete(f"wa:{{inbound}}:once:{_digest(name)}")
+    except Exception as exc:
+        print(f"[queue] release claim type={type(exc).__name__}")
+
+
+def registrar_aviso_fallido(
+    purpose: str, order_name: str, resumen: str, destinatario_tag: str = ""
+) -> bool:
+    """A notification nobody received: park it, and open ONE ERPNext ToDo per
+    purpose and order per day so a person follows up.
+
+    Returns True when a ToDo exists for it (fresh or from earlier today), so
+    callers can be honest about whether anyone will see the problem. The parked
+    entry carries no phone number: only a hashed recipient tag.
+    """
+    entry = json.dumps(
+        {
+            "purpose": purpose[:80],
+            "order_name": order_name or "",
+            "resumen": (resumen or "")[:300],
+            "destinatario": destinatario_tag[:16],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    client = None
+    try:
+        client = _redis()
+        client.rpush(DEAD_NOTIFY_KEY, entry)
+    except Exception as exc:
+        print(f"[notify] dead-letter no disponible type={type(exc).__name__}")
+
+    todo_key = f"wa:{{inbound}}:notify-todo:{_digest(purpose + chr(0) + (order_name or ''))}"
+    fresh = True
+    if client is not None:
+        try:
+            fresh = bool(client.set(todo_key, "1", nx=True, ex=NOTIFY_TODO_TTL_SECONDS))
+        except Exception as exc:
+            print(f"[notify] dedupe no disponible type={type(exc).__name__}")
+            fresh = True
+    if not fresh:
+        return True
+
+    from app import erpnext
+
+    payload: dict = {
+        "description": (
+            f"[WhatsApp] Aviso no entregado ({purpose})"
+            + (f" para {order_name}" if order_name else "")
+            + f": {(resumen or '')[:300]}. Nadie lo recibió por WhatsApp; revisar la lista "
+            f"{DEAD_NOTIFY_KEY} y contactar manualmente."
+        ),
+        "priority": "High",
+    }
+    if order_name:
+        payload["reference_type"] = "Sales Order"
+        payload["reference_name"] = order_name
+    try:
+        erpnext.create_doc("ToDo", payload)
+        return True
+    except Exception as exc:
+        print(f"[notify] ToDo de aviso fallido no creado type={type(exc).__name__}")
+        if client is not None:
+            try:
+                client.delete(todo_key)
+            except Exception:
+                pass
+        return False
+
+
+def contar_pendientes() -> dict:
+    """Counts for the daily digest. None means "could not read"."""
+    counts: dict = {
+        "respuestas_en_dead_letter": None,
+        "avisos_en_dead_letter": None,
+        "entregas_fallidas": None,
+    }
+    try:
+        client = _redis()
+        counts["respuestas_en_dead_letter"] = int(client.llen("wa:{inbound}:dead"))
+        counts["avisos_en_dead_letter"] = int(client.llen(DEAD_NOTIFY_KEY))
+        fallidas = 0
+        for _ in client.scan_iter(match="wa:{inbound}:failed-audit:*", count=500):
+            fallidas += 1
+        counts["entregas_fallidas"] = fallidas
+    except Exception as exc:
+        print(f"[notify] contadores no disponibles type={type(exc).__name__}")
+    return counts

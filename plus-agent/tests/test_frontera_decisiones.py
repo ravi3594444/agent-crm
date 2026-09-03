@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import aprobacion, decisiones
 from app.graph import TOOLS_CLIENTES, TOOLS_GERENCIA
 
-MANUAL = ("confirmar", "rechazar", "confirmar_pedido", "confirmar_conteo")
+MANUAL = ("confirmar", "rechazar", "confirmar_pedido", "confirmar_conteo", "preparar", "despachar")
 
 
 def test_no_llm_tool_exposes_the_manual_decision_functions() -> None:
@@ -54,6 +54,8 @@ def test_no_tool_function_is_the_manual_decision_function() -> None:
         decisiones.confirmar,
         decisiones.rechazar,
         decisiones.confirmar_conteo,
+        decisiones.preparar,
+        decisiones.despachar,
         aprobacion.confirmar_pedido,
     }
     for lista in (TOOLS_CLIENTES, TOOLS_GERENCIA):
@@ -86,14 +88,14 @@ def test_a_customer_is_never_offered_the_tools_that_move_a_limit() -> None:
 
 def test_no_tool_can_submit_or_adjust_anything() -> None:
     """The LLM has no submit/payment/invoice/stock-adjustment verb at all."""
-    prohibidos = ("submit", "confirmar_pedido", "aprobar", "pagar", "ajustar_stock")
+    prohibidos = ("submit", "confirmar_pedido", "aprobar", "pagar", "ajustar_stock", "despachar", "preparar")
     for lista in (TOOLS_CLIENTES, TOOLS_GERENCIA):
         for herramienta in lista:
             for palabra in prohibidos:
                 assert palabra not in herramienta.name.lower(), herramienta.name
 
 
-@pytest.mark.parametrize("accion", ["ok", "no", "ver"])
+@pytest.mark.parametrize("accion", ["ok", "no", "ver", "preparar", "despachar"])
 def test_unauthorized_phone_cannot_confirm_reject_or_read(
     monkeypatch: pytest.MonkeyPatch, accion: str
 ) -> None:

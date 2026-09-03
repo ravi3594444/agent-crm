@@ -5,7 +5,7 @@ button payload gets nothing.
 """
 import os
 
-from app import erpnext, policy
+from app import erpnext, notificar, policy
 from app.formato import pesos
 from app.outbound_status import has_accepted, record_outbound, window_open
 from app.router import es_equipo
@@ -51,6 +51,18 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
         from app import decisiones
 
         return decisiones.confirmar_conteo(nombre, telefono)["detalle"]
+
+    if accion == "preparar":
+        # Stage 2e: a DRAFT Delivery Note, policy identity. Dispatching it is a
+        # second, separate human command — never the same tap, never an LLM.
+        from app import decisiones
+
+        return decisiones.preparar(nombre, telefono)["detalle"]
+
+    if accion == "despachar":
+        from app import decisiones
+
+        return decisiones.despachar(nombre, telefono)["detalle"]
 
     if accion == "ver":
         try:
@@ -130,6 +142,10 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
             ),
         }
 
+    # Stage 2e: the manager team gets ONE confirmed-order notice per order, no
+    # matter which path confirmed it or how many times the button is tapped.
+    _notificar_confirmada(nombre, actual)
+
     prefix = "ℹ️ Ya estaba confirmado." if ya_confirmado else f"✅ {nombre} confirmado."
     if _avisar_cliente(nombre):
         return {
@@ -147,6 +163,18 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
             f"{prefix} No pude enviar el aviso al cliente; contactalo manualmente."
         ),
     }
+
+
+def _notificar_confirmada(nombre: str, conocido: dict) -> None:
+    """Never raises: a notice problem must not change what the manager is told."""
+    try:
+        try:
+            completo = _leer_doc("Sales Order", nombre)
+        except erpnext.ERPNextError:
+            completo = conocido
+        notificar.notificar_confirmacion(completo, "manual (confirmación humana)")
+    except Exception as exc:
+        print(f"[approval] {nombre}: aviso de confirmación falló ({type(exc).__name__})")
 
 
 def _avisar_cliente(nombre: str) -> bool:

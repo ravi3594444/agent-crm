@@ -150,12 +150,38 @@ free-form with the same two buttons **only if the owner wrote to the bot in the
 last 24 hours** (any message, e.g. "pendientes?"); otherwise it fails closed and
 the order stays visible as a draft in ERPNext with an audit comment saying so.
 
-The owner can also approve by text, without buttons and without the LLM:
+The owner can also act by text, without buttons and without the LLM:
 
 ```
-confirmar SAL-ORD-2026-00008     (also: ok / aprobar / apruebo)
 ver SAL-ORD-2026-00008           (also: detalle)
+confirmar SAL-ORD-2026-00008     (also: ok / aprobar / apruebo)
+rechazar SAL-ORD-2026-00008      (also: rechazo / no) — the customer is told
+preparar SAL-ORD-2026-00008      draft Delivery Note for a CONFIRMED order
+despachar SAL-ORD-2026-00008     submits that draft: a separate human step
 ```
+
+Every command runs a deterministic handler in `app/aprobacion.py` /
+`app/decisiones.py` after `router.es_equipo()` authenticates the sender; none
+of them is an LLM tool, and the LLM has no submit or dispatch tool at all
+(`tests/test_frontera_decisiones.py`, `tests/test_etapa_2e.py`).
+
+**Confirmed-order notice (Stage 2e).** After every confirmation, automatic or
+human, the manager receives exactly ONE notice per Sales Order (a Redis claim
+keyed by the order id, released only if nobody could be reached): order id,
+customer, items with quantities and UOM, total with currency, delivery address
+and date, source (automatic or human) and confirmation time. Template when
+`WHATSAPP_STAFF_CONFIRMED_TEMPLATE` is configured, free text inside the
+manager's own 24-hour window otherwise. A notice that reaches nobody is parked
+in the Redis list `wa:{inbound}:dead-notify` and opens one deduplicated ERPNext
+ToDo; the same applies to pending-order alerts and exception alerts.
+
+**18:00 digest (Stage 2e, `app/digest.py`).** Deterministic, no model: confirmed
+orders waiting for preparation/dispatch, orders waiting for the manager, stock
+counts expired or about to expire, and failed notifications / dead-letter
+counts. The agent sends it once a day from `DIGEST_HORA` in `BUSINESS_TIMEZONE`
+(`DIGEST_ACTIVO=false` disables the in-process scheduler); `python -m app.digest`
+or the `digest` job in `deploy/crontab` sends it on demand. Both share one
+per-day marker in Redis.
 
 Both paths run the same authorized handler (`manejar_boton`): only numbers in
 `TELEFONOS_EQUIPO` are accepted, a second tap is idempotent, and a successful

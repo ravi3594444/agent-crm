@@ -318,3 +318,169 @@ def _wamid(result: object) -> str:
     first = messages[0]
     wamid = first.get("id") if isinstance(first, dict) else None
     return wamid.strip() if isinstance(wamid, str) else ""
+
+
+# ---------------------------------------------------------------------------
+# Stage 2e — dispatch, in two human steps.
+#
+#   preparar  -> a DRAFT Delivery Note for a CONFIRMED order (policy identity,
+#                docstatus forced to 0 by erpnext.policy_create_doc).
+#   despachar -> submits that draft. A separate command, so nobody dispatches
+#                by accident from the same tap, and no LLM tool can reach it.
+#
+# Neither function is in any tool list (tests/test_frontera_decisiones.py).
+# ---------------------------------------------------------------------------
+
+
+def _hoy() -> str:
+    from app import policy
+
+    return policy._hoy_del_negocio().isoformat()
+
+
+def _remitos_borrador(nombre_so: str) -> list[str]:
+    """Draft Delivery Notes already prepared for this order (policy read)."""
+    filas = erpnext.policy_get_list(
+        "Delivery Note Item",
+        filters=[["against_sales_order", "=", nombre_so], ["docstatus", "=", 0]],
+        fields=["parent", "against_sales_order", "docstatus"],
+        limit=20,
+        parent="Delivery Note",
+    )
+    nombres: list[str] = []
+    for fila in filas:
+        if str(fila.get("against_sales_order") or nombre_so).strip() != nombre_so:
+            continue
+        if int(float(fila.get("docstatus") or 0)) != 0:
+            continue
+        remito = str(fila.get("parent") or "").strip()
+        if remito and remito not in nombres:
+            nombres.append(remito)
+    return nombres
+
+
+def preparar(nombre: str, por: str) -> dict:
+    """Prepare the dispatch of a CONFIRMED order: one draft Delivery Note. HUMAN ONLY.
+
+    Idempotent: a second "preparar" for the same order reuses the draft instead
+    of creating another one. A draft or rejected order cannot be prepared.
+    """
+    try:
+        so = _leer_doc("Sales Order", nombre)
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: no pude leer el pedido ({type(exc).__name__})")
+        return _resultado(False, False, f"No pude abrir {nombre}. Revisalo en ERPNext.")
+    if int(so.get("docstatus") or 0) != 1:
+        return _resultado(
+            False,
+            False,
+            f"{nombre} no está confirmado (docstatus {so.get('docstatus')}); primero "
+            f"escribí 'confirmar {nombre}' o rechazalo.",
+        )
+    if str(so.get("status") or "").strip() in ("Closed", "Cancelled", "On Hold"):
+        return _resultado(
+            False, False, f"{nombre} está {so.get('status')}: no se prepara un despacho."
+        )
+
+    try:
+        existentes = _remitos_borrador(nombre)
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: no pude buscar remitos ({type(exc).__name__})")
+        return _resultado(False, False, f"No pude verificar los remitos de {nombre}. Reintentá.")
+    if existentes:
+        return _resultado(
+            True,
+            False,
+            f"📦 {nombre} ya tiene el remito {existentes[0]} preparado en borrador. "
+            f"Para despacharlo escribí 'despachar {nombre}'.",
+        )
+
+    try:
+        company, deposito = erpnext.default_context()
+        renglones = [
+            {
+                "item_code": i["item_code"],
+                "qty": i["qty"],
+                "warehouse": i.get("warehouse") or deposito,
+                "against_sales_order": nombre,
+                "so_detail": i["name"],
+            }
+            for i in so.get("items", [])
+            if isinstance(i, dict) and i.get("item_code")
+        ]
+        if not renglones:
+            return _resultado(False, False, f"{nombre} no tiene renglones para despachar.")
+        remito = erpnext.policy_create_doc(
+            "Delivery Note",
+            {
+                "company": so.get("company") or company,
+                "customer": so["customer"],
+                "posting_date": _hoy(),
+                "set_posting_time": 1,
+                "items": renglones,
+                "remarks": f"Preparado por WhatsApp por un integrante autorizado ({por}).",
+            },
+        )
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: crear remito falló ({type(exc).__name__})")
+        return _resultado(False, False, f"No pude preparar el remito de {nombre}. Revisalo en ERPNext.")
+
+    nombre_remito = str(remito.get("name") or "").strip()
+    _comentar(
+        nombre,
+        f"Remito {nombre_remito or '(sin nombre)'} preparado en BORRADOR por un integrante "
+        f"autorizado ({por}). Se despacha con una confirmación aparte.",
+    )
+    return _resultado(
+        True,
+        False,
+        f"📦 Remito {nombre_remito} preparado en borrador para {nombre}. Nada salió todavía: "
+        f"cuando el reparto cargue, escribí 'despachar {nombre}'.",
+    )
+
+
+def despachar(nombre: str, por: str) -> dict:
+    """Submit the prepared Delivery Note of an order. HUMAN ONLY, second step.
+
+    Requires exactly one draft prepared by ``preparar``; with none it tells the
+    manager to prepare first, with several it refuses and points to ERPNext.
+    Submitting uses erpnext.submit_doc (policy identity), as every submit does.
+    """
+    try:
+        existentes = _remitos_borrador(nombre)
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: no pude buscar remitos ({type(exc).__name__})")
+        return _resultado(False, False, f"No pude verificar los remitos de {nombre}. Reintentá.")
+    if not existentes:
+        return _resultado(
+            False,
+            False,
+            f"{nombre} no tiene un remito preparado. Escribí 'preparar {nombre}' primero.",
+        )
+    if len(existentes) > 1:
+        return _resultado(
+            False,
+            False,
+            f"{nombre} tiene {len(existentes)} remitos en borrador ({', '.join(existentes)}). "
+            "Dejá uno solo en ERPNext y volvé a escribir 'despachar'.",
+        )
+    remito = existentes[0]
+    try:
+        erpnext.submit_doc("Delivery Note", remito)
+    except Exception as exc:
+        print(f"[decisiones] {remito}: submit del remito falló ({type(exc).__name__})")
+        try:
+            actual = _leer_doc("Delivery Note", remito)
+        except Exception:
+            actual = {}
+        if int(actual.get("docstatus") or 0) != 1:
+            return _resultado(
+                False,
+                False,
+                f"No pude despachar el remito {remito}. Confirmalo en ERPNext o reintentá.",
+            )
+    _comentar(
+        nombre,
+        f"Remito {remito} despachado (confirmado) por un integrante autorizado ({por}).",
+    )
+    return _resultado(True, False, f"🚚 Remito {remito} despachado. {nombre} queda en reparto.")

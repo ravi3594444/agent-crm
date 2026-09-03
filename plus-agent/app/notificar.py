@@ -12,9 +12,19 @@ Meta did not accept.
 """
 import hashlib
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from app import erpnext
-from app.outbound_status import has_accepted, record_outbound, window_open
+from app import entrega, erpnext
+from app.formato import cantidad, pesos
+from app.outbound_status import (
+    claim_once,
+    has_accepted,
+    record_outbound,
+    registrar_aviso_fallido,
+    release_claim,
+    window_open,
+)
 from app.router import STAFF
 from app.whatsapp import enviar_botones, enviar_mensaje, enviar_plantilla
 
@@ -164,6 +174,167 @@ def notificar_equipo(
             nombre,
             "Alerta al equipo no enviada; requiere seguimiento manual.",
         )
+    # Nobody received it: park it and make sure a person sees a task.
+    registrar_aviso_fallido(
+        "staff_order_confirmed" if auto else "staff_order_pending", nombre, texto
+    )
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Stage 2e — the confirmed-order notice: exactly once per order.
+#
+# Both confirmation paths end here: policy.evaluar + submit in
+# app/tools/pedidos.py (automatic) and aprobacion.confirmar_pedido (a human on
+# the signed webhook). The first one to claim the order sends; the other finds
+# the claim and does nothing. A claim whose send reaches nobody is released, so
+# the other path (or a retry) can still notify.
+# ---------------------------------------------------------------------------
+
+CONFIRMACION_TTL_SEGUNDOS = 30 * 24 * 60 * 60
+
+
+def _momento_negocio() -> str:
+    zona = os.getenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires").strip()
+    try:
+        return datetime.now(ZoneInfo(zona)).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+
+def _direccion_de_entrega(so: dict) -> str:
+    """The delivery address as a person reads it; the Address name if unreadable."""
+    nombre = entrega.nombre_direccion(so)
+    if not nombre:
+        return ""
+    try:
+        doc = erpnext.policy_get_doc("Address", nombre)
+    except Exception:
+        return nombre
+    return entrega.texto_direccion(doc) if isinstance(doc, dict) else nombre
+
+
+def _renglones(so: dict) -> str:
+    partes = []
+    for item in so.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        unidad = item.get("uom") or item.get("stock_uom") or "u"
+        partes.append(
+            f"{cantidad(item.get('qty'))} {unidad} × "
+            f"{item.get('item_name') or item.get('item_code') or 'producto'}"
+        )
+    return "; ".join(partes) or "sin renglones"
+
+
+def texto_confirmacion(so: dict, fuente: str, momento: str | None = None) -> str:
+    """What the manager reads: every field the client asked for, in order."""
+    direccion = _direccion_de_entrega(so)
+    entrega_txt = " — ".join(
+        parte for parte in (direccion, str(so.get("delivery_date") or "")) if parte
+    ) or "a coordinar"
+    total = f"{pesos(so.get('grand_total'), 2)} {so.get('currency') or ''}".strip()
+    return "\n".join(
+        [
+            f"✅ Pedido {so.get('name')} confirmado",
+            f"Cliente: {so.get('customer_name') or so.get('customer') or 'Cliente'}",
+            f"Items: {_renglones(so)}",
+            f"Total: {total}",
+            f"Entrega: {entrega_txt}",
+            f"Origen: {fuente}",
+            f"Confirmado: {momento or _momento_negocio()}",
+        ]
+    )[:3500]
+
+
+def notificar_confirmacion(so: dict, fuente: str) -> bool:
+    """Tell the human manager an order is confirmed — exactly once per order.
+
+    ``fuente`` is "automática (política)" or "manual (confirmación humana)".
+    Returns True when Meta accepted it for at least one staff phone, or when
+    the order was already notified. Never raises.
+    """
+    nombre = str(so.get("name") or "").strip()
+    if not nombre:
+        return False
+    try:
+        if not claim_once(f"confirm-notice:{nombre}", CONFIRMACION_TTL_SEGUNDOS):
+            return True
+    except Exception as exc:
+        # Cannot coordinate: a possible duplicate beats a certain silence.
+        print(f"[staff-notify] {nombre}: claim no disponible ({type(exc).__name__})")
+
+    momento = _momento_negocio()
+    texto = texto_confirmacion(so, fuente, momento)
+    plantilla = os.getenv("WHATSAPP_STAFF_CONFIRMED_TEMPLATE", "").strip()
+    idioma = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"
+    parametros = [
+        nombre,
+        "Confirmado",
+        str(so.get("customer_name") or so.get("customer") or "Cliente"),
+        _renglones(so)[:1000],
+        f"{float(so.get('grand_total') or 0):.2f} {so.get('currency') or ''}".strip(),
+        " — ".join(
+            p for p in (_direccion_de_entrega(so), str(so.get("delivery_date") or "")) if p
+        )[:1000]
+        or "a coordinar",
+        f"Origen: {fuente}; confirmado {momento}"[:1000],
+    ]
+
+    if not STAFF:
+        print(f"[staff-notify] {nombre}: TELEFONOS_EQUIPO vacío, sin aviso de confirmación")
+        erpnext.add_comment(
+            "Sales Order", nombre, "Aviso de confirmación al equipo no enviado: TELEFONOS_EQUIPO vacío."
+        )
+        release_claim(f"confirm-notice:{nombre}")
+        registrar_aviso_fallido("manager_order_confirmed", nombre, texto)
+        return False
+
+    telefonos = sorted(STAFF)
+    if os.getenv("NOTIFICAR_SOLO_PRIMERO", "true").lower() == "true":
+        telefonos = telefonos[:1]
+    enviados = 0
+    for telefono in telefonos:
+        tag = hashlib.sha256(telefono.encode()).hexdigest()[:12]
+        purpose = f"manager_order_confirmed:{tag}"
+        try:
+            if has_accepted(nombre, purpose):
+                enviados += 1
+                continue
+            if plantilla:
+                result = enviar_plantilla(telefono, plantilla, idioma, parametros)
+            elif window_open(telefono):
+                result = enviar_mensaje(telefono, texto)
+            else:
+                print(
+                    f"[staff-notify] {nombre}: sin plantilla de confirmación y ventana "
+                    f"de 24 h de {tag} cerrada"
+                )
+                continue
+            enviados += 1
+            try:
+                record_outbound(result["messages"][0]["id"], purpose, order_name=nombre)
+            except Exception as tracking_error:
+                print(f"[staff-notify] {nombre}: tracking falló ({type(tracking_error).__name__})")
+        except Exception as exc:
+            print(f"[staff-notify] {nombre}: aviso de confirmación falló ({type(exc).__name__})")
+
+    if enviados:
+        erpnext.add_comment(
+            "Sales Order",
+            nombre,
+            f"Aviso de pedido confirmado ({fuente}) aceptado por Meta para {enviados} integrante(s).",
+        )
+        return True
+
+    release_claim(f"confirm-notice:{nombre}")
+    erpnext.add_comment(
+        "Sales Order",
+        nombre,
+        "Aviso de pedido confirmado al equipo NO enviado (sin plantilla y sin ventana de "
+        "24 h abierta, o Meta lo rechazó). Quedó en la lista de avisos pendientes.",
+    )
+    registrar_aviso_fallido("manager_order_confirmed", nombre, texto)
     return False
 
 
@@ -233,6 +404,7 @@ def alertar_excepcion(
 
     if not enviados:
         print(f"[alerta] {asunto}: urgencia={urgencia} no llegó a nadie")
+        registrar_aviso_fallido(f"exception:{asunto[:40]}", "", texto)
     return bool(enviados)
 
 
