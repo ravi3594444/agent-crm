@@ -12,9 +12,20 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import confirmacion, erpnext, outbound_status
-from tests.fakes import FakeMarcas
+from tests.fakes import FakeMarcas, listar
 
 SO = "SAL-ORD-2026-00012"
+
+
+def _fila(contenido: str, creation: str = "2026-09-03 10:00:00") -> dict:
+    """One Comment row as ERPNext returns it — including the fields the query
+    filters and orders on, so the double answers the real query."""
+    return {
+        "content": contenido,
+        "reference_doctype": "Sales Order",
+        "reference_name": SO,
+        "creation": creation,
+    }
 
 
 @pytest.fixture
@@ -22,16 +33,27 @@ def erp(monkeypatch: pytest.MonkeyPatch):
     marcas = FakeMarcas()
     monkeypatch.setattr(outbound_status, "_client", marcas)
     filas: list[dict] = []
-    monkeypatch.setattr(
-        erpnext,
-        "registrar_comentario",
-        lambda dt, name, text: filas.append({"content": text, "creation": "2026-09-03 10:00:00"}),
-    )
+
+    def registrar_comentario(dt, name, text):
+        # A distinct, increasing `creation` per row: ERPNext orders and CUTS by
+        # it, and rows that all share one stamp make the cut invisible.
+        filas.append(
+            {
+                "content": text,
+                "reference_doctype": dt,
+                "reference_name": name,
+                "creation": f"2026-09-03 10:00:{len(filas):02d}.000000",
+            }
+        )
+
+    monkeypatch.setattr(erpnext, "registrar_comentario", registrar_comentario)
     lecturas: list[dict] = []
 
     def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None):
-        lecturas.append({"doctype": doctype, "filters": filters, "order_by": order_by})
-        return list(filas)
+        lecturas.append(
+            {"doctype": doctype, "filters": filters, "limit": limit, "order_by": order_by}
+        )
+        return listar(filas, filters, limit=limit, order_by=order_by)
 
     monkeypatch.setattr(erpnext, "policy_get_list", policy_get_list)
     monkeypatch.delenv("CANCELACION_HORAS", raising=False)
@@ -100,12 +122,11 @@ def test_the_read_asks_erpnext_for_this_order_only(erp) -> None:
 def test_the_earliest_record_wins(erp) -> None:
     viejo = datetime.now(UTC) - timedelta(hours=40)
     erp["filas"].append(
-        {"content": f"{confirmacion.MARCA} {confirmacion.sello(viejo)} fuente=primera",
-         "creation": "2026-09-01 10:00:00"}
+        _fila(f"{confirmacion.MARCA} {confirmacion.sello(viejo)} fuente=primera",
+              "2026-09-01 10:00:00")
     )
     erp["filas"].append(
-        {"content": f"{confirmacion.MARCA} {confirmacion.sello()} fuente=segunda",
-         "creation": "2026-09-03 10:00:00"}
+        _fila(f"{confirmacion.MARCA} {confirmacion.sello()} fuente=segunda")
     )
 
     momento = confirmacion.momento(SO)
@@ -116,8 +137,7 @@ def test_the_earliest_record_wins(erp) -> None:
 def test_a_record_with_no_offset_is_read_as_utc(erp) -> None:
     """The direction that expires the window sooner, never later."""
     erp["filas"].append(
-        {"content": f"{confirmacion.MARCA} 2026-09-03 10:00:00 fuente=otro sistema",
-         "creation": "2026-09-03 10:00:00"}
+        _fila(f"{confirmacion.MARCA} 2026-09-03 10:00:00 fuente=otro sistema")
     )
 
     momento = confirmacion.momento(SO)
@@ -127,7 +147,7 @@ def test_a_record_with_no_offset_is_read_as_utc(erp) -> None:
 
 @pytest.mark.parametrize("contenido", ["", "sin marca alguna", "[confirmado-por-agente] ayer"])
 def test_anything_unparseable_cannot_prove_a_window(erp, contenido) -> None:
-    erp["filas"].append({"content": contenido, "creation": "2026-09-03 10:00:00"})
+    erp["filas"].append(_fila(contenido))
 
     assert confirmacion.momento(SO) is None
 

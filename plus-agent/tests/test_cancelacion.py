@@ -20,7 +20,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import aprobacion, confirmacion, decisiones, erpnext, outbound_status
-from tests.fakes import FakeMarcas
+from tests.fakes import FakeMarcas, listar
+
+
+def _fila_comentario(contenido: str, creation: str = "2026-09-03 10:00:00") -> dict:
+    """One Comment row with the fields the ERPNext query filters and orders on."""
+    return {
+        "content": contenido,
+        "reference_doctype": "Sales Order",
+        "reference_name": SO,
+        "creation": creation,
+    }
 
 STAFF = "5493511111111"
 SO = "SAL-ORD-2026-00009"
@@ -74,7 +84,14 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
     # The durable confirmation record: written here, read back by
     # app/confirmacion.py exactly as it would be from ERPNext.
     def registrar_comentario(doctype, name, text):
-        estado["durables"].append({"content": text, "creation": text[:19]})
+        estado["durables"].append(
+            {
+                "content": text,
+                "reference_doctype": doctype,
+                "reference_name": name,
+                "creation": f"2026-09-03 10:00:{len(estado['durables']):03d}",
+            }
+        )
 
     monkeypatch.setattr(erpnext, "registrar_comentario", registrar_comentario)
 
@@ -98,7 +115,7 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
 
     def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None):
         if doctype == "Comment":
-            return list(estado["durables"])
+            return listar(estado["durables"], filters, limit=limit, order_by=order_by)
         campo = "against_sales_order" if doctype == "Delivery Note Item" else "sales_order"
         return [
             {"parent": n, campo: SO, "docstatus": d}
@@ -169,10 +186,9 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
         marcas.values.pop(confirmacion._clave_cache(SO), None)
         momento = datetime.now(UTC) - timedelta(hours=horas)
         estado["durables"].append(
-            {
-                "content": f"{confirmacion.MARCA} {confirmacion.sello(momento)} fuente=prueba",
-                "creation": "2026-09-03 10:00:00",
-            }
+            _fila_comentario(
+                f"{confirmacion.MARCA} {confirmacion.sello(momento)} fuente=prueba"
+            )
         )
 
     def preparar_remito(doc: dict | None = None) -> str:
@@ -451,10 +467,10 @@ def test_the_earliest_durable_record_is_the_one_that_counts(mundo) -> None:
     """Two records must not extend the deadline; the first confirmation wins."""
     mundo["confirmado_hace"](30)
     mundo["estado"]["durables"].append(
-        {
-            "content": f"{confirmacion.MARCA} {confirmacion.sello()} fuente=segunda",
-            "creation": "2026-09-03 12:00:00",
-        }
+        _fila_comentario(
+            f"{confirmacion.MARCA} {confirmacion.sello()} fuente=segunda",
+            "2026-09-03 12:00:00",
+        )
     )
     mundo["marcas"].values.pop(confirmacion._clave_cache(SO), None)
 

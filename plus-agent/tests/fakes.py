@@ -11,6 +11,7 @@ drops a customer's confirmation.
 
 from __future__ import annotations
 
+import re
 import time
 
 
@@ -138,3 +139,63 @@ class FakeMarcas:
 def entrada_de_cola(marcas: FakeMarcas, cola: str) -> list[str]:
     """Queued notices, earliest first — what a worker would pick up."""
     return marcas._due(cola, time.time() + 10**9)
+
+
+# ---------------------------------------------------------------------------
+# One list query, answered the way ERPNext answers it.
+# ---------------------------------------------------------------------------
+
+_ORDEN = re.compile(r"^\s*(?P<campo>[\w.]+)\s*(?P<sentido>asc|desc)?\s*$", re.IGNORECASE)
+
+
+def _coincide(fila: dict, filtro) -> bool:
+    try:
+        campo, operador, esperado = filtro[0], str(filtro[1]).lower(), filtro[2]
+    except (IndexError, TypeError):
+        return True
+    valor = fila.get(campo)
+    if operador == "=":
+        return str(valor) == str(esperado)
+    if operador == "!=":
+        return str(valor) != str(esperado)
+    if operador == "in":
+        return str(valor) in {str(v) for v in esperado or []}
+    if operador == "not in":
+        return str(valor) not in {str(v) for v in esperado or []}
+    if operador == "like":
+        return str(esperado).replace("%", "") in str(valor or "")
+    return True
+
+
+def listar(filas, filtros=None, *, limit: int = 20, order_by: str | None = None) -> list[dict]:
+    """Filter, ORDER, then CUT — in that order, like a Frappe list query.
+
+    ``limit`` and ``order_by`` are not decoration. A double that returned every
+    matching row in insertion order made "read the newest 200 events" and "read
+    the oldest 200 events" the same call, so a reconstruction that only ever saw
+    the oldest page of history could not be written down as a failing test. The
+    truncation has to be visible here or it is only ever visible in production.
+
+    Ties keep insertion order for ``asc`` and reverse it for ``desc``, so the
+    row written last is the newest one either way.
+    """
+    elegidas = [
+        fila
+        for fila in filas
+        if isinstance(fila, dict)
+        and all(_coincide(fila, f) for f in (filtros or []))
+    ]
+    if order_by:
+        match = _ORDEN.match(str(order_by))
+        if match is None:
+            raise AssertionError(f"order_by no interpretable: {order_by!r}")
+        campo = match.group("campo")
+        descendente = (match.group("sentido") or "asc").lower() == "desc"
+        elegidas = sorted(
+            enumerate(elegidas),
+            key=lambda par: (str(par[1].get(campo) or ""), par[0]),
+            reverse=descendente,
+        )
+        elegidas = [fila for _, fila in elegidas]
+    tope = int(limit) if limit else 0
+    return [dict(fila) for fila in (elegidas[:tope] if tope > 0 else elegidas)]

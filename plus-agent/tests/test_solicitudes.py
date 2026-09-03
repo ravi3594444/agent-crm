@@ -40,7 +40,7 @@ from app import (
     outbound_status,
     solicitudes,
 )
-from tests.fakes import FakeMarcas
+from tests.fakes import FakeMarcas, listar
 
 STAFF = "5493511111111"
 OTRO = "5490000000000"
@@ -77,6 +77,17 @@ PEDIDO = {
 }
 
 
+_INICIO_EVENTOS = datetime(2026, 9, 3, 10, 0, 0)
+
+
+def _sello_creacion(estado: dict) -> str:
+    """The next `creation` stamp: sortable as a string, one second apart."""
+    estado["reloj"] += 1
+    return (_INICIO_EVENTOS + timedelta(seconds=estado["reloj"])).strftime(
+        "%Y-%m-%d %H:%M:%S.%f"
+    )
+
+
 @pytest.fixture
 def mundo(monkeypatch: pytest.MonkeyPatch):
     """A draft order, an empty Redis, and an ERPNext that records comments."""
@@ -92,11 +103,23 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
         "cargos": [],
         "submits": [],
         "estados": [],
+        "consultas": [],
         "stock": True,
+        # A strictly increasing `creation` per recorded event. ERPNext orders by
+        # it, so without one every event shares a timestamp and "newest first"
+        # silently degrades to "insertion order".
+        "reloj": 0,
     }
 
     def registrar_comentario(doctype, name, text):
-        estado["durables"].append({"content": text, "reference_name": name})
+        estado["durables"].append(
+            {
+                "content": text,
+                "reference_doctype": doctype,
+                "reference_name": name,
+                "creation": _sello_creacion(estado),
+            }
+        )
 
     monkeypatch.setattr(erpnext, "registrar_comentario", registrar_comentario)
     monkeypatch.setattr(
@@ -104,17 +127,12 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
     )
 
     def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None):
+        estado["consultas"].append(
+            {"doctype": doctype, "filters": filters, "limit": limit, "order_by": order_by}
+        )
         if doctype != "Comment":
             return []
-        nombres = None
-        for f in filters or []:
-            if f[0] == "reference_name":
-                nombres = [f[2]] if f[1] == "=" else list(f[2])
-        return [
-            fila
-            for fila in estado["durables"]
-            if nombres is None or fila.get("reference_name") in nombres
-        ]
+        return listar(estado["durables"], filters, limit=limit, order_by=order_by)
 
     monkeypatch.setattr(erpnext, "policy_get_list", policy_get_list)
     monkeypatch.setattr(
