@@ -126,13 +126,21 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
         erpnext, "add_comment", lambda dt, n, t: estado["comentarios"].append(t)
     )
 
-    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None):
+    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0):
         estado["consultas"].append(
-            {"doctype": doctype, "filters": filters, "limit": limit, "order_by": order_by}
+            {
+                "doctype": doctype,
+                "filters": filters,
+                "limit": limit,
+                "order_by": order_by,
+                "start": start,
+            }
         )
         if doctype != "Comment":
             return []
-        return listar(estado["durables"], filters, limit=limit, order_by=order_by)
+        return listar(
+            estado["durables"], filters, limit=limit, order_by=order_by, start=start
+        )
 
     monkeypatch.setattr(erpnext, "policy_get_list", policy_get_list)
     monkeypatch.setattr(
@@ -2340,3 +2348,232 @@ def test_cancelling_a_confirmed_order_also_closes_its_review(
     assert solicitudes.vencimientos([SO]) == {}
     # ...and it is a no-op on an order with no review, so it is safe everywhere.
     assert decisiones.cerrar_revision_si_hay(SO, STAFF, "otra vez") is False
+
+
+# ---------------------------------------------------------------------------
+# History longer than one page. Every durable read here is a bounded Frappe
+# query, and a system that has been running correctly for a few weeks has more
+# events than fit in one.
+# ---------------------------------------------------------------------------
+
+OTRO_PEDIDO = "SAL-ORD-2026-00099"
+
+
+def _evento_de(pedido: str, estado: str, n: int) -> solicitudes.Solicitud:
+    ahora = time.time()
+    return solicitudes.Solicitud(
+        id=f"{pedido}-{n}",
+        pedido=pedido,
+        tipo=solicitudes.TIPO_ENTREGA,
+        estado=estado,
+        cliente=CLIENTE,
+        cliente_nombre="Otro cliente",
+        resumen_items="1 x LECHE-1L",
+        total=1000.0,
+        moneda="ARS",
+        creada_en=ahora,
+        vence_en=ahora + 4 * 3600,
+        sello=ahora,
+    )
+
+
+def _historia(mundo, cuantos: int, *, pedido: str = OTRO_PEDIDO, viva: bool = False) -> float:
+    """`cuantos` REAL durable events on ``pedido``, written through registrar.
+
+    Not hand-built rows: the production reader has to meet exactly what it will
+    meet in ERPNext. The CALL ORDER decides whether this history is older or
+    newer than the request under test, because the double stamps `creation` from
+    one increasing clock.
+
+    Returns the deadline of the last event, which is the only correct answer for
+    that order once these have been written.
+    """
+    estado = solicitudes.REVISION_HUMANA if viva else solicitudes.CUMPLIDA
+    base = _evento_de(pedido, estado, 0)
+    ultima = None
+    for n in range(cuantos):
+        ultima = solicitudes.registrar(
+            base, "prueba", estado=estado, motivo=f"evento {n}", vence_en=base.vence_en + n
+        )
+        assert ultima is not None
+    return ultima.vence_en
+
+
+def _sin_redis() -> None:
+    """A flush, or a restart onto an empty cache: only ERPNext is left."""
+    outbound_status._client.values.clear()
+    outbound_status._client.zsets.clear()
+
+
+def test_a_rebuild_reads_the_newest_end_of_history_not_the_oldest_page(mundo) -> None:
+    """THE restart bug. One page ordered `creation asc` is the OLDEST 200 events
+    the system ever wrote, so after a few weeks a rebuild reconstructed nothing
+    but long-closed requests from the first days and NOT ONE live one. Every
+    draft parked on a real pending decision came back from the restart with no
+    deadline, and a draft with no deadline holds its units until a person
+    notices. The longer the system ran correctly, the worse it got."""
+    _historia(mundo, 250)  # older than the request, and more than one page
+    solicitud = _abrir(mundo)
+    _sin_redis()
+
+    assert solicitudes.reconstruir_indice() == 1
+    assert solicitudes.reconstruccion_incompleta() is False
+    # And end to end: the sweep can now reach it, which is the point.
+    _sin_redis()
+    assert solicitudes.tick(ahora=solicitud.vence_en + 1) == 1
+    assert solicitudes.leer(SO).estado == solicitudes.VENCIDA
+
+
+def test_a_rebuild_pages_backwards_until_the_history_runs_out(mundo, monkeypatch) -> None:
+    """A live request older than a full page is still found."""
+    monkeypatch.setattr(solicitudes, "MAX_RECONSTRUCCION", 100)
+    solicitud = _abrir(mundo)
+    _historia(mundo, 250)  # newer than the request: it is now on page 3
+    _sin_redis()
+    mundo["consultas"].clear()
+
+    assert solicitudes.reconstruir_indice() == 1
+    assert solicitudes.reconstruccion_incompleta() is False
+
+    paginas = [c for c in mundo["consultas"] if c["doctype"] == "Comment"]
+    assert [c["start"] for c in paginas] == [0, 100, 200]
+    assert {c["order_by"] for c in paginas} == {"creation desc"}
+    assert solicitudes.vencimientos([SO]) == {SO: solicitud.vence_en}
+
+
+def test_a_rebuild_that_ran_out_of_pages_says_so_and_is_retried(
+    mundo, monkeypatch
+) -> None:
+    """A non-empty index is not proof the rebuild finished. Believing it was
+    would leave the orders it never reached with no deadline until the next
+    restart — the permanent hold, one step removed."""
+    monkeypatch.setattr(solicitudes, "MAX_RECONSTRUCCION", 100)
+    monkeypatch.setattr(solicitudes, "MAX_PAGINAS_RECONSTRUCCION", 1)
+    _abrir(mundo)
+    _historia(mundo, 250, viva=True)
+    _sin_redis()
+
+    solicitudes.reconstruir_indice()
+
+    assert solicitudes.reconstruccion_incompleta() is True
+    # tick rebuilds again even though the index it just built is NOT empty.
+    mundo["consultas"].clear()
+    assert solicitudes._indice_vacio() is False
+    solicitudes.tick(ahora=time.time())
+    assert [c["start"] for c in mundo["consultas"] if c["doctype"] == "Comment"] == [0]
+
+    # A complete rebuild clears the debt.
+    monkeypatch.setattr(solicitudes, "MAX_PAGINAS_RECONSTRUCCION", 25)
+    solicitudes.reconstruir_indice()
+    assert solicitudes.reconstruccion_incompleta() is False
+
+
+def test_an_erpnext_failure_midway_through_a_rebuild_is_not_a_finished_rebuild(
+    mundo, monkeypatch
+) -> None:
+    monkeypatch.setattr(solicitudes, "MAX_RECONSTRUCCION", 100)
+    _abrir(mundo)
+    _historia(mundo, 250)
+    _sin_redis()
+    real = erpnext.policy_get_list
+
+    def falla_en_la_segunda(*a, **k):
+        if k.get("start"):
+            raise erpnext.ERPNextError("caído")
+        return real(*a, **k)
+
+    monkeypatch.setattr(erpnext, "policy_get_list", falla_en_la_segunda)
+
+    solicitudes.reconstruir_indice()
+
+    assert solicitudes.reconstruccion_incompleta() is True
+
+
+def test_the_current_state_of_a_noisy_order_is_its_newest_event(mundo) -> None:
+    """`_desde_erpnext` asked for the OLDEST MAX_EVENTOS and kept the last of
+    them, which is the newest event only while an order has fewer than 60 events
+    in its whole life. A review that retries passes that in a day, and then the
+    "current" state read back was one the order had left hours earlier."""
+    _abrir(mundo)
+    for n in range(70):
+        actual = solicitudes.leer(SO)
+        assert solicitudes.registrar(actual, "prueba", motivo=f"vuelta {n}") is not None
+    cerrada = solicitudes.registrar(
+        solicitudes.leer(SO), "cumplida", estado=solicitudes.CUMPLIDA, motivo="listo"
+    )
+    _sin_redis()
+
+    recuperada = solicitudes.leer(SO)
+
+    assert recuperada is not None
+    assert recuperada.estado == solicitudes.CUMPLIDA
+    assert recuperada.motivo == "listo"
+    assert recuperada.sello == cerrada.sello
+    # Terminal: nothing left holding units, and nothing for the sweep to do.
+    assert solicitudes.vencimientos([SO]) == {}
+    assert solicitudes.tick(ahora=time.time() + 10 * 3600) == 0
+
+
+@pytest.mark.parametrize("ruido_primero", [True, False])
+def test_one_noisy_order_cannot_eat_the_shared_vencimientos_budget(
+    mundo, ruido_primero
+) -> None:
+    """vencimientos() asks about every draft in ONE read whose page is shared
+    between them. An order that has been retried hundreds of times fills that
+    page on its own, and ordered `creation asc` every other draft came back with
+    no rows at all — recorded as "this order has no request" for ten minutes.
+    That is the one lie that matters: it drops a LIVE hold's deadline, so
+    app/policy.py stops seeing the units as held and the sweep never gets the
+    order back.
+
+    Both arrangements are checked, because the two of them break the old code in
+    different directions: noise older than the quiet order loses the quiet
+    order's deadline, and noise newer than it reports the noisy order's state
+    from hours earlier."""
+    if ruido_primero:
+        ruidoso_vence = _historia(mundo, 200, viva=True)
+        quieta = _abrir(mundo)
+    else:
+        quieta = _abrir(mundo)
+        ruidoso_vence = _historia(mundo, 200, viva=True)
+    _sin_redis()
+
+    plazos = solicitudes.vencimientos([SO, OTRO_PEDIDO])
+
+    # The quiet order keeps its hold ...
+    assert plazos[SO] == quieta.vence_en
+    # ... and the noisy one is reported from its NEWEST event, not an old one.
+    assert plazos[OTRO_PEDIDO] == ruidoso_vence
+    # Nothing was remembered as "no request": that is what erased the deadline.
+    for pedido in (SO, OTRO_PEDIDO):
+        assert solicitudes._leer_cache(pedido) != solicitudes.SIN_SOLICITUD
+
+
+def test_an_order_with_no_request_is_still_remembered_as_having_none(mundo) -> None:
+    """The negative cache is what keeps app/policy.py from re-reading ERPNext
+    for every draft on every stock check. It must survive the fix — it is only
+    a lie when the answer was TRUNCATED."""
+    _abrir(mundo)
+    _sin_redis()
+
+    solicitudes.vencimientos([SO, "SAL-ORD-SIN-NADA"])
+
+    assert solicitudes._leer_cache("SAL-ORD-SIN-NADA") == solicitudes.SIN_SOLICITUD
+
+
+def test_a_truncated_budget_never_invents_an_answer_it_could_not_read(
+    mundo, monkeypatch
+) -> None:
+    """Past the rescue budget the honest answer is silence. A missing deadline
+    reads as "still holding stock", which never oversells; a false "no request"
+    hands the units to nobody."""
+    monkeypatch.setattr(solicitudes, "MAX_EVENTOS", 1)
+    monkeypatch.setattr(solicitudes, "MAX_RESCATES_VENCIMIENTOS", 0)
+    _abrir(mundo)
+    _historia(mundo, 5, viva=True)
+    _sin_redis()
+
+    plazos = solicitudes.vencimientos([SO, OTRO_PEDIDO])
+
+    assert SO not in plazos
+    assert solicitudes._leer_cache(SO) != solicitudes.SIN_SOLICITUD

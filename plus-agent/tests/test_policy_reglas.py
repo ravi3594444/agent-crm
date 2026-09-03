@@ -129,7 +129,7 @@ def _stock_erp(
         )
 
     def policy_get_list(
-        doctype, filters=None, fields=None, limit=20, parent=None, order_by=None
+        doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0
     ):
         if doctype == "Comment":
             # app/solicitudes.py asks whether any of those drafts is parked on a

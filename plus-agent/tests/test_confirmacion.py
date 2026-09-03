@@ -49,11 +49,17 @@ def erp(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(erpnext, "registrar_comentario", registrar_comentario)
     lecturas: list[dict] = []
 
-    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None):
+    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0):
         lecturas.append(
-            {"doctype": doctype, "filters": filters, "limit": limit, "order_by": order_by}
+            {
+                "doctype": doctype,
+                "filters": filters,
+                "limit": limit,
+                "order_by": order_by,
+                "start": start,
+            }
         )
-        return listar(filas, filters, limit=limit, order_by=order_by)
+        return listar(filas, filters, limit=limit, order_by=order_by, start=start)
 
     monkeypatch.setattr(erpnext, "policy_get_list", policy_get_list)
     monkeypatch.delenv("CANCELACION_HORAS", raising=False)

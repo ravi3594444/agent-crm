@@ -169,6 +169,20 @@ SIN_SOLICITUD = "-"
 SIN_SOLICITUD_TTL_SEGUNDOS = 600
 MAX_EVENTOS = 60
 MAX_RECONSTRUCCION = 200
+# How many pages of history ONE rebuild may read. The index is rebuilt from the
+# newest end, so the first page already carries the requests most likely to
+# still be live; the budget exists so a store with years of events cannot make
+# a restart hang on a background thread.
+MAX_PAGINAS_RECONSTRUCCION = 25
+# ... and when even that budget ran out, the rebuild is INCOMPLETE, not done.
+# The orders it could not reach have no deadline at all, so it is retried this
+# soon instead of waiting for the next restart.
+REINTENTO_RECONSTRUCCION_SEGUNDOS = 600.0
+# vencimientos() asks about many drafts in one read. When that read comes back
+# truncated the missing orders are resolved ONE BY ONE, bounded by this, so a
+# single order with thousands of events cannot starve every other draft of an
+# answer. See vencimientos().
+MAX_RESCATES_VENCIMIENTOS = 20
 # ERPNext has no "rejected draft" docstatus; "Closed" is the durable state its
 # own get_reserved_qty does not count. Same constant as app/decisiones.py.
 _ESTADO_SIN_RESERVA = "Closed"
@@ -455,7 +469,17 @@ def _cachear_sin_solicitud(pedido: str) -> None:
 
 
 def _desde_erpnext(pedido: str) -> Solicitud | None:
-    """The LAST event recorded on the order, or None."""
+    """The NEWEST event recorded on the order, or None.
+
+    Ordered `creation desc` and taken from the front. It used to ask for the
+    oldest ``MAX_EVENTOS`` and keep the last of those, which is the newest event
+    only while an order has fewer than 60 events in its life. A review that
+    retries, or a request that was offered, accepted and re-offered, passes that
+    in a day — and then the "current" state of the order was a state it had left
+    hours earlier: an expired request read as pending, a resolved review read as
+    still open. Frappe's own ordering decides which event is last, not the size
+    of the page it happened to fit in.
+    """
     try:
         filas = erpnext.policy_get_list(
             "Comment",
@@ -466,12 +490,11 @@ def _desde_erpnext(pedido: str) -> Solicitud | None:
             ],
             fields=["content", "creation"],
             limit=MAX_EVENTOS,
-            order_by="creation asc",
+            order_by="creation desc",
         )
     except Exception as exc:
         print(f"[solicitudes] {pedido}: no pude leer los eventos ({type(exc).__name__})")
         return None
-    ultima: Solicitud | None = None
     for fila in filas:
         if not isinstance(fila, dict):
             continue
@@ -479,12 +502,14 @@ def _desde_erpnext(pedido: str) -> Solicitud | None:
         if not datos:
             continue
         candidata = _desde_dict(datos)
-        if candidata is None:
-            continue
-        # Comments come back oldest first; a later event with an older stamp
-        # would be a clock going backwards, and the recorded order wins.
-        ultima = candidata
-    return ultima
+        if candidata is not None:
+            # Newest first, so the first one that parses IS the current state.
+            # An unparseable newer event is skipped rather than treated as
+            # "no request": a corrupt row must not resurrect an old state
+            # silently, and the older event it falls back to still carries a
+            # deadline, which is the direction that keeps the hold bounded.
+            return candidata
+    return None
 
 
 def leer(pedido: str) -> Solicitud | None:
@@ -626,6 +651,7 @@ def vencimientos(pedidos: list[str]) -> dict[str, float]:
     if not faltan:
         return pendientes
 
+    tope = MAX_EVENTOS * max(1, len(faltan))
     try:
         filas = erpnext.policy_get_list(
             "Comment",
@@ -635,8 +661,8 @@ def vencimientos(pedidos: list[str]) -> dict[str, float]:
                 ["content", "like", f"%{MARCA}%"],
             ],
             fields=["content", "reference_name", "creation"],
-            limit=MAX_EVENTOS * max(1, len(faltan)),
-            order_by="creation asc",
+            limit=tope,
+            order_by="creation desc",
         )
     except Exception as exc:
         print(f"[solicitudes] vencimientos no legibles ({type(exc).__name__})")
@@ -649,14 +675,52 @@ def vencimientos(pedidos: list[str]) -> dict[str, float]:
         candidata = _desde_dict(datos) if datos else None
         if candidata is None:
             continue
-        ultimas[candidata.pedido] = candidata
+        # Newest first, so the FIRST event seen for an order is its current
+        # state. Ordered `creation asc`, a truncated page gave every order the
+        # newest of its OLDEST events — a lapsed request read as pending, and a
+        # closed one read as still holding stock.
+        ultimas.setdefault(candidata.pedido, candidata)
     for nombre, candidata in ultimas.items():
         _cachear(candidata)
         if candidata.con_plazo:
             pendientes[nombre] = candidata.vence_en
-    for nombre in faltan:
-        if nombre not in ultimas:
+
+    # THE SHARED BUDGET IS NOT SHARED FAIRLY, SO ABSENCE IS NOT AN ANSWER.
+    # The page holds `tope` rows for ALL the orders asked about. One order that
+    # has been retried a thousand times fills it on its own, and every other
+    # draft then comes back with no rows at all — which used to be recorded as
+    # "this order has no request" for ten minutes. That is a lie in the one
+    # direction that matters: it drops a live hold's deadline, so app/policy.py
+    # stops seeing the units as held and the sweep never gets the order back.
+    #
+    # A full page means the answer was cut, so the orders it did not mention
+    # are UNKNOWN, not empty. They are resolved one at a time — a per-order read
+    # has its own per-order limit, so no other order's history can crowd it out
+    # — and the rescue itself is bounded. Whatever is still unresolved is simply
+    # not reported: the caller then treats those drafts as still holding stock,
+    # which is the direction that never oversells.
+    truncada = len(filas) >= tope
+    sin_eventos = [nombre for nombre in faltan if nombre not in ultimas]
+    if not truncada:
+        for nombre in sin_eventos:
             _cachear_sin_solicitud(nombre)
+        return pendientes
+
+    print(
+        f"[solicitudes] vencimientos: la consulta de {len(faltan)} pedido(s) "
+        f"volvió cortada en {tope} eventos; resuelvo "
+        f"{min(len(sin_eventos), MAX_RESCATES_VENCIMIENTOS)} de "
+        f"{len(sin_eventos)} uno por uno"
+    )
+    for nombre in sin_eventos[:MAX_RESCATES_VENCIMIENTOS]:
+        candidata = _desde_erpnext(nombre)
+        if candidata is None:
+            # Unreadable or genuinely absent — indistinguishable here, and only
+            # one of those is safe to remember. Neither is cached.
+            continue
+        _cachear(candidata)
+        if candidata.con_plazo:
+            pendientes[nombre] = candidata.vence_en
     return pendientes
 
 
@@ -757,6 +821,16 @@ def _indice_vacio() -> bool:
         return True
 
 
+# monotonic() deadline after which an incomplete rebuild is worth retrying.
+# In-process on purpose: a restart rebuilds anyway, because the index is empty.
+_reconstruccion_incompleta_hasta: float = 0.0
+
+
+def reconstruccion_incompleta() -> bool:
+    """Whether the last rebuild ran out of pages and is still owed a retry."""
+    return time.monotonic() < _reconstruccion_incompleta_hasta
+
+
 def reconstruir_indice() -> int:
     """Rebuild the expiry index from ERPNext after a flush or a restart.
 
@@ -764,34 +838,83 @@ def reconstruir_indice() -> int:
     record: the open requests are found again and rescheduled. Without it, a
     flush would leave pending decisions with no expiry at all, and their drafts
     would hold stock for ever — the exact failure this module exists to avoid.
+
+    IT USED TO REBUILD FROM THE WRONG END OF HISTORY
+    One page of 200 events ordered `creation asc` is the OLDEST 200 events this
+    system ever wrote. Past that — a few weeks of ordinary traffic — the rebuild
+    reconstructed nothing but long-closed requests from the first days of the
+    deployment and NOT ONE live one. Every draft parked on a real pending
+    decision came back from the restart with no deadline at all, and a draft
+    with no deadline holds its units until somebody notices by hand. The bug got
+    worse the longer the system ran correctly.
+
+    So it reads from the NEWEST end, and pages backwards. Newest-first also
+    settles which event counts: the first one seen for an order is its current
+    state, where the old code kept the last one and therefore the newest of the
+    OLDEST events it had read.
+
+    Truncation is reported rather than hidden. Reaching the page budget means
+    there are orders this rebuild could not reach, so the run is marked
+    incomplete and ``tick`` comes back for it — a partial index that looks
+    finished is the same permanent hold with an extra step.
     """
-    try:
-        filas = erpnext.policy_get_list(
-            "Comment",
-            filters=[
-                ["reference_doctype", "=", "Sales Order"],
-                ["content", "like", f"%{MARCA}%"],
-            ],
-            fields=["content", "reference_name", "creation"],
-            limit=MAX_RECONSTRUCCION,
-            order_by="creation asc",
-        )
-    except Exception as exc:
-        print(f"[solicitudes] no pude reconstruir el índice ({type(exc).__name__})")
-        return 0
+    global _reconstruccion_incompleta_hasta
     ultimas: dict[str, Solicitud] = {}
-    for fila in filas:
-        if not isinstance(fila, dict):
-            continue
-        datos = _parsear(str(fila.get("content") or ""))
-        candidata = _desde_dict(datos) if datos else None
-        if candidata is not None:
-            ultimas[candidata.pedido] = candidata
+    truncada = False
+    for pagina in range(MAX_PAGINAS_RECONSTRUCCION):
+        try:
+            filas = erpnext.policy_get_list(
+                "Comment",
+                filters=[
+                    ["reference_doctype", "=", "Sales Order"],
+                    ["content", "like", f"%{MARCA}%"],
+                ],
+                fields=["content", "reference_name", "creation"],
+                limit=MAX_RECONSTRUCCION,
+                order_by="creation desc",
+                start=pagina * MAX_RECONSTRUCCION,
+            )
+        except Exception as exc:
+            print(
+                f"[solicitudes] no pude reconstruir el índice "
+                f"({type(exc).__name__}); página {pagina + 1}"
+            )
+            # Whatever was read so far is still worth indexing — it is the
+            # newest end — but the rebuild is not finished.
+            truncada = True
+            break
+        for fila in filas:
+            if not isinstance(fila, dict):
+                continue
+            datos = _parsear(str(fila.get("content") or ""))
+            candidata = _desde_dict(datos) if datos else None
+            if candidata is not None:
+                # Newest first: the first event seen for an order is current.
+                ultimas.setdefault(candidata.pedido, candidata)
+        if len(filas) < MAX_RECONSTRUCCION:
+            break
+    else:
+        truncada = True
+
     recuperadas = 0
     for candidata in ultimas.values():
         _cachear(candidata)
         if candidata.con_plazo:
             recuperadas += 1
+    if truncada:
+        _reconstruccion_incompleta_hasta = (
+            time.monotonic() + REINTENTO_RECONSTRUCCION_SEGUNDOS
+        )
+        print(
+            f"[solicitudes] reconstrucción INCOMPLETA: leí "
+            f"{MAX_PAGINAS_RECONSTRUCCION * MAX_RECONSTRUCCION} eventos y hay "
+            f"más. {recuperadas} plazo(s) recuperado(s) de "
+            f"{len(ultimas)} pedido(s); reintento en "
+            f"{REINTENTO_RECONSTRUCCION_SEGUNDOS / 60:g} min. Los pedidos que "
+            f"no alcancé siguen reservando stock sin plazo."
+        )
+    else:
+        _reconstruccion_incompleta_hasta = 0.0
     return recuperadas
 
 
@@ -802,7 +925,10 @@ def tick(ahora: float | None = None) -> int:
     must not stop the loop that will try again a minute later.
     """
     momento = ahora or _ahora()
-    if _indice_vacio():
+    # An index that is merely NON-EMPTY is not proof the rebuild finished: a
+    # truncated one leaves the orders it never reached with no deadline, and
+    # they would wait for the next restart to get one.
+    if _indice_vacio() or reconstruccion_incompleta():
         reconstruir_indice()
     cerradas = 0
     for pedido in _indice_pendientes(momento)[:50]:

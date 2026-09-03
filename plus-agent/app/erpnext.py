@@ -128,8 +128,14 @@ def _list(
     limit: int,
     parent: str | None,
     order_by: str | None = None,
+    start: int = 0,
 ) -> list[dict]:
     params: dict[str, Any] = {"limit_page_length": limit}
+    if start:
+        # Frappe's page offset. Only meaningful with a deterministic order_by:
+        # paging an unordered list re-shuffles the rows between pages and both
+        # skips and repeats them. Callers that page MUST pass an order.
+        params["limit_start"] = start
     if order_by:
         params["order_by"] = order_by
     if filters:
@@ -165,8 +171,9 @@ def get_list(
     limit: int = 20,
     parent: str | None = None,
     order_by: str | None = None,
+    start: int = 0,
 ) -> list[dict]:
-    return _list(_active_client(), doctype, filters, fields, limit, parent, order_by)
+    return _list(_active_client(), doctype, filters, fields, limit, parent, order_by, start)
 
 
 def get_doc(doctype: str, name: str) -> dict:
@@ -335,6 +342,7 @@ def policy_get_list(
     limit: int = 20,
     parent: str | None = None,
     order_by: str | None = None,
+    start: int = 0,
 ) -> list[dict]:
     """List documents with the policy identity, for policy checks only.
 
@@ -342,7 +350,7 @@ def policy_get_list(
     customers' orders. app/policy.py needs exactly that to know how much stock
     is already promised, so the read runs under the non-LLM policy identity.
     """
-    return _list(_policy(), doctype, filters, fields, limit, parent, order_by)
+    return _list(_policy(), doctype, filters, fields, limit, parent, order_by, start)
 
 
 def policy_update_status(doctype: str, name: str, status: str) -> dict:

@@ -167,7 +167,9 @@ def _coincide(fila: dict, filtro) -> bool:
     return True
 
 
-def listar(filas, filtros=None, *, limit: int = 20, order_by: str | None = None) -> list[dict]:
+def listar(
+    filas, filtros=None, *, limit: int = 20, order_by: str | None = None, start: int = 0
+) -> list[dict]:
     """Filter, ORDER, then CUT — in that order, like a Frappe list query.
 
     ``limit`` and ``order_by`` are not decoration. A double that returned every
@@ -178,6 +180,9 @@ def listar(filas, filtros=None, *, limit: int = 20, order_by: str | None = None)
 
     Ties keep insertion order for ``asc`` and reverse it for ``desc``, so the
     row written last is the newest one either way.
+
+    ``start`` is Frappe's page offset, applied after the ordering like the cut
+    is: a pager that offset an unordered list would both skip and repeat rows.
     """
     elegidas = [
         fila
@@ -197,5 +202,7 @@ def listar(filas, filtros=None, *, limit: int = 20, order_by: str | None = None)
             reverse=descendente,
         )
         elegidas = [fila for _, fila in elegidas]
+    desde = max(0, int(start or 0))
+    elegidas = elegidas[desde:]
     tope = int(limit) if limit else 0
     return [dict(fila) for fila in (elegidas[:tope] if tope > 0 else elegidas)]

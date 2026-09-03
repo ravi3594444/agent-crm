@@ -205,7 +205,7 @@ def remitos(monkeypatch: pytest.MonkeyPatch):
     submits: list[tuple[str, str]] = []
     monkeypatch.setattr(decisiones, "_leer_doc", lambda dt, name: dict(estado["so"]) if dt == "Sales Order" else {"name": name, "docstatus": 1})
 
-    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None):
+    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0):
         assert doctype == "Delivery Note Item" and parent == "Delivery Note"
         return [{"parent": n, "against_sales_order": SO["name"], "docstatus": 0} for n in estado["borradores"]]
 
@@ -296,7 +296,7 @@ def test_no_llm_tool_can_prepare_or_dispatch_and_none_can_submit(monkeypatch) ->
 
 @pytest.fixture
 def erp_digest(monkeypatch: pytest.MonkeyPatch):
-    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None):
+    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0):
         if doctype == "Sales Order":
             docstatus = next(f[2] for f in filters if f[0] == "docstatus")
             if docstatus == 1:

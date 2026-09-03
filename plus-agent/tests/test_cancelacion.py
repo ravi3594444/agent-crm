@@ -113,9 +113,11 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(decisiones, "_leer_doc", leer)
 
-    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None):
+    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0):
         if doctype == "Comment":
-            return listar(estado["durables"], filters, limit=limit, order_by=order_by)
+            return listar(
+                estado["durables"], filters, limit=limit, order_by=order_by, start=start
+            )
         campo = "against_sales_order" if doctype == "Delivery Note Item" else "sales_order"
         return [
             {"parent": n, campo: SO, "docstatus": d}
