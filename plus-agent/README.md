@@ -324,14 +324,23 @@ The startup log prints one `[config] WARN` line per missing template.
 
 ### Models
 
-The default model identifier is `google_genai:gemini-3.5-flash` for both
-agents (the earlier `gemini-2.5-*` defaults were retired by Google and now
-return 404). Set `GOOGLE_API_KEY`; `langchain-google-genai` requires it when
-the model object is built, which happens at import, so the container will not
-start without it. An existing `ANTHROPIC_API_KEY` does not authenticate these
-models. `LLM_MODEL_CLIENTES` and `LLM_MODEL_GERENCIA` can still override the
-provider/model explicitly, but the matching provider package must be pinned in
-`requirements.txt` and its API key present.
+Both agents run on Qwen through Alibaba Model Studio (DashScope) using its
+OpenAI-compatible endpoint, with ONE key (`DASHSCOPE_API_KEY`). Defaults, all
+overridable from the environment and nowhere else (`app/modelos.py`):
+
+| | Sales agent | Management agent |
+|---|---|---|
+| model | `LLM_MODEL_CLIENTES` = `qwen3.7-plus-2026-05-26` | `LLM_MODEL_GERENCIA` = `qwen3.8-max-0902` |
+| reasoning | `QWEN_THINKING_CLIENTES` = `false` | `QWEN_THINKING_GERENCIA` = `false`; set `true` only when analysis needs it (`QWEN_THINKING_BUDGET` caps it; DashScope requires streaming with thinking, which the code enables with it) |
+| endpoint / timeouts | `DASHSCOPE_BASE_URL`, `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES` | same |
+
+The models are built at import, so a missing key or a `provider:model`-style
+name stops the process with the variable named. There is deliberately no
+fallback provider and no Gemini/Anthropic package in `requirements.txt`. The
+model only converses and calls tools: stock, price, discount, credit, delivery,
+confirmation and dispatch decisions stay in Python (`policy.py`, `entrega.py`,
+`inventario.py`, `decisiones.py`). `tests/test_modelos.py` mocks the provider
+boundary, so CI never calls DashScope.
 
 ### Redis Stack is required
 

@@ -45,8 +45,8 @@ jobs:
         # Prueba lo que ningún test unitario puede: que TODAS las variables
         # que la app exige al importar estén declaradas, que el checkpointer
         # arranque contra un Redis Stack real y que uvicorn levante en 8081.
-        # GOOGLE_API_KEY: langchain-google-genai exige que exista al construir
-        # el modelo (al importar); no se llama a Google en el arranque.
+        # DASHSCOPE_API_KEY: app/modelos.py exige que exista al construir los
+        # modelos Qwen (al importar); no se llama a DashScope en el arranque.
         run: |
           docker network create ci
           docker run -d --name redis-ci --network ci redis/redis-stack-server:7.4.0-v1
@@ -62,7 +62,7 @@ jobs:
             -e META_APP_SECRET=x -e META_VERIFY_TOKEN=y \
             -e REDIS_URL=redis://redis-ci:6379/0 \
             -e WHATSAPP_PHONE_NUMBER_ID=1 -e WHATSAPP_TOKEN=t \
-            -e GOOGLE_API_KEY=noop \
+            -e DASHSCOPE_API_KEY=noop \
             plus-agent:ci
           for i in $(seq 1 30); do
             if curl -fsS localhost:8081/health; then echo; echo "OK"; exit 0; fi

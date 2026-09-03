@@ -79,8 +79,8 @@ entre sí.`
 That is not pedantry: they are three ERPNext users with three different
 permission sets, and if the customer agent's credentials can submit, the main
 guardrail of the whole system stops existing. It also requires
-`GOOGLE_API_KEY`: the model is built at import and the process will not start
-without it.
+`DASHSCOPE_API_KEY`: both Qwen models are built at import and the process will
+not start without it (there is no fallback provider).
 
 ```bash
 make up

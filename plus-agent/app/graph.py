@@ -10,11 +10,10 @@ enforced by ERPNext itself — not by which prompt happened to load.
 """
 import os
 
-from langchain.chat_models import init_chat_model
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.prebuilt import ToolNode, create_react_agent
 
-from app import erpnext
+from app import erpnext, modelos
 from app.conversacion import (
     business_today,
     prompt_clientes,
@@ -96,14 +95,10 @@ _checkpointer = RedisSaver(
 _checkpointer.setup()
 
 # Cheap+fast for the high-volume customer bot; stronger model for analysis.
-_modelo_clientes = init_chat_model(
-    os.getenv("LLM_MODEL_CLIENTES", "google_genai:gemini-3.5-flash"),
-    temperature=0.3,
-)
-_modelo_gerencia = init_chat_model(
-    os.getenv("LLM_MODEL_GERENCIA", "google_genai:gemini-3.5-flash"),
-    temperature=0.1,
-)
+# Both are Qwen on one DashScope key (app/modelos.py). Missing configuration
+# raises here, at import: there is deliberately no fallback provider.
+_modelo_clientes = modelos.construir("clientes")
+_modelo_gerencia = modelos.construir("gerencia")
 
 # A raising tool leaves an AIMessage with no matching ToolMessage, which
 # permanently breaks that conversation thread — on WhatsApp that means one

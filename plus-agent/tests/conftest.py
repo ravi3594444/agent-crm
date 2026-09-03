@@ -35,11 +35,15 @@ _DUMMY = {
     "REDIS_URL": "redis://localhost:6379/15",
     "WHATSAPP_PHONE_NUMBER_ID": "test-phone-id",
     "WHATSAPP_TOKEN": "test-token",
-    # app/graph.py builds the chat model at import, and the provider SDK
-    # validates its key eagerly. A dummy lets a test import the real tool lists
-    # (see tests/test_frontera_decisiones.py) without credentials or network.
-    "GOOGLE_API_KEY": "test-google-key",
-    "ANTHROPIC_API_KEY": "test-anthropic-key",
+    # app/graph.py builds the chat models at import (app/modelos.py refuses to
+    # start without the key). A dummy lets a test import the real tool lists
+    # (see tests/test_frontera_decisiones.py) without credentials or network:
+    # ChatOpenAI makes no request when constructed.
+    "DASHSCOPE_API_KEY": "test-dashscope-key",
+    # The developer's real .env may still carry the old "google_genai:…" names;
+    # pin the Qwen defaults so the suite never depends on that file.
+    "LLM_MODEL_CLIENTES": "qwen3.7-plus-2026-05-26",
+    "LLM_MODEL_GERENCIA": "qwen3.8-max-0902",
     # opcionales que cambian comportamiento: valores deterministas para tests
     "BUSINESS_TIMEZONE": "America/Argentina/Buenos_Aires",
     "ERPNEXT_COMPANY": "Lacteos Test SA",

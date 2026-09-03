@@ -40,7 +40,7 @@ check-env: ## ¿Están todas las variables obligatorias en .env y las 3 claves E
 	         ERPNEXT_COMPANY ERPNEXT_WAREHOUSE \
 	         META_APP_SECRET META_VERIFY_TOKEN REDIS_URL \
 	         WHATSAPP_PHONE_NUMBER_ID WHATSAPP_TOKEN \
-	         GOOGLE_API_KEY TELEFONOS_EQUIPO; do \
+	         DASHSCOPE_API_KEY TELEFONOS_EQUIPO; do \
 	  val=$$(grep -E "^$$v=" .env | cut -d= -f2-); \
 	  if [ -z "$$val" ]; then echo "  FALTA  $$v"; missing=1; fi; \
 	done; \
