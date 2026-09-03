@@ -40,6 +40,20 @@ reserving, and that is only reported as "released" if a re-read proves it. And
 the customer is never told the stock is reserved: they are told it will be
 re-checked when the answer comes, because that is what actually happens.
 
+AN EXPIRY IS STILL AN ANSWER
+Nobody answering is OUR failure, not the customer's, so "write to me again"
+is not an acceptable ending: they already wrote. When a request expires the
+original dies for good — VENCIDA is terminal, its hold is released, and no
+later decision revives it — and a SECOND, separate request is opened carrying a
+concrete offer computed from the owner's configuration (app/excepciones.py
+``evaluar_respaldo``): the next normal delivery day, or a pickup at the shop.
+New id, new expiry, its own event trail, and still no promise — the customer
+has to accept it in so many words, and acceptance re-reads and re-validates
+everything under the lock exactly like any other offer. A fallback never gets a
+fallback of its own, so there is no chain; and when nothing can be computed
+nothing is offered, which is the direction that never promises a delivery
+nobody can make.
+
 CUSTOMER TEXT IS DATA
 Whatever the customer wrote travels in one field, quoted, and is shown to the
 manager as a quotation. It is never a line of the management agent's prompt and
@@ -50,11 +64,13 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 import secrets
 import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from app import erpnext
 from app.outbound_status import cliente as _redis
@@ -85,6 +101,11 @@ TERMINALES = frozenset(
 APROBADA = "aprobada"
 CONTRAOFERTA = "contraoferta"
 RETIRO = "retiro"
+# Not a human decision: the deterministic offer that replaces a request nobody
+# answered. It is recorded in the same field so "ver <pedido>" and the audit
+# trail read the same way, and it can only ever be written by _respaldar.
+RESPALDO = "respaldo_automatico"
+DECIDE_EL_SISTEMA = "el sistema (regla configurada por el dueño)"
 
 CLAVE_INDICE = "wa:{inbound}:solicitudes"
 CACHE_TTL_SEGUNDOS = 30 * 24 * 60 * 60
@@ -101,6 +122,9 @@ MAX_RECONSTRUCCION = 200
 # ERPNext has no "rejected draft" docstatus; "Closed" is the durable state its
 # own get_reserved_qty does not count. Same constant as app/decisiones.py.
 _ESTADO_SIN_RESERVA = "Closed"
+# ... and the state it came from, so an accepted fallback can be confirmed on
+# the same document instead of asking the customer to order again.
+_ESTADO_BORRADOR = "Draft"
 
 _JSON = re.compile(re.escape(MARCA) + r"\s*(\{.*\})\s*$", re.DOTALL)
 
@@ -131,6 +155,11 @@ class Solicitud:
     sello: float = 0.0
     cantidades: dict = field(default_factory=dict)
     reabierta_en: float = 0.0
+    # A fallback offer: computed after ``origen`` expired unanswered. It is a
+    # request in its own right, and the flag is what stops a second one and
+    # what makes acceptance re-open the draft its predecessor closed.
+    es_respaldo: bool = False
+    origen: str = ""
 
     @property
     def abierta(self) -> bool:
@@ -164,6 +193,8 @@ class Solicitud:
             "sello": self.sello,
             "cantidades": self.cantidades,
             "reabierta_en": self.reabierta_en,
+            "es_respaldo": self.es_respaldo,
+            "origen": self.origen,
         }
 
 
@@ -267,6 +298,8 @@ def _desde_dict(datos: dict) -> Solicitud | None:
             sello=float(datos.get("sello") or 0),
             cantidades=dict(datos.get("cantidades") or {}),
             reabierta_en=float(datos.get("reabierta_en") or 0),
+            es_respaldo=bool(datos.get("es_respaldo") or False),
+            origen=str(datos.get("origen") or ""),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -553,6 +586,12 @@ def soltar_reserva(pedido: str) -> tuple[bool, str]:
         return False, "no pude verificar si el borrador dejó de comprometer stock"
     if int(actual.get("docstatus") or 0) != 0:
         return False, "el pedido ya no es un borrador"
+    from app import policy
+
+    if policy.sin_reserva(actual.get("status")):
+        # Already out of the way — a fallback offer lives on a draft its
+        # predecessor closed, and re-closing it would be a write for nothing.
+        return True, "el borrador ya estaba cerrado y no compromete stock"
     try:
         erpnext.policy_update_status("Sales Order", pedido, _ESTADO_SIN_RESERVA)
     except Exception as exc:
@@ -563,11 +602,47 @@ def soltar_reserva(pedido: str) -> tuple[bool, str]:
     except Exception as exc:
         print(f"[solicitudes] {pedido}: relectura falló ({type(exc).__name__})")
         return False, "cerré el borrador pero no pude comprobarlo"
-    from app import policy
-
     if policy.sin_reserva(confirmado.get("status")):
         return True, "el borrador quedó cerrado y ya no compromete stock"
     return False, "ERPNext no dejó el borrador cerrado; sigue comprometiendo stock"
+
+
+def reabrir_borrador(pedido: str) -> tuple[bool, str]:
+    """Undo ``soltar_reserva``, so an accepted fallback can be confirmed.
+
+    A fallback offer is made on a draft that was deliberately Closed when its
+    predecessor expired — that is what stopped it holding stock while nobody
+    was promised anything. Accepting the fallback has to put the document back
+    where the ordinary rules apply, and the ordinary rules are what run next:
+    ``revalidar`` re-checks the stock that was NOT held in the meantime, so
+    re-opening promises nothing by itself.
+
+    Fails closed, and only claims success when a re-read agrees.
+    """
+    from app import policy
+
+    try:
+        actual = erpnext.policy_get_doc("Sales Order", pedido)
+    except Exception as exc:
+        print(f"[solicitudes] {pedido}: no pude leer el pedido ({type(exc).__name__})")
+        return False, "no pude leer el pedido para reabrirlo"
+    if int(actual.get("docstatus") or 0) != 0:
+        return False, "el pedido ya no es un borrador"
+    if not policy.sin_reserva(actual.get("status")):
+        return True, ""
+    try:
+        erpnext.policy_update_status("Sales Order", pedido, _ESTADO_BORRADOR)
+    except Exception as exc:
+        print(f"[solicitudes] {pedido}: no pude reabrir el borrador ({type(exc).__name__})")
+        return False, "no pude reabrir el borrador que había quedado cerrado"
+    try:
+        confirmado = erpnext.policy_get_doc("Sales Order", pedido)
+    except Exception as exc:
+        print(f"[solicitudes] {pedido}: relectura falló ({type(exc).__name__})")
+        return False, "reabrí el borrador pero no pude comprobarlo"
+    if policy.sin_reserva(confirmado.get("status")):
+        return False, "ERPNext dejó el borrador cerrado; no lo puedo confirmar"
+    return True, ""
 
 
 # ---------------------------------------------------------------------------
@@ -650,6 +725,17 @@ def tick(ahora: float | None = None) -> int:
 
 
 def _vencer(pedido: str, ahora: float) -> bool:
+    """Close what ran out of time, and answer the customer with something.
+
+    Everything durable happens under the order's lock, in this order: release
+    the hold, record the expiry, then compute and record the fallback. A repeat
+    is safe at every point — the state is re-read inside the lock, releasing an
+    already-closed draft writes nothing, and an expiry that did not become
+    durable leaves the request open for the next tick instead of half-done.
+
+    The notices go out AFTERWARDS, outside the lock, through the durable queue:
+    a person's phone must never be on the critical path of a state change.
+    """
     from app.locks import CoordinationError, distributed_lock
 
     try:
@@ -672,18 +758,155 @@ def _vencer(pedido: str, ahora: float) -> bool:
                 decidida_en=ahora,
             )
             if cerrada is None:
+                # Not durable means it did not happen: the request is still
+                # open, the next tick tries again, and nobody was told
+                # anything. A second event on top of a failed one would be a
+                # decision that exists only in this process.
                 return False
+            respaldo, sin_respaldo = _respaldar(cerrada, ahora)
     except CoordinationError:
         return False
+
+    if respaldo is not None:
+        _avisar_cliente_respaldo(respaldo)
+        _avisar_equipo(
+            respaldo,
+            f"⏰ {pedido}: la solicitud {cerrada.id} venció sin respuesta. "
+            f"{detalle.capitalize()}.\n"
+            f"Le ofrecí automáticamente lo que ya estaba configurado: "
+            f"{terminos_texto(respaldo.ofrecido, respaldo.moneda)} "
+            f"(solicitud {respaldo.id}, vence {_sello_utc(respaldo.vence_en)} UTC).\n"
+            f"Nada está confirmado hasta que el cliente acepte, y ahí se "
+            f"revalida todo.",
+        )
+        return True
 
     _avisar_cliente_vencida(cerrada, liberado)
     _avisar_equipo(
         cerrada,
         f"⏰ {pedido}: la solicitud venció sin respuesta.\n"
         f"{detalle.capitalize()}.\n"
+        f"No pude ofrecerle nada concreto en su lugar: {sin_respaldo}.\n"
         f"Si querés hacerlo igual, reabrí el pedido en ERPNext y confirmalo.",
     )
     return True
+
+
+def _respaldar(vencida: Solicitud, ahora: float) -> tuple[Solicitud | None, str]:
+    """The concrete second offer for a request nobody answered, or why not.
+
+    Called with the order's lock already held and ``vencida`` already recorded
+    as terminal — this never touches that record, so the expired request stays
+    expired whatever happens here.
+
+    Every refusal is a reason a person can read, and every one of them ends
+    with the customer hearing the plain truth instead of an offer that might
+    not hold.
+    """
+    from app import excepciones
+
+    if vencida.es_respaldo:
+        # A fallback offer that the CUSTOMER did not answer. Offering them a
+        # third date nobody asked for would be a machine talking to itself.
+        return None, "ya era la oferta de respaldo y el cliente no la contestó"
+
+    try:
+        so = erpnext.policy_get_doc("Sales Order", vencida.pedido)
+    except Exception as exc:
+        print(f"[solicitudes] {vencida.pedido}: relectura falló ({type(exc).__name__})")
+        return None, "no pude releer el pedido"
+    if not isinstance(so, dict):
+        return None, "no pude releer el pedido"
+    if int(so.get("docstatus") or 0) != 0:
+        return None, "el pedido ya no es un borrador"
+
+    # Nobody to accept it means nobody to offer it to. Checked BEFORE the
+    # record is written, so a durable offer never exists with no way to answer.
+    if not _telefono_cliente(vencida.pedido):
+        return None, "el cliente no tiene teléfono cargado"
+
+    evaluacion = excepciones.evaluar_respaldo(so)
+    if not evaluacion.preautorizada or evaluacion.oferta is None:
+        return None, evaluacion.motivo or "no hay una alternativa configurada"
+
+    oferta = evaluacion.oferta.como_dict()
+    respaldo = Solicitud(
+        id=_nuevo_id(vencida.pedido),
+        pedido=vencida.pedido,
+        tipo=vencida.tipo,
+        estado=ESPERANDO_CLIENTE,
+        cliente=str(so.get("customer") or vencida.cliente),
+        cliente_nombre=str(
+            so.get("customer_name") or so.get("customer") or vencida.cliente_nombre
+        ),
+        resumen_items=vencida.resumen_items,
+        total=float(so.get("grand_total") or 0),
+        moneda=str(so.get("currency") or vencida.moneda),
+        creada_en=ahora,
+        vence_en=_vence_respaldo(
+            ahora, evaluacion.oferta.fecha, evaluacion.oferta.hora
+        ),
+        solicitado=dict(vencida.solicitado),
+        ofrecido=oferta,
+        decision=RESPALDO,
+        decidida_por=DECIDE_EL_SISTEMA,
+        decidida_en=ahora,
+        motivo=f"la solicitud {vencida.id} venció sin respuesta",
+        nota_cliente=vencida.nota_cliente,
+        evento="respaldo",
+        sello=ahora,
+        # Re-read, not inherited: what the fallback is measured against on
+        # acceptance has to be the order as it stands NOW, since its
+        # predecessor's hold is gone and anything could have moved.
+        cantidades=_cantidades(so),
+        es_respaldo=True,
+        origen=vencida.id,
+    )
+    if not _escribir(respaldo):
+        return None, "no pude registrar la oferta de respaldo en ERPNext"
+    try:
+        erpnext.add_comment(
+            "Sales Order",
+            vencida.pedido,
+            f"La solicitud {vencida.id} venció sin respuesta y quedó cerrada. "
+            f"Oferta de respaldo automática {respaldo.id}: "
+            f"{terminos_texto(oferta, respaldo.moneda)}, calculada con la "
+            f"configuración del dueño. No confirma nada: el cliente tiene que "
+            f"aceptarla y ahí se revalida stock, precios y estado del pedido.",
+        )
+    except Exception as exc:
+        print(f"[solicitudes] {vencida.pedido}: comentario de respaldo falló ({type(exc).__name__})")
+    return respaldo, ""
+
+
+def _vence_respaldo(ahora: float, fecha: str, hora: str) -> float:
+    """When the fallback offer dies: the timeout, never past its own date.
+
+    An offer for Thursday 18:00 must not still be acceptable on Thursday at
+    19:00 — the customer would be answered "a person has to look at this"
+    when the plain truth is that it lapsed. So the deadline is the earlier of
+    the configured timeout and the moment the offer itself promises.
+    """
+    tope = ahora + max(0.5, timeout_horas()) * 3600.0
+    momento = _momento_del_negocio(fecha, hora)
+    return min(tope, momento) if momento > ahora else tope
+
+
+def _momento_del_negocio(fecha: str, hora: str) -> float:
+    """"2026-09-10", "18:00" -> that instant in the business timezone, or 0.0.
+
+    0.0 means "unreadable", and every caller then falls back to the plain
+    timeout rather than to a deadline it invented.
+    """
+    if not fecha or not hora:
+        return 0.0
+    zona = os.getenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires").strip()
+    try:
+        cuando = datetime.fromisoformat(f"{fecha}T{hora}").replace(tzinfo=ZoneInfo(zona))
+    except Exception as exc:
+        print(f"[solicitudes] fecha/hora de respaldo no interpretable ({type(exc).__name__})")
+        return 0.0
+    return cuando.timestamp()
 
 
 # ---------------------------------------------------------------------------
@@ -796,6 +1019,13 @@ def texto_rechazo_cliente(solicitud: Solicitud) -> str:
 
 
 def texto_vencida_cliente(solicitud: Solicitud) -> str:
+    """Last resort: nobody answered AND nothing could be offered instead.
+
+    Reached only when ``_respaldar`` could compute no safe alternative — no
+    configured round, no pickup, an order that is no longer a draft. Asking
+    them to write again is not a good answer, and it is the only honest one
+    left: inventing a date here is exactly what this module exists to prevent.
+    """
     return (
         f"Sobre tu pedido {solicitud.pedido}: no llegué a tener una respuesta "
         f"del encargado, así que por ahora no queda confirmado. Escribime y lo "
@@ -803,6 +1033,60 @@ def texto_vencida_cliente(solicitud: Solicitud) -> str:
         f"About your order {solicitud.pedido}: I did not get an answer in time, "
         f"so it is not confirmed. Message me and we will look at it again with "
         f"current stock."
+    )
+
+
+def texto_respaldo_cliente(solicitud: Solicitud) -> str:
+    """Nobody answered, so here is what we CAN do — a date, and a yes/no.
+
+    The waiting was our failure, so the customer is not sent away to write
+    again: they get the alternative the owner already authorized, in the same
+    message, with the same explicit acceptance every other offer needs.
+    """
+    terminos = terminos_texto(solicitud.ofrecido, solicitud.moneda)
+    retiro = str(solicitud.ofrecido.get("metodo") or "entrega") == "retiro"
+    puede = (
+        "podés pasar a buscarlo por el local"
+        if retiro
+        else "te lo puedo llevar en el próximo reparto normal"
+    )
+    puede_en = (
+        "you can pick it up at the shop"
+        if retiro
+        else "I can bring it on the next normal delivery round"
+    )
+    return (
+        f"Sobre tu pedido {solicitud.pedido}: no llegué a tener la respuesta "
+        f"del encargado sobre lo que pediste, así que eso queda sin efecto. "
+        f"Perdón por la espera.\n"
+        f"Lo que sí {puede}: {terminos}.\n"
+        f"¿Lo tomás? Respondé 'acepto {solicitud.pedido}' o "
+        f"'no acepto {solicitud.pedido}'. Sin tu respuesta no cierro nada, y "
+        f"cuando aceptes vuelvo a chequear el stock antes de confirmarlo.\n\n"
+        f"About your order {solicitud.pedido}: I did not get the manager's "
+        f"answer about what you asked for, so that is off. Sorry for the wait. "
+        f"What I can do: {puede_en} — {terminos}. Reply "
+        f"'acepto {solicitud.pedido}' or 'no acepto {solicitud.pedido}'. "
+        f"Nothing is closed without your reply, and I re-check stock before "
+        f"confirming."
+    )
+
+
+def texto_respaldo_vencido_cliente(solicitud: Solicitud) -> str:
+    """The fallback offer itself ran out — and this time it was their turn.
+
+    Different from ``texto_vencida_cliente`` on purpose: telling somebody "I
+    did not get an answer" when they are the one who did not answer reads as
+    blaming us for their silence, and it hides what actually happened.
+    """
+    return (
+        f"Sobre tu pedido {solicitud.pedido}: no tuve tu respuesta sobre "
+        f"{terminos_texto(solicitud.ofrecido, solicitud.moneda)}, así que no lo "
+        f"dejo agendado. Cuando quieras, escribime y lo armamos con el stock "
+        f"del momento.\n\n"
+        f"About your order {solicitud.pedido}: I did not get your reply about "
+        f"that option, so it is not scheduled. Message me whenever you like and "
+        f"we will put it together with current stock."
     )
 
 
@@ -848,7 +1132,19 @@ def _encolar_cliente(solicitud: Solicitud, evento: str, texto: str) -> bool:
 
 def _avisar_cliente_vencida(solicitud: Solicitud, liberado: bool) -> bool:
     del liberado  # the customer is told the same either way: nothing is promised
-    return _encolar_cliente(solicitud, "solicitud_vencida", texto_vencida_cliente(solicitud))
+    texto = (
+        texto_respaldo_vencido_cliente(solicitud)
+        if solicitud.es_respaldo
+        else texto_vencida_cliente(solicitud)
+    )
+    return _encolar_cliente(solicitud, "solicitud_vencida", texto)
+
+
+def _avisar_cliente_respaldo(solicitud: Solicitud) -> bool:
+    """The concrete second offer. Keyed on the NEW id, so it is sent once."""
+    return _encolar_cliente(
+        solicitud, "solicitud_respaldo", texto_respaldo_cliente(solicitud)
+    )
 
 
 def _avisar_equipo(solicitud: Solicitud, texto: str) -> bool:
@@ -912,6 +1208,11 @@ def texto_estado(solicitud: Solicitud) -> str:
         f"Solicitud {solicitud.id}: {solicitud.estado}",
         f"Pide: {terminos_texto(solicitud.solicitado, solicitud.moneda)}",
     ]
+    if solicitud.es_respaldo:
+        lineas.append(
+            f"Es la oferta de respaldo automática: la solicitud {solicitud.origen} "
+            "venció sin respuesta y quedó cerrada para siempre."
+        )
     if solicitud.ofrecido:
         lineas.append(f"Ofrecido: {terminos_texto(solicitud.ofrecido, solicitud.moneda)}")
     if solicitud.decision:
@@ -933,6 +1234,26 @@ def texto_vencida_equipo(solicitud: Solicitud) -> str:
         "tardía: habría que verificar de nuevo stock, precios y estado del "
         "pedido. Si el cliente todavía lo quiere, que lo pida otra vez y sale "
         "una solicitud nueva con los datos del momento."
+    )
+
+
+def texto_superada_equipo(respaldo: Solicitud) -> str:
+    """A late decision on a request the expiry already answered for us.
+
+    The expired request is terminal and is NOT reopened. What exists now is a
+    different record with a different id, waiting on the customer — so the
+    manager is told exactly that, rather than "already decided", which would
+    read as though their command had landed.
+    """
+    return (
+        f"La solicitud {respaldo.origen} de {respaldo.pedido} venció antes de tu "
+        f"respuesta y quedó cerrada; no la reabro con una decisión tardía. "
+        f"Ya le ofrecí automáticamente lo que estaba configurado: "
+        f"{terminos_texto(respaldo.ofrecido, respaldo.moneda)} "
+        f"(solicitud {respaldo.id}, vence {_sello_utc(respaldo.vence_en)} UTC), "
+        f"y estoy esperando que el cliente la acepte. Sin su respuesta no cierro "
+        f"nada. Si querés hacer lo que pedía originalmente, confirmalo a mano en "
+        f"ERPNext."
     )
 
 
@@ -1091,6 +1412,16 @@ def aceptar_cliente(pedido: str, telefono_cliente: str) -> str:
                     f"Pasó el plazo de la oferta de {pedido}, así que no la puedo "
                     "cerrar. Escribime y lo vemos de nuevo con el stock de ahora."
                 )
+
+            if solicitud.es_respaldo:
+                # This offer was made on a draft that was deliberately closed
+                # when its predecessor expired, so nothing was held while the
+                # customer thought about it. Re-open it FIRST and re-validate
+                # afterwards: revalidar is what proves the units are still
+                # there, and it refuses a closed order outright.
+                reabierto, por_que = reabrir_borrador(pedido)
+                if not reabierto:
+                    return _a_revision(solicitud, [por_que])
 
             try:
                 so = erp.policy_get_doc("Sales Order", pedido)
@@ -1312,19 +1643,25 @@ def revalidar(so: dict, solicitud: Solicitud) -> list[str]:
             print(f"[solicitudes] {solicitud.pedido}: stock no verificable causa={exc}")
             problemas.append(f"no pude verificar el stock de {codigo}")
 
+    # The day matters whichever way the goods move: a pickup somebody agreed to
+    # last Thursday is as stale as a delivery, and confirming it would put a
+    # past date on the order.
     metodo = str(solicitud.ofrecido.get("metodo") or "entrega")
     fecha = str(solicitud.ofrecido.get("fecha") or "")
-    if metodo == "entrega":
-        if not fecha:
-            problemas.append("la oferta no dice qué día se entrega")
-        else:
-            try:
-                from datetime import date as _date
+    if not fecha:
+        problemas.append(
+            "la oferta no dice qué día se retira"
+            if metodo == "retiro"
+            else "la oferta no dice qué día se entrega"
+        )
+    else:
+        try:
+            from datetime import date as _date
 
-                if _date.fromisoformat(fecha) < policy._hoy_del_negocio():
-                    problemas.append("la fecha acordada ya pasó")
-            except Exception:
-                problemas.append("la fecha acordada no se pudo interpretar")
+            if _date.fromisoformat(fecha) < policy._hoy_del_negocio():
+                problemas.append("la fecha acordada ya pasó")
+        except Exception:
+            problemas.append("la fecha acordada no se pudo interpretar")
     return problemas
 
 
@@ -1350,13 +1687,15 @@ def _aplicar_terminos(pedido: str, solicitud: Solicitud) -> tuple[bool, str]:
         cargo = float(solicitud.ofrecido.get("cargo") or 0)
     except (TypeError, ValueError):
         return False, "el cargo acordado no se pudo leer"
-    metodo = str(solicitud.ofrecido.get("metodo") or "entrega")
 
     try:
         erpnext.policy_aplicar_terminos(
             "Sales Order",
             pedido,
-            delivery_date=fecha if metodo == "entrega" else "",
+            # Written for a pickup too: delivery_date is the day the goods
+            # leave, and leaving the old one there dates the order to a day
+            # nobody agreed to — the exception's date, which has often passed.
+            delivery_date=fecha,
             descuento_pct=descuento if descuento > 0 else None,
         )
     except Exception as exc:

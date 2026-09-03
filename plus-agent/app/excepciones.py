@@ -16,6 +16,14 @@ agreeable answer, and a customer only has to insist. So there is no judgement
 here, only comparisons against values the owner set. The model may ASK for the
 exception and REPEAT what was decided; it never decides.
 
+AND WHAT IF NOBODY ANSWERS?
+Then the request expires (app/solicitudes.py) and the customer still deserves
+an answer with something in it. ``evaluar_respaldo`` computes that answer the
+same way: the next NORMAL delivery day the owner configured, or — when there is
+no round to put them on — a pickup at the shop, if he enabled one. It is the
+same kind of comparison against the same kind of value; no model is asked what
+would be reasonable.
+
 FAIL CLOSED
 Anything missing, unparseable or contradictory means "not pre-authorized",
 which routes the case to a person. That is the direction where a wrong answer
@@ -82,8 +90,8 @@ def _sin_tildes(texto: str) -> str:
     ).strip()
 
 
-def activa() -> bool:
-    return os.getenv("ENTREGA_EXCEPCION_ACTIVA", "").strip().lower() in {
+def _bandera(variable: str) -> bool:
+    return os.getenv(variable, "").strip().lower() in {
         "true",
         "1",
         "si",
@@ -92,23 +100,65 @@ def activa() -> bool:
     }
 
 
-def dias_habilitados() -> list[int]:
-    """Weekday numbers the owner pre-authorized, in ISO Monday-0 form."""
+def _dias(variable: str) -> list[int]:
+    """Weekday numbers from one variable, in ISO Monday-0 form."""
     dias: list[int] = []
-    for parte in os.getenv("ENTREGA_EXCEPCION_DIAS", "").split(","):
+    for parte in os.getenv(variable, "").split(","):
         indice = _DIAS.get(_sin_tildes(parte))
         if indice is not None and indice not in dias:
             dias.append(indice)
     return sorted(dias)
 
 
-def hora_configurada() -> str:
-    """The configured time, or '' when it is missing or not a real time."""
-    crudo = os.getenv("ENTREGA_EXCEPCION_HORA", "").strip()
-    encontrado = _HORA.match(crudo)
+def _hora_de(variable: str) -> str:
+    """One variable's time, or '' when it is missing or not a real time."""
+    encontrado = _HORA.match(os.getenv(variable, "").strip())
     if not encontrado:
         return ""
     return f"{int(encontrado.group(1)):02d}:{encontrado.group(2)}"
+
+
+def activa() -> bool:
+    return _bandera("ENTREGA_EXCEPCION_ACTIVA")
+
+
+def dias_habilitados() -> list[int]:
+    """Weekday numbers the owner pre-authorized, in ISO Monday-0 form."""
+    return _dias("ENTREGA_EXCEPCION_DIAS")
+
+
+def hora_configurada() -> str:
+    """The configured time, or '' when it is missing or not a real time."""
+    return _hora_de("ENTREGA_EXCEPCION_HORA")
+
+
+# --- The fallback: the NORMAL round, and the shop counter. ------------------
+# These are not exception values. ENTREGA_DIAS/ENTREGA_HORA are the ordinary
+# delivery rounds, and RETIRO_LOCAL_* is the counter the customer can come to.
+# They only ever produce an offer AFTER a request expired unanswered, so they
+# never compete with the deterministic path or with a person's decision.
+
+
+def dias_reparto() -> list[int]:
+    """The weekdays the normal delivery round goes out."""
+    return _dias("ENTREGA_DIAS")
+
+
+def hora_reparto() -> str:
+    """The time the normal round is promised for."""
+    return _hora_de("ENTREGA_HORA")
+
+
+def retiro_activo() -> bool:
+    return _bandera("RETIRO_LOCAL_ACTIVO")
+
+
+def dias_retiro() -> list[int]:
+    return _dias("RETIRO_LOCAL_DIAS")
+
+
+def hora_retiro() -> str:
+    return _hora_de("RETIRO_LOCAL_HORA")
 
 
 def _numero(variable: str) -> float | None:
@@ -153,9 +203,15 @@ def _hoy() -> date:
     return policy._hoy_del_negocio()
 
 
-def _proxima_fecha(dias: list[int], hoy: date) -> str:
-    """The next pre-authorized day, today included, inside the horizon."""
-    for adelanto in range(HORIZONTE_DIAS + 1):
+def _proxima_fecha(dias: list[int], hoy: date, *, desde: int = 0) -> str:
+    """The next configured day inside the horizon, no earlier than ``desde``.
+
+    ``desde=0`` includes today, which is what a live exception wants: the
+    customer is writing now and the owner said today is fine. ``desde=1``
+    excludes it, which is what the expiry fallback wants: that request sat
+    unanswered for hours, and today's round may already have left.
+    """
+    for adelanto in range(max(0, desde), HORIZONTE_DIAS + 1):
         candidato = hoy + timedelta(days=adelanto)
         if candidato.weekday() in dias:
             return candidato.isoformat()
@@ -197,11 +253,7 @@ def evaluar_entrega(sales_order: dict, *, hoy: date | None = None) -> Evaluacion
 
     # An exception moves the DAY, not the map: outside the delivery zones there
     # is no route at all, and no fee makes one appear.
-    try:
-        en_zona, motivo_zona = entrega.autorizada(sales_order)
-    except Exception as exc:
-        print(f"[excepciones] zona no verificable ({type(exc).__name__})")
-        return Evaluacion(False, None, "no pude verificar la zona de entrega")
+    en_zona, motivo_zona = _en_zona(sales_order)
     if not en_zona:
         return Evaluacion(False, None, motivo_zona or "la dirección no está en zona")
 
@@ -227,3 +279,83 @@ def texto_oferta(oferta: Oferta, moneda: str = "") -> str:
         else f"con un cargo de {pesos(oferta.cargo, 2)} {moneda}".strip()
     )
     return f"{oferta.fecha} a las {oferta.hora}, {cargo}"
+
+
+def _en_zona(sales_order: dict) -> tuple[bool, str]:
+    """Can this address be delivered to at all? Never raises."""
+    try:
+        return entrega.autorizada(sales_order)
+    except Exception as exc:
+        print(f"[excepciones] zona no verificable ({type(exc).__name__})")
+        return False, "no pude verificar la zona de entrega"
+
+
+def evaluar_respaldo(sales_order: dict, *, hoy: date | None = None) -> Evaluacion:
+    """What can be offered INSTEAD, now that nobody answered in time.
+
+    An expired request must not leave the customer with "write to me again":
+    they already wrote, and waiting was our side's failure. So this returns a
+    CONCRETE second offer, and it is arithmetic on the owner's own values, not
+    a judgement:
+
+      1. the next NORMAL delivery day (``ENTREGA_DIAS`` / ``ENTREGA_HORA``),
+         because the customer asked to be delivered to and a normal round keeps
+         that intent. It still needs an address inside the delivery zones: the
+         exception moved the day, and so does this;
+      2. otherwise a pickup at the shop (``RETIRO_LOCAL_*``), which needs no
+         route and no zone — the customer comes to us.
+
+    Both carry NO fee. A normal round day is the ordinary price, and a pickup
+    has nothing to charge for; that also keeps the offer independent of
+    ``ENTREGA_CARGO_CUENTA``, so accepting it can never stall on a missing
+    account. Today is excluded on purpose (see ``_proxima_fecha``).
+
+    Fails closed: when nothing can be computed, ``preautorizada`` is False and
+    ``motivo`` lists every reason, so the person who has to pick up the case
+    reads what is missing instead of guessing.
+    """
+    try:
+        dia = hoy or _hoy()
+    except erpnext.ERPNextError:
+        return Evaluacion(False, None, "no pude establecer la fecha de hoy")
+
+    motivos: list[str] = []
+
+    dias = dias_reparto()
+    hora = hora_reparto()
+    if not dias:
+        motivos.append("no hay días de reparto configurados (ENTREGA_DIAS)")
+    elif not hora:
+        motivos.append("no hay hora de reparto configurada (ENTREGA_HORA)")
+    else:
+        fecha = _proxima_fecha(dias, dia, desde=1)
+        if not fecha:
+            motivos.append("ningún día de reparto cae en los próximos días")
+        else:
+            en_zona, motivo_zona = _en_zona(sales_order)
+            if en_zona:
+                return Evaluacion(
+                    True, Oferta(fecha=fecha, hora=hora, cargo=0.0), ""
+                )
+            motivos.append(motivo_zona or "la dirección no está en zona")
+
+    if not retiro_activo():
+        motivos.append("el dueño no habilitó el retiro en el local")
+        return Evaluacion(False, None, "; ".join(motivos))
+
+    dias_r = dias_retiro()
+    hora_r = hora_retiro()
+    if not dias_r:
+        motivos.append("no hay días de retiro configurados (RETIRO_LOCAL_DIAS)")
+    elif not hora_r:
+        motivos.append("no hay hora de retiro configurada (RETIRO_LOCAL_HORA)")
+    else:
+        fecha_r = _proxima_fecha(dias_r, dia, desde=1)
+        if fecha_r:
+            return Evaluacion(
+                True,
+                Oferta(fecha=fecha_r, hora=hora_r, cargo=0.0, metodo="retiro"),
+                "",
+            )
+        motivos.append("ningún día de retiro cae en los próximos días")
+    return Evaluacion(False, None, "; ".join(motivos))

@@ -257,13 +257,48 @@ never decides, and neither does the management agent.
    sweep runs, and the sweep marks the draft so ERPNext itself stops reserving
    — reported as released only when a re-read proves it. A late decision does
    not revive an expired request.
-8. **Whatever the customer wrote is data.** It travels in one field, quoted and
+8. **An expiry is still an answer.** Nobody answering is our failure, not the
+   customer's, so they are not sent away to write again. When a request
+   expires the original dies for good — `vencida` is terminal, its hold is
+   released, and no later decision reopens it — and a **second, separate**
+   request is opened carrying a concrete offer computed from the owner's own
+   configuration: the next normal delivery day (`ENTREGA_DIAS` /
+   `ENTREGA_HORA`, address still inside the zones), or a pickup at the shop
+   (`RETIRO_LOCAL_ACTIVO` / `RETIRO_LOCAL_DIAS` / `RETIRO_LOCAL_HORA`), which
+   needs no route and no zone. New id, new expiry, its own event trail. Both
+   carry no fee, so accepting can never stall on a missing charge account, and
+   today is excluded — that request sat unanswered for hours and today's round
+   may already have left.
+   It is still only an **offer**: the customer has to accept it in so many
+   words, and acceptance re-reads the order and re-validates stock, draft
+   commitments, quantities, total, price, discount, delivery details and order
+   state under the distributed lock, exactly like any other offer. Nothing was
+   held while they thought about it — the draft was closed when the original
+   expired — so accepting re-opens it first and the revalidation is what proves
+   the units are still there. A fallback never gets a fallback of its own, and
+   when nothing can be computed nothing is offered: the customer hears the
+   plain truth and the manager is told what was missing.
+9. **Whatever the customer wrote is data.** It travels in one field, quoted and
    labelled, and is never part of a prompt or an instruction.
 
 A delivery fee is only written into the order when `ENTREGA_CARGO_CUENTA` names
 the account to book it against. Without it the order is not confirmed and a
 person is asked to add the charge: a stock ERPNext has no plain fee field, and
 inventing a total is worse than waiting.
+
+The expiry fallback is off until it is configured, and like the exception
+variables it is not part of `make check-env`: unset means an expired request
+ends with the honest "I did not get an answer" and one audited notice asking a
+person to pick it up, which is the direction that never promises a delivery
+nobody can make.
+
+```
+ENTREGA_DIAS=martes,viernes        the normal delivery round
+ENTREGA_HORA=08:00                 the time it is promised for
+RETIRO_LOCAL_ACTIVO=true           the shop counter, for addresses off the round
+RETIRO_LOCAL_DIAS=sabado
+RETIRO_LOCAL_HORA=10:00
+```
 
 Every command runs a deterministic handler in `app/aprobacion.py` /
 `app/decisiones.py` after `router.es_equipo()` authenticates the sender; none

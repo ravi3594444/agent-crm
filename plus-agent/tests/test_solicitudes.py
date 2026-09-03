@@ -21,6 +21,7 @@ import json
 import sys
 import time
 from contextlib import contextmanager
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -1096,3 +1097,583 @@ def test_a_bare_acceptance_with_two_offers_open_asks_which_order(mundo) -> None:
 
 def test_an_acceptance_from_a_customer_with_nothing_pending_is_ignored(mundo) -> None:
     assert main._customer_command("acepto", CUSTOMER_PHONE, CLIENTE) is None
+
+
+# ---------------------------------------------------------------------------
+# An expiry is an ANSWER: the concrete fallback offer.
+# ---------------------------------------------------------------------------
+
+# Monday, so "the next configured day" is arithmetic a reader can check and
+# not whatever weekday the suite happens to run on.
+LUNES = date(2026, 9, 7)
+MARTES = "2026-09-08"
+SABADO = "2026-09-12"
+
+
+def _reparto(monkeypatch, *, dias: str = "martes,viernes", hora: str = "08:00") -> None:
+    """The owner's normal delivery round."""
+    monkeypatch.setenv("ENTREGA_DIAS", dias)
+    monkeypatch.setenv("ENTREGA_HORA", hora)
+
+
+def _retiro(monkeypatch, *, dias: str = "sabado", hora: str = "10:00") -> None:
+    """The owner's shop counter."""
+    monkeypatch.setenv("RETIRO_LOCAL_ACTIVO", "true")
+    monkeypatch.setenv("RETIRO_LOCAL_DIAS", dias)
+    monkeypatch.setenv("RETIRO_LOCAL_HORA", hora)
+
+
+@pytest.fixture
+def lunes(monkeypatch):
+    """Pin the business day, and clear every fallback variable."""
+    from app import policy
+
+    monkeypatch.setattr(policy, "_hoy_del_negocio", lambda: LUNES)
+    for nombre in (
+        "ENTREGA_DIAS",
+        "ENTREGA_HORA",
+        "RETIRO_LOCAL_ACTIVO",
+        "RETIRO_LOCAL_DIAS",
+        "RETIRO_LOCAL_HORA",
+    ):
+        monkeypatch.delenv(nombre, raising=False)
+    return LUNES
+
+
+def _vencer(mundo, solicitud) -> None:
+    """Run the sweep past the request's deadline, the way the thread does."""
+    solicitudes.tick(ahora=solicitud.vence_en + 1)
+
+
+def _respaldo(mundo, monkeypatch, *, entrega_ok: bool = True):
+    """Expire a request with a delivery round configured, and return the offer."""
+    from tests.conftest import entrega_autorizada
+
+    entrega_autorizada(monkeypatch, autorizada=entrega_ok)
+    _reparto(monkeypatch)
+    solicitud = _abrir(mundo)
+    _vencer(mundo, solicitud)
+    return solicitud, solicitudes.leer(SO)
+
+
+def test_a_timeout_offers_the_next_normal_delivery_day_by_itself(
+    mundo, monkeypatch, lunes
+) -> None:
+    """The requirement: a concrete offer, not "write to me again"."""
+    vencida, respaldo = _respaldo(mundo, monkeypatch)
+
+    assert respaldo is not None
+    assert respaldo.id != vencida.id
+    assert respaldo.es_respaldo is True and respaldo.origen == vencida.id
+    assert respaldo.estado == solicitudes.ESPERANDO_CLIENTE
+    assert respaldo.decision == solicitudes.RESPALDO
+    assert respaldo.ofrecido == {
+        "fecha": MARTES,
+        "hora": "08:00",
+        "cargo": 0.0,
+        "metodo": "entrega",
+    }
+    texto = _mensaje_cliente(mundo)
+    assert MARTES in texto and "08:00" in texto
+    assert f"acepto {SO}" in texto
+    # Not the old ending, and not a request for another message.
+    assert "no llegué a tener una respuesta" not in texto
+
+
+def test_the_fallback_is_a_pickup_when_there_is_no_round_to_put_them_on(
+    mundo, monkeypatch, lunes
+) -> None:
+    """Out of zone: an exception moves the day, and so does the fallback."""
+    _retiro(monkeypatch)
+    _, respaldo = _respaldo(mundo, monkeypatch, entrega_ok=False)
+
+    assert respaldo is not None and respaldo.es_respaldo is True
+    assert respaldo.ofrecido["metodo"] == "retiro"
+    assert respaldo.ofrecido["fecha"] == SABADO
+    assert respaldo.ofrecido["cargo"] == 0.0
+    texto = _mensaje_cliente(mundo)
+    assert "retiro en el local" in texto and SABADO in texto
+
+
+def test_the_fallback_never_carries_a_fee_nobody_configured_an_account_for(
+    mundo, monkeypatch, lunes
+) -> None:
+    """A fee would need ENTREGA_CARGO_CUENTA, and acceptance would stall."""
+    _, respaldo = _respaldo(mundo, monkeypatch)
+
+    assert respaldo.ofrecido["cargo"] == 0.0
+    assert "cargo" not in solicitudes.terminos_texto(respaldo.ofrecido, "ARS")
+
+
+def test_the_fallback_is_never_today_however_the_round_falls(monkeypatch, lunes) -> None:
+    """That request sat unanswered for hours; today's round may have left."""
+    from tests.conftest import entrega_autorizada
+
+    entrega_autorizada(monkeypatch)
+    _reparto(monkeypatch, dias="lunes,martes")
+
+    evaluacion = excepciones.evaluar_respaldo({"name": SO}, hoy=LUNES)
+
+    assert evaluacion.preautorizada is True
+    assert evaluacion.oferta.fecha == MARTES  # not 2026-09-07, which is a Monday
+    # ...while a LIVE exception still includes today: the owner said so.
+    monkeypatch.setenv("ENTREGA_EXCEPCION_ACTIVA", "true")
+    monkeypatch.setenv("ENTREGA_EXCEPCION_DIAS", "lunes,martes")
+    monkeypatch.setenv("ENTREGA_EXCEPCION_HORA", "19:00")
+    monkeypatch.setenv("ENTREGA_EXCEPCION_CARGO", "1500")
+    viva = excepciones.evaluar_entrega({"grand_total": 8000}, hoy=LUNES)
+    assert viva.oferta.fecha == LUNES.isoformat()
+
+
+def _eventos(mundo) -> list[dict]:
+    """Every durable event on the order, oldest first, as ERPNext holds them."""
+    return [
+        json.loads(f["content"].split(solicitudes.MARCA, 1)[1])
+        for f in mundo["durables"]
+        if solicitudes.MARCA in f["content"]
+    ]
+
+
+def test_the_original_request_stays_expired_for_ever(mundo, monkeypatch, lunes) -> None:
+    vencida, respaldo = _respaldo(mundo, monkeypatch)
+    assert respaldo.id != vencida.id
+
+    # Everything a late arrival could try, in one go.
+    decisiones.aprobar_solicitud(SO, STAFF)
+    decisiones.rechazar_solicitud(SO, STAFF, "lo hago igual")
+    solicitudes.tick(ahora=vencida.vence_en + 5)
+    solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    eventos = _eventos(mundo)
+    mios = [i for i, e in enumerate(eventos) if e["id"] == vencida.id]
+    expiro = mios[-1]
+    assert eventos[expiro]["estado"] == solicitudes.VENCIDA
+    # Its id never appears again at all, let alone open: the record is closed
+    # and every later event belongs to the fallback.
+    assert expiro == mios[-1] == max(mios)
+    assert {e["id"] for e in eventos[expiro + 1 :]} == {respaldo.id}
+
+
+def test_the_expired_holds_stock_is_released_before_anything_is_offered(
+    mundo, monkeypatch, lunes
+) -> None:
+    _, respaldo = _respaldo(mundo, monkeypatch)
+
+    assert mundo["estados"] == ["Closed"]
+    # The fallback is an offer, not a hold: policy counts the draft as free.
+    assert mundo["so"]["status"] == "Closed"
+    assert respaldo.estado == solicitudes.ESPERANDO_CLIENTE
+
+
+def test_a_late_manager_decision_is_still_refused_after_a_fallback(
+    mundo, monkeypatch, lunes
+) -> None:
+    vencida, respaldo = _respaldo(mundo, monkeypatch)
+
+    for resultado in (
+        decisiones.aprobar_solicitud(SO, STAFF),
+        decisiones.contraofertar(SO, STAFF, {"fecha": MARTES, "hora": "18:00", "cargo": 0}),
+        decisiones.ofrecer_retiro(SO, STAFF, {"fecha": MARTES, "hora": "10:00"}),
+        decisiones.rechazar_solicitud(SO, STAFF, "lo hago igual"),
+    ):
+        assert resultado["ok"] is False
+        assert vencida.id in resultado["detalle"] or "venció" in resultado["detalle"]
+
+    assert mundo["submits"] == []
+    # The fallback is untouched: same id, same terms, still waiting on the customer.
+    actual = solicitudes.leer(SO)
+    assert actual.id == respaldo.id
+    assert actual.decision == solicitudes.RESPALDO
+    assert actual.estado == solicitudes.ESPERANDO_CLIENTE
+
+
+def test_a_late_manager_decision_is_refused_when_there_was_no_fallback(
+    mundo, monkeypatch, lunes
+) -> None:
+    """Nothing configured: the old refusal, unchanged."""
+    solicitud = _abrir(mundo)
+    _vencer(mundo, solicitud)
+
+    resultado = decisiones.aprobar_solicitud(SO, STAFF)
+
+    assert resultado["ok"] is False and "vencida" in resultado["detalle"]
+    assert mundo["submits"] == []
+
+
+def test_the_manager_is_told_what_was_offered_in_their_place(
+    mundo, monkeypatch, lunes
+) -> None:
+    _, respaldo = _respaldo(mundo, monkeypatch)
+
+    texto = _mensaje_equipo(mundo)
+
+    assert "venció sin respuesta" in texto
+    assert respaldo.id in texto and MARTES in texto
+    assert "hasta que el cliente acepte" in texto
+
+
+# --- the customer's explicit yes -------------------------------------------
+
+
+def test_accepting_the_fallback_reopens_revalidates_and_confirms(
+    mundo, monkeypatch, lunes
+) -> None:
+    _, respaldo = _respaldo(mundo, monkeypatch)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert "quedó confirmado" in respuesta
+    # Closed when the original expired, back to Draft to be confirmed.
+    assert mundo["estados"] == ["Closed", "Draft"]
+    assert mundo["aplicados"] == [{"fecha": MARTES, "descuento": None}]
+    assert mundo["submits"] == [SO]
+    assert solicitudes.leer(SO).estado == solicitudes.CUMPLIDA
+    assert solicitudes.leer(SO).id == respaldo.id
+    assert f"solicitud:{SO}" in mundo["locks"]
+
+
+def test_the_fallback_confirms_nothing_before_the_customer_answers(
+    mundo, monkeypatch, lunes
+) -> None:
+    _respaldo(mundo, monkeypatch)
+
+    assert mundo["submits"] == []
+    assert mundo["aplicados"] == []
+    assert solicitudes.leer(SO).estado == solicitudes.ESPERANDO_CLIENTE
+
+
+def test_stock_that_went_while_the_fallback_waited_stops_the_order(
+    mundo, monkeypatch, lunes
+) -> None:
+    """Nothing was held, so this is the case the revalidation exists for."""
+    _respaldo(mundo, monkeypatch)
+    mundo["stock"] = False
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert "necesito revisarlo con una persona" in respuesta
+    assert mundo["submits"] == []
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_HUMANA
+
+
+def test_a_draft_erpnext_refuses_to_reopen_is_never_confirmed(
+    mundo, monkeypatch, lunes
+) -> None:
+    _respaldo(mundo, monkeypatch)
+    monkeypatch.setattr(
+        erpnext, "policy_update_status", Mock(side_effect=erpnext.ERPNextError("no"))
+    )
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert "necesito revisarlo con una persona" in respuesta
+    assert mundo["submits"] == []
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_HUMANA
+
+
+def test_a_pickup_fallback_writes_the_day_it_is_picked_up(
+    mundo, monkeypatch, lunes
+) -> None:
+    _retiro(monkeypatch)
+    _respaldo(mundo, monkeypatch, entrega_ok=False)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert "quedó confirmado" in respuesta
+    # Not the exception's stale date: the day the goods actually leave.
+    assert mundo["aplicados"] == [{"fecha": SABADO, "descuento": None}]
+
+
+def test_only_the_orders_own_customer_can_accept_the_fallback(
+    mundo, monkeypatch, lunes
+) -> None:
+    _respaldo(mundo, monkeypatch)
+
+    respuesta = solicitudes.aceptar_cliente(SO, OTRO)
+
+    assert "No encontré una oferta tuya pendiente" in respuesta
+    assert mundo["submits"] == []
+
+
+def test_refusing_the_fallback_closes_it_and_confirms_nothing(
+    mundo, monkeypatch, lunes
+) -> None:
+    _respaldo(mundo, monkeypatch)
+
+    respuesta = solicitudes.rechazar_cliente(SO, CUSTOMER_PHONE)
+
+    assert f"no avanzo con {SO}" in respuesta
+    assert mundo["submits"] == []
+    assert solicitudes.leer(SO).estado == solicitudes.RECHAZADA_CLIENTE
+
+
+def test_a_bare_acceptance_resolves_the_fallback_like_any_other_offer(
+    mundo, monkeypatch, lunes
+) -> None:
+    _respaldo(mundo, monkeypatch)
+
+    esperando = solicitudes.esperando_para(CLIENTE)
+
+    assert esperando is not None and esperando.es_respaldo is True
+
+
+# --- duplicate events, restarts, concurrency, several orders ---------------
+
+
+def test_a_second_timeout_event_for_the_same_order_offers_nothing_twice(
+    mundo, monkeypatch, lunes
+) -> None:
+    """The sweep is at-least-once: a repeat must be a no-op."""
+    solicitud = _abrir(mundo)
+    from tests.conftest import entrega_autorizada
+
+    entrega_autorizada(monkeypatch)
+    _reparto(monkeypatch)
+
+    primera = solicitudes.tick(ahora=solicitud.vence_en + 1)
+    segunda = solicitudes.tick(ahora=solicitud.vence_en + 2)
+    tercera = solicitudes._vencer(SO, solicitud.vence_en + 3)
+
+    assert primera == 1 and segunda == 0 and tercera is False
+    respaldos = [f for f in mundo["durables"] if '"evento":"respaldo"' in f["content"]]
+    assert len(respaldos) == 1
+    assert mundo["estados"] == ["Closed"]  # not re-closed on the repeat
+    # Exactly three notices ever queued: the original question to the team, and
+    # the fallback to each side. The repeats add none.
+    assert avisos.pendientes() == 3
+    avisos.procesar()
+    avisos.procesar()
+    avisos.procesar()
+    assert len([t for tel, t in mundo["enviados"] if tel == CUSTOMER_PHONE]) == 1
+
+
+def test_two_sweeps_at_once_produce_one_fallback(mundo, monkeypatch, lunes) -> None:
+    """The lock serializes them; the second re-reads and finds it done."""
+    solicitud = _abrir(mundo)
+    from tests.conftest import entrega_autorizada
+
+    entrega_autorizada(monkeypatch)
+    _reparto(monkeypatch)
+
+    resultados = [
+        solicitudes._vencer(SO, solicitud.vence_en + 1),
+        solicitudes._vencer(SO, solicitud.vence_en + 1),
+    ]
+
+    assert resultados == [True, False]
+    assert len([f for f in mundo["durables"] if '"evento":"respaldo"' in f["content"]]) == 1
+
+
+def test_the_fallback_survives_a_restart_with_an_empty_redis(
+    mundo, monkeypatch, lunes
+) -> None:
+    _, respaldo = _respaldo(mundo, monkeypatch)
+    outbound_status._client.values.clear()
+    outbound_status._client.zsets.clear()
+
+    recuperada = solicitudes.leer(SO)
+
+    assert recuperada is not None
+    assert recuperada.id == respaldo.id
+    assert recuperada.es_respaldo is True and recuperada.origen == respaldo.origen
+    assert recuperada.estado == solicitudes.ESPERANDO_CLIENTE
+    assert recuperada.ofrecido == respaldo.ofrecido
+    assert recuperada.vence_en == respaldo.vence_en
+    # and it is schedulable again, so its own deadline still means something
+    assert solicitudes.reconstruir_indice() == 1
+
+
+def test_a_restart_does_not_resurrect_the_request_the_fallback_replaced(
+    mundo, monkeypatch, lunes
+) -> None:
+    vencida, _ = _respaldo(mundo, monkeypatch)
+    outbound_status._client.values.clear()
+    outbound_status._client.zsets.clear()
+
+    assert solicitudes.leer(SO).id != vencida.id
+    assert decisiones.aprobar_solicitud(SO, STAFF)["ok"] is False
+
+
+def test_a_fallback_that_expires_gets_no_fallback_of_its_own(
+    mundo, monkeypatch, lunes
+) -> None:
+    """Otherwise the machine offers dates for ever, talking to itself."""
+    _, respaldo = _respaldo(mundo, monkeypatch)
+    mundo["enviados"].clear()
+
+    cerradas = solicitudes.tick(ahora=respaldo.vence_en + 1)
+
+    assert cerradas == 1
+    assert solicitudes.leer(SO).estado == solicitudes.VENCIDA
+    assert len([f for f in mundo["durables"] if '"evento":"respaldo"' in f["content"]]) == 1
+    # The draft was already out of the way, so it is not written to again.
+    assert mundo["estados"] == ["Closed"]
+    texto = _mensaje_cliente(mundo)
+    # Their silence, not ours: the text says so.
+    assert "no tuve tu respuesta" in texto
+    assert "no llegué a tener una respuesta del encargado" not in texto
+
+
+def test_each_order_gets_its_own_fallback_and_nothing_leaks(
+    mundo, monkeypatch, lunes
+) -> None:
+    from tests.conftest import entrega_autorizada
+
+    entrega_autorizada(monkeypatch)
+    _reparto(monkeypatch)
+    otro_nombre = "SAL-ORD-2026-00099"
+    pedidos = {SO: mundo["so"], otro_nombre: {**PEDIDO, "name": otro_nombre}}
+    monkeypatch.setattr(
+        erpnext,
+        "policy_get_doc",
+        lambda dt, name: dict(pedidos[name])
+        if dt == "Sales Order"
+        else {"name": name, "mobile_no": CUSTOMER_PHONE},
+    )
+    primera = _abrir(mundo)
+    segunda = solicitudes.crear(pedidos[otro_nombre], solicitado={"metodo": "entrega"})
+    assert segunda is not None
+
+    # Only the first one has run out of time.
+    solicitudes.registrar(segunda, "prueba", vence_en=primera.vence_en + 10_000)
+    solicitudes.tick(ahora=primera.vence_en + 1)
+
+    respaldo = solicitudes.leer(SO)
+    intacta = solicitudes.leer(otro_nombre)
+    assert respaldo.es_respaldo is True and respaldo.pedido == SO
+    assert intacta.estado == solicitudes.PENDIENTE and intacta.id == segunda.id
+    assert intacta.es_respaldo is False
+
+
+# --- fail closed -----------------------------------------------------------
+
+
+def test_nothing_configured_means_nothing_is_offered(mundo, monkeypatch, lunes) -> None:
+    solicitud = _abrir(mundo)
+
+    _vencer(mundo, solicitud)
+
+    assert solicitudes.leer(SO).estado == solicitudes.VENCIDA
+    assert not [f for f in mundo["durables"] if '"evento":"respaldo"' in f["content"]]
+    assert "no llegué a tener una respuesta" in _mensaje_cliente(mundo)
+    assert "No pude ofrecerle nada concreto" in _mensaje_equipo(mundo)
+
+
+@pytest.mark.parametrize(
+    "dias,hora",
+    [("", "08:00"), ("martes", ""), ("martes", "no es una hora")],
+)
+def test_half_configured_rounds_are_never_stretched_into_an_offer(
+    mundo, monkeypatch, lunes, dias, hora
+) -> None:
+    from tests.conftest import entrega_autorizada
+
+    entrega_autorizada(monkeypatch)
+    _reparto(monkeypatch, dias=dias, hora=hora)
+    solicitud = _abrir(mundo)
+
+    _vencer(mundo, solicitud)
+
+    assert not [f for f in mundo["durables"] if '"evento":"respaldo"' in f["content"]]
+    assert solicitudes.leer(SO).estado == solicitudes.VENCIDA
+
+
+def test_out_of_zone_with_no_pickup_configured_offers_nothing(
+    mundo, monkeypatch, lunes
+) -> None:
+    _, respaldo = _respaldo(mundo, monkeypatch, entrega_ok=False)
+
+    assert respaldo.estado == solicitudes.VENCIDA
+    assert respaldo.es_respaldo is False
+    assert "el dueño no habilitó el retiro" in _mensaje_equipo(mundo)
+
+
+def test_a_customer_with_no_phone_is_never_given_a_durable_offer(
+    mundo, monkeypatch, lunes
+) -> None:
+    """A record nobody can accept would be a promise with no way to answer."""
+    from tests.conftest import entrega_autorizada
+
+    entrega_autorizada(monkeypatch)
+    _reparto(monkeypatch)
+    solicitud = _abrir(mundo)
+    monkeypatch.setattr(
+        erpnext,
+        "policy_get_doc",
+        lambda dt, name: dict(mundo["so"])
+        if dt == "Sales Order"
+        else {"name": name, "mobile_no": ""},
+    )
+
+    _vencer(mundo, solicitud)
+
+    assert not [f for f in mundo["durables"] if '"evento":"respaldo"' in f["content"]]
+    assert solicitudes.leer(SO).estado == solicitudes.VENCIDA
+
+
+def test_an_order_that_is_no_longer_a_draft_gets_no_fallback(
+    mundo, monkeypatch, lunes
+) -> None:
+    from tests.conftest import entrega_autorizada
+
+    entrega_autorizada(monkeypatch)
+    _reparto(monkeypatch)
+    solicitud = _abrir(mundo)
+    mundo["so"]["docstatus"] = 1
+
+    _vencer(mundo, solicitud)
+
+    assert not [f for f in mundo["durables"] if '"evento":"respaldo"' in f["content"]]
+    assert "el pedido ya no es un borrador" in _mensaje_equipo(mundo)
+
+
+def test_an_offer_erpnext_refuses_to_record_is_never_sent(
+    mundo, monkeypatch, lunes
+) -> None:
+    from tests.conftest import entrega_autorizada
+
+    entrega_autorizada(monkeypatch)
+    _reparto(monkeypatch)
+    solicitud = _abrir(mundo)
+    original = erpnext.registrar_comentario
+    llamadas: list[int] = []
+
+    def falla_en_el_respaldo(doctype, name, text):
+        llamadas.append(1)
+        if '"evento":"respaldo"' in text:
+            raise erpnext.ERPNextError("no")
+        return original(doctype, name, text)
+
+    monkeypatch.setattr(erpnext, "registrar_comentario", falla_en_el_respaldo)
+
+    _vencer(mundo, solicitud)
+
+    assert solicitudes.leer(SO).estado == solicitudes.VENCIDA
+    assert "no pude registrar la oferta de respaldo" in _mensaje_equipo(mundo)
+    assert f"acepto {SO}" not in _mensaje_cliente(mundo)
+
+
+def test_the_fallback_offer_never_outlives_the_day_it_promises(monkeypatch) -> None:
+    """An offer for Tuesday 08:00 must not be acceptable on Tuesday at 09:00."""
+    from zoneinfo import ZoneInfo
+
+    monkeypatch.setenv("APROBACION_TIMEOUT_HORAS", "72")
+    manana = (date.today() + timedelta(days=1)).isoformat()
+    momento = datetime.fromisoformat(f"{manana}T08:00").replace(
+        tzinfo=ZoneInfo("America/Argentina/Buenos_Aires")
+    ).timestamp()
+    ahora = time.time()
+
+    vence = solicitudes._vence_respaldo(ahora, manana, "08:00")
+
+    assert vence == pytest.approx(momento, abs=1)
+    assert vence < ahora + 72 * 3600
+
+
+def test_a_date_the_clock_cannot_read_keeps_the_plain_timeout(monkeypatch) -> None:
+    monkeypatch.setenv("APROBACION_TIMEOUT_HORAS", "6")
+    ahora = time.time()
+
+    vence = solicitudes._vence_respaldo(ahora, "no es una fecha", "08:00")
+
+    assert vence == pytest.approx(ahora + 6 * 3600, abs=2)

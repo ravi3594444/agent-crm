@@ -140,3 +140,33 @@ comments, with its own expiry sweep). One new customer tool,
   otherwise the order waits for a person rather than carrying an invented total.
 
 791 tests pass, ruff clean. No model, key or provider change; no live test.
+
+## Phase B follow-up — an expiry is an answer, not a dead end
+
+The timeout released the hold correctly but ended the conversation with "write
+to me again". The customer already wrote; the waiting was our side's failure.
+So the sweep now answers them with something concrete.
+
+- The original request dies for good: `vencida` is terminal, its hold is
+  released, and no later manager decision reopens it (`texto_superada_equipo`
+  says so by name instead of "already decided").
+- A **second, separate** request is opened with a new id, a new expiry and its
+  own event trail, carrying an offer computed from the owner's configuration
+  (`excepciones.evaluar_respaldo`): the next normal delivery day
+  (`ENTREGA_DIAS` / `ENTREGA_HORA`, address still inside the zones), otherwise
+  a pickup at the shop (`RETIRO_LOCAL_*`), which needs no route and no zone.
+  Both carry no fee, so acceptance can never stall on a missing charge
+  account, and today is excluded — that request sat unanswered for hours.
+- The fallback expiry is capped at the moment it promises, so an offer for
+  Tuesday 08:00 is never still acceptable on Tuesday at 09:00.
+- It is only an offer: `acepto <pedido>` is still required, and acceptance
+  re-opens the draft its predecessor closed and then re-validates stock, draft
+  commitments, quantities, total, price, discount, delivery details and order
+  state under the lock. Nothing was held while the customer thought about it,
+  which is exactly what the revalidation is for.
+- A fallback never gets a fallback of its own; a repeated timeout event writes
+  nothing twice; requests stay isolated by Sales Order id; and when nothing can
+  be computed nothing is offered — the customer hears the plain truth and the
+  manager is told what was missing.
+
+824 tests pass, ruff clean. No model, key or provider change; no live test.

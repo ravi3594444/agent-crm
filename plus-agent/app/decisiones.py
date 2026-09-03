@@ -899,6 +899,11 @@ def _abierta(nombre: str) -> tuple[object | None, str]:
     if solicitud is None:
         return None, f"{nombre} no tiene ninguna decisión pendiente."
     if solicitud.estado == solicitudes.ESPERANDO_CLIENTE:
+        if solicitud.es_respaldo:
+            # Nobody decided this one: it expired and the fallback answered for
+            # us. Saying "already decided" would let the manager believe their
+            # late command was the decision.
+            return None, solicitudes.texto_superada_equipo(solicitud)
         return None, (
             f"{nombre} ya está decidido y esperando al cliente: le ofrecí "
             f"{solicitudes.terminos_texto(solicitud.ofrecido, solicitud.moneda)}. "
