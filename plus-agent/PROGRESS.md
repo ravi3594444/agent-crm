@@ -214,3 +214,49 @@ them for ever.
 23 new tests, including the three-layer proof that a failed fallback acceptance
 cannot retain stock (live draft -> deadline reported to policy -> draft closed
 by the sweep). 847 pass, ruff clean. No model, key or provider change.
+
+## Phase B follow-up 3 — the delivery rules become the owner's
+
+They were `os.getenv` reads, so the one thing the owner most needs to change
+was the one thing he could not: the days he delivers on. Now they resolve like
+every other setting — Redis, then the bootstrap environment, then a safe
+default — and he sets them from WhatsApp through the SAME two-step confirmation
+code and the same append-only audit (Redis plus the durable ERPNext comment,
+written first).
+
+- Ten settings: normal round days/time; off-day delivery enablement, days,
+  time, fee and order minimum; pickup enablement, days and time.
+- Their own registry (`limites.ENTREGA`), not `LIMITES`. `configuracion()`
+  validates every entry and raises on the first bad one, and `app/policy.py`
+  calls it once per order LINE and again inside the submit lock — so a typo in
+  "martes" would have become an outage for every customer. `limites.entrega()`
+  reads these on their own and fails SOFT: unreadable means "not
+  pre-authorized", which is where app/excepciones.py already fails.
+- Read per operation. `app/excepciones.py` no longer touches os.getenv; its
+  weekday and time parsing moved into the validators, so one vocabulary
+  validates on the way in and reads on the way out.
+- Deterministic validators for four kinds: weekday lists in any spelling or
+  order ("Miércoles, Sábado" -> "miercoles,sabado"), times ("8", "9:30",
+  "18.00", "7 hs" -> "HH:MM"), sí/no, and money. A `-` sentinel makes "borrá
+  los días" expressible: an empty string in the store reads as "unset" and
+  would silently restore the .env value.
+- `definicion()` now refuses an AMBIGUOUS name instead of returning the first
+  dict match. "hora" matches six settings; picking one would let a vague word
+  from the model move a setting the owner never mentioned.
+- The account head (`ENTREGA_CARGO_CUENTA`) is in no registry and stays a
+  server setting: a wrong account does not break the bot, it unbalances the
+  books, and no model can verify one exists.
+- `readiness.chequear_entrega` reports every rule from the owner's store and
+  raises an AVISO when neither a round nor a pickup is configured — the expiry
+  fallback is then off and an expired request drops the order.
+
+Two money defects fixed on the way, both pre-existing and both about the
+owner's own numbers: `validar()` stored at 6 significant digits, so a 1234567
+ceiling became "1.23457e+06" and read back as 1234570; and `_numero` read
+"1.500" as 1.5 while `solicitudes.parsear_terminos` reads the same keystrokes
+as 1500.
+
+48 new tests: authorization, the confirmation code, the audit trail in both
+places, resolution order, restart, read-per-operation, malformed values,
+ambiguity, the account-head refusal, one-setting-at-a-time, a dead store, and
+the readiness AVISO. 905 pass, ruff clean. No model, key or provider change.

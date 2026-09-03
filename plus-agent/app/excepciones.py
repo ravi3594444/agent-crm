@@ -33,8 +33,6 @@ costs one WhatsApp message instead of a delivery nobody can make.
 from __future__ import annotations
 
 import os
-import re
-import unicodedata
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -45,16 +43,6 @@ from app import entrega, erpnext
 # dentro de dos meses porque el dueño habilitó un solo día de la semana.
 HORIZONTE_DIAS = 7
 
-_DIAS = {
-    "lunes": 0,
-    "martes": 1,
-    "miercoles": 2,
-    "jueves": 3,
-    "viernes": 4,
-    "sabado": 5,
-    "domingo": 6,
-}
-_HORA = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
 @dataclass(frozen=True)
@@ -82,104 +70,81 @@ class Evaluacion:
     motivo: str
 
 
-def _sin_tildes(texto: str) -> str:
-    return "".join(
-        char
-        for char in unicodedata.normalize("NFD", str(texto).lower())
-        if unicodedata.category(char) != "Mn"
-    ).strip()
+# WHERE THESE VALUES COME FROM
+# The OWNER's store first, then the bootstrap environment, then a safe default
+# — app/limites.py resolves all three and normalizes the result, behind the
+# same two-step confirmation code every other setting needs. Read on EVERY
+# call, so a change he confirms applies to the next message with nothing
+# restarted; and it fails soft, so a value that cannot be read reads as "not
+# configured" and this module then answers "not pre-authorized".
 
 
-def _bandera(variable: str) -> bool:
-    return os.getenv(variable, "").strip().lower() in {
-        "true",
-        "1",
-        "si",
-        "sí",
-        "yes",
-    }
+def reglas():
+    """The owner's delivery rules as they stand right now. Never raises."""
+    from app import limites
+
+    try:
+        return limites.entrega()
+    except Exception as exc:
+        print(f"[excepciones] reglas de entrega no legibles ({type(exc).__name__})")
+        return limites.Entrega()
 
 
-def _dias(variable: str) -> list[int]:
-    """Weekday numbers from one variable, in ISO Monday-0 form."""
-    dias: list[int] = []
-    for parte in os.getenv(variable, "").split(","):
-        indice = _DIAS.get(_sin_tildes(parte))
-        if indice is not None and indice not in dias:
-            dias.append(indice)
-    return sorted(dias)
-
-
-def _hora_de(variable: str) -> str:
-    """One variable's time, or '' when it is missing or not a real time."""
-    encontrado = _HORA.match(os.getenv(variable, "").strip())
-    if not encontrado:
-        return ""
-    return f"{int(encontrado.group(1)):02d}:{encontrado.group(2)}"
+# The named readers below are the readable surface for the readiness report,
+# the management tools and the tests. The evaluators do NOT use them: they take
+# one ``reglas()`` snapshot each, so a decision cannot be assembled from two
+# different versions of the configuration.
 
 
 def activa() -> bool:
-    return _bandera("ENTREGA_EXCEPCION_ACTIVA")
+    return reglas().excepcion_activa
 
 
 def dias_habilitados() -> list[int]:
     """Weekday numbers the owner pre-authorized, in ISO Monday-0 form."""
-    return _dias("ENTREGA_EXCEPCION_DIAS")
+    return list(reglas().excepcion_dias)
 
 
 def hora_configurada() -> str:
     """The configured time, or '' when it is missing or not a real time."""
-    return _hora_de("ENTREGA_EXCEPCION_HORA")
+    return reglas().excepcion_hora
 
 
 # --- The fallback: the NORMAL round, and the shop counter. ------------------
-# These are not exception values. ENTREGA_DIAS/ENTREGA_HORA are the ordinary
-# delivery rounds, and RETIRO_LOCAL_* is the counter the customer can come to.
-# They only ever produce an offer AFTER a request expired unanswered, so they
-# never compete with the deterministic path or with a person's decision.
+# These are not exception values. The normal delivery round and the pickup
+# counter only ever produce an offer AFTER a request expired unanswered, so
+# they never compete with the deterministic path or with a person's decision.
 
 
 def dias_reparto() -> list[int]:
     """The weekdays the normal delivery round goes out."""
-    return _dias("ENTREGA_DIAS")
+    return list(reglas().dias_reparto)
 
 
 def hora_reparto() -> str:
     """The time the normal round is promised for."""
-    return _hora_de("ENTREGA_HORA")
+    return reglas().hora_reparto
 
 
 def retiro_activo() -> bool:
-    return _bandera("RETIRO_LOCAL_ACTIVO")
+    return reglas().retiro_activo
 
 
 def dias_retiro() -> list[int]:
-    return _dias("RETIRO_LOCAL_DIAS")
+    return list(reglas().retiro_dias)
 
 
 def hora_retiro() -> str:
-    return _hora_de("RETIRO_LOCAL_HORA")
-
-
-def _numero(variable: str) -> float | None:
-    crudo = os.getenv(variable, "").strip()
-    if not crudo:
-        return None
-    try:
-        valor = float(crudo.replace(",", "."))
-    except (TypeError, ValueError):
-        return None
-    return valor if valor >= 0 else None
+    return reglas().retiro_hora
 
 
 def cargo_configurado() -> float | None:
-    return _numero("ENTREGA_EXCEPCION_CARGO")
+    return reglas().excepcion_cargo
 
 
 def minimo_configurado() -> float:
     """Order total below which no exception is pre-authorized. 0 means none."""
-    valor = _numero("ENTREGA_EXCEPCION_MIN_TOTAL")
-    return valor if valor is not None else 0.0
+    return reglas().excepcion_minimo
 
 
 def cuenta_cargo() -> str:
@@ -189,8 +154,13 @@ def cuenta_cargo() -> str:
     a Sales Taxes and Charges row against an account, and guessing one would
     make the customer's total wrong in the accounts. Empty means the automatic
     path stops before confirming and asks a person to add the charge.
+
+    Environment only, and never through the management agent — see
+    app/limites.py::cuenta_cargo.
     """
-    return os.getenv("ENTREGA_CARGO_CUENTA", "").strip()
+    from app import limites
+
+    return limites.cuenta_cargo()
 
 
 def descripcion_cargo() -> str:
@@ -226,16 +196,22 @@ def evaluar_entrega(sales_order: dict, *, hoy: date | None = None) -> Evaluacion
     delivery zone — because an exception is about the DAY, never about driving
     somewhere there is no route to.
     """
-    if not activa():
+    # ONE snapshot for the whole evaluation. Reading each value separately
+    # would be five Redis round-trips AND five chances for the owner to change
+    # something mid-decision — an offer that pairs last week's days with
+    # today's time is not a rule anybody configured.
+    cfg = reglas()
+
+    if not cfg.excepcion_activa:
         return Evaluacion(False, None, "el dueño no habilitó entregas fuera de día")
 
-    dias = dias_habilitados()
+    dias = list(cfg.excepcion_dias)
     if not dias:
         return Evaluacion(False, None, "no hay días de excepción configurados")
-    hora = hora_configurada()
+    hora = cfg.excepcion_hora
     if not hora:
         return Evaluacion(False, None, "no hay hora de excepción configurada")
-    cargo = cargo_configurado()
+    cargo = cfg.excepcion_cargo
     if cargo is None:
         return Evaluacion(False, None, "no hay cargo de excepción configurado")
 
@@ -243,7 +219,7 @@ def evaluar_entrega(sales_order: dict, *, hoy: date | None = None) -> Evaluacion
         total = float(sales_order.get("grand_total") or 0)
     except (TypeError, ValueError):
         return Evaluacion(False, None, "el total del pedido no se pudo leer")
-    minimo = minimo_configurado()
+    minimo = cfg.excepcion_minimo
     if minimo > 0 and total < minimo:
         return Evaluacion(
             False,
@@ -319,10 +295,14 @@ def evaluar_respaldo(sales_order: dict, *, hoy: date | None = None) -> Evaluacio
     except erpnext.ERPNextError:
         return Evaluacion(False, None, "no pude establecer la fecha de hoy")
 
+    # One snapshot, for the same reason as evaluar_entrega: the round and the
+    # counter are compared against each other here, so they have to be the
+    # owner's configuration as of one instant.
+    cfg = reglas()
     motivos: list[str] = []
 
-    dias = dias_reparto()
-    hora = hora_reparto()
+    dias = list(cfg.dias_reparto)
+    hora = cfg.hora_reparto
     if not dias:
         motivos.append("no hay días de reparto configurados (ENTREGA_DIAS)")
     elif not hora:
@@ -339,12 +319,12 @@ def evaluar_respaldo(sales_order: dict, *, hoy: date | None = None) -> Evaluacio
                 )
             motivos.append(motivo_zona or "la dirección no está en zona")
 
-    if not retiro_activo():
+    if not cfg.retiro_activo:
         motivos.append("el dueño no habilitó el retiro en el local")
         return Evaluacion(False, None, "; ".join(motivos))
 
-    dias_r = dias_retiro()
-    hora_r = hora_retiro()
+    dias_r = list(cfg.retiro_dias)
+    hora_r = cfg.retiro_hora
     if not dias_r:
         motivos.append("no hay días de retiro configurados (RETIRO_LOCAL_DIAS)")
     elif not hora_r:

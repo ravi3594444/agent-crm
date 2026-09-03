@@ -302,19 +302,62 @@ the account to book it against. Without it the order is not confirmed and a
 person is asked to add the charge: a stock ERPNext has no plain fee field, and
 inventing a total is worse than waiting.
 
-The expiry fallback is off until it is configured, and like the exception
-variables it is not part of `make check-env`: unset means an expired request
-ends with the honest "I did not get an answer" and one audited notice asking a
-person to pick it up, which is the direction that never promises a delivery
-nobody can make.
+### The delivery rules are the owner's, and he sets them from WhatsApp
+
+Every value the exception and fallback paths read is a setting he owns, on the
+same footing as the auto-confirmation limits: **Redis (what he set) → the
+bootstrap environment → a safe default**, read on *every* operation so a change
+applies to the next message with nothing restarted.
 
 ```
-ENTREGA_DIAS=martes,viernes        the normal delivery round
-ENTREGA_HORA=08:00                 the time it is promised for
-RETIRO_LOCAL_ACTIVO=true           the shop counter, for addresses off the round
-RETIRO_LOCAL_DIAS=sabado
-RETIRO_LOCAL_HORA=10:00
+días de reparto          martes,viernes     the normal round
+hora de reparto          08:00
+entregas fuera de día    sí/no              off-schedule delivery, pre-authorized
+días fuera de día        jueves
+hora fuera de día        19:00
+cargo fuera de día       $1.500
+mínimo fuera de día      $8.000             0 means no minimum
+retiro en el local       sí/no              the shop counter
+días de retiro           sabado
+hora de retiro           10:00
 ```
+
+He changes one by saying so — "los martes y viernes reparto" — and the
+management agent calls `proponer_limite`. **Nothing moves yet**: Python
+validates it, stores it as *pending* and returns a four-digit code. The setting
+changes only when he writes that code back and the agent calls
+`confirmar_limite`. Same two-step gate as every limit, same append-only audit
+in Redis *and* as a durable ERPNext comment written before the Redis write — so
+the model may interpret and propose, and can never apply. `reglas de entrega`
+reads them back with where each value came from.
+
+Validation is deterministic, never a judgement: days are weekday names in any
+spelling or order and normalize to one form (`Miércoles, Sábado` →
+`miercoles,sabado`), times accept `8` / `9:30` / `18.00` / `7 hs` and normalize
+to `HH:MM`, booleans are sí/no, and money reads the way he writes it — `1.500`
+is fifteen hundred pesos, matching how the manager already types a counter-offer
+fee. Anything else is refused by name and nothing is stored. A vague word is
+asked about rather than guessed: `hora` matches six settings, and picking the
+first would let the model move one he never mentioned.
+
+These live in their **own registry**, deliberately. `limites.configuracion()`
+validates every auto-confirmation limit and raises on the first bad one, and
+`app/policy.py` calls it once per order *line* and again inside the submit lock
+— so a typo in `martes` would have become an outage for every customer. The
+delivery rules are read on their own instead, where an unreadable value fails
+soft to "not pre-authorized" and costs one WhatsApp message.
+
+**The accounting account head is not reachable by natural language.**
+`ENTREGA_CARGO_CUENTA` is a real ERPNext account: a wrong name does not break
+the bot, it unbalances the owner's books, and no model interpreting "poneme la
+cuenta de fletes" can check that the account exists. It is in no registry, so no
+tool can write it; it stays a server setting. Without it a fee is simply never
+written and a person is asked to add the charge.
+
+`make check-env` reports all of it, and says plainly when **neither a normal
+round nor a pickup counter is configured** — an AVISO, not a blocker, because
+nothing is oversold: it means an expired request has nothing concrete to offer
+and the order is effectively dropped.
 
 Every command runs a deterministic handler in `app/aprobacion.py` /
 `app/decisiones.py` after `router.es_equipo()` authenticates the sender; none
