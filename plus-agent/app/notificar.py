@@ -452,6 +452,32 @@ def pedir_confirmacion_conteo(telefono: str, nombre: str, texto: str) -> bool:
         return False
 
 
+def pedir_codigo_de_ajuste(telefono: str, texto: str) -> bool:
+    """Send the owner the confirmation code for a setting he asked to change.
+
+    DIRECT, and to HIS number — not through the model's reply. A code that came
+    back inside a tool result is a code the model has read, and a model that has
+    read it can confirm the change on its own: the second step stops being a
+    person and becomes the same turn as the first. This path is the reason the
+    two steps are two.
+
+    He is by definition inside the 24-hour window — he just wrote to ask for the
+    change — so free-form text works and no template is needed. Never raises;
+    False means he was NOT told, and the caller must not leave a change pending
+    on a code nobody can read.
+    """
+    from app import whatsapp
+
+    if not telefono:
+        return False
+    try:
+        whatsapp.enviar_mensaje(telefono, texto)
+        return True
+    except Exception as exc:
+        print(f"[staff-notify] código de ajuste no enviado ({type(exc).__name__})")
+        return False
+
+
 def avisar_falla_tecnica(telefono: str, texto: str, error: str) -> bool:
     """A customer got the technical-problem apology. That text says the team was
     told, so this makes it true."""

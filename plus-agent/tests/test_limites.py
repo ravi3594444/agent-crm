@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -26,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from conftest import FakeRedis, entrega_autorizada, inventario_confiable
 
-from app import limites, locks, policy
+from app import limites, locks, main, policy, whatsapp
 from app.tools import configuracion
 
 # Captured before the autouse fixture in conftest replaces it: the two tests
@@ -63,14 +64,38 @@ def _cliente() -> dict:
 
 @pytest.fixture
 def almacen(monkeypatch: pytest.MonkeyPatch) -> FakeRedis:
-    """A store that keeps what is written to it, and a staff list of two."""
+    """A store that keeps what is written to it, and a staff list of two.
+
+    Also captures what Python sends the owner DIRECTLY. The confirmation code
+    does not come back through the tool any more, so `enviados` is where a test
+    looks for it — which is exactly the point being made.
+    """
     from app import router
 
     falso = FakeRedis()
+    falso.enviados = []
     monkeypatch.setattr(locks, "conexion", lambda: falso)
     monkeypatch.setattr(router, "STAFF", [EQUIPO, OTRO_DEL_EQUIPO])
+    monkeypatch.setattr(router, "es_equipo", lambda t: t in (EQUIPO, OTRO_DEL_EQUIPO))
     monkeypatch.setattr(limites, "_codigo", lambda: "4242")
+    monkeypatch.setattr(
+        whatsapp,
+        "enviar_mensaje",
+        lambda tel, texto: falso.enviados.append((tel, texto))
+        or {"messages": [{"id": "wamid.x"}]},
+    )
     return falso
+
+
+def _codigo_enviado(almacen: FakeRedis, telefono: str = EQUIPO) -> str:
+    """The code as the OWNER received it — the only place it exists."""
+    for tel, texto in almacen.enviados:
+        if tel != telefono:
+            continue
+        match = re.search(r"\*(\d{4})\*", texto)
+        if match:
+            return match.group(1)
+    return ""
 
 
 # --------------------------------------------------------------- authorization
@@ -94,29 +119,32 @@ def test_only_an_authorized_manager_can_see_or_change_a_limit(
     assert "no está autorizado" in configuracion.proponer_limite.invoke(
         {"limite": "tope", "valor": "999999"}, config=config
     )
-    assert "no está autorizado" in configuracion.confirmar_limite.invoke(
-        {"codigo": "4242"}, config=config
-    )
     assert "no está autorizado" in configuracion.historial_limites.invoke(
         {}, config=config
     )
+    # And nobody outside the staff list can confirm one either: the router only
+    # reaches the handler for a phone router.es_equipo authenticated.
+    assert main._codigo_de_ajuste("4242", DESCONOCIDO) is None
     assert almacen.hashes == {}
 
 
 def test_a_manager_cannot_confirm_a_change_somebody_else_proposed(
     almacen: FakeRedis,
 ) -> None:
-    """The pending change belongs to the phone that asked for it."""
+    """The pending change belongs to the phone that asked for it.
+
+    Nothing is pending for the other manager, so his four digits are not a
+    confirmation at all: the router hands the message to the agent like any
+    other. What must not happen is the change being applied."""
     configuracion.proponer_limite.invoke(
         {"limite": "tope", "valor": "5000"}, config=_gerencia(EQUIPO)
     )
 
-    respuesta = configuracion.confirmar_limite.invoke(
-        {"codigo": "4242"}, config=_gerencia(OTRO_DEL_EQUIPO)
-    )
-
-    assert "No apliqué nada" in respuesta
+    assert _confirmar(telefono=OTRO_DEL_EQUIPO) == ""
     assert limites.vigente("AUTO_CONFIRM_MAX") == "0"
+
+    # And the manager who DID propose it can still confirm his own.
+    assert "0 a 5000" in _confirmar(telefono=EQUIPO)
 
 
 # ------------------------------------------------------ confirmation and audit
@@ -125,15 +153,19 @@ def test_nothing_changes_until_the_owner_writes_the_code(almacen: FakeRedis) -> 
         {"limite": "monto máximo", "valor": "30000"}, config=_gerencia()
     )
 
-    assert "4242" in propuesta
+    # THE BOUNDARY: the code is not in what the model gets back. A code the
+    # model has read is a code the model can supply, and then the second step
+    # is the same turn as the first.
+    assert "4242" not in propuesta
     assert "0 → 30000" in propuesta
+    # It went to the OWNER instead, deterministically, to his own number.
+    assert _codigo_enviado(almacen) == "4242"
+    assert almacen.enviados[0][0] == EQUIPO
     # Proposed only: the limit in force is still the old one.
     assert limites.vigente("AUTO_CONFIRM_MAX") == "0"
     assert limites.configuracion().tope == 0.0
 
-    aplicado = configuracion.confirmar_limite.invoke(
-        {"codigo": "4242"}, config=_gerencia()
-    )
+    aplicado = _confirmar()
 
     assert "0 a 30000" in aplicado
     assert limites.configuracion().tope == 30_000.0
@@ -144,21 +176,32 @@ def test_a_wrong_code_changes_nothing(almacen: FakeRedis) -> None:
         {"limite": "tope", "valor": "30000"}, config=_gerencia()
     )
 
-    respuesta = configuracion.confirmar_limite.invoke(
-        {"codigo": "1111"}, config=_gerencia()
-    )
+    respuesta = _confirmar("1111")
 
     assert "No apliqué nada" in respuesta
     assert limites.configuracion().tope == 0.0
 
 
-def test_confirming_with_nothing_pending_changes_nothing(almacen: FakeRedis) -> None:
-    respuesta = configuracion.confirmar_limite.invoke(
-        {"codigo": "4242"}, config=_gerencia()
-    )
-
-    assert "No apliqué nada" in respuesta
+def test_four_digits_with_nothing_pending_are_just_a_message(
+    almacen: FakeRedis,
+) -> None:
+    """Not every number the owner types is a confirmation code. With nothing
+    pending the handler declines to answer, so the message reaches the agent
+    instead of getting a confusing "no apliqué nada"."""
+    assert main._codigo_de_ajuste("4242", EQUIPO) is None
     assert almacen.hashes == {}
+
+
+@pytest.mark.parametrize(
+    "texto", ["42", "42424", "4242 5", "el código es 4242", "SAL-ORD-2026-00021"]
+)
+def test_only_four_digits_and_nothing_else_is_read_as_a_code(
+    almacen: FakeRedis, texto: str
+) -> None:
+    _proponer("tope", "30000")
+
+    assert main._codigo_de_ajuste(texto, EQUIPO) is None
+    assert limites.configuracion().tope == 0.0
 
 
 def test_a_pending_change_is_dropped_on_its_own(almacen: FakeRedis) -> None:
@@ -178,7 +221,7 @@ def test_every_change_records_who_when_and_from_what_to_what(
     configuracion.proponer_limite.invoke(
         {"limite": "tope", "valor": "12000"}, config=_gerencia()
     )
-    configuracion.confirmar_limite.invoke({"codigo": "4242"}, config=_gerencia())
+    _confirmar()
 
     entradas = limites.auditoria()
     assert len(entradas) == 1
@@ -202,7 +245,7 @@ def test_the_audit_trail_does_not_grow_without_bound(almacen: FakeRedis) -> None
     configuracion.proponer_limite.invoke(
         {"limite": "tope", "valor": "1"}, config=_gerencia()
     )
-    configuracion.confirmar_limite.invoke({"codigo": "4242"}, config=_gerencia())
+    _confirmar()
 
     assert len(almacen.lists[limites.CLAVE_AUDITORIA]) == limites.AUDITORIA_MAXIMA
 
@@ -216,7 +259,7 @@ def test_a_confirmed_change_outlives_the_process_that_made_it(
     configuracion.proponer_limite.invoke(
         {"limite": "colchón de stock", "valor": "35"}, config=_gerencia()
     )
-    configuracion.confirmar_limite.invoke({"codigo": "4242"}, config=_gerencia())
+    _confirmar()
 
     assert almacen.hashes[limites.CLAVE_VALORES]["STOCK_BUFFER_PCT"] == "35"
     assert limites.configuracion().buffer == 0.35
@@ -232,7 +275,7 @@ def test_what_the_owner_set_beats_the_bootstrap_environment(
     configuracion.proponer_limite.invoke(
         {"limite": "tope", "valor": "7500"}, config=_gerencia()
     )
-    configuracion.confirmar_limite.invoke({"codigo": "4242"}, config=_gerencia())
+    _confirmar()
 
     assert limites.configuracion().tope == 7_500.0
     fila = next(f for f in limites.resumen() if f["nombre"] == "AUTO_CONFIRM_MAX")
@@ -263,12 +306,14 @@ def test_a_change_really_survives_in_redis(monkeypatch: pytest.MonkeyPatch) -> N
         locks.conexion().ping()
     except redis.exceptions.RedisError:
         pytest.skip("Redis no responde")
+    # The code now goes out over WhatsApp. No test may reach Meta.
+    monkeypatch.setattr(whatsapp, "enviar_mensaje", lambda tel, texto: {"ok": True})
     cliente_directo = redis.Redis.from_url(os.environ["REDIS_URL"])
     try:
         configuracion.proponer_limite.invoke(
             {"limite": "tope", "valor": "4321"}, config=_gerencia()
         )
-        configuracion.confirmar_limite.invoke({"codigo": "4242"}, config=_gerencia())
+        _confirmar()
 
         # A different connection, as another worker would have.
         guardado = cliente_directo.hget(clave, "AUTO_CONFIRM_MAX")
@@ -345,7 +390,7 @@ def test_a_confirmed_change_decides_the_very_next_order_with_no_restart(
     configuracion.proponer_limite.invoke(
         {"limite": "tope", "valor": "50"}, config=_gerencia()
     )
-    configuracion.confirmar_limite.invoke({"codigo": "4242"}, config=_gerencia())
+    _confirmar()
 
     decision = policy.evaluar(_pedido_verde())
     assert decision.auto is False
@@ -356,7 +401,7 @@ def test_a_confirmed_change_decides_the_very_next_order_with_no_restart(
     configuracion.proponer_limite.invoke(
         {"limite": "tope", "valor": "2000"}, config=_gerencia()
     )
-    configuracion.confirmar_limite.invoke({"codigo": "9999"}, config=_gerencia())
+    _confirmar("9999")
 
     assert policy.evaluar(_pedido_verde()).auto is True
 
@@ -383,7 +428,7 @@ def test_every_change_is_also_recorded_in_erpnext(almacen: FakeRedis) -> None:
     configuracion.proponer_limite.invoke(
         {"limite": "tope", "valor": "8000"}, config=_gerencia()
     )
-    configuracion.confirmar_limite.invoke({"codigo": "4242"}, config=_gerencia())
+    _confirmar()
 
     limites.erpnext.registrar_comentario.assert_called_once()
     doctype, _nombre, texto = limites.erpnext.registrar_comentario.call_args.args
@@ -407,9 +452,7 @@ def test_a_change_that_cannot_be_recorded_durably_is_not_applied(
         {"limite": "tope", "valor": "8000"}, config=_gerencia()
     )
 
-    respuesta = configuracion.confirmar_limite.invoke(
-        {"codigo": "4242"}, config=_gerencia()
-    )
+    respuesta = _confirmar()
 
     assert "No apliqué nada" in respuesta
     assert almacen.hashes == {}
@@ -579,7 +622,7 @@ def test_one_setting_at_a_time(almacen: FakeRedis) -> None:
     configuracion.proponer_limite.invoke(
         {"limite": "deuda", "valor": "250"}, config=_gerencia()
     )
-    configuracion.confirmar_limite.invoke({"codigo": "4242"}, config=_gerencia())
+    _confirmar()
 
     almacenados = almacen.hashes[limites.CLAVE_VALORES]
     assert almacenados == {"AUTO_CONFIRM_MAX_DEBT": "250"}
@@ -608,9 +651,13 @@ def _proponer(limite: str, valor: str, telefono: str = EQUIPO) -> str:
 
 
 def _confirmar(codigo: str = "4242", telefono: str = EQUIPO) -> str:
-    return configuracion.confirmar_limite.invoke(
-        {"codigo": codigo}, config=_gerencia(telefono)
-    )
+    """Confirm the way the owner does: an inbound message with four digits.
+
+    Not a tool. There is no tool for this — the code never reaches the model, so
+    the only thing that can apply a change is app/main.py's deterministic
+    handler running on a signed webhook from an authenticated staff phone.
+    """
+    return main._codigo_de_ajuste(codigo, telefono) or ""
 
 
 # ------------------------------------------------------------- authorization
@@ -628,7 +675,7 @@ def test_only_an_authorized_manager_can_see_or_change_a_delivery_rule(
     configuracion.proponer_limite.invoke(
         {"limite": "días de reparto", "valor": "martes"}, config=config
     )
-    configuracion.confirmar_limite.invoke({"codigo": "4242"}, config=config)
+    _confirmar(telefono=str(config["configurable"].get("actor_phone") or ""))
 
     assert almacen.hashes == {}
     assert limites.entrega().dias_reparto == ()
@@ -639,7 +686,7 @@ def test_a_manager_cannot_confirm_a_delivery_change_somebody_else_proposed(
 ) -> None:
     _proponer("días de reparto", "martes y viernes", EQUIPO)
 
-    assert "No apliqué nada" in _confirmar(telefono=OTRO_DEL_EQUIPO)
+    assert _confirmar(telefono=OTRO_DEL_EQUIPO) == ""
     assert limites.entrega().dias_reparto == ()
 
 
@@ -649,7 +696,8 @@ def test_nothing_about_delivery_changes_until_the_owner_writes_the_code(
 ) -> None:
     propuesta = _proponer("días de reparto", "martes y viernes")
 
-    assert "4242" in propuesta
+    assert "4242" not in propuesta
+    assert _codigo_enviado(almacen) == "4242"
     assert "martes,viernes" in propuesta
     # Proposed only.
     assert limites.entrega().dias_reparto == ()
@@ -673,20 +721,15 @@ def test_the_llm_can_propose_a_delivery_rule_but_never_apply_one(
 ) -> None:
     """The whole boundary in one test: every tool the management agent can
     call, and none of them moves a setting without the owner's own code."""
-    nombres = {t.name for t in [
-        configuracion.ver_limites,
-        configuracion.ver_reglas_de_entrega,
-        configuracion.proponer_limite,
-        configuracion.confirmar_limite,
-        configuracion.historial_limites,
-    ]}
-    assert nombres == {
+    from app import graph
+
+    assert {t.name for t in graph.TOOLS_GERENCIA if "limite" in t.name} == {
         "ver_limites",
-        "ver_reglas_de_entrega",
         "proponer_limite",
-        "confirmar_limite",
         "historial_limites",
     }
+    # There is no confirm tool at all — not unregistered, ABSENT.
+    assert not hasattr(configuracion, "confirmar_limite")
 
     # Reading changes nothing; proposing changes nothing.
     configuracion.ver_reglas_de_entrega.invoke({}, config=_gerencia())
@@ -982,7 +1025,10 @@ def test_a_dead_store_cannot_be_talked_into_a_delivery_change(
     almacen.caido = True
 
     assert "No cambié nada" in _proponer("días de reparto", "martes")
-    assert "No apliqué nada" in _confirmar()
+    # Nothing could be written, so nothing is pending, so four digits are not a
+    # confirmation. A dead store fails closed in BOTH steps.
+    assert _confirmar() == ""
+    assert limites.entrega().dias_reparto == ()
 
 
 @pytest.mark.parametrize(
@@ -1135,3 +1181,74 @@ def test_a_vague_word_is_still_asked_about_rather_than_guessed(
         with pytest.raises(limites.LimiteError) as caido:
             limites.definicion(vago)
         assert "puede ser varias cosas" in str(caido.value)
+
+
+# ------------------------------------- who actually applies the change, e2e
+def test_the_code_is_applied_by_the_router_before_any_model_reads_it(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of the second step, end to end.
+
+    The owner's four digits arrive on a signed webhook from a phone es_equipo
+    authenticated, and the deterministic handler applies the change and answers
+    him. The management model is never called — so it cannot be steered into
+    confirming, and it never learns the code even after the fact.
+    """
+    monkeypatch.setattr(main, "es_equipo", lambda t: t == EQUIPO)
+    gerencia = Mock(side_effect=AssertionError("el modelo no interviene en esto"))
+    monkeypatch.setattr(main, "responder_gerencia", gerencia)
+    _proponer("monto máximo", "30000")
+    codigo = _codigo_enviado(almacen)
+
+    respuesta = main._generate_response(
+        {"telefono": EQUIPO, "message_id": "wamid.1", "kind": "text", "data": codigo}
+    )
+
+    assert "0 a 30000" in respuesta
+    assert limites.configuracion().tope == 30_000.0
+    gerencia.assert_not_called()
+
+
+def test_a_stranger_who_guesses_the_code_changes_nothing(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """es_equipo is the gate. A customer's message never reaches the handler,
+    so a guessed code is just four digits the sales agent has to answer."""
+    monkeypatch.setattr(main, "es_equipo", lambda t: t == EQUIPO)
+    _proponer("monto máximo", "30000")
+
+    assert main._codigo_de_ajuste("4242", DESCONOCIDO) is None
+    assert limites.configuracion().tope == 0.0
+    # ...and the owner's own pending change is untouched by the attempt.
+    assert "0 a 30000" in _confirmar()
+
+
+def test_a_change_whose_code_could_not_be_sent_is_dropped(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A change waiting on a code he never saw cannot be confirmed and can
+    confuse him ten minutes later."""
+    monkeypatch.setattr(
+        whatsapp, "enviar_mensaje", Mock(side_effect=RuntimeError("Meta caído"))
+    )
+
+    respuesta = _proponer("monto máximo", "30000")
+
+    assert "NO pude mandarte el código" in respuesta
+    assert "No cambié nada" in respuesta
+    assert limites.pendiente(EQUIPO) is None
+    assert _confirmar() == ""
+    assert limites.configuracion().tope == 0.0
+
+
+def test_what_is_left_pending_never_includes_the_code(almacen: FakeRedis) -> None:
+    """limites.pendiente() is what the router reads to tell a code from an
+    ordinary number. It must not become a second way to obtain one."""
+    _proponer("monto máximo", "30000")
+
+    pendiente = limites.pendiente(EQUIPO)
+
+    assert pendiente["alias"] == "monto maximo"
+    assert pendiente["nuevo"] == "30000"
+    assert "codigo" not in pendiente
+    assert "4242" not in json.dumps(pendiente, ensure_ascii=False)

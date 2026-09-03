@@ -333,6 +333,52 @@ def _staff_command(text: str) -> str | None:
     return f"{action}:{match.group('order').upper()}"
 
 
+# The owner confirming a setting change. Exactly four digits and nothing else —
+# what app/limites.py generates and what he is asked to send back.
+_CODIGO_AJUSTE_RE = re.compile(r"^\s*(\d{4})\s*$")
+
+
+def _codigo_de_ajuste(text: str, telefono: str) -> str | None:
+    """Apply a pending settings change the owner just confirmed, or None.
+
+    THIS is the second step, and it is deliberately not a tool. The management
+    agent proposes a change and never sees the code — app/notificar.py sends it
+    straight to the owner's own number — so the only thing that can apply one is
+    an inbound message that arrived through the signed webhook from a phone
+    router.es_equipo authenticated, handled here before any model reads it.
+
+    An agent able to call both halves is not a two-step confirmation: it is one
+    step with extra words, and the words come from a model that a customer's
+    message can steer.
+
+    Returns None when the message is NOT a confirmation — no four digits, or
+    nothing pending for that phone — so an ordinary message that happens to be
+    a number still reaches the agent. A code that does not MATCH is answered
+    here, because that is something he has to know.
+    """
+    from app import limites
+
+    match = _CODIGO_AJUSTE_RE.match(str(text or ""))
+    if not match:
+        return None
+    if limites.pendiente(telefono) is None:
+        return None
+    try:
+        cambio = limites.aplicar(match.group(1), telefono)
+    except limites.LimiteError as exc:
+        return f"No apliqué nada: {exc}."
+    except Exception as error:
+        print(f"[limites] confirmación falló type={_error_name(error)}")
+        return "No pude aplicar el cambio en este momento. No cambié nada."
+    defi = limites.TODOS.get(cambio["limite"])
+    alias = defi.alias[0] if defi else cambio["limite"]
+    return (
+        f"Listo: *{alias}* pasó de {cambio['anterior']} a {cambio['nuevo']}. "
+        "Rige desde el próximo pedido, sin reiniciar nada. "
+        f"Queda registrado a tu nombre ({cambio['ts']})."
+    )
+
+
 # A customer accepting or refusing an offer is a DECISION about money and a
 # delivery date. It is matched here, before any model sees the message, so the
 # answer cannot depend on a paraphrase.
@@ -473,6 +519,9 @@ def _generate_response(item: dict) -> str:
         if kind != "text":
             return TEXT_REQUIRED
         if es_equipo(telefono):
+            ajuste = _codigo_de_ajuste(data, telefono)
+            if ajuste:
+                return ajuste
             command = _staff_command(data)
             if command:
                 return str(manejar_boton(command, telefono))

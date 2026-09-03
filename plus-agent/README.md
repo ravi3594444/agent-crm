@@ -324,12 +324,18 @@ hora de retiro           10:00
 
 He changes one by saying so — "los martes y viernes reparto" — and the
 management agent calls `proponer_limite`. **Nothing moves yet**: Python
-validates it, stores it as *pending* and returns a four-digit code. The setting
-changes only when he writes that code back and the agent calls
-`confirmar_limite`. Same two-step gate as every limit, same append-only audit
-in Redis *and* as a durable ERPNext comment written before the Redis write — so
-the model may interpret and propose, and can never apply. `reglas de entrega`
-reads them back with where each value came from.
+validates it and stores it as *pending*.
+
+The four-digit code does **not** come back through the agent. Python sends it
+straight to his own number (`notificar.pedir_codigo_de_ajuste`), and the model
+never sees it. The setting changes when he writes those four digits back and
+`app/main.py`'s deterministic handler applies them — on a signed webhook, from
+a phone `router.es_equipo` authenticated, before any model reads the message.
+There is no tool that confirms a setting, deliberately: an agent that could
+call both halves is not a two-step confirmation, it is one step, and the step
+would be taken by a model a message can steer. Same append-only audit in Redis
+*and* as a durable ERPNext comment written before the Redis write. `reglas de
+entrega` reads them back with where each value came from.
 
 Validation is deterministic, never a judgement: days are weekday names in any
 spelling or order and normalize to one form (`Miércoles, Sábado` →

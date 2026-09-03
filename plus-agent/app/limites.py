@@ -869,6 +869,48 @@ def proponer(nombre_o_alias: str, valor_crudo: str, telefono: str) -> dict:
     return propuesta
 
 
+def pendiente(telefono: str) -> dict | None:
+    """El cambio que ese teléfono dejó esperando confirmación, si hay uno.
+
+    Lo usa el router determinista de app/main.py para saber si un mensaje de
+    cuatro dígitos ES un código de confirmación. Sin esto tendría que llamar a
+    aplicar() para averiguarlo, y un "no hay nada pendiente" no se distinguiría
+    de un "ese código está mal": el primero es un mensaje cualquiera que le toca
+    contestar al agente, el segundo es algo que el dueño tiene que saber.
+
+    NUNCA devuelve el código. Falla cerrada: si no se puede leer, no hay nada.
+    """
+    if not telefono:
+        return None
+    try:
+        crudo = locks.conexion().get(f"{CLAVE_PROPUESTA}:{telefono}")
+    except (locks.CoordinationError, RedisError):
+        return None
+    if not crudo:
+        return None
+    try:
+        propuesta = json.loads(_texto(crudo))
+    except ValueError:
+        return None
+    if not isinstance(propuesta, dict):
+        return None
+    return {k: v for k, v in propuesta.items() if k != "codigo"}
+
+
+def descartar(telefono: str) -> None:
+    """Tira el cambio pendiente de ese teléfono. Para cuando el código no llegó.
+
+    Un cambio que espera un código que el dueño nunca vio no se puede confirmar
+    y sí puede confundirlo diez minutos después. Mejor no dejarlo.
+    """
+    if not telefono:
+        return
+    try:
+        locks.conexion().delete(f"{CLAVE_PROPUESTA}:{telefono}")
+    except (locks.CoordinationError, RedisError) as exc:
+        print(f"[limites] no pude descartar la propuesta ({type(exc).__name__})")
+
+
 def aplicar(codigo: str, telefono: str) -> dict:
     """Aplica el cambio pendiente de ESE teléfono si el código coincide."""
     if not telefono:

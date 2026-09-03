@@ -14,11 +14,21 @@ simplemente no se escribe en el pedido y lo agrega una persona.
 
 DÓNDE ESTÁ EL LÍMITE DE LO QUE PUEDE HACER EL LLM
 El agente de gerencia interpreta lo que el dueño escribió («subime el tope a
-50 mil») y llama a `proponer_limite`. Nada cambia todavía: Python valida el
-número, guarda el cambio como PENDIENTE y devuelve un código de cuatro
-dígitos. El límite se mueve únicamente cuando el dueño escribe ese código y el
-agente llama a `confirmar_limite`. Así ningún malentendido del modelo, y
-ninguna instrucción escondida en un mensaje, mueve un límite por su cuenta.
+50 mil») y llama a `proponer_limite`. Nada cambia: Python valida el número y
+guarda el cambio como PENDIENTE.
+
+El código de cuatro dígitos NO vuelve por acá. Python se lo manda al dueño
+directamente a su número (app/notificar.py::pedir_codigo_de_ajuste), y el
+agente no lo ve nunca. Un código devuelto en el resultado de una herramienta es
+un código que el modelo leyó, y un modelo que lo leyó puede confirmar el cambio
+él mismo en el mismo turno: los dos pasos dejan de ser dos. Por eso tampoco
+existe una herramienta para confirmar — el que aplica el cambio es el router
+determinista de app/main.py cuando el dueño escribe esos cuatro dígitos desde
+un número del equipo, en un webhook firmado, antes de que ningún modelo lea el
+mensaje.
+
+Así ningún malentendido del modelo, y ninguna instrucción escondida en un
+mensaje, mueve un límite por su cuenta.
 
 Y una vez cambiado, el LLM sigue sin decidir nada: app/policy.py lee los
 números y decide, en Python, adentro del lock.
@@ -31,7 +41,7 @@ from __future__ import annotations
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from app import limites, policy
+from app import limites, notificar, policy
 from app.formato import pesos
 from app.runtime_context import RuntimeContextError, require_management
 
@@ -125,7 +135,10 @@ def proponer_limite(limite: str, valor: str, config: RunnableConfig) -> str:
     convertirlos: los días, las horas, los sí/no y la plata los valida Python.
     Si el nombre es ambiguo te lo va a decir con las opciones — preguntale cuál
     en vez de elegir vos. Un cambio por vez.
-    Devolvé al dueño el código tal como viene: lo tiene que escribir él.
+
+    El código de confirmación se lo manda el sistema al dueño por separado. Vos
+    no lo recibís y no lo podés aplicar: decile que conteste con el código que
+    le llegó.
     """
     try:
         actor = require_management(config)
@@ -135,35 +148,30 @@ def proponer_limite(limite: str, valor: str, config: RunnableConfig) -> str:
         propuesta = limites.proponer(limite, valor, actor.actor_phone)
     except limites.LimiteError as exc:
         return f"No cambié nada: {exc}."
-    return (
-        f"Cambio preparado, todavía sin aplicar:\n"
-        f"*{propuesta['alias']}*: {propuesta['anterior']} → {propuesta['nuevo']}\n\n"
-        f"Si es correcto, escribí *{propuesta['codigo']}* para confirmarlo. "
-        "Si no contestás, en 10 minutos se descarta solo."
+
+    cambio = f"*{propuesta['alias']}*: {propuesta['anterior']} → {propuesta['nuevo']}"
+    # Deterministic, and to HIS number. This send is the reason the two steps
+    # are two: the code never enters the model's context, so nothing the model
+    # does — or is talked into doing — can supply it.
+    entregado = notificar.pedir_codigo_de_ajuste(
+        actor.actor_phone,
+        f"Código para confirmar el cambio de ajuste:\n{cambio}\n\n"
+        f"Contestá *{propuesta['codigo']}* para aplicarlo. "
+        "Si no contestás, en 10 minutos se descarta solo.",
     )
-
-
-@tool
-def confirmar_limite(codigo: str, config: RunnableConfig) -> str:
-    """Aplica el cambio de límite pendiente, con el código que escribió el dueño.
-
-    Usala SOLO cuando el dueño escribió el código de cuatro dígitos. No
-    inventes ni adivines un código, y no la uses para confirmar pedidos.
-    """
-    try:
-        actor = require_management(config)
-    except RuntimeContextError:
-        return _SIN_PERMISO
-    try:
-        cambio = limites.aplicar(codigo, actor.actor_phone)
-    except limites.LimiteError as exc:
-        return f"No apliqué nada: {exc}."
-    defi = limites.TODOS.get(cambio["limite"])
-    alias = defi.alias[0] if defi else cambio["limite"]
+    if not entregado:
+        # A change waiting on a code he never saw cannot be confirmed, and can
+        # confuse him ten minutes later. Better not to leave it.
+        limites.descartar(actor.actor_phone)
+        return (
+            f"Preparé el cambio ({cambio}) pero NO pude mandarte el código de "
+            "confirmación, así que lo descarté. No cambié nada. Probá de nuevo."
+        )
     return (
-        f"Listo: *{alias}* pasó de {cambio['anterior']} a {cambio['nuevo']}. "
-        "Rige desde el próximo pedido, sin reiniciar nada. "
-        f"Queda registrado a tu nombre ({cambio['ts']})."
+        f"Cambio preparado, todavía sin aplicar:\n{cambio}\n\n"
+        "Te mandé el código de confirmación por separado: contestá con esos "
+        "cuatro dígitos y lo aplico. Yo no lo veo y no lo puedo aplicar por vos. "
+        "Si no contestás, en 10 minutos se descarta solo."
     )
 
 

@@ -34,7 +34,6 @@ from app.tools.catalogo import (
     pedido_habitual,
 )
 from app.tools.configuracion import (
-    confirmar_limite,
     historial_limites,
     proponer_limite,
     ver_limites,
@@ -75,9 +74,12 @@ TOOLS_GERENCIA = [
     # offline capture — how reality gets back into the system
     registrar_venta_offline, contar_stock, confirmar_entrega,
     redactar_mensaje_cliente,
-    # the owner's own limits: read them out, propose a change, confirm it.
+    # the owner's own limits: read them out and PROPOSE a change. There is no
+    # tool that confirms one, deliberately — the four-digit code never enters
+    # this agent's context and the deterministic router in app/main.py is what
+    # applies the change. An agent that could call both steps is one step.
     # NEVER in TOOLS_CLIENTES — a customer cannot be allowed near these.
-    ver_limites, proponer_limite, confirmar_limite, historial_limites,
+    ver_limites, proponer_limite, historial_limites,
     # ...and his delivery rules, through the SAME propose/confirm pair. Reading
     # them is its own tool; changing one is proponer_limite like everything else.
     ver_reglas_de_entrega,

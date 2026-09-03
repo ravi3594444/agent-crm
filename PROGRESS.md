@@ -235,14 +235,18 @@ a limit the owner had tightened. It raises, and the order waits for a person.
 re-checking `router.es_equipo` itself (`runtime_context.require_management`):
 - `ver_limites` — all six, with the value and where it came from.
 - `proponer_limite(limite, valor)` — validates and stores the change as
-  **pending**. Nothing moves. Returns a four-digit code.
-- `confirmar_limite(codigo)` — applies it, only for the phone that proposed it,
-  only with that code, and only one setting at a time. Audited with phone,
-  timestamp, old and new value; the pending change expires in 10 minutes.
+  **pending**. Nothing moves. The four-digit code does NOT come back here:
+  Python sends it to the owner's own number and the agent never sees it.
+- there is **no** confirm tool. `app/main.py::_codigo_de_ajuste` applies the
+  change when the owner writes those four digits — a signed webhook, a phone
+  `es_equipo` authenticated, handled before any model reads the message. Only
+  for the phone that proposed it, only with that code, one setting at a time.
+  Audited with phone, timestamp, old and new value; pending expires in 10 min.
 - `historial_limites` — the last ten changes.
 
-The LLM interprets what the owner wrote and relays the code. It cannot move a
-limit on its own, and it still decides nothing about any order: `policy.evaluar`
+The LLM interprets what the owner wrote and proposes. It never learns the code,
+so it cannot take both halves of the confirmation. It cannot move a limit on
+its own, and it still decides nothing about any order: `policy.evaluar`
 reads the numbers and decides, in Python, including in the locked revalidation
 (`test_the_locked_revalidation_uses_the_limits_in_force_at_that_moment` —
 lowering the ceiling while the lock is held stops that order).
