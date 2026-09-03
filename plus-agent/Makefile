@@ -6,7 +6,7 @@ PY     := $(VENV)/bin/python
 PIP    := $(VENV)/bin/pip
 PUERTO ?= 8081
 
-.PHONY: help install test lint fmt check check-env build up down logs decisiones briefing seed
+.PHONY: help install test lint fmt check check-env check-env-offline verificar-qwen build up down logs decisiones briefing seed
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -30,40 +30,14 @@ fmt: install ## Formatear y autocorregir lo que ruff sabe arreglar
 
 check: lint test ## Todo lo que corre CI
 
-check-env: ## ¿Están todas las variables obligatorias en .env y las 3 claves ERPNext son distintas?
-	@test -f .env || { echo "falta .env — copiá .env.example"; exit 1; }
-	@missing=0; \
-	for v in ERPNEXT_URL \
-	         ERPNEXT_API_KEY ERPNEXT_API_SECRET \
-	         ERPNEXT_MANAGER_API_KEY ERPNEXT_MANAGER_API_SECRET \
-	         ERPNEXT_POLICY_API_KEY ERPNEXT_POLICY_API_SECRET \
-	         ERPNEXT_COMPANY ERPNEXT_WAREHOUSE \
-	         META_APP_SECRET META_VERIFY_TOKEN REDIS_URL \
-	         WHATSAPP_PHONE_NUMBER_ID WHATSAPP_TOKEN \
-	         DASHSCOPE_API_KEY TELEFONOS_EQUIPO; do \
-	  val=$$(grep -E "^$$v=" .env | cut -d= -f2-); \
-	  if [ -z "$$val" ]; then echo "  FALTA  $$v"; missing=1; fi; \
-	done; \
-	for v in AUTO_CONFIRM_PRICE_LIST AUTO_CONFIRM_CURRENCY \
-	         WHATSAPP_STAFF_PENDING_TEMPLATE WHATSAPP_STAFF_CONFIRMED_TEMPLATE \
-	         WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE; do \
-	  val=$$(grep -E "^$$v=" .env | cut -d= -f2-); \
-	  if [ -z "$$val" ]; then echo "  AVISO  $$v vacía: precios/avisos fallan cerrados hasta que la completes"; fi; \
-	done; \
-	if [ "$$missing" = "1" ]; then exit 1; fi; \
-	agente=$$(grep -E '^ERPNEXT_API_KEY=' .env | cut -d= -f2-); \
-	gerencia=$$(grep -E '^ERPNEXT_MANAGER_API_KEY=' .env | cut -d= -f2-); \
-	policy=$$(grep -E '^ERPNEXT_POLICY_API_KEY=' .env | cut -d= -f2-); \
-	if [ "$$agente" = "$$policy" ] || [ "$$gerencia" = "$$policy" ] || [ "$$agente" = "$$gerencia" ]; then \
-	  echo "  PELIGRO  Dos de las tres claves ERPNext son iguales"; \
-	  echo "           (ERPNEXT_API_KEY / ERPNEXT_MANAGER_API_KEY / ERPNEXT_POLICY_API_KEY)."; \
-	  echo "           Son tres usuarios distintos: agente de clientes (sin Submit),"; \
-	  echo "           gerencia (lectura amplia, sin Submit) y política (la única con Submit)."; \
-	  echo "           Con una clave repetida un LLM tendría Submit o lectura de todo el"; \
-	  echo "           negocio: el guardarraíl principal del sistema deja de existir."; \
-	  exit 1; \
-	fi; \
-	echo "  .env completo, y las tres credenciales de ERPNext son distintas entre sí."
+check-env: install ## ¿Está todo listo para probar en vivo? Valida .env, Meta, ERPNext, Redis y límites sin mostrar valores
+	$(PY) -m app.readiness
+
+check-env-offline: install ## Lo mismo sin llamar a Meta ni a ERPNext (sólo el .env y Redis)
+	$(PY) -m app.readiness --sin-red
+
+verificar-qwen: install ## Una llamada real con herramientas a cada modelo Qwen (manual, nunca en CI)
+	$(PY) deploy/verificar_qwen.py
 
 build: ## Buildear la imagen
 	docker build -t plus-agent .

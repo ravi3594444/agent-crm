@@ -42,8 +42,8 @@ _DUMMY = {
     "DASHSCOPE_API_KEY": "test-dashscope-key",
     # The developer's real .env may still carry the old "google_genai:…" names;
     # pin the Qwen defaults so the suite never depends on that file.
-    "LLM_MODEL_CLIENTES": "qwen3.7-plus-2026-05-26",
-    "LLM_MODEL_GERENCIA": "qwen3.8-max-0902",
+    "QWEN_SALES_MODEL": "qwen3.7-plus-2026-05-26",
+    "QWEN_MANAGER_MODEL": "qwen3.8-max",
     # opcionales que cambian comportamiento: valores deterministas para tests
     "BUSINESS_TIMEZONE": "America/Argentina/Buenos_Aires",
     "ERPNEXT_COMPANY": "Lacteos Test SA",

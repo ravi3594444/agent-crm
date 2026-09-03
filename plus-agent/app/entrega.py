@@ -6,38 +6,46 @@ convencería con un mensaje: "es acá al lado, mandámelo igual". Acá no hay
 criterio, hay comparaciones contra las zonas que configuró el negocio. El
 modelo puede PEDIR la dirección y repetir lo que se decidió; no puede decidir.
 
-CÓMO SE DECIDE, EN ESTE ORDEN
-  1. El código postal de la dirección está en ZONAS_ENTREGA_CP  -> se entrega.
-  2. Sin código postal, la localidad está en ZONAS_ENTREGA_LOCALIDADES
-     (comparada sin tildes ni mayúsculas) -> se entrega.
-  3. Ya se entregó antes en esa misma dirección —hay un pedido CONFIRMADO del
-     mismo cliente a esa dirección— -> se entrega. Es la evidencia más fuerte
-     que existe: una persona ya la aprobó y el reparto llegó.
-  4. Cualquier otra cosa —sin dirección, sin CP y localidad desconocida, fuera
-     de zona, o ERPNext que no contesta— NO habilita nada: el pedido queda en
-     BORRADOR y lo revisa una persona.
-
-El punto 3 es lo que hace que esto no moleste a los clientes de siempre: su
-dirección ya está probada, aunque no tenga el CP cargado. Un cliente conocido
-que estrena dirección pasa por los puntos 1 y 2 como cualquiera.
+LA REGLA (release gate RC1)
+  * Con ZONAS_ENTREGA_CP y ZONAS_ENTREGA_LOCALIDADES configuradas, la dirección
+    tiene que traer LOS DOS datos y LOS DOS tienen que estar permitidos.
+  * Con una sola lista configurada, manda esa lista sobre su dato.
+  * Sin ninguna lista, nada se entrega solo.
+  * Cualquier contradicción (un dato dentro y el otro fuera), cualquier dato
+    exigido que falte y cualquier valor que no se pueda interpretar dejan el
+    pedido en BORRADOR para que lo mire una persona.
+Un pedido anterior a la misma dirección ya NO habilita nada por sí solo: la
+zona la definen las listas, y si el dueño quiere entregar ahí, agrega el
+código postal o la localidad a la lista. Así la regla es la misma para todos.
 """
 from __future__ import annotations
 
 import os
 import re
 import unicodedata
+from dataclasses import dataclass
 
 from app import erpnext
-
-# Cuántos pedidos confirmados del cliente se miran para ver si ya se entregó
-# en esa dirección. Con el más reciente alcanza, pero se piden varios porque
-# puede tener direcciones distintas.
-MAX_PEDIDOS_ENTREGADOS = 50
 
 # Todos los motivos de esta capa arrancan igual, para que el resto del sistema
 # sepa que ESTE pedido está esperando por la entrega y no por otra regla: el
 # aviso al equipo lo dice y al cliente se le habla distinto.
 MOTIVO = "entrega a revisar"
+
+# Por qué NO se entrega, en categorías que el resto del sistema puede leer.
+OK = "ok"
+SIN_ZONAS = "sin_zonas"
+FALTA = "falta"
+FUERA = "fuera"
+CONTRADICCION = "contradiccion"
+ERROR = "error"
+
+
+@dataclass(frozen=True)
+class EvaluacionZona:
+    dentro: bool
+    motivo: str
+    categoria: str
 
 
 def _sin_tildes(texto: str) -> str:
@@ -92,29 +100,86 @@ def texto_direccion(direccion: dict) -> str:
     return escrito or "sin datos de dirección"
 
 
-def en_zona(direccion: dict) -> tuple[bool, str]:
-    """(en_zona, motivo). Determinista y sin red: sólo compara texto."""
+def _requerido(nombre: str, crudo: str, normalizado: str) -> str | None:
+    """Motivo si un dato exigido falta o no se puede interpretar; None si sirve."""
+    if not crudo:
+        return f"la dirección no tiene {nombre}"
+    if not normalizado:
+        return f"{nombre} «{crudo}» no se pudo interpretar"
+    return None
+
+
+def evaluar_zona(direccion: object) -> EvaluacionZona:
+    """Determinista y sin red: sólo compara texto contra las listas configuradas."""
+    if not isinstance(direccion, dict):
+        return EvaluacionZona(False, "la dirección no se pudo interpretar", ERROR)
     codigos, localidades = zonas_configuradas()
     if not codigos and not localidades:
-        return False, "no hay zonas de reparto configuradas"
+        return EvaluacionZona(False, "no hay zonas de reparto configuradas", SIN_ZONAS)
 
-    cp = normalizar_cp(direccion.get("pincode"))
-    localidad = normalizar_localidad(direccion.get("city"))
+    cp_crudo = str(direccion.get("pincode") or "").strip()
+    loc_cruda = str(direccion.get("city") or "").strip()
+    try:
+        cp = normalizar_cp(cp_crudo)
+        localidad = normalizar_localidad(loc_cruda)
+    except Exception:
+        return EvaluacionZona(False, "no pude interpretar el código postal o la localidad", ERROR)
 
-    if cp:
-        if cp in codigos:
-            return True, ""
-        # Con CP cargado, el CP manda: una localidad que "suena parecida" no
-        # puede habilitar un reparto a 200 km.
-        return False, f"el código postal {cp} no está en las zonas de reparto"
-    if not localidad:
-        return False, "la dirección no tiene código postal ni localidad"
-    if localidad in localidades:
-        return True, ""
-    return False, (
-        f"sin código postal, y la localidad «{direccion.get('city')}» no está "
-        "en las zonas de reparto"
+    faltantes: list[str] = []
+    ilegibles: list[str] = []
+    if codigos:
+        problema = _requerido("código postal", cp_crudo, cp)
+        if problema and "no se pudo interpretar" in problema:
+            ilegibles.append(problema)
+        elif problema:
+            faltantes.append("código postal")
+    if localidades:
+        problema = _requerido("localidad", loc_cruda, localidad)
+        if problema and "no se pudo interpretar" in problema:
+            ilegibles.append(problema)
+        elif problema:
+            faltantes.append("localidad")
+    if ilegibles:
+        return EvaluacionZona(False, "; ".join(ilegibles), ERROR)
+    if faltantes:
+        return EvaluacionZona(
+            False,
+            "la dirección no tiene " + " ni ".join(faltantes) + ", y las zonas de reparto lo exigen",
+            FALTA,
+        )
+
+    cp_ok = (cp in codigos) if codigos else None
+    loc_ok = (localidad in localidades) if localidades else None
+    if codigos and localidades:
+        if cp_ok and loc_ok:
+            return EvaluacionZona(True, "", OK)
+        if cp_ok != loc_ok:
+            return EvaluacionZona(
+                False,
+                f"el código postal {cp} y la localidad «{loc_cruda}» se contradicen: "
+                "uno está en las zonas de reparto y el otro no",
+                CONTRADICCION,
+            )
+        return EvaluacionZona(
+            False,
+            f"el código postal {cp} y la localidad «{loc_cruda}» no están en las zonas de reparto",
+            FUERA,
+        )
+    if codigos:
+        if cp_ok:
+            return EvaluacionZona(True, "", OK)
+        return EvaluacionZona(False, f"el código postal {cp} no está en las zonas de reparto", FUERA)
+    if loc_ok:
+        return EvaluacionZona(True, "", OK)
+    return EvaluacionZona(
+        False, f"la localidad «{loc_cruda}» no está en las zonas de reparto", FUERA
     )
+
+
+def en_zona(direccion: dict) -> tuple[bool, str]:
+    """(en_zona, motivo). Compatibilidad: la evaluación completa es evaluar_zona."""
+    evaluacion = evaluar_zona(direccion)
+    return evaluacion.dentro, evaluacion.motivo
 
 
 def nombre_direccion(sales_order: dict) -> str:
@@ -124,36 +189,6 @@ def nombre_direccion(sales_order: dict) -> str:
         if valor:
             return valor
     return ""
-
-
-def _ya_se_entrego(cliente: str, direccion: str) -> bool:
-    """Si hay un pedido CONFIRMADO de este cliente a esa misma dirección.
-
-    Una persona ya aprobó ese reparto y el camión llegó: es mejor evidencia
-    que cualquier zona configurada. Ante un error de lectura devuelve False
-    (no habilita), nunca True.
-    """
-    if not cliente or not direccion:
-        return False
-    try:
-        previos = erpnext.policy_get_list(
-            "Sales Order",
-            filters=[["customer", "=", cliente], ["docstatus", "=", 1]],
-            fields=["name", "customer", "shipping_address_name", "customer_address"],
-            limit=MAX_PEDIDOS_ENTREGADOS,
-        )
-    except erpnext.ERPNextError as exc:
-        print(f"[entrega] no pude revisar entregas previas de {cliente}: {exc}")
-        return False
-    for previo in previos:
-        if str(previo.get("customer") or "").strip() != cliente:
-            continue
-        if direccion in {
-            str(previo.get("shipping_address_name") or "").strip(),
-            str(previo.get("customer_address") or "").strip(),
-        }:
-            return True
-    return False
 
 
 def autorizada(sales_order: dict) -> tuple[bool, str]:
@@ -173,12 +208,7 @@ def autorizada(sales_order: dict) -> tuple[bool, str]:
     if not isinstance(direccion, dict):
         return False, f"{MOTIVO}: no pude leer la dirección {nombre}"
 
-    dentro, motivo = en_zona(direccion)
-    if dentro:
+    evaluacion = evaluar_zona(direccion)
+    if evaluacion.dentro:
         return True, ""
-
-    cliente = str(sales_order.get("customer") or "").strip()
-    if _ya_se_entrego(cliente, nombre):
-        return True, ""
-
-    return False, f"{MOTIVO}: {texto_direccion(direccion)} — {motivo}"
+    return False, f"{MOTIVO}: {texto_direccion(direccion)} — {evaluacion.motivo}"

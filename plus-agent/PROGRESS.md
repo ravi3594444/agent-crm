@@ -43,3 +43,28 @@ i.e. the old one — fixed in its own commit (`clientes.direccion_para_pedido`).
 when the stated locality is not in the configured list; the reverse (postcode
 outside, locality inside) already fails closed. Making both-present-and-
 conflicting fail closed is a policy choice, not a defect, so it was left as is.
+
+## Release candidate RC1 = `084e2c7c` on `feat/experiencia-2e`, plus the release gate
+
+The gate commit (this one) tightens two things and adds the readiness tooling:
+
+- **Delivery rule** (`app/entrega.py`, `evaluar_zona`): with both lists
+  configured, postcode AND locality must be present and allowed; with one list,
+  that list decides; with none, nothing auto-delivers; a contradiction, a
+  missing required value or an unreadable value leaves the order pending. The
+  "delivered there before" override is gone: the lists are the rule, and the
+  owner extends them. `tests/test_entrega.py` covers every combination of rule
+  set × address values.
+- **Qwen**: sales stays `qwen3.7-plus-2026-05-26`; the management default is the
+  documented `qwen3.8-max`, with `QWEN_MANAGER_MODEL` (and the older
+  `LLM_MODEL_*` names) still overriding it — select `qwen3.8-max-0902` after
+  `make verificar-qwen` proves it on your endpoint. That script makes one
+  tool-calling request per model, refuses to run in CI and never prints the key.
+- **Readiness** (`app/readiness.py`, `make check-env`): validates and reports,
+  without exposing values, the DashScope key/endpoint/region/models, staff
+  phones and country code, zone mode, permanent WhatsApp token and scopes,
+  template approval, ERPNext identities and Submit permissions, warehouse,
+  stock-trust window and every owner limit. Nothing is fabricated.
+
+Live testing was deliberately NOT run: `.env` still needs the owner's values
+(DashScope key, staff phones, zones, templates, three distinct ERPNext users).

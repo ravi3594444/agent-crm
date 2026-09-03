@@ -88,7 +88,7 @@ Those confirm INSTANTLY. Only unusual ones wake a human. Every rule must pass:
 | No more than X of one product, in stock units | 0 = nothing passes | owner |
 | Stock above the buffer, minus what other open orders already promised | 20% | owner |
 | A customer with no real history stays under their own ceiling | 0 = they always wait | owner |
-| The delivery address is in a configured zone, or was delivered to before | no zones = nothing delivers | `ZONAS_ENTREGA_*` |
+| Delivery address allowed: with both `ZONAS_ENTREGA_CP` and `ZONAS_ENTREGA_LOCALIDADES` set, postcode AND locality must be present and listed; with one list, that list decides; contradictions, missing or unreadable values stay pending | no zones = nothing delivers | `ZONAS_ENTREGA_*` |
 | No overdue balance | 0 | owner |
 | Any discount goes to a person | yes | owner |
 | If not, line + document discount combined stays under the cap | 5% | owner |
@@ -356,7 +356,7 @@ overridable from the environment and nowhere else (`app/modelos.py`):
 
 | | Sales agent | Management agent |
 |---|---|---|
-| model | `LLM_MODEL_CLIENTES` = `qwen3.7-plus-2026-05-26` | `LLM_MODEL_GERENCIA` = `qwen3.8-max-0902` |
+| model | `QWEN_SALES_MODEL` = `qwen3.7-plus-2026-05-26` | `QWEN_MANAGER_MODEL` = `qwen3.8-max` (documented name); set `qwen3.8-max-0902` once `make verificar-qwen` confirms it on your endpoint |
 | reasoning | `QWEN_THINKING_CLIENTES` = `false` | `QWEN_THINKING_GERENCIA` = `false`; set `true` only when analysis needs it (`QWEN_THINKING_BUDGET` caps it; DashScope requires streaming with thinking, which the code enables with it) |
 | endpoint / timeouts | `DASHSCOPE_BASE_URL`, `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES` | same |
 
@@ -406,7 +406,28 @@ in the Redis checkpoint, and the model only sees the last
 `CONVERSATION_MAX_MESSAGES` messages of a thread (default 40). The Gemini
 free tier used in staging allows only 20 requests per day per model; the
 production deployment uses a paid provider key configured through
-`LLM_MODEL_CLIENTES` / `LLM_MODEL_GERENCIA`.
+`QWEN_SALES_MODEL` / `QWEN_MANAGER_MODEL`.
+
+### Before a live test: readiness and provider checks
+
+```bash
+make check-env          # validates .env, Meta token/templates, ERPNext permissions, Redis limits
+make check-env-offline  # same, without calling Meta or ERPNext
+make verificar-qwen     # one minimal tool-calling request to each Qwen model (manual, never in CI)
+```
+
+`make check-env` (`app/readiness.py`) prints one OK / AVISO / FALTA / ERROR line
+per item and never shows a value: only presence, lengths, counts, regions and
+statuses. It checks the DashScope key and endpoint region, both model names,
+the staff phones and country code, the delivery-zone mode, whether the WhatsApp
+token is a permanent System User token with the right scopes, whether each
+configured template is APPROVED in Meta (needs `WHATSAPP_BUSINESS_ACCOUNT_ID` or
+a token that reveals the account), that the three ERPNext credentials are
+distinct users where only the policy one can submit a Sales Order, that the
+warehouse belongs to the company, the stock-trust window, and every owner limit
+as stored in Redis. What it cannot verify it reports as unverified; it never
+fills in a value. `deploy/verificar_qwen.py` refuses to run when `CI` is set and
+sanitizes anything that looks like a key from its output.
 
 ### Install, test, and start
 

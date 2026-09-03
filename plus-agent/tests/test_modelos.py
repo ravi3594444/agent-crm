@@ -40,6 +40,7 @@ class _ChatOpenAIGrabado(RunnableLambda):
 def _entorno(monkeypatch: pytest.MonkeyPatch):
     for variable in (
         "DASHSCOPE_API_KEY", "DASHSCOPE_BASE_URL", "LLM_MODEL_CLIENTES", "LLM_MODEL_GERENCIA",
+        "QWEN_SALES_MODEL", "QWEN_MANAGER_MODEL",
         "LLM_TIMEOUT_SECONDS", "LLM_MAX_RETRIES", "LLM_TEMPERATURA_CLIENTES",
         "LLM_TEMPERATURA_GERENCIA", "QWEN_THINKING_CLIENTES", "QWEN_THINKING_GERENCIA",
         "QWEN_THINKING_BUDGET",
@@ -63,9 +64,9 @@ def test_sales_agent_is_qwen_plus_with_thinking_off_by_default() -> None:
     assert cfg["max_retries"] == 2
 
 
-def test_management_agent_is_qwen_max_and_reasons_only_when_asked(monkeypatch) -> None:
+def test_management_agent_is_the_documented_qwen_max_and_reasons_only_when_asked(monkeypatch) -> None:
     apagado = modelos.configuracion("gerencia")
-    assert apagado["model"] == "qwen3.8-max-0902"
+    assert apagado["model"] == "qwen3.8-max"
     assert apagado["extra_body"] == {"enable_thinking": False}
     assert apagado["temperature"] == 0.1
 
@@ -79,10 +80,30 @@ def test_management_agent_is_qwen_max_and_reasons_only_when_asked(monkeypatch) -
     assert modelos.configuracion("clientes")["extra_body"] == {"enable_thinking": False}
 
 
+def test_the_dated_manager_snapshot_is_selectable_once_verified(monkeypatch) -> None:
+    monkeypatch.setenv("QWEN_MANAGER_MODEL", "qwen3.8-max-0902")
+    assert modelos.configuracion("gerencia")["model"] == "qwen3.8-max-0902"
+    assert modelos.configuracion("clientes")["model"] == "qwen3.7-plus-2026-05-26"
+    assert modelos.nombre_modelo("gerencia") == ("QWEN_MANAGER_MODEL", "qwen3.8-max-0902")
+
+
+def test_the_previous_variable_names_still_work_but_the_qwen_names_win(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_MODEL_GERENCIA", "qwen3.8-max-0902")
+    assert modelos.configuracion("gerencia")["model"] == "qwen3.8-max-0902"
+    monkeypatch.setenv("QWEN_MANAGER_MODEL", "qwen3.8-max")
+    assert modelos.configuracion("gerencia")["model"] == "qwen3.8-max"
+
+
+def test_region_is_derived_from_the_endpoint_host() -> None:
+    assert modelos.region("https://dashscope-intl.aliyuncs.com/compatible-mode/v1") == "internacional (Singapur)"
+    assert modelos.region("https://dashscope.aliyuncs.com/compatible-mode/v1") == "China (Beijing)"
+    assert modelos.region("https://example.com/v1") == "desconocida"
+
+
 def test_everything_is_environment_configuration(monkeypatch) -> None:
     monkeypatch.setenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-    monkeypatch.setenv("LLM_MODEL_CLIENTES", "qwen3.7-plus-2026-05-26")
-    monkeypatch.setenv("LLM_MODEL_GERENCIA", "qwen3.8-max-0902")
+    monkeypatch.setenv("QWEN_SALES_MODEL", "qwen3.7-plus-2026-05-26")
+    monkeypatch.setenv("QWEN_MANAGER_MODEL", "qwen3.8-max-0902")
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "25")
     monkeypatch.setenv("LLM_MAX_RETRIES", "0")
     cfg = modelos.configuracion("gerencia")
@@ -100,8 +121,8 @@ def test_missing_key_stops_the_process_instead_of_falling_back(monkeypatch) -> N
 
 
 def test_a_gemini_style_model_name_is_refused_not_translated(monkeypatch) -> None:
-    monkeypatch.setenv("LLM_MODEL_CLIENTES", "google_genai:gemini-3.5-flash")
-    with pytest.raises(modelos.ConfiguracionModeloError, match="prefijo de proveedor"):
+    monkeypatch.setenv("QWEN_SALES_MODEL", "google_genai:gemini-3.5-flash")
+    with pytest.raises(modelos.ConfiguracionModeloError, match=r"QWEN_SALES_MODEL.*prefijo de proveedor"):
         modelos.configuracion("clientes")
 
 
@@ -153,6 +174,6 @@ def test_graph_builds_both_agents_from_the_factory_without_network(monkeypatch) 
     monkeypatch.setattr(redis_ckpt, "RedisSaver", _Saver)
     graph = importlib.import_module("app.graph")
     modelos_construidos = [c["model"] for c in _ChatOpenAIGrabado.instancias]
-    assert modelos_construidos == ["qwen3.7-plus-2026-05-26", "qwen3.8-max-0902"]
+    assert modelos_construidos == ["qwen3.7-plus-2026-05-26", "qwen3.8-max"]
     assert graph.agente_clientes is not None and graph.agente_gerencia is not None
     del _sys.modules["app.graph"]
