@@ -1,4 +1,16 @@
-"""Las herramientas con las que el DUEÑO cambia los límites, por WhatsApp.
+"""Las herramientas con las que el DUEÑO cambia sus ajustes, por WhatsApp.
+
+Dos familias, un mismo camino: los límites de auto-confirmación
+(app/policy.py) y las reglas de entrega (app/excepciones.py). Las dos se
+proponen y se confirman igual, se auditan igual, y ninguna la aplica el modelo.
+
+LO QUE NO SE TOCA POR ACÁ
+La cuenta contable del cargo de envío (ENTREGA_CARGO_CUENTA). Es un account
+head real de ERPNext: un nombre equivocado no rompe el bot, le desbalancea la
+contabilidad al dueño, y un modelo interpretando "poneme la cuenta de fletes"
+no puede verificar que exista. No está en ningún registro, así que ninguna
+herramienta puede escribirla; se configura en el servidor. Sin ella, un cargo
+simplemente no se escribe en el pedido y lo agrega una persona.
 
 DÓNDE ESTÁ EL LÍMITE DE LO QUE PUEDE HACER EL LLM
 El agente de gerencia interpreta lo que el dueño escribió («subime el tope a
@@ -31,7 +43,9 @@ _SIN_PERMISO = (
 
 def _mostrar(fila: dict) -> str:
     valor = fila["valor"]
-    if fila["unidad"] == "$":
+    if valor == limites.NINGUNO:
+        valor = "sin configurar"
+    elif fila["unidad"] == "$":
         try:
             valor = pesos(float(valor))
         except (TypeError, ValueError):
@@ -40,6 +54,8 @@ def _mostrar(fila: dict) -> str:
         valor = f"{valor}%"
     elif fila["unidad"] == "sí/no":
         valor = "sí" if valor == "true" else "no"
+    elif fila["unidad"] == "días":
+        valor = valor.replace(",", ", ")
     origen = {
         "dueño": "lo fijaste vos",
         "arranque": "valor de arranque",
@@ -78,7 +94,7 @@ def ver_limites(config: RunnableConfig) -> str:
     except RuntimeContextError:
         return _SIN_PERMISO
     try:
-        filas = limites.resumen()
+        filas = [f for f in limites.resumen() if f["nombre"] in limites.LIMITES]
     except limites.LimiteError as exc:
         return (
             f"No pude leer los límites ({exc}). Mientras no se puedan leer, "
@@ -89,17 +105,26 @@ def ver_limites(config: RunnableConfig) -> str:
         "Límites de auto-confirmación:\n"
         f"{cuerpo}\n\n"
         "Para cambiar uno, decime cuál y el valor nuevo. Te pido confirmación "
-        "antes de aplicarlo."
+        "antes de aplicarlo. Las reglas de entrega se ven con «reglas de "
+        "entrega»."
     )
 
 
 @tool
 def proponer_limite(limite: str, valor: str, config: RunnableConfig) -> str:
-    """Prepara un cambio de UN límite y pide confirmación. NO lo aplica.
+    """Prepara un cambio de UN ajuste y pide confirmación. NO lo aplica.
 
-    `limite` es como lo dijo el dueño ("tope", "colchón de stock", "cantidad
-    por producto", "cliente nuevo", "deuda", "descuentos"). `valor` es el
-    número o sí/no que dijo, sin interpretarlo ni convertirlo.
+    Sirve para los límites de auto-confirmación ("tope", "colchón de stock",
+    "cantidad por producto", "cliente nuevo", "deuda", "descuentos", "plazo de
+    revisión") y también para las reglas de entrega ("días de reparto", "hora
+    de reparto", "entregas fuera de día", "días fuera de día", "hora fuera de
+    día", "cargo fuera de día", "mínimo fuera de día", "retiro en el local",
+    "días de retiro", "hora de retiro").
+
+    Pasá `limite` y `valor` TAL COMO los dijo el dueño, sin interpretarlos ni
+    convertirlos: los días, las horas, los sí/no y la plata los valida Python.
+    Si el nombre es ambiguo te lo va a decir con las opciones — preguntale cuál
+    en vez de elegir vos. Un cambio por vez.
     Devolvé al dueño el código tal como viene: lo tiene que escribir él.
     """
     try:
@@ -133,11 +158,47 @@ def confirmar_limite(codigo: str, config: RunnableConfig) -> str:
         cambio = limites.aplicar(codigo, actor.actor_phone)
     except limites.LimiteError as exc:
         return f"No apliqué nada: {exc}."
-    alias = limites.LIMITES[cambio["limite"]].alias[0]
+    defi = limites.TODOS.get(cambio["limite"])
+    alias = defi.alias[0] if defi else cambio["limite"]
     return (
         f"Listo: *{alias}* pasó de {cambio['anterior']} a {cambio['nuevo']}. "
         "Rige desde el próximo pedido, sin reiniciar nada. "
         f"Queda registrado a tu nombre ({cambio['ts']})."
+    )
+
+
+@tool
+def ver_reglas_de_entrega(config: RunnableConfig) -> str:
+    """Muestra las reglas de entrega vigentes: reparto, excepciones y retiro.
+
+    Usala cuando el dueño pregunta qué días se reparte, si se entrega fuera de
+    día, cuánto se cobra por eso, o si se puede retirar por el local — y antes
+    de proponerle un cambio.
+    """
+    try:
+        require_management(config)
+    except RuntimeContextError:
+        return _SIN_PERMISO
+    try:
+        filas = [f for f in limites.resumen() if f["nombre"] in limites.ENTREGA]
+    except limites.LimiteError as exc:
+        return (
+            f"No pude leer las reglas de entrega ({exc}). Mientras no se puedan "
+            "leer, no se ofrece ninguna entrega fuera de día ni retiro."
+        )
+    cuerpo = "\n".join(_mostrar(fila) for fila in filas)
+    cuenta = limites.cuenta_cargo()
+    nota = (
+        f"\nCuenta contable del cargo: {cuenta} (se configura en el servidor)."
+        if cuenta
+        else "\n⚠️ Sin cuenta contable configurada: un cargo de envío no se "
+        "escribe en el pedido y queda para que lo agregue una persona."
+    )
+    return (
+        "Reglas de entrega:\n"
+        f"{cuerpo}\n{nota}\n\n"
+        "Para cambiar una, decime cuál y el valor nuevo. Te pido confirmación "
+        "antes de aplicarla."
     )
 
 
@@ -157,7 +218,7 @@ def historial_limites(config: RunnableConfig) -> str:
     lineas = []
     for entrada in entradas:
         nombre = str(entrada.get("limite") or "")
-        defi = limites.LIMITES.get(nombre)
+        defi = limites.TODOS.get(nombre)
         lineas.append(
             f"· {entrada.get('ts', '?')} — {defi.alias[0] if defi else nombre or '?'}: "
             f"{entrada.get('anterior', '?')} → {entrada.get('nuevo', '?')} "

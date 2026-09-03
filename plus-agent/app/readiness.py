@@ -430,8 +430,12 @@ def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_l
     except Exception as exc:
         reporte.error("Límites", f"no se pueden leer ({type(exc).__name__}): la política deja TODO pendiente")
         return
+    from app import limites as _limites
+
     for fila in filas:
         nombre = str(fila.get("nombre") or fila.get("alias") or "límite")
+        if nombre in _limites.ENTREGA:
+            continue  # chequear_entrega reports these, with the fallback line
         origen = {"dueño": "fijado por el dueño", "arranque": "del .env", "default": "default del código"}.get(
             str(fila.get("origen")), str(fila.get("origen"))
         )
@@ -441,6 +445,108 @@ def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_l
             reporte.aviso(nombre, f"en 0 ({origen}): todo pedido espera al dueño")
         else:
             reporte.ok(nombre, f"válido ({origen})")
+
+
+def chequear_entrega(env: Mapping[str, str], reporte: Reporte, resumen_limites: Callable[[], list[dict]] | None) -> None:
+    """Las reglas de entrega, y sobre todo: ¿hay red de contención o no?
+
+    Read from the owner's own store (through ``resumen_limites``) rather than
+    from the environment, because that is where a confirmed change lives — a
+    check against the .env would report the bootstrap value and call a
+    configured system unconfigured.
+
+    THE LINE THAT MATTERS
+    With neither a normal delivery round nor a pickup counter, an expired
+    decision request has nothing concrete to offer: the customer gets "no
+    answer in time, write to me again" and the order is effectively dropped.
+    Nothing is oversold, so this is an AVISO and not a blocker — but the owner
+    has to know the fallback is off.
+    """
+    from app import limites
+
+    if resumen_limites is None:
+        reporte.aviso("Entrega", "sin Redis: no se verificaron las reglas de entrega")
+        return
+    try:
+        filas = {
+            str(f.get("nombre")): f
+            for f in resumen_limites()
+            if str(f.get("nombre")) in limites.ENTREGA
+        }
+    except Exception as exc:
+        reporte.error(
+            "Entrega",
+            f"reglas no legibles ({type(exc).__name__}): no se ofrece ninguna "
+            "entrega fuera de día ni retiro",
+        )
+        return
+
+    def _puesto(nombre: str) -> str:
+        fila = filas.get(nombre) or {}
+        if fila.get("problema"):
+            return ""
+        valor = str(fila.get("valor") or "")
+        return "" if valor in ("", limites.NINGUNO) else valor
+
+    for nombre, fila in filas.items():
+        if fila.get("problema"):
+            reporte.error(nombre, f"mal configurado: {fila['problema']}")
+
+    reparto = bool(_puesto("ENTREGA_DIAS") and _puesto("ENTREGA_HORA"))
+    retiro = bool(
+        _puesto("RETIRO_LOCAL_ACTIVO") == "true"
+        and _puesto("RETIRO_LOCAL_DIAS")
+        and _puesto("RETIRO_LOCAL_HORA")
+    )
+    if reparto:
+        reporte.ok(
+            "ENTREGA_DIAS",
+            f"reparto {_puesto('ENTREGA_DIAS')} a las {_puesto('ENTREGA_HORA')}",
+        )
+    if retiro:
+        reporte.ok(
+            "RETIRO_LOCAL_DIAS",
+            f"retiro {_puesto('RETIRO_LOCAL_DIAS')} a las {_puesto('RETIRO_LOCAL_HORA')}",
+        )
+    if not reparto and not retiro:
+        reporte.aviso(
+            "Respaldo de vencimiento",
+            "sin días/hora de reparto ni retiro habilitado: una solicitud que "
+            "vence no puede ofrecerle nada concreto al cliente y el pedido se "
+            "cae. Configurá «días de reparto» y «hora de reparto», o el retiro "
+            "por el local",
+        )
+
+    if _puesto("ENTREGA_EXCEPCION_ACTIVA") != "true":
+        reporte.aviso(
+            "ENTREGA_EXCEPCION_ACTIVA",
+            "en no: toda entrega fuera de día la decide una persona",
+        )
+    else:
+        faltan = [
+            defi.alias[0]
+            for clave, defi in limites.ENTREGA.items()
+            if clave
+            in ("ENTREGA_EXCEPCION_DIAS", "ENTREGA_EXCEPCION_HORA", "ENTREGA_EXCEPCION_CARGO")
+            and not _puesto(clave)
+        ]
+        if faltan:
+            reporte.aviso(
+                "ENTREGA_EXCEPCION_ACTIVA",
+                "en sí pero falta " + ", ".join(faltan) + ": nada queda "
+                "pre-autorizado y cada caso lo decide una persona",
+            )
+        else:
+            reporte.ok("ENTREGA_EXCEPCION_ACTIVA", "sí, con días, hora y cargo configurados")
+        if not _valor(env, "ENTREGA_CARGO_CUENTA"):
+            reporte.aviso(
+                "ENTREGA_CARGO_CUENTA",
+                "vacía: un cargo de envío no se escribe en el pedido y queda "
+                "para que lo agregue una persona (se configura sólo acá, nunca "
+                "por WhatsApp)",
+            )
+        else:
+            reporte.ok("ENTREGA_CARGO_CUENTA", "presente")
 
 
 # ------------------------------------------------------------------- entry
@@ -464,6 +570,7 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
         except Exception as exc:  # pragma: no cover - import-time env problems
             reporte.aviso("Límites", f"módulo de límites no disponible ({type(exc).__name__})")
     chequear_stock_y_limites(env, reporte, resumen)
+    chequear_entrega(env, reporte, resumen)
     return reporte
 
 

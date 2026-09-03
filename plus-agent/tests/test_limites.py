@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import date
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -592,3 +593,572 @@ def test_a_dead_store_cannot_be_talked_into_a_change(almacen: FakeRedis) -> None
     )
 
     assert "No cambié nada" in propuesta
+
+
+# ---------------------------------------------------------------------------
+# Las reglas de ENTREGA: mismo dueño, mismo código de dos pasos, misma
+# auditoría durable — y ningún camino por el que el modelo las aplique solo.
+# ---------------------------------------------------------------------------
+
+
+def _proponer(limite: str, valor: str, telefono: str = EQUIPO) -> str:
+    return configuracion.proponer_limite.invoke(
+        {"limite": limite, "valor": valor}, config=_gerencia(telefono)
+    )
+
+
+def _confirmar(codigo: str = "4242", telefono: str = EQUIPO) -> str:
+    return configuracion.confirmar_limite.invoke(
+        {"codigo": codigo}, config=_gerencia(telefono)
+    )
+
+
+# ------------------------------------------------------------- authorization
+@pytest.mark.parametrize(
+    "config",
+    [_cliente(), _gerencia(DESCONOCIDO)],
+    ids=["un cliente", "un número desconocido"],
+)
+def test_only_an_authorized_manager_can_see_or_change_a_delivery_rule(
+    almacen: FakeRedis, config: dict
+) -> None:
+    assert "no está autorizado" in configuracion.ver_reglas_de_entrega.invoke(
+        {}, config=config
+    )
+    configuracion.proponer_limite.invoke(
+        {"limite": "días de reparto", "valor": "martes"}, config=config
+    )
+    configuracion.confirmar_limite.invoke({"codigo": "4242"}, config=config)
+
+    assert almacen.hashes == {}
+    assert limites.entrega().dias_reparto == ()
+
+
+def test_a_manager_cannot_confirm_a_delivery_change_somebody_else_proposed(
+    almacen: FakeRedis,
+) -> None:
+    _proponer("días de reparto", "martes y viernes", EQUIPO)
+
+    assert "No apliqué nada" in _confirmar(telefono=OTRO_DEL_EQUIPO)
+    assert limites.entrega().dias_reparto == ()
+
+
+# --------------------------------------------------- the confirmation code
+def test_nothing_about_delivery_changes_until_the_owner_writes_the_code(
+    almacen: FakeRedis,
+) -> None:
+    propuesta = _proponer("días de reparto", "martes y viernes")
+
+    assert "4242" in propuesta
+    assert "martes,viernes" in propuesta
+    # Proposed only.
+    assert limites.entrega().dias_reparto == ()
+    assert limites.vigente("ENTREGA_DIAS") == limites.NINGUNO
+
+    aplicado = _confirmar()
+
+    assert "días de reparto" in aplicado
+    assert limites.entrega().dias_reparto == (1, 4)  # martes, viernes
+
+
+def test_a_wrong_code_changes_no_delivery_rule(almacen: FakeRedis) -> None:
+    _proponer("hora de reparto", "8")
+
+    assert "No apliqué nada" in _confirmar("1111")
+    assert limites.entrega().hora_reparto == ""
+
+
+def test_the_llm_can_propose_a_delivery_rule_but_never_apply_one(
+    almacen: FakeRedis,
+) -> None:
+    """The whole boundary in one test: every tool the management agent can
+    call, and none of them moves a setting without the owner's own code."""
+    nombres = {t.name for t in [
+        configuracion.ver_limites,
+        configuracion.ver_reglas_de_entrega,
+        configuracion.proponer_limite,
+        configuracion.confirmar_limite,
+        configuracion.historial_limites,
+    ]}
+    assert nombres == {
+        "ver_limites",
+        "ver_reglas_de_entrega",
+        "proponer_limite",
+        "confirmar_limite",
+        "historial_limites",
+    }
+
+    # Reading changes nothing; proposing changes nothing.
+    configuracion.ver_reglas_de_entrega.invoke({}, config=_gerencia())
+    _proponer("retiro en el local", "sí")
+    assert almacen.hashes == {}
+    assert limites.entrega().retiro_activo is False
+
+    _confirmar()
+    assert limites.entrega().retiro_activo is True
+
+
+# ------------------------------------------------------------------- audit
+def test_every_delivery_change_is_audited_in_redis_and_in_erpnext(
+    almacen: FakeRedis,
+) -> None:
+    _proponer("hora de retiro", "10:30")
+    _confirmar()
+
+    entrada = limites.auditoria()[0]
+    assert entrada["limite"] == "RETIRO_LOCAL_HORA"
+    assert entrada["anterior"] == limites.NINGUNO
+    assert entrada["nuevo"] == "10:30"
+    assert entrada["telefono"] == EQUIPO
+    assert entrada["ts"]
+
+    texto = limites.erpnext.registrar_comentario.call_args[0][2]
+    # Its own marker: sharing the limits' one would arm their data-loss
+    # tripwire for ever (see the tripwire test below).
+    assert limites.MARCA_DURABLE_ENTREGA in texto
+    assert limites.MARCA_DURABLE not in texto
+    assert "RETIRO_LOCAL_HORA" in texto and "10:30" in texto and EQUIPO in texto
+
+    historial = configuracion.historial_limites.invoke({}, config=_gerencia())
+    assert "hora de retiro" in historial
+
+
+def test_a_delivery_change_that_cannot_be_recorded_durably_is_not_applied(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same rule as the limits: an audit that only lives in Redis disappears
+    with Redis, and then a wiped store looks like a fresh install."""
+    _proponer("días de reparto", "lunes")
+    monkeypatch.setattr(
+        limites.erpnext,
+        "registrar_comentario",
+        Mock(side_effect=limites.erpnext.ERPNextError("no")),
+    )
+
+    assert "No apliqué nada" in _confirmar()
+    assert almacen.hashes == {}
+    assert limites.entrega().dias_reparto == ()
+
+
+# ------------------------------------------------- resolution order, restart
+def test_what_the_owner_set_beats_the_bootstrap_environment_for_delivery(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ENTREGA_DIAS", "lunes")
+    assert limites.entrega().dias_reparto == (0,)  # bootstrap
+
+    _proponer("días de reparto", "jueves")
+    _confirmar()
+
+    assert limites.entrega().dias_reparto == (3,)  # the owner wins
+    filas = {f["nombre"]: f for f in limites.resumen()}
+    assert filas["ENTREGA_DIAS"]["origen"] == "dueño"
+
+
+def test_with_nothing_set_anywhere_a_delivery_rule_is_simply_unconfigured(
+    almacen: FakeRedis,
+) -> None:
+    reglas = limites.entrega()
+
+    assert reglas.dias_reparto == () and reglas.hora_reparto == ""
+    assert reglas.excepcion_activa is False and reglas.retiro_activo is False
+    assert reglas.excepcion_cargo is None and reglas.excepcion_minimo == 0.0
+    filas = {f["nombre"]: f for f in limites.resumen()}
+    assert filas["ENTREGA_DIAS"]["origen"] == "default"
+    assert filas["ENTREGA_DIAS"]["problema"] == ""
+
+
+def test_a_confirmed_delivery_rule_outlives_the_process_that_set_it(
+    almacen: FakeRedis,
+) -> None:
+    _proponer("días de reparto", "martes")
+    _confirmar()
+
+    # A brand new store object over the SAME data: nothing cached in-process.
+    from app import locks as _locks
+
+    sobreviviente = FakeRedis(hashes=almacen.hashes, lists=almacen.lists)
+    _locks.conexion = lambda: sobreviviente
+
+    assert limites.entrega().dias_reparto == (1,)
+    assert limites.vigente("ENTREGA_DIAS") == "martes"
+
+
+def test_a_change_applies_to_the_very_next_operation_with_no_restart(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read per operation: app/excepciones.py asks again every time."""
+    from app import excepciones
+
+    entrega_autorizada(monkeypatch)
+    assert excepciones.evaluar_respaldo({}, hoy=date(2026, 9, 7)).preautorizada is False
+
+    _proponer("días de reparto", "martes")
+    _confirmar()
+    _proponer("hora de reparto", "08:00")
+    _confirmar()
+
+    evaluacion = excepciones.evaluar_respaldo({}, hoy=date(2026, 9, 7))
+    assert evaluacion.preautorizada is True
+    assert evaluacion.oferta.fecha == "2026-09-08"
+    assert evaluacion.oferta.hora == "08:00"
+
+
+def test_a_store_that_cannot_be_read_offers_no_delivery_at_all(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ENTREGA_DIAS", "martes")
+    monkeypatch.setenv("ENTREGA_HORA", "08:00")
+    almacen.caido = True
+
+    reglas = limites.entrega()
+
+    assert reglas.dias_reparto == () and reglas.hora_reparto == ""
+    # ...and it does NOT raise into the deterministic path, unlike the limits:
+    # a delivery-rule outage must not stop every order from confirming.
+    from app import excepciones
+
+    assert excepciones.dias_reparto() == []
+    assert excepciones.activa() is False
+
+
+# ------------------------------------------------------------ malformed values
+@pytest.mark.parametrize(
+    "limite,valor,esperado",
+    [
+        ("días de reparto", "lunez", "no es un día de la semana"),
+        ("días de reparto", "32", "no es un día de la semana"),
+        ("hora de reparto", "25:00", "una hora tipo 08:00"),
+        ("hora de reparto", "mañana", "una hora tipo 08:00"),
+        ("hora de retiro", "8:75", "una hora tipo 08:00"),
+        ("retiro en el local", "quizás", "tiene que ser sí o no"),
+        ("cargo fuera de día", "gratis", "no es un número"),
+        ("mínimo fuera de día", "-500", "no puede ser menor que 0"),
+        ("cargo fuera de día", "99999999", "es imposible"),
+    ],
+)
+def test_a_malformed_delivery_value_is_refused_and_nothing_is_stored(
+    almacen: FakeRedis, limite: str, valor: str, esperado: str
+) -> None:
+    respuesta = _proponer(limite, valor)
+
+    assert "No cambié nada" in respuesta
+    assert esperado in respuesta
+    assert almacen.strings == {} and almacen.hashes == {}
+
+
+@pytest.mark.parametrize(
+    "dicho,guardado",
+    [
+        ("martes y viernes", "martes,viernes"),
+        ("Miércoles, Sábado", "miercoles,sabado"),
+        ("viernes martes", "martes,viernes"),
+        ("MARTES,martes", "martes"),
+    ],
+)
+def test_however_the_owner_writes_the_days_one_normal_form_is_stored(
+    almacen: FakeRedis, dicho: str, guardado: str
+) -> None:
+    _proponer("días de reparto", dicho)
+    _confirmar()
+
+    assert limites.vigente("ENTREGA_DIAS") == guardado
+
+
+@pytest.mark.parametrize(
+    "dicho,guardado", [("8", "08:00"), ("9:30", "09:30"), ("18.00", "18:00"), ("7 hs", "07:00")]
+)
+def test_however_the_owner_writes_the_time_one_normal_form_is_stored(
+    almacen: FakeRedis, dicho: str, guardado: str
+) -> None:
+    _proponer("hora de reparto", dicho)
+    _confirmar()
+
+    assert limites.vigente("ENTREGA_HORA") == guardado
+
+
+def test_a_setting_can_be_cleared_which_an_empty_value_cannot_do(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty string in the store reads as "unset" and falls back to the
+    bootstrap environment, so "borrá los días" needs a real sentinel."""
+    monkeypatch.setenv("ENTREGA_DIAS", "lunes")
+    _proponer("días de reparto", "jueves")
+    _confirmar()
+    assert limites.entrega().dias_reparto == (3,)
+
+    _proponer("días de reparto", "ninguno")
+    _confirmar()
+
+    assert limites.vigente("ENTREGA_DIAS") == limites.NINGUNO
+    assert limites.entrega().dias_reparto == ()  # NOT back to the .env's lunes
+
+
+def test_a_broken_bootstrap_value_reads_as_unconfigured_not_as_an_offer(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An environment variable never went through the confirmation code, so it
+    is re-validated on the way out."""
+    monkeypatch.setenv("ENTREGA_DIAS", "lunes,jueevs")
+    monkeypatch.setenv("ENTREGA_HORA", "08:00")
+
+    assert limites.entrega().dias_reparto == ()
+    filas = {f["nombre"]: f for f in limites.resumen()}
+    assert "no es un día de la semana" in filas["ENTREGA_DIAS"]["problema"]
+
+
+def test_a_seven_digit_amount_is_stored_exactly(almacen: FakeRedis) -> None:
+    """At :g a 1234567 value is stored as "1.23457e+06" and reads back as
+    1234570 — silently rounding the owner's money."""
+    _proponer("mínimo fuera de día", "1234567")
+    _confirmar()
+
+    assert limites.vigente("ENTREGA_EXCEPCION_MIN_TOTAL") == "1234567"
+    assert limites.entrega().excepcion_minimo == 1234567.0
+    assert "e+" not in limites.auditoria()[0]["nuevo"]
+
+
+# --------------------------------------------------------- ambiguity, safety
+def test_an_ambiguous_name_is_asked_about_instead_of_guessed(
+    almacen: FakeRedis,
+) -> None:
+    """"hora" matches the approval timeout, the review deadline and four
+    delivery times. Picking the first would let a vague word from the model
+    move a setting the owner never mentioned."""
+    respuesta = _proponer("hora", "08:00")
+
+    assert "puede ser varias cosas" in respuesta
+    assert "hora de reparto" in respuesta
+    assert almacen.hashes == {}
+
+
+def test_the_accounting_account_is_not_reachable_by_natural_language(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wrong account head does not break the bot — it unbalances the owner's
+    books, and no model can check that an account exists."""
+    assert limites.CUENTA_CARGO not in limites.TODOS
+    assert not [
+        d for d in limites.TODOS.values() if "cuenta" in " ".join(d.alias)
+    ]
+
+    for dicho in ("cuenta contable", "cuenta del cargo", "ENTREGA_CARGO_CUENTA"):
+        respuesta = _proponer(dicho, "Fletes - LT")
+        assert "No cambié nada" in respuesta
+
+    assert almacen.hashes == {}
+    # It is still configurable, on the server, where a person can check it.
+    monkeypatch.setenv("ENTREGA_CARGO_CUENTA", "Fletes - LT")
+    assert limites.cuenta_cargo() == "Fletes - LT"
+
+
+def test_a_delivery_rule_cannot_stop_an_order_from_confirming(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Why the delivery settings are a separate registry: configuracion() runs
+    once per order LINE and raises on the first bad value, so a typo in
+    "martes" would have become an outage for every customer."""
+    monkeypatch.setenv("ENTREGA_DIAS", "lunez")
+    monkeypatch.setenv("ENTREGA_HORA", "no es una hora")
+
+    assert limites.configuracion().tope == 0.0  # reads fine
+    assert set(limites.ENTREGA) & set(limites.LIMITES) == set()
+    for campo in limites.Configuracion.__dataclass_fields__:
+        assert "entrega" not in campo and "retiro" not in campo
+
+
+def test_one_delivery_setting_at_a_time(almacen: FakeRedis) -> None:
+    """Two proposals from one phone: the second replaces the first, and only
+    the confirmed one is stored."""
+    _proponer("días de reparto", "martes")
+    _proponer("hora de reparto", "08:00")
+
+    _confirmar()
+
+    assert almacen.hashes[limites.CLAVE_VALORES] == {"ENTREGA_HORA": "08:00"}
+    assert limites.entrega().dias_reparto == ()
+
+
+def test_a_dead_store_cannot_be_talked_into_a_delivery_change(
+    almacen: FakeRedis,
+) -> None:
+    almacen.caido = True
+
+    assert "No cambié nada" in _proponer("días de reparto", "martes")
+    assert "No apliqué nada" in _confirmar()
+
+
+@pytest.mark.parametrize(
+    "dicho,guardado",
+    [
+        ("1.500", "1500"),
+        ("1.234.567", "1234567"),
+        ("$ 2.000", "2000"),
+        ("1500", "1500"),
+        ("1500,50", "1500.5"),
+        ("1.500,50", "1500.5"),
+        ("1,5", "1.5"),
+    ],
+)
+def test_money_reads_the_way_the_owner_writes_it(
+    almacen: FakeRedis, dicho: str, guardado: str
+) -> None:
+    """"1.500" is fifteen hundred pesos to him and 1.5 to float(). The manager
+    already types a delivery fee that way for a counter-offer
+    (solicitudes.parsear_terminos strips the dots), so a setting must agree —
+    otherwise the same three keystrokes mean two different amounts."""
+    _proponer("mínimo fuera de día", dicho)
+    _confirmar()
+
+    assert limites.vigente("ENTREGA_EXCEPCION_MIN_TOTAL") == guardado
+
+
+@pytest.mark.parametrize("dicho,esperado", [("1.5", 1.5), ("20", 20.0), ("1,5", 1.5)])
+def test_a_percentage_or_an_hour_count_is_never_regrouped(
+    almacen: FakeRedis, dicho: str, esperado: float
+) -> None:
+    """The thousands rule is for money only: 1.5% is one and a half percent."""
+    _proponer("colchón de stock", dicho)
+    _confirmar()
+
+    assert limites.configuracion().buffer == pytest.approx(esperado / 100.0)
+
+
+# ------------------------------------------ what the adversarial review found
+def test_confirming_a_price_stores_the_number_the_owner_was_shown(
+    almacen: FakeRedis,
+) -> None:
+    """The normal form is re-read on the way out, and the thousands rule is not
+    idempotent: "1,125" is one peso twelve, normalizes to "1.125", and reading
+    THAT as raw input regroups it into 1125. He would confirm one number and a
+    thousandfold different one would be stored."""
+    propuesta = _proponer("cargo fuera de día", "1,125")
+
+    assert "1.125" in propuesta
+
+    _confirmar()
+
+    assert limites.vigente("ENTREGA_EXCEPCION_CARGO") == "1.125"
+    assert limites.entrega().excepcion_cargo == 1.125
+    assert limites.auditoria()[0]["nuevo"] == "1.125"
+
+
+@pytest.mark.parametrize("valor", ["1.125", "1500.5", "1.5", "1234567", "1500"])
+def test_normalizing_a_value_twice_changes_nothing(
+    almacen: FakeRedis, valor: str
+) -> None:
+    """validar() has to be a fixed point on its own output, for every kind."""
+    una = limites.validar("ENTREGA_EXCEPCION_CARGO", valor)
+    otra = limites.validar("ENTREGA_EXCEPCION_CARGO", una, tecleado=False)
+
+    assert una == otra
+
+
+def _excepcion_lista(monkeypatch) -> None:
+    for nombre, valor in (
+        ("ENTREGA_EXCEPCION_ACTIVA", "true"),
+        ("ENTREGA_EXCEPCION_DIAS", "jueves"),
+        ("ENTREGA_EXCEPCION_HORA", "19:00"),
+        ("ENTREGA_EXCEPCION_CARGO", "1500"),
+    ):
+        monkeypatch.setenv(nombre, valor)
+
+
+def test_an_unreadable_order_minimum_blocks_the_exception(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Everything in Entrega fails soft because everything in it can only
+    WIDEN what is offered. The minimum is the one that NARROWS — it is what
+    stops a $200 order earning a free off-day delivery — so reading an
+    unreadable one as "no minimum" would remove the owner's floor and
+    pre-authorize everything."""
+    from app import excepciones
+
+    _excepcion_lista(monkeypatch)
+    entrega_autorizada(monkeypatch)
+    monkeypatch.setenv("ENTREGA_EXCEPCION_MIN_TOTAL", "8000")
+    assert excepciones.evaluar_entrega(
+        {"grand_total": 9000}, hoy=date(2026, 9, 3)
+    ).preautorizada is True
+
+    monkeypatch.setenv("ENTREGA_EXCEPCION_MIN_TOTAL", "ocho mil")
+
+    # Not "no minimum": no exception at all.
+    assert limites.entrega().excepcion_minimo is None
+    evaluacion = excepciones.evaluar_entrega({"grand_total": 9000}, hoy=date(2026, 9, 3))
+    assert evaluacion.preautorizada is False
+    assert evaluacion.oferta is None
+
+
+def test_no_minimum_configured_still_means_no_minimum(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0 is a real answer the owner can give, and must stay distinguishable
+    from a value nobody can read."""
+    from app import excepciones
+
+    _excepcion_lista(monkeypatch)
+    entrega_autorizada(monkeypatch)
+    monkeypatch.setenv("ENTREGA_EXCEPCION_MIN_TOTAL", "0")
+
+    assert limites.entrega().excepcion_minimo == 0.0
+    assert excepciones.evaluar_entrega(
+        {"grand_total": 1}, hoy=date(2026, 9, 3)
+    ).preautorizada is True
+
+
+def test_a_delivery_change_does_not_arm_the_auto_confirm_tripwire(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_hubo_cambios_durables greps ERPNext for the limits marker to tell
+    "never configured" from "the store was wiped", and a wiped store WITH
+    changes on record makes configuracion() raise — stopping every order.
+    Sharing the marker would mean a delivery-day edit today halts sales after
+    the next Redis flush: the coupling the separate registry exists to prevent.
+    """
+    _proponer("días de reparto", "martes")
+    _confirmar()
+
+    texto = limites.erpnext.registrar_comentario.call_args[0][2]
+    assert texto.startswith(limites.MARCA_DURABLE_ENTREGA)
+    assert limites.MARCA_DURABLE not in texto
+
+    # And that is exactly what the data-loss probe greps for, so a wiped store
+    # after a delivery edit still reads as "nothing a limit cares about was
+    # ever configured" rather than as data loss.
+    almacen.hashes.clear()
+    monkeypatch.setattr(limites, "_durable_cache", None)
+    monkeypatch.setattr(limites.erpnext, "policy_get_list", lambda *a, **k: [])
+    monkeypatch.setattr(limites, "_hubo_cambios_durables", _CONSULTA_DURABLE_REAL)
+    assert limites.configuracion().tope == 0.0
+
+
+def test_a_limit_change_still_arms_it(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same rule: a LIMIT change must still be detectable
+    as data loss, or a wiped store looks like a fresh install."""
+    _proponer("tope", "30000")
+    _confirmar()
+
+    texto = limites.erpnext.registrar_comentario.call_args[0][2]
+    assert texto.startswith(limites.MARCA_DURABLE)
+
+    almacen.hashes.clear()
+    monkeypatch.setattr(limites, "_hubo_cambios_durables", lambda: True)
+    with pytest.raises(limites.LimiteError):
+        limites.configuracion()
+
+
+@pytest.mark.parametrize(
+    "dicho,esperado", [("1.000", 1000.0), ("1500", 1500.0), ("1.5", 1.5)]
+)
+def test_a_quantity_ceiling_is_grouped_like_money(
+    almacen: FakeRedis, dicho: str, esperado: float
+) -> None:
+    """"1.000" is a thousand litres exactly as much as a thousand pesos, and
+    reading it as 1 sent every order to a person."""
+    _proponer("cantidad máxima por producto", dicho)
+    _confirmar()
+
+    assert limites.configuracion().tope_qty_por_producto == esperado

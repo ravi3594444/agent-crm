@@ -67,10 +67,42 @@ def _http_sano(url, headers=None, params=None):
     raise AssertionError(f"URL inesperada {url}")
 
 
+# The delivery rules live in the owner's store like every other setting, so the
+# stub answers for them too. "-" is limites.NINGUNO: set, and set to nothing.
+def _entrega(**cambios):
+    filas = {
+        "ENTREGA_DIAS": "martes,viernes",
+        "ENTREGA_HORA": "08:00",
+        "ENTREGA_EXCEPCION_ACTIVA": "false",
+        "ENTREGA_EXCEPCION_DIAS": "-",
+        "ENTREGA_EXCEPCION_HORA": "-",
+        "ENTREGA_EXCEPCION_CARGO": "-",
+        "ENTREGA_EXCEPCION_MIN_TOTAL": "0",
+        "RETIRO_LOCAL_ACTIVO": "false",
+        "RETIRO_LOCAL_DIAS": "-",
+        "RETIRO_LOCAL_HORA": "-",
+    }
+    filas.update(cambios)
+    from app import limites
+
+    return [
+        {
+            "nombre": nombre,
+            "alias": limites.ENTREGA[nombre].alias[0],
+            "unidad": limites.ENTREGA[nombre].unidad,
+            "valor": valor,
+            "origen": "dueño",
+            "problema": "",
+        }
+        for nombre, valor in filas.items()
+    ]
+
+
 def _limites_ok():
     return [
         {"nombre": "AUTO_CONFIRM_MAX", "alias": "tope", "valor": "30000", "origen": "dueño", "problema": ""},
         {"nombre": "STOCK_BUFFER_PCT", "alias": "colchón", "valor": "20", "origen": "default", "problema": ""},
+        *_entrega(),
     ]
 
 
@@ -82,6 +114,7 @@ def _correr(env, http=_http_sano, limites=_limites_ok):
     readiness.chequear_plantillas(env, reporte, http, waba)
     readiness.chequear_erpnext(env, reporte, http)
     readiness.chequear_stock_y_limites(env, reporte, limites)
+    readiness.chequear_entrega(env, reporte, limites)
     return reporte
 
 
@@ -235,3 +268,136 @@ def test_the_command_exits_nonzero_when_not_ready(monkeypatch, capsys) -> None:
     monkeypatch.setattr(readiness, "ejecutar", lambda con_red=True: _correr({k: v for k, v in BASE.items() if k != "DASHSCOPE_API_KEY"}))
     assert readiness.main(["--sin-red"]) == 1
     assert "NO LISTO" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# The delivery rules, and the line that actually matters: is the expiry
+# fallback on? Without it an expired decision request has nothing concrete to
+# offer, the customer is told "write to me again", and the order is dropped.
+# ---------------------------------------------------------------------------
+
+
+def test_a_configured_round_is_reported_as_the_fallback_being_on() -> None:
+    reporte = _correr(BASE)
+    texto = reporte.texto()
+
+    assert reporte.listo, texto
+    assert "reparto martes,viernes a las 08:00" in texto
+    assert "Respaldo de vencimiento" not in texto
+
+
+def test_with_neither_a_round_nor_a_pickup_the_owner_is_warned() -> None:
+    """The requirement: at least an AVISO that the fallback is disabled."""
+    def sin_nada():
+        return _entrega(ENTREGA_DIAS="-", ENTREGA_HORA="-")
+
+    reporte = _correr(BASE, limites=sin_nada)
+    texto = reporte.texto()
+
+    assert "Respaldo de vencimiento" in texto
+    assert "el pedido se cae" in texto
+    assert [n for n, c, _ in reporte.lineas if c == "Respaldo de vencimiento"] == [
+        readiness.AVISO
+    ]
+    # An AVISO, not a blocker: nothing is oversold by having no fallback.
+    assert reporte.listo, texto
+
+
+def test_a_pickup_counter_alone_is_enough_of_a_fallback() -> None:
+    def solo_retiro():
+        return _entrega(
+            ENTREGA_DIAS="-",
+            ENTREGA_HORA="-",
+            RETIRO_LOCAL_ACTIVO="true",
+            RETIRO_LOCAL_DIAS="sabado",
+            RETIRO_LOCAL_HORA="10:00",
+        )
+
+    texto = _correr(BASE, limites=solo_retiro).texto()
+
+    assert "retiro sabado a las 10:00" in texto
+    assert "Respaldo de vencimiento" not in texto
+
+
+def test_half_a_round_is_not_a_round() -> None:
+    """Days with no time cannot produce an offer, so it is not configured."""
+    def media():
+        return _entrega(ENTREGA_HORA="-")
+
+    assert "Respaldo de vencimiento" in _correr(BASE, limites=media).texto()
+
+
+def test_a_malformed_delivery_rule_is_an_error_naming_the_setting() -> None:
+    def roto():
+        return [
+            {
+                "nombre": "ENTREGA_DIAS",
+                "alias": "días de reparto",
+                "unidad": "días",
+                "valor": "lunez",
+                "origen": "arranque",
+                "problema": "«lunez» no es un día de la semana",
+            }
+        ]
+
+    reporte = _correr(BASE, limites=roto)
+    texto = reporte.texto()
+
+    assert not reporte.listo
+    assert "ENTREGA_DIAS" in texto and "no es un día de la semana" in texto
+
+
+def test_an_enabled_exception_missing_its_terms_is_called_out() -> None:
+    def a_medias():
+        return _entrega(ENTREGA_EXCEPCION_ACTIVA="true")
+
+    texto = _correr(BASE, limites=a_medias).texto()
+
+    assert "en sí pero falta" in texto
+    assert "nada queda pre-autorizado" in texto
+
+
+def test_a_fee_with_no_account_says_a_person_has_to_add_the_charge() -> None:
+    def completa():
+        return _entrega(
+            ENTREGA_EXCEPCION_ACTIVA="true",
+            ENTREGA_EXCEPCION_DIAS="jueves",
+            ENTREGA_EXCEPCION_HORA="19:00",
+            ENTREGA_EXCEPCION_CARGO="1500",
+        )
+
+    texto = _correr(BASE, limites=completa).texto()
+
+    assert "ENTREGA_CARGO_CUENTA" in texto
+    assert "nunca por WhatsApp" in texto
+
+
+def test_without_redis_the_delivery_rules_are_not_guessed_at() -> None:
+    reporte = readiness.Reporte()
+    readiness.chequear_entrega(BASE, reporte, None)
+
+    assert "no se verificaron las reglas de entrega" in reporte.texto()
+
+
+def test_an_unreadable_store_is_an_error_not_an_empty_configuration() -> None:
+    def explota():
+        raise RuntimeError("redis caído")
+
+    reporte = readiness.Reporte()
+    readiness.chequear_entrega(BASE, reporte, explota)
+
+    assert not reporte.listo
+    assert "reglas no legibles" in reporte.texto()
+
+
+def test_the_end_to_end_report_includes_the_delivery_check(monkeypatch) -> None:
+    """chequear_entrega is wired into ejecutar(), not only into this file's
+    own harness — otherwise it would have zero real coverage."""
+    monkeypatch.setattr(readiness, "_http_real", _http_sano)
+    from app import limites
+
+    monkeypatch.setattr(limites, "resumen", lambda: list(_limites_ok()))
+
+    reporte = readiness.ejecutar(BASE, con_red=False)
+
+    assert "reparto martes,viernes" in reporte.texto()

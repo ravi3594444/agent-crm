@@ -38,6 +38,7 @@ from app.tools.configuracion import (
     historial_limites,
     proponer_limite,
     ver_limites,
+    ver_reglas_de_entrega,
 )
 from app.tools.gerencia import (
     cobranzas_vencidas,
@@ -77,6 +78,9 @@ TOOLS_GERENCIA = [
     # the owner's own limits: read them out, propose a change, confirm it.
     # NEVER in TOOLS_CLIENTES — a customer cannot be allowed near these.
     ver_limites, proponer_limite, confirmar_limite, historial_limites,
+    # ...and his delivery rules, through the SAME propose/confirm pair. Reading
+    # them is its own tool; changing one is proponer_limite like everything else.
+    ver_reglas_de_entrega,
 ]
 
 # from_conn_string() is a CONTEXT MANAGER, not a constructor — using it

@@ -253,3 +253,76 @@ Known and deliberately not changed: the ordinary offer path writes the terminal
 `vencida` on the same unproven-release footing. Re-arming there would silently
 extend a customer's acceptance window, which is a worse bug than the one it
 would fix, so it needs its own design rather than this one's mechanism.
+
+## Phase B follow-up 3 — the delivery rules become the owner's
+
+They were `os.getenv` reads, so the one thing the owner most needs to change
+was the one thing he could not: the days he delivers on. Now they resolve like
+every other setting — Redis, then the bootstrap environment, then a safe
+default — and he sets them from WhatsApp through the SAME two-step confirmation
+code and the same append-only audit (Redis plus the durable ERPNext comment,
+written first).
+
+- Ten settings: normal round days/time; off-day delivery enablement, days,
+  time, fee and order minimum; pickup enablement, days and time.
+- Their own registry (`limites.ENTREGA`), not `LIMITES`. `configuracion()`
+  validates every entry and raises on the first bad one, and `app/policy.py`
+  calls it once per order LINE and again inside the submit lock — so a typo in
+  "martes" would have become an outage for every customer. `limites.entrega()`
+  reads these on their own and fails SOFT: unreadable means "not
+  pre-authorized", which is where app/excepciones.py already fails.
+- Read per operation. `app/excepciones.py` no longer touches os.getenv; its
+  weekday and time parsing moved into the validators, so one vocabulary
+  validates on the way in and reads on the way out.
+- Deterministic validators for four kinds: weekday lists in any spelling or
+  order ("Miércoles, Sábado" -> "miercoles,sabado"), times ("8", "9:30",
+  "18.00", "7 hs" -> "HH:MM"), sí/no, and money. A `-` sentinel makes "borrá
+  los días" expressible: an empty string in the store reads as "unset" and
+  would silently restore the .env value.
+- `definicion()` now refuses an AMBIGUOUS name instead of returning the first
+  dict match. "hora" matches six settings; picking one would let a vague word
+  from the model move a setting the owner never mentioned.
+- The account head (`ENTREGA_CARGO_CUENTA`) is in no registry and stays a
+  server setting: a wrong account does not break the bot, it unbalances the
+  books, and no model can verify one exists.
+- `readiness.chequear_entrega` reports every rule from the owner's store and
+  raises an AVISO when neither a round nor a pickup is configured — the expiry
+  fallback is then off and an expired request drops the order.
+
+Two money defects fixed on the way, both pre-existing and both about the
+owner's own numbers: `validar()` stored at 6 significant digits, so a 1234567
+ceiling became "1.23457e+06" and read back as 1234570; and `_numero` read
+"1.500" as 1.5 while `solicitudes.parsear_terminos` reads the same keystrokes
+as 1500.
+
+Four more the adversarial review found in this commit, all fixed here (the
+minimum via `_bruto` returning whether the value parsed at all, so
+`excepciones.evaluar_entrega` can refuse outright):
+
+- `validar()` was not IDEMPOTENT for money. "1,125" is one peso twelve, it
+  normalizes to "1.125", and re-normalizing THAT read the dot as a thousands
+  separator and stored 1125 — the owner confirmed one number and a
+  thousandfold different one was saved. Grouping now applies only to text a
+  person typed; a value already in normal form is re-read as a plain float.
+- `ENTREGA_EXCEPCION_MIN_TOTAL` was the one field in `Entrega` whose soft
+  failure failed OPEN. Every other value can only WIDEN what the system offers,
+  so unreadable has to mean "offer nothing" — but the minimum NARROWS, and
+  collapsing an unreadable one to 0.0 removed the owner's floor and
+  pre-authorized everything. "Unset" and "unreadable" are now different
+  answers, and an unreadable minimum disables the exception.
+- The delivery audit gets its OWN durable marker. `_hubo_cambios_durables()`
+  greps ERPNext for `[limite]` to tell "never configured" from "the store was
+  wiped", and a wiped store WITH changes on record makes `configuracion()`
+  raise — which stops every order auto-confirming. Sharing the marker meant a
+  delivery-day edit today armed that tripwire for ever, so a Redis flush next
+  month would halt sales because of a schedule change: the exact coupling the
+  separate registry exists to prevent.
+- Grouping also applies to the per-product quantity ceiling. "1.000" is a
+  thousand litres exactly as much as a thousand pesos, and reading it as 1 sent
+  every order to a person. Percentages and hour counts stay out of it: nobody
+  groups a percentage in es-AR, and "1.5" hours is a decimal.
+
+48 new tests: authorization, the confirmation code, the audit trail in both
+places, resolution order, restart, read-per-operation, malformed values,
+ambiguity, the account-head refusal, one-setting-at-a-time, a dead store, and
+the readiness AVISO. 915 pass, ruff clean. No model, key or provider change.
