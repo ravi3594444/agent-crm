@@ -49,6 +49,11 @@ _PURPOSE_CANCELACION = "customer_order_cancelled"
 # policy.ESTADOS_SIN_RESERVA.
 _ESTADO_SIN_RESERVA = "Closed"
 
+# Stamped into the remarks of every Delivery Note this system prepares, so
+# "despreparar" can tell a draft the agent created from one a person made by
+# hand in ERPNext. A draft without it is never touched.
+MARCA_REMITO_AGENTE = "[remito-preparado-por-agente]"
+
 
 def _resultado(ok: bool, aviso_cliente: bool, detalle: str) -> dict:
     return {"ok": ok, "aviso_cliente": aviso_cliente, "detalle": detalle}
@@ -428,7 +433,10 @@ def preparar(nombre: str, por: str) -> dict:
                 "posting_date": _hoy(),
                 "set_posting_time": 1,
                 "items": renglones,
-                "remarks": f"Preparado por WhatsApp por un integrante autorizado ({por}).",
+                "remarks": (
+                    f"{MARCA_REMITO_AGENTE} Preparado por WhatsApp por un "
+                    f"integrante autorizado ({por})."
+                ),
             },
         )
     except Exception as exc:
@@ -505,7 +513,9 @@ def despachar(nombre: str, por: str) -> dict:
 #      confirmation THIS system recorded DURABLY in ERPNext
 #      (app/confirmacion.py) — no durable record, no cancellation, and a Redis
 #      flush or restart cannot take the window away;
-#   3. refused when a Delivery Note or Sales Invoice exists for it;
+#   3. refused when a Delivery Note or Sales Invoice is CONFIRMED for it; a
+#      draft remito is undone by "despreparar" first and a draft invoice in
+#      ERPNext — never deleted from here;
 #   4. never cancels linked documents; 5. re-read and validated under the
 #   distributed lock; 6. policy identity only; 7. reason required, audited;
 #   8. idempotent; 9-11. the customer is told once — free text inside the
@@ -519,34 +529,196 @@ def horas_cancelacion() -> float:
     return confirmacion.horas_ventana()
 
 
-def _documentos_vinculados(nombre: str) -> list[str]:
-    """Delivery Notes and Sales Invoices (draft or submitted) tied to the order.
+def _vinculados(nombre_so: str) -> tuple[list[str], list[str], list[str]]:
+    """(confirmados, remitos en borrador, facturas en borrador) for the order.
 
-    Raises on a read failure: not knowing is not "there are none".
+    Raises on a read failure: not knowing is never "there are none".
+
+    The three groups get three different answers, because only one of them is
+    something this system may undo:
+      * a SUBMITTED Delivery Note or Sales Invoice blocks the WhatsApp
+        cancellation outright. Cancelling the order would mean cancelling them
+        first, and cascade-cancelling a document that already moved stock or
+        money is not a decision a chat command gets to make.
+      * a DRAFT Delivery Note is undone by the separate ``despreparar``
+        command, which checks that the agent created it and nobody edited it.
+        ``cancelar`` never deletes it silently.
+      * a DRAFT Sales Invoice belongs to ERPNext: this system never creates
+        invoices, so it has no way to know what is safe to remove.
     """
-    vinculados: list[str] = []
+    confirmados: list[str] = []
+    remitos_borrador: list[str] = []
+    facturas_borrador: list[str] = []
     for doctype, campo, etiqueta in (
         ("Delivery Note", "against_sales_order", "remito"),
         ("Sales Invoice", "sales_order", "factura"),
     ):
         filas = erpnext.policy_get_list(
             f"{doctype} Item",
-            filters=[[campo, "=", nombre], ["docstatus", "in", [0, 1]]],
+            filters=[[campo, "=", nombre_so], ["docstatus", "in", [0, 1]]],
             fields=["parent", campo, "docstatus"],
             limit=20,
             parent=doctype,
         )
         vistos: set[str] = set()
         for fila in filas:
-            if str(fila.get(campo) or nombre).strip() != nombre:
+            if str(fila.get(campo) or nombre_so).strip() != nombre_so:
                 continue
             padre = str(fila.get("parent") or "").strip()
             if not padre or padre in vistos:
                 continue
             vistos.add(padre)
-            estado = "confirmado" if int(float(fila.get("docstatus") or 0)) == 1 else "borrador"
-            vinculados.append(f"{etiqueta} {padre} ({estado})")
-    return vinculados
+            estado = int(float(fila.get("docstatus") or 0))
+            if estado == 1:
+                confirmados.append(f"{etiqueta} {padre} (confirmado)")
+            elif doctype == "Delivery Note":
+                remitos_borrador.append(padre)
+            else:
+                facturas_borrador.append(padre)
+    return confirmados, remitos_borrador, facturas_borrador
+
+
+# ---------------------------------------------------------------------------
+# despreparar <pedido> — undo a preparation this system made, and nothing else.
+#
+# It exists so that "cancelar" never has to choose between refusing for ever
+# and deleting a document behind the manager's back. Both are wrong: the first
+# leaves an order nobody can cancel by WhatsApp after one accidental
+# "preparar", and the second destroys a document a person may have edited.
+#
+# So the destructive step is its own explicit human command, and it only ever
+# touches a DRAFT Delivery Note that this system created and nobody changed:
+# same customer, same company, exactly the order's own lines. Anything else —
+# a hand-made draft, an edited one, several of them, any invoice, anything
+# submitted — is left alone and the manager is sent to ERPNext.
+# ---------------------------------------------------------------------------
+
+
+def _renglones_esperados(so: dict) -> dict[tuple[str, str], float]:
+    """What a Delivery Note prepared from this order must contain, line by line."""
+    esperado: dict[tuple[str, str], float] = {}
+    for item in so.get("items") or []:
+        if not isinstance(item, dict) or not item.get("item_code"):
+            continue
+        clave = (str(item.get("item_code")).strip(), str(item.get("name") or "").strip())
+        esperado[clave] = esperado.get(clave, 0.0) + float(item.get("qty") or 0)
+    return esperado
+
+
+def _remito_intacto(remito: dict, so: dict, nombre_so: str) -> tuple[bool, str]:
+    """Whether this draft is one the agent prepared and nobody has touched."""
+    if int(remito.get("docstatus") or 0) != 0:
+        return False, "ya no es un borrador"
+    if MARCA_REMITO_AGENTE not in str(remito.get("remarks") or ""):
+        return False, "no lo preparó el agente"
+    if str(remito.get("customer") or "").strip() != str(so.get("customer") or "").strip():
+        return False, "el cliente del remito no es el del pedido"
+    empresa_so = str(so.get("company") or "").strip()
+    empresa_dn = str(remito.get("company") or "").strip()
+    if empresa_so and empresa_dn and empresa_so != empresa_dn:
+        return False, "la compañía del remito no es la del pedido"
+
+    esperado = _renglones_esperados(so)
+    real: dict[tuple[str, str], float] = {}
+    for item in remito.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("against_sales_order") or "").strip() != nombre_so:
+            return False, "tiene renglones de otro pedido"
+        clave = (
+            str(item.get("item_code") or "").strip(),
+            str(item.get("so_detail") or "").strip(),
+        )
+        real[clave] = real.get(clave, 0.0) + float(item.get("qty") or 0)
+    if set(real) != set(esperado):
+        return False, "los renglones del remito ya no son los del pedido"
+    for clave, cantidad in esperado.items():
+        if abs(real[clave] - cantidad) > 0.000001:
+            return False, "alguien cambió las cantidades del remito"
+    return True, ""
+
+
+def despreparar(nombre: str, por: str) -> dict:
+    """Undo the preparation of an order: delete the agent's DRAFT Delivery Note.
+
+    HUMAN ONLY, deterministic, in no tool list. Idempotent: with no draft left
+    it reports that there is nothing prepared and the order can be cancelled.
+    """
+    if not es_equipo(por):
+        return _resultado(False, False, "No tenés permiso para despreparar pedidos.")
+
+    try:
+        with distributed_lock(f"despreparar:{nombre}", lease_seconds=60, wait_seconds=10):
+            so = _leer_doc("Sales Order", nombre)
+            confirmados, borradores, facturas = _vinculados(nombre)
+            if confirmados:
+                return _resultado(
+                    False,
+                    False,
+                    f"No toco {nombre}: ya tiene {', '.join(confirmados)}. Un documento "
+                    "confirmado se resuelve en ERPNext; no cancelo en cascada.",
+                )
+            if facturas:
+                return _resultado(
+                    False,
+                    False,
+                    f"{nombre} tiene la factura {', '.join(facturas)} en borrador. "
+                    "Las facturas se resuelven en ERPNext.",
+                )
+            if not borradores:
+                return _resultado(
+                    True,
+                    False,
+                    f"{nombre} no tiene remito preparado. Si querés anularlo: "
+                    f"cancelar {nombre} <motivo>.",
+                )
+            if len(borradores) > 1:
+                return _resultado(
+                    False,
+                    False,
+                    f"{nombre} tiene {len(borradores)} remitos en borrador "
+                    f"({', '.join(borradores)}). Dejá uno solo en ERPNext y reintentá.",
+                )
+
+            remito_nombre = borradores[0]
+            remito = _leer_doc("Delivery Note", remito_nombre)
+            intacto, problema = _remito_intacto(remito, so, nombre)
+            if not intacto:
+                return _resultado(
+                    False,
+                    False,
+                    f"No borro el remito {remito_nombre}: {problema}. Resolvelo en "
+                    "ERPNext y después volvé a intentar.",
+                )
+
+            # The record goes in BEFORE the deletion: a deleted document cannot
+            # be commented on, and a deletion with no trace is not auditable.
+            renglones = "; ".join(
+                f"{float(i.get('qty') or 0):g} x {i.get('item_code')}"
+                for i in remito.get("items") or []
+                if isinstance(i, dict)
+            )
+            _comentar(
+                nombre,
+                f"Despreparado por un integrante autorizado ({por}): se borra el remito "
+                f"BORRADOR {remito_nombre} que había preparado el agente "
+                f"({renglones or 'sin renglones'}). Nada se despachó ni se canceló en cascada.",
+            )
+            erpnext.policy_delete_doc("Delivery Note", remito_nombre)
+    except CoordinationError:
+        return _resultado(
+            False, False, f"No pude coordinar el desprepare de {nombre}; reintentá en un momento."
+        )
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: desprepare falló ({type(exc).__name__})")
+        return _resultado(False, False, f"No pude despreparar {nombre}. Revisalo en ERPNext.")
+
+    return _resultado(
+        True,
+        False,
+        f"↩️ Remito {remito_nombre} borrado; {nombre} vuelve a estar sólo confirmado. "
+        f"Para anularlo: cancelar {nombre} <motivo>.",
+    )
 
 
 def cancelar(nombre: str, por: str, motivo: str) -> dict:
@@ -590,13 +762,30 @@ def cancelar(nombre: str, por: str, motivo: str) -> dict:
                         f"{nombre} se confirmó hace {horas:.0f} h; el límite para cancelar por "
                         f"WhatsApp es {horas_cancelacion():g} h. Cancelalo en ERPNext.",
                     )
-                vinculados = _documentos_vinculados(nombre)
-                if vinculados:
+                confirmados, borradores, facturas = _vinculados(nombre)
+                if confirmados:
                     return _resultado(
                         False,
                         False,
-                        f"No cancelo {nombre}: ya tiene {', '.join(vinculados)}. No cancelo "
+                        f"No cancelo {nombre}: ya tiene {', '.join(confirmados)}. No cancelo "
                         "documentos vinculados en cascada; resolvelo en ERPNext.",
+                    )
+                if facturas:
+                    return _resultado(
+                        False,
+                        False,
+                        f"No cancelo {nombre}: tiene la factura {', '.join(facturas)} en "
+                        "borrador. Las facturas se resuelven en ERPNext.",
+                    )
+                if borradores:
+                    # Never deleted from here, and never in cascade: undoing a
+                    # preparation is its own audited human command.
+                    return _resultado(
+                        False,
+                        False,
+                        f"No cancelo {nombre}: tiene el remito {', '.join(borradores)} "
+                        f"preparado en borrador y no lo borro solo. Escribí "
+                        f"'despreparar {nombre}' y después 'cancelar {nombre} <motivo>'.",
                     )
                 try:
                     erpnext.policy_cancel_doc("Sales Order", nombre)

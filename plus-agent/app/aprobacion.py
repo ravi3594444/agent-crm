@@ -60,6 +60,15 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
 
         return decisiones.despachar(nombre, telefono)["detalle"]
 
+    if accion == "despreparar":
+        # Undo a preparation: deletes ONLY a draft Delivery Note this system
+        # created and nobody edited, after auditing it on the order. It is the
+        # single place allowed to remove a linked draft, so "cancelar" never
+        # has to.
+        from app import decisiones
+
+        return decisiones.despreparar(nombre, telefono)["detalle"]
+
     if accion == "cancelar":
         # "cancelar:<pedido>:<motivo>" — a confirmed order, within the window,
         # with a reason. Everything is re-checked in app/decisiones.py.

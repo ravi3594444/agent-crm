@@ -277,6 +277,12 @@ _STAFF_ACTIONS = {
     "despachar": "despachar",
     "despacha": "despachar",
     "despacho": "despachar",
+    # Undo a preparation: deletes only the agent's own untouched draft remito,
+    # so a prepared order can be cancelled without anything being deleted
+    # behind the manager's back. See app/decisiones.py::despreparar.
+    "despreparar": "despreparar",
+    "desprepara": "despreparar",
+    "desprepare": "despreparar",
 }
 _ORDER_IN_TEXT = re.compile(r"\b[A-Z]{2,6}(?:-[A-Z]{2,6})?-\d{2,}[0-9-]*\b")
 # "cancelar SAL-ORD-2026-00009 el cliente se arrepintió": the reason is the rest

@@ -420,6 +420,37 @@ def policy_cancel_doc(doctype: str, name: str) -> dict:
     return data
 
 
+def policy_delete_doc(doctype: str, name: str) -> None:
+    """Delete ONE DRAFT document with the policy identity. Nothing else.
+
+    The document is re-read first and a docstatus other than 0 refuses before
+    any DELETE is sent, so a submitted or cancelled document can never be
+    destroyed through this path — those are ERPNext's to resolve, and
+    cancelling them in cascade is never this system's decision.
+
+    Its only caller is app/decisiones.py::despreparar, undoing a draft Delivery
+    Note that this system itself created and nobody edited, after the reason
+    has already been written onto the Sales Order.
+    """
+    actual = policy_get_doc(doctype, name)
+    if int(actual.get("docstatus") or 0) != 0:
+        raise ERPNextError(
+            f"{doctype} {name} no es un borrador (docstatus "
+            f"{actual.get('docstatus')}): no se borra"
+        )
+    _request(
+        _policy(),
+        "DELETE",
+        _resource_path(doctype, name),
+        operation=f"el borrado de {doctype}",
+    )
+    try:
+        policy_get_doc(doctype, name)
+    except ERPNextError:
+        return
+    raise ERPNextError(f"ERPNext no borró {doctype} {name}")
+
+
 def submit_doc(doctype: str, name: str) -> dict:
     body = _request(
         _policy(),

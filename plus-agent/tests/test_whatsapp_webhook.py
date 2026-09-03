@@ -865,6 +865,11 @@ def test_redis_failure_never_counts_towards_dead_letter(webhook, monkeypatch):
         ("Rechazo sal-ord-2026-00008", "no:SAL-ORD-2026-00008"),
         ("preparar SAL-ORD-2026-00008", "preparar:SAL-ORD-2026-00008"),
         ("Despachar SAL-ORD-2026-00008!", "despachar:SAL-ORD-2026-00008"),
+        ("despreparar SAL-ORD-2026-00008", "despreparar:SAL-ORD-2026-00008"),
+        ("Desprepara sal-ord-2026-00008.", "despreparar:SAL-ORD-2026-00008"),
+        # "despreparar" must not be swallowed by the cancellation verbs, whose
+        # pattern also matches "<verb> <order> <rest>".
+        ("despreparar SAL-ORD-2026-00008 porque quiero", None),
         ("hola, cuántos pedidos pendientes hay?", None),
         ("confirmar", None),
         ("confirmar todo", None),
