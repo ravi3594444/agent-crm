@@ -57,6 +57,8 @@ from unittest.mock import Mock
 import pytest
 from redis.exceptions import RedisError
 
+from tests.fakes import FakeMarcas
+
 
 class FakeRedis:
     """Enough Redis for app/limites.py, with no server and no network.
@@ -200,45 +202,17 @@ def limites_sin_redis(monkeypatch):
     return vacio
 
 
-class _MarcasSinRedis:
-    """Enough of Redis for app/outbound_status.py's markers and claims."""
-
-    def __init__(self) -> None:
-        self.values: dict = {}
-        self.lists: dict = {}
-
-    def set(self, key, value, nx=False, ex=None):
-        if nx and key in self.values:
-            return False
-        self.values[key] = value
-        return True
-
-    def get(self, key):
-        return self.values.get(key)
-
-    def delete(self, key):
-        self.values.pop(key, None)
-        return 1
-
-    def rpush(self, key, value):
-        self.lists.setdefault(key, []).append(value)
-
-    def llen(self, key):
-        return len(self.lists.get(key, []))
-
-    def scan_iter(self, match="*", count=100):
-        return iter([k for k in self.values if k.startswith(match.rstrip("*"))])
-
-    def eval(self, *args):
-        return "accepted_by_meta"
-
-
 @pytest.fixture(autouse=True)
 def marcas_sin_redis(monkeypatch):
     """Every test starts with an empty, in-memory marker store; tests that need
-    their own fake (the webhook harness) override it."""
+    their own fake (the webhook harness) override it.
+
+    app/avisos.py and app/confirmacion.py both reach Redis through
+    outbound_status.cliente(), so patching this one attribute keeps the notice
+    queue and the confirmation cache in memory too.
+    """
     from app import outbound_status
 
-    marcas = _MarcasSinRedis()
+    marcas = FakeMarcas()
     monkeypatch.setattr(outbound_status, "_client", marcas)
     return marcas

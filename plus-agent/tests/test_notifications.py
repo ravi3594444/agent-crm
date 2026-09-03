@@ -38,7 +38,7 @@ def _clean_templates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(notificar, "release_claim", lambda *args, **kwargs: None)
     monkeypatch.setattr(notificar, "registrar_aviso_fallido", lambda *args, **kwargs: False)
     monkeypatch.setattr(aprobacion, "_notificar_confirmada", lambda *args, **kwargs: None)
-    monkeypatch.setattr(aprobacion, "marcar_confirmacion", lambda *args, **kwargs: None)
+    monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
     monkeypatch.setattr(aprobacion, "cliente_informado", lambda nombre: False)
 
 

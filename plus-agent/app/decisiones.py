@@ -30,11 +30,10 @@ from __future__ import annotations
 import os
 import time
 
-from app import erpnext, telefono
+from app import confirmacion, erpnext, telefono
 from app.locks import CoordinationError, distributed_lock
 from app.outbound_status import (
     has_accepted,
-    momento_confirmacion,
     record_outbound,
     registrar_aviso_fallido,
     window_open,
@@ -503,7 +502,9 @@ def despachar(nombre: str, por: str) -> dict:
 # Twelve rules, all here and in tests/test_cancelacion.py:
 #   1. only TELEFONOS_EQUIPO (checked again here, not just in the router);
 #   2. only a SUBMITTED Sales Order, within CANCELACION_HORAS (24) of the
-#      confirmation THIS system recorded — no record, no cancellation;
+#      confirmation THIS system recorded DURABLY in ERPNext
+#      (app/confirmacion.py) — no durable record, no cancellation, and a Redis
+#      flush or restart cannot take the window away;
 #   3. refused when a Delivery Note or Sales Invoice exists for it;
 #   4. never cancels linked documents; 5. re-read and validated under the
 #   distributed lock; 6. policy identity only; 7. reason required, audited;
@@ -514,11 +515,8 @@ def despachar(nombre: str, por: str) -> dict:
 
 
 def horas_cancelacion() -> float:
-    try:
-        horas = float(os.getenv("CANCELACION_HORAS", "24"))
-    except (TypeError, ValueError):
-        return 24.0
-    return horas if horas > 0 else 24.0
+    """The cancellation window, from app/confirmacion.py (CANCELACION_HORAS)."""
+    return confirmacion.horas_ventana()
 
 
 def _documentos_vinculados(nombre: str) -> list[str]:
@@ -576,13 +574,13 @@ def cancelar(nombre: str, por: str, motivo: str) -> dict:
                         f"{nombre} no está confirmado; un borrador se rechaza con "
                         f"'rechazar {nombre}'.",
                     )
-                momento = momento_confirmacion(nombre)
+                momento = confirmacion.momento(nombre)
                 if momento is None:
                     return _resultado(
                         False,
                         False,
-                        f"No puedo establecer cuándo se confirmó {nombre} (no lo confirmó este "
-                        "sistema o la marca venció). Cancelalo en ERPNext.",
+                        f"No puedo establecer cuándo se confirmó {nombre}: no hay registro "
+                        "durable de que lo haya confirmado este sistema. Cancelalo en ERPNext.",
                     )
                 horas = (time.time() - momento) / 3600.0
                 if horas > horas_cancelacion():

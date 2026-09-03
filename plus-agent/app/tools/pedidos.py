@@ -12,7 +12,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app import clientes, entrega, erpnext, outbound_status, policy
+from app import clientes, confirmacion, entrega, erpnext, outbound_status, policy
 from app.locks import CoordinationError, distributed_lock
 from app.notificar import notificar_confirmacion, notificar_equipo
 from app.runtime_context import RuntimeContextError, actor_context
@@ -344,12 +344,18 @@ def _notificar_confirmada(order: dict) -> None:
 
     The customer reads PEDIDO_CONFIRMADO in this same turn, so the order is
     marked as already communicated: no later path sends a second confirmation.
-    The marker also opens the manual cancellation window.
+    The DURABLE record of when it was confirmed (app/confirmacion.py) opens the
+    manual cancellation window and survives a restart of this process or of
+    Redis.
     """
     try:
-        outbound_status.marcar_confirmacion(str(order.get("name") or ""), informado_en_chat=True)
+        confirmacion.registrar(str(order.get("name") or ""), "automática (política)")
     except Exception as exc:
-        print(f"[orders] marca de confirmación falló ({type(exc).__name__})")
+        print(f"[orders] marca durable de confirmación falló ({type(exc).__name__})")
+    try:
+        outbound_status.marcar_cliente_informado(str(order.get("name") or ""))
+    except Exception as exc:
+        print(f"[orders] marca de cliente informado falló ({type(exc).__name__})")
     try:
         notificar_confirmacion(order, "automática (política)")
     except Exception as exc:

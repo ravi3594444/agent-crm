@@ -1,9 +1,15 @@
-"""cancelar <pedido> <motivo>: twelve rules, one test each (or more)."""
+"""cancelar <pedido> <motivo>: twelve rules, one test each (or more).
+
+The tests at the end cover the repair this command needed before release: the
+cancellation window is an ERPNext record, so it survives a Redis flush and a
+restart instead of quietly disappearing with the cache.
+"""
 from __future__ import annotations
 
 import sys
 import time
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -11,51 +17,42 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import aprobacion, decisiones, erpnext, outbound_status
+from app import aprobacion, confirmacion, decisiones, erpnext, outbound_status
+from tests.fakes import FakeMarcas
 
 STAFF = "5493511111111"
 SO = "SAL-ORD-2026-00009"
 CUSTOMER_PHONE = "5493512222222"
-
-
-class _RedisMarcas:
-    def __init__(self) -> None:
-        self.values: dict[str, str] = {}
-        self.lists: dict[str, list] = {}
-
-    def set(self, key, value, nx=False, ex=None):
-        if nx and key in self.values:
-            return False
-        self.values[key] = value
-        return True
-
-    def get(self, key):
-        return self.values.get(key)
-
-    def delete(self, key):
-        self.values.pop(key, None)
-
-    def rpush(self, key, value):
-        self.lists.setdefault(key, []).append(value)
-
-    def llen(self, key):
-        return len(self.lists.get(key, []))
-
-    def eval(self, *args):
-        return "accepted_by_meta"
+REMITO = "MAT-DN-1"
 
 
 @pytest.fixture
 def mundo(monkeypatch: pytest.MonkeyPatch):
     """A confirmed order this system confirmed a minute ago, no linked docs."""
-    marcas = _RedisMarcas()
+    marcas = FakeMarcas()
     monkeypatch.setattr(outbound_status, "_client", marcas)
-    outbound_status.marcar_confirmacion(SO)
     estado = {
-        "so": {"name": SO, "docstatus": 1, "status": "To Deliver and Bill", "customer": "CUST-001"},
+        "so": {
+            "name": SO,
+            "docstatus": 1,
+            "status": "To Deliver and Bill",
+            "customer": "CUST-001",
+            "company": "Lacteos Test SA",
+            "items": [{"item_code": "LECHE-1L", "qty": 5, "name": "row-1"}],
+        },
         "vinculados": [],
+        "remitos": {},
         "locks": [],
+        "durables": [],
+        "borrados": [],
     }
+
+    # The durable confirmation record: written here, read back by
+    # app/confirmacion.py exactly as it would be from ERPNext.
+    def registrar_comentario(doctype, name, text):
+        estado["durables"].append({"content": text, "creation": text[:19]})
+
+    monkeypatch.setattr(erpnext, "registrar_comentario", registrar_comentario)
 
     @contextmanager
     def lock(nombre, **kwargs):
@@ -65,12 +62,19 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(decisiones, "distributed_lock", lock)
     monkeypatch.setattr(decisiones, "es_equipo", lambda phone: phone == STAFF)
     monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: phone == STAFF)
-    monkeypatch.setattr(
-        decisiones, "_leer_doc",
-        lambda dt, name: dict(estado["so"]) if dt == "Sales Order" else {"name": name, "mobile_no": CUSTOMER_PHONE},
-    )
+
+    def leer(doctype, name):
+        if doctype == "Sales Order":
+            return dict(estado["so"])
+        if doctype == "Delivery Note":
+            return dict(estado["remitos"][name])
+        return {"name": name, "mobile_no": CUSTOMER_PHONE}
+
+    monkeypatch.setattr(decisiones, "_leer_doc", leer)
 
     def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None):
+        if doctype == "Comment":
+            return list(estado["durables"])
         campo = "against_sales_order" if doctype == "Delivery Note Item" else "sales_order"
         return [
             {"parent": n, campo: SO, "docstatus": d}
@@ -87,8 +91,11 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
         return {"name": name, "docstatus": 2}
 
     monkeypatch.setattr(erpnext, "policy_cancel_doc", policy_cancel_doc)
+
     for prohibido in ("get_doc", "submit_doc", "policy_update_status"):
-        monkeypatch.setattr(erpnext, prohibido, Mock(side_effect=AssertionError(f"{prohibido} no debe usarse")))
+        monkeypatch.setattr(
+            erpnext, prohibido, Mock(side_effect=AssertionError(f"{prohibido} no debe usarse"))
+        )
     comentarios: list[str] = []
     monkeypatch.setattr(erpnext, "add_comment", lambda dt, name, text: comentarios.append(text))
     todos: list[dict] = []
@@ -104,16 +111,50 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
     enviados: list[tuple[str, str]] = []
     import app.whatsapp as whatsapp
 
-    monkeypatch.setattr(whatsapp, "enviar_mensaje", lambda tel, texto: enviados.append((tel, texto)) or {"messages": [{"id": f"wamid.{len(enviados)}"}]})
+    monkeypatch.setattr(
+        whatsapp,
+        "enviar_mensaje",
+        lambda tel, texto: enviados.append((tel, texto))
+        or {"messages": [{"id": f"wamid.{len(enviados)}"}]},
+    )
     monkeypatch.setattr(whatsapp, "enviar_plantilla", Mock(side_effect=AssertionError("sin plantilla")))
     monkeypatch.setattr(decisiones, "window_open", lambda tel: tel == CUSTOMER_PHONE)
     monkeypatch.delenv("WHATSAPP_CUSTOMER_CANCELLED_TEMPLATE", raising=False)
     monkeypatch.delenv("CANCELACION_HORAS", raising=False)
-    return {"estado": estado, "marcas": marcas, "cancelados": cancelados, "comentarios": comentarios, "enviados": enviados, "todos": todos}
+
+    mundo = {
+        "estado": estado,
+        "marcas": marcas,
+        "cancelados": cancelados,
+        "comentarios": comentarios,
+        "enviados": enviados,
+        "todos": todos,
+    }
+
+    def confirmado_hace(horas: float) -> None:
+        """Rewrite the durable record, and drop the cache the way a flush does."""
+        estado["durables"].clear()
+        marcas.values.pop(confirmacion._clave_cache(SO), None)
+        momento = datetime.now(UTC) - timedelta(hours=horas)
+        estado["durables"].append(
+            {
+                "content": f"{confirmacion.MARCA} {confirmacion.sello(momento)} fuente=prueba",
+                "creation": "2026-09-03 10:00:00",
+            }
+        )
+
+    mundo["confirmado_hace"] = confirmado_hace
+
+    confirmacion.registrar(SO, "automática (política)")
+    return mundo
 
 
 def _cancelar(motivo="el cliente se arrepintió", por=STAFF):
     return aprobacion.manejar_boton(f"cancelar:{SO}:{motivo}", por)
+
+
+def _despreparar(por=STAFF):
+    return aprobacion.manejar_boton(f"despreparar:{SO}", por)
 
 
 # 1. only staff
@@ -152,7 +193,7 @@ def test_a_draft_order_cannot_be_cancelled_here(mundo) -> None:
 
 
 def test_outside_the_24_hour_window_it_refuses(mundo) -> None:
-    mundo["marcas"].values[outbound_status._clave_confirmacion(SO)] = f"{time.time() - 25 * 3600:.3f}"
+    mundo["confirmado_hace"](25)
     respuesta = _cancelar()
     assert "hace 25 h" in respuesta and "24 h" in respuesta and "ERPNext" in respuesta
     assert mundo["cancelados"] == []
@@ -160,12 +201,13 @@ def test_outside_the_24_hour_window_it_refuses(mundo) -> None:
 
 def test_the_window_is_configurable(mundo, monkeypatch) -> None:
     monkeypatch.setenv("CANCELACION_HORAS", "48")
-    mundo["marcas"].values[outbound_status._clave_confirmacion(SO)] = f"{time.time() - 25 * 3600:.3f}"
+    mundo["confirmado_hace"](25)
     assert "cancelado" in _cancelar()
 
 
 def test_an_order_this_system_did_not_confirm_cannot_be_proven_inside_the_window(mundo) -> None:
-    mundo["marcas"].values.pop(outbound_status._clave_confirmacion(SO))
+    mundo["estado"]["durables"].clear()
+    mundo["marcas"].values.pop(confirmacion._clave_cache(SO), None)
     respuesta = _cancelar()
     assert "No puedo establecer cuándo se confirmó" in respuesta
     assert mundo["cancelados"] == []
@@ -186,7 +228,15 @@ def test_linked_delivery_notes_or_invoices_block_the_cancellation(mundo, doctype
 
 
 def test_an_unreadable_link_check_refuses_instead_of_assuming_none(mundo, monkeypatch) -> None:
-    monkeypatch.setattr(erpnext, "policy_get_list", Mock(side_effect=erpnext.ERPNextError("caído")))
+    monkeypatch.setattr(
+        erpnext,
+        "policy_get_list",
+        lambda doctype, **kwargs: (
+            list(mundo["estado"]["durables"])
+            if doctype == "Comment"
+            else (_ for _ in ()).throw(erpnext.ERPNextError("caído"))
+        ),
+    )
     assert "No pude cancelar" in _cancelar()
     assert mundo["cancelados"] == []
 
@@ -273,9 +323,9 @@ def test_cancelar_is_not_reachable_from_any_llm_tool() -> None:
 
 # the clarified workflow around confirmations
 def test_an_auto_confirmed_order_never_gets_a_second_customer_confirmation(monkeypatch) -> None:
-    marcas = _RedisMarcas()
+    marcas = FakeMarcas()
     monkeypatch.setattr(outbound_status, "_client", marcas)
-    outbound_status.marcar_confirmacion(SO, informado_en_chat=True)  # what pedidos._after_create does
+    outbound_status.marcar_cliente_informado(SO)  # what pedidos._after_create does
     monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
     monkeypatch.setattr(aprobacion, "_leer_doc", lambda dt, name: {"name": SO, "docstatus": 1, "customer": "CUST-001"})
     monkeypatch.setattr(aprobacion.erpnext, "submit_doc", Mock(side_effect=AssertionError("ya confirmado")))
@@ -296,3 +346,86 @@ def test_the_manager_alert_is_informational_and_says_so(monkeypatch) -> None:
     texto = notificar.texto_confirmacion({"name": SO, "customer": "C", "items": [], "grand_total": 1, "currency": "ARS", "delivery_date": "2026-09-04"}, "automática (política)", "2026-09-03 10:00")
     assert "Informativo: no hace falta responder" in texto
     assert f"cancelar {SO} <motivo>" in texto
+
+
+# ---------------------------------------------------------------------------
+# Repair 2 — the deadline is durable: a restart or a Redis flush cannot move it.
+# ---------------------------------------------------------------------------
+
+
+def test_the_window_survives_a_redis_flush(mundo) -> None:
+    """Everything Redis knew is gone; ERPNext still holds the confirmation."""
+    mundo["marcas"].values.clear()
+    mundo["marcas"].lists.clear()
+    mundo["marcas"].zsets.clear()
+
+    assert "cancelado" in _cancelar()
+    assert mundo["cancelados"] == [SO]
+
+
+def test_the_window_survives_an_application_restart(mundo) -> None:
+    """A fresh process has no cache at all and must re-read the durable record."""
+    mundo["marcas"].values.pop(confirmacion._clave_cache(SO), None)
+
+    momento = confirmacion.momento(SO)
+
+    assert momento is not None
+    assert time.time() - momento < 60
+    # ...and the re-read is cached, so the next attempt costs no ERPNext call.
+    assert mundo["marcas"].values.get(confirmacion._clave_cache(SO)) is not None
+
+
+def test_a_flushed_redis_does_not_reopen_a_window_that_had_closed(mundo) -> None:
+    mundo["confirmado_hace"](30)
+    mundo["marcas"].values.clear()
+
+    respuesta = _cancelar()
+
+    assert "hace 30 h" in respuesta
+    assert mundo["cancelados"] == []
+
+
+def test_an_order_confirmed_only_inside_erpnext_fails_closed(mundo) -> None:
+    """No durable record from this system: it cannot prove the window at all."""
+    mundo["estado"]["durables"].clear()
+    mundo["marcas"].values.clear()
+
+    assert "No puedo establecer cuándo se confirmó" in _cancelar()
+    assert mundo["cancelados"] == []
+
+
+def test_a_durable_record_that_cannot_be_written_closes_the_window(mundo, monkeypatch) -> None:
+    """If ERPNext refused the record, no Redis-only deadline takes its place."""
+    mundo["estado"]["durables"].clear()
+    mundo["marcas"].values.clear()
+    monkeypatch.setattr(
+        erpnext, "registrar_comentario", Mock(side_effect=erpnext.ERPNextError("sin permiso"))
+    )
+
+    assert confirmacion.registrar(SO, "automática (política)") is False
+    assert confirmacion.momento(SO) is None
+    assert "No puedo establecer cuándo se confirmó" in _cancelar()
+
+
+def test_the_earliest_durable_record_is_the_one_that_counts(mundo) -> None:
+    """Two records must not extend the deadline; the first confirmation wins."""
+    mundo["confirmado_hace"](30)
+    mundo["estado"]["durables"].append(
+        {
+            "content": f"{confirmacion.MARCA} {confirmacion.sello()} fuente=segunda",
+            "creation": "2026-09-03 12:00:00",
+        }
+    )
+    mundo["marcas"].values.pop(confirmacion._clave_cache(SO), None)
+
+    assert "hace 30 h" in _cancelar()
+
+
+def test_an_unparseable_durable_record_is_not_trusted(mundo) -> None:
+    mundo["estado"]["durables"].clear()
+    mundo["marcas"].values.clear()
+    mundo["estado"]["durables"].append(
+        {"content": f"{confirmacion.MARCA} ayer a la tarde", "creation": "2026-09-03 12:00:00"}
+    )
+
+    assert confirmacion.momento(SO) is None

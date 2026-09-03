@@ -5,12 +5,11 @@ button payload gets nothing.
 """
 import os
 
-from app import erpnext, notificar, policy
+from app import confirmacion, erpnext, notificar, policy
 from app.formato import pesos
 from app.outbound_status import (
     cliente_informado,
     has_accepted,
-    marcar_confirmacion,
     record_outbound,
     window_open,
 )
@@ -146,8 +145,9 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
                 nombre,
                 f"Confirmado por un integrante autorizado mediante WhatsApp ({por}).",
             )
-            # Opens the manual cancellation window (cancelar <pedido> <motivo>).
-            marcar_confirmacion(nombre)
+            # Durable record of WHEN, in ERPNext: it opens the manual
+            # cancellation window and survives any Redis restart.
+            confirmacion.registrar(nombre, f"manual (confirmación humana, {por})")
     except erpnext.ERPNextError as error:
         print(f"[approval] {nombre}: {type(error).__name__}")
         return {
