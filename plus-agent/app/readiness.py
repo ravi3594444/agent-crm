@@ -18,6 +18,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 import httpx
 
@@ -447,7 +448,120 @@ def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_l
             reporte.ok(nombre, f"válido ({origen})")
 
 
-def chequear_entrega(env: Mapping[str, str], reporte: Reporte, resumen_limites: Callable[[], list[dict]] | None) -> None:
+# A delivery charge is written as a Sales Taxes and Charges row of type "Actual"
+# against an account head (erpnext.policy_agregar_cargo). ERPNext will not post
+# one to a group account, to a disabled or frozen one, or to an account of
+# another company — and a charge BILLED TO THE CUSTOMER posted against an asset
+# or equity head is a bookkeeping mistake rather than a matter of taste.
+#
+# Which heads are legitimate is deliberately left wide: "Freight and Forwarding
+# Charges" is an EXPENSE head in ERPNext's standard chart and is what most
+# businesses use for a shipping charge, while a "Delivery Income" head is
+# Income, and a fee treated as a tax is a Liability. So the only root types
+# refused are the two that cannot be any of those.
+# ponytail: root_type is the check, not account_type. If a build turns out to
+# refuse a specific account_type for this row, add that check then — guessing at
+# ERPNext's link filters here would fail a valid configuration.
+RAICES_IMPOSIBLES_PARA_UN_CARGO = ("Asset", "Equity")
+
+
+def chequear_cuenta_cargo(
+    env: Mapping[str, str],
+    reporte: Reporte,
+    http: Http | None,
+    *,
+    con_cargo: bool,
+) -> None:
+    """Is ENTREGA_CARGO_CUENTA an account ERPNext will actually accept?
+
+    "Present" was the whole check before this, and presence is not the failure
+    mode. A wrong name does not break the bot: the charge write fails, and
+    app/solicitudes.py sends every accepted off-day delivery to a person instead
+    of confirming it. The owner sees orders quietly stop confirming, days after
+    typing an account name into the environment.
+
+    ``con_cargo`` is whether a fee is actually enabled. With one enabled a bad
+    account BLOCKS readiness; without one it is an AVISO, so a mistake is still
+    visible before he turns fees on.
+    """
+    cuenta = _valor(env, "ENTREGA_CARGO_CUENTA")
+    if not cuenta:
+        reporte.aviso(
+            "ENTREGA_CARGO_CUENTA",
+            "vacía: un cargo de envío no se escribe en el pedido y queda "
+            "para que lo agregue una persona (se configura sólo acá, nunca "
+            "por WhatsApp)",
+        )
+        return
+
+    def _mal(detalle: str) -> None:
+        consecuencia = (
+            ": un cargo acordado no se puede escribir y cada entrega fuera de "
+            "día que el cliente acepte termina esperando a una persona"
+        )
+        if con_cargo:
+            reporte.error("ENTREGA_CARGO_CUENTA", detalle + consecuencia)
+        else:
+            reporte.aviso(
+                "ENTREGA_CARGO_CUENTA",
+                detalle + " (todavía sin cargo configurado, así que no bloquea)",
+            )
+
+    url = _valor(env, "ERPNEXT_URL").rstrip("/")
+    par = _pares(env)["politica"]
+    if http is None or not url or not all(par):
+        reporte.aviso(
+            "ENTREGA_CARGO_CUENTA",
+            "presente, pero sin red no se verificó que la cuenta exista",
+        )
+        return
+
+    estado, cuerpo = http(
+        f"{url}/api/resource/Account/{quote(cuenta, safe='')}", headers=_auth(par)
+    )
+    datos = (cuerpo or {}).get("data") if isinstance(cuerpo, dict) else None
+    if estado != 200 or not isinstance(datos, dict):
+        _mal(f"no existe o no se puede leer (HTTP {estado})")
+        return
+    if int(datos.get("is_group") or 0):
+        _mal("es un grupo, y un cargo no se puede imputar a un grupo")
+        return
+    if int(datos.get("disabled") or 0):
+        _mal("está deshabilitada")
+        return
+    if str(datos.get("freeze_account") or "").strip().lower() in ("yes", "sí", "si"):
+        _mal("está congelada, así que no admite asientos")
+        return
+    empresa = _valor(env, "ERPNEXT_COMPANY")
+    if empresa and str(datos.get("company") or "") != empresa:
+        _mal("pertenece a otra compañía que ERPNEXT_COMPANY")
+        return
+    raiz = str(datos.get("root_type") or "").strip()
+    if not raiz:
+        reporte.aviso(
+            "ENTREGA_CARGO_CUENTA",
+            "existe y es de la compañía configurada, pero no pude leer su "
+            "root_type: revisá a mano que sea una cuenta de cargo",
+        )
+        return
+    if raiz in RAICES_IMPOSIBLES_PARA_UN_CARGO:
+        _mal(
+            f"es una cuenta de tipo {raiz}: un cargo que se le cobra al cliente "
+            "no va contra el patrimonio ni contra un activo"
+        )
+        return
+    reporte.ok(
+        "ENTREGA_CARGO_CUENTA",
+        f"existe, habilitada, de la compañía configurada y de tipo {raiz}",
+    )
+
+
+def chequear_entrega(
+    env: Mapping[str, str],
+    reporte: Reporte,
+    resumen_limites: Callable[[], list[dict]] | None,
+    http: Http | None = None,
+) -> None:
     """Las reglas de entrega, y sobre todo: ¿hay red de contención o no?
 
     Read from the owner's own store (through ``resumen_limites``) rather than
@@ -538,15 +652,16 @@ def chequear_entrega(env: Mapping[str, str], reporte: Reporte, resumen_limites: 
             )
         else:
             reporte.ok("ENTREGA_EXCEPCION_ACTIVA", "sí, con días, hora y cargo configurados")
-        if not _valor(env, "ENTREGA_CARGO_CUENTA"):
-            reporte.aviso(
-                "ENTREGA_CARGO_CUENTA",
-                "vacía: un cargo de envío no se escribe en el pedido y queda "
-                "para que lo agregue una persona (se configura sólo acá, nunca "
-                "por WhatsApp)",
-            )
-        else:
-            reporte.ok("ENTREGA_CARGO_CUENTA", "presente")
+
+    # Checked whether or not the exception is on, so a wrong account name is
+    # visible BEFORE he turns fees on rather than the first time one is agreed.
+    cargo = _puesto("ENTREGA_EXCEPCION_CARGO")
+    reporte_con_cargo = bool(
+        _puesto("ENTREGA_EXCEPCION_ACTIVA") == "true"
+        and cargo
+        and cargo not in ("0", "0.0")
+    )
+    chequear_cuenta_cargo(env, reporte, http, con_cargo=reporte_con_cargo)
 
 
 def chequear_solicitudes(reporte: Reporte) -> None:
@@ -594,7 +709,7 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
         except Exception as exc:  # pragma: no cover - import-time env problems
             reporte.aviso("Límites", f"módulo de límites no disponible ({type(exc).__name__})")
     chequear_stock_y_limites(env, reporte, resumen)
-    chequear_entrega(env, reporte, resumen)
+    chequear_entrega(env, reporte, resumen, http)
     if _valor(env, "REDIS_URL"):
         chequear_solicitudes(reporte)
     return reporte

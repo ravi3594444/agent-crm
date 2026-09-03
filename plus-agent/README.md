@@ -360,6 +360,20 @@ cuenta de fletes" can check that the account exists. It is in no registry, so no
 tool can write it; it stays a server setting. Without it a fee is simply never
 written and a person is asked to add the charge.
 
+So `make check-env` checks it instead of the model, and checks the thing that
+actually fails: that the account **exists**, is not a group, is not disabled or
+frozen, belongs to `ERPNEXT_COMPANY`, and is not an asset or equity head — a
+charge billed to the customer cannot post against either. Income, Expense and
+Liability heads all pass, because "Freight and Forwarding Charges" is an expense
+head in ERPNext's standard chart and is what most businesses use for this.
+
+With a fee enabled, a bad account **blocks** readiness. Presence was the whole
+check before, and presence is not the failure mode: the charge write fails, and
+then every off-day delivery the customer accepts waits for a person instead of
+confirming — which the owner discovers as orders quietly stopping, days after
+typing the name in. With no fee configured yet it is an AVISO, so the typo is
+visible before he starts charging for delivery.
+
 `make check-env` reports all of it, and says plainly when **neither a normal
 round nor a pickup counter is configured** — an AVISO, not a blocker, because
 nothing is oversold: it means an expired request has nothing concrete to offer
