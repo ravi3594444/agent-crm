@@ -73,24 +73,47 @@ def _correr(*args: str, entrada: str = "", verificar: bool = True,
 
 
 def _ip(contenedor: str, red: str = "") -> str:
-    """La IP del contenedor EN esa red.
+    """La IP del contenedor EN esa red, esperando a que Docker se la asigne.
 
-    Hay que nombrar la red: el relevo está en dos (la interna y la de salida) y
-    recorrerlas todas devuelve las dos IPs pegadas, que no es ninguna.
+    Dos cosas que costaron una corrida entera cada una.
+
+    Hay que NOMBRAR la red: el relevo está en dos (la interna y la de salida)
+    y recorrerlas todas devuelve las dos IPs pegadas, que no es ninguna.
+
+    Y hay que ESPERAR: `docker run -d` vuelve en cuanto el contenedor existe,
+    y la dirección puede no estar puesta todavía. Devolver "" ahí no falla —
+    y eso es lo peor que podía hacer: la URL queda «http://:8999/buzon», que
+    urllib interpreta como localhost, y el banco de pruebas termina hablándole
+    al HOST en vez de al contenedor. Se ve como «connection refused» veinte
+    minutos después, en otro lado, sin ninguna pista de la causa.
     """
-    return _correr(
-        "docker", "inspect", "-f",
-        "{{(index .NetworkSettings.Networks " + f'"{red or RED}"' + ").IPAddress}}",
-        contenedor,
+    plantilla = ("{{(index .NetworkSettings.Networks "
+                 + f'"{red or RED}"' + ").IPAddress}}")
+    for _ in range(30):
+        direccion = _correr("docker", "inspect", "-f", plantilla, contenedor)
+        if direccion.strip():
+            return direccion.strip()
+        time.sleep(1)
+    raise RuntimeError(
+        f"docker no le asignó una IP a {contenedor} en la red {red or RED}"
     )
 
 
+def _sin_host(url: str) -> bool:
+    """«http://:8999/x» — urllib lo manda a localhost en vez de fallar."""
+    return "://:" in url or url.split("://", 1)[-1].startswith("/")
+
+
 def _get(url: str, timeout: float = 15) -> dict:
+    if _sin_host(url):
+        raise RuntimeError(f"URL sin host: {url}")
     with urllib.request.urlopen(url, timeout=timeout) as r:
         return json.loads(r.read())
 
 
 def _post(url: str, cuerpo: dict | None = None, timeout: float = 30) -> dict:
+    if _sin_host(url):
+        raise RuntimeError(f"URL sin host: {url}")
     datos_ = json.dumps(cuerpo or {}).encode()
     req = urllib.request.Request(
         url, data=datos_, headers={"Content-Type": "application/json"})
@@ -204,6 +227,32 @@ class Piloto:
     def control(self) -> str:
         return f"http://{self.ip_servicios}:8999"
 
+    def _control(self, ruta: str) -> dict:
+        """Lee del control de los dobles, y si no está dice POR QUÉ.
+
+        Un URLError pelado a mitad de una corrida no dice nada: no se sabe si
+        el contenedor se cayó, si lo borró otra cosa o si fue un hipo de red.
+        Un reintento cubre el hipo; si no vuelve, se informa el estado del
+        contenedor y sus últimas líneas, que es lo que hace falta para
+        entender qué pasó.
+        """
+        ultimo: Exception | None = None
+        for intento in range(3):
+            try:
+                return _get(f"{self.control}{ruta}")
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                ultimo = exc
+                if intento < 2:
+                    time.sleep(2)
+        estado = _correr("docker", "inspect", "-f", "{{.State.Status}} "
+                         "(exitcode {{.State.ExitCode}}, oomkilled "
+                         "{{.State.OOMKilled}})", SERVICIOS, verificar=False)
+        raise RuntimeError(
+            f"los dobles no contestan en {ruta} ({type(ultimo).__name__}).\n"
+            f"contenedor {SERVICIOS}: {estado or 'no existe'}\n"
+            f"--- últimas líneas ---\n{self.registros(SERVICIOS, 25)}"
+        )
+
     def firmar(self, cuerpo: bytes) -> str:
         return "sha256=" + hmac.new(
             APP_SECRET.encode(), cuerpo, hashlib.sha256
@@ -229,8 +278,11 @@ class Piloto:
                 }],
             }}]}],
         }, ensure_ascii=False).encode("utf-8")
+        destino = f"http://{self.ip_agente}:8081/webhook/whatsapp"
+        if _sin_host(destino):
+            raise RuntimeError("no sé la IP del agente: no mando el webhook")
         req = urllib.request.Request(
-            f"http://{self.ip_agente}:8081/webhook/whatsapp",
+            destino,
             data=cuerpo,
             headers={"Content-Type": "application/json",
                      "X-Hub-Signature-256": self.firmar(cuerpo)},
@@ -248,7 +300,7 @@ class Piloto:
         mientras = ESPERA_TURNO
         vistos: list[str] = []
         while time.monotonic() - inicio < mientras:
-            envios = _get(f"{self.control}/buzon")["envios"]
+            envios = self._control("/buzon")["envios"]
             nuevos = [e for e in envios if e["n"] > desde and e["a"] == telefono]
             vistos = [e["texto"] for e in nuevos]
             sustanciales = [t for t in vistos if "dame un momento" not in t.lower()]
@@ -265,8 +317,8 @@ class Piloto:
             datos.TELEFONO_DUENO, datos.TELEFONO_EQUIPO} else "cliente"
         turno = Turno(escenario.clave, i + 1, paso.quien, rol, texto)
 
-        antes = _get(f"{self.control}/instantanea")["documentos"]
-        cuantos = len(_get(f"{self.control}/buzon")["envios"])
+        antes = self._control("/instantanea")["documentos"]
+        cuantos = len(self._control("/buzon")["envios"])
         try:
             self.mandar_whatsapp(paso.quien, texto)
         except (urllib.error.URLError, TimeoutError) as exc:
@@ -278,7 +330,7 @@ class Piloto:
                 paso.quien, cuantos)
         else:
             time.sleep(2)
-        despues = _get(f"{self.control}/instantanea")["documentos"]
+        despues = self._control("/instantanea")["documentos"]
         turno.cambios = _diferencia(antes, despues)
 
         # el número de pedido más nuevo, para los pasos que lo nombran
@@ -364,7 +416,7 @@ class Piloto:
         """
         print("[piloto] el dueño escribe una vez (abre su ventana de 24 h)",
               flush=True)
-        cuantos = len(_get(f"{self.control}/buzon")["envios"])
+        cuantos = len(self._control("/buzon")["envios"])
         self.mandar_whatsapp(datos.TELEFONO_DUENO, "hola")
         self.esperar_respuesta(datos.TELEFONO_DUENO, cuantos)
 

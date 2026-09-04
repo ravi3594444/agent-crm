@@ -811,3 +811,36 @@ def test_only_the_acknowledgement_is_never_a_pass(modo: str) -> None:
         "Recibido, dame un momento mientras lo verifico."])
     assert not turno.ok
     assert any("sólo llegó el acuse" in p for p in turno.problemas)
+
+
+# ------------------------------------------------------------ URLs sin host
+
+
+@pytest.mark.parametrize("url", [
+    "http://:8999/buzon",
+    "http:///buzon",
+    "http://:8081/webhook/whatsapp",
+])
+def test_a_url_with_no_host_is_refused_instead_of_hitting_localhost(url) -> None:
+    """El bug que costó dos corridas enteras.
+
+    `docker run -d` vuelve antes de que Docker asigne la dirección, así que
+    _ip() podía devolver "". La URL quedaba «http://:8999/buzon» y urllib la
+    manda a LOCALHOST en vez de fallar: el banco de pruebas le hablaba al host
+    en lugar del contenedor, y el síntoma aparecía veinte minutos más tarde,
+    en otro lado, como «connection refused».
+    """
+    assert piloto._sin_host(url) is True
+    with pytest.raises(RuntimeError, match="URL sin host"):
+        piloto._get(url)
+    with pytest.raises(RuntimeError, match="URL sin host"):
+        piloto._post(url, {})
+
+
+@pytest.mark.parametrize("url", [
+    "http://172.19.0.3:8999/buzon",
+    "http://plus-demo-servicios:8000/api/resource/Item",
+    "https://plus-demo-relevo:8444/v1/chat/completions",
+])
+def test_a_url_with_a_host_is_left_alone(url) -> None:
+    assert piloto._sin_host(url) is False
