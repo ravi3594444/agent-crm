@@ -2093,6 +2093,92 @@ def _sin_oferta(pedido: str, solicitud: Solicitud | None) -> str:
     )
 
 
+def _vencer_tarde(solicitud: Solicitud) -> str:
+    """The customer accepted after the deadline. Lock held. Same proof as the sweep.
+
+    This ending used to write VENCIDA whatever soltar_reserva had managed, and
+    VENCIDA is TERMINAL: no deadline, so vencimientos stopped reporting the
+    hold, the stuck-draft counter forgot it, and a draft ERPNext was still
+    counting reserved its units for ever with nothing coming back for it — the
+    defect _vencer had already been guarded against, on the one path that had
+    no guard. And on an order the owner had just submitted by hand it told the
+    customer the order could not be closed.
+
+    So it goes through _liberar, like both sweep endings, and writes a state
+    only when that state is TRUE:
+
+      _LIBERADO     the draft is provably out of the way  -> VENCIDA
+      _POR_PERSONA  a person submitted or cancelled it    -> resolved by them
+      _ILEGIBLE     the order could not be read           -> nothing written
+      _REINTENTAR   ERPNext would not close the draft     -> nothing written
+
+    In the last two the record is left exactly as it was: past its deadline and
+    still holding, which is the sweep's own trigger. Its next tick runs the same
+    _liberar and, on a stuck draft, _sin_soltar with its bounded retries, its
+    counter and its ToDo. Nothing is re-armed HERE on purpose: re-arming
+    ESPERANDO_CLIENTE would reopen an offer the customer was just told had
+    lapsed, and a second «acepto» a minute later would confirm it. Refusing
+    twice says the same thing twice and writes nothing twice.
+    """
+    pedido = solicitud.pedido
+    ahora = _ahora()
+    tarde = (
+        f"Pasó el plazo de la oferta de {pedido}, así que no la puedo cerrar. "
+        "Escribime y lo vemos de nuevo con el stock de ahora."
+    )
+    no_verificable = (
+        "No pude verificar el pedido en este momento. Escribime de nuevo en un rato."
+    )
+    resultado, estado_doc, detalle = _liberar(pedido)
+    if resultado == _ILEGIBLE:
+        return no_verificable
+    if resultado == _POR_PERSONA:
+        if not _resuelta_por_persona(solicitud, estado_doc, ahora):
+            return no_verificable
+        if estado_doc == 1:
+            return (
+                f"El encargado ya confirmó {pedido} por su cuenta, así que no hay "
+                "nada más que cerrar de tu lado. Cualquier duda, escribime."
+            )
+        return (
+            f"{pedido} fue cancelado por el encargado. Si lo querés igual, "
+            "escribime y lo armamos de nuevo con el stock de ahora."
+        )
+    if resultado == _REINTENTAR:
+        _avisar_equipo(
+            solicitud,
+            evento=f"acepto_tarde:{solicitud.id}",
+            texto=(
+                f"⏰ {pedido}: el cliente aceptó después del vencimiento y NO pude "
+                f"cerrar el borrador — {detalle}. No lo confirmé. Sigue reservando "
+                "stock y el barrido lo reintenta. Si todavía se puede, hay que "
+                "rehacerlo con los datos del momento."
+            ),
+        )
+        return tarde
+
+    vencida = registrar(
+        solicitud,
+        "vencida",
+        estado=VENCIDA,
+        motivo=f"el cliente contestó tarde; {detalle}",
+        decidida_en=ahora,
+    )
+    if vencida is None:
+        # Not durable means it did not happen: the sweep comes back for it.
+        return "No pude registrar tu respuesta. Escribime de nuevo en un momento."
+    _avisar_equipo(
+        vencida,
+        evento=f"acepto_tarde:{solicitud.id}",
+        texto=(
+            f"⏰ {pedido}: el cliente aceptó después del vencimiento. No lo "
+            f"confirmé; {detalle}. Si todavía se puede, hay que rehacerlo con los "
+            "datos del momento."
+        ),
+    )
+    return tarde
+
+
 def aceptar_cliente(pedido: str, telefono_cliente: str) -> str:
     """The customer accepts. Re-check EVERYTHING, then confirm the order.
 
@@ -2113,25 +2199,7 @@ def aceptar_cliente(pedido: str, telefono_cliente: str) -> str:
                 print(f"[solicitudes] {pedido}: respuesta de otro número, ignorada")
                 return "No encontré una oferta tuya pendiente."
             if solicitud.vencida():
-                liberado, detalle = soltar_reserva(pedido)
-                del liberado
-                vencida = registrar(
-                    solicitud,
-                    "vencida",
-                    estado=VENCIDA,
-                    motivo=f"el cliente contestó tarde; {detalle}",
-                    decidida_en=_ahora(),
-                )
-                _avisar_equipo(
-                    vencida or solicitud,
-                    f"⏰ {pedido}: el cliente aceptó después del vencimiento. No lo "
-                    "confirmé; si todavía se puede, hay que rehacerlo con los datos "
-                    "del momento.",
-                )
-                return (
-                    f"Pasó el plazo de la oferta de {pedido}, así que no la puedo "
-                    "cerrar. Escribime y lo vemos de nuevo con el stock de ahora."
-                )
+                return _vencer_tarde(solicitud)
 
             if solicitud.es_respaldo:
                 # This offer was made on a draft that was deliberately closed

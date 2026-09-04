@@ -838,6 +838,160 @@ def test_a_customer_accepting_after_the_deadline_is_not_confirmed(mundo) -> None
     assert mundo["estados"] == ["Closed"]
 
 
+def _oferta_vencida(mundo) -> None:
+    """An open offer whose deadline has just passed — before the sweep ran."""
+    _aprobar_y_esperar(mundo)
+    solicitudes.registrar(solicitudes.leer(SO), "prueba", vence_en=time.time() - 1)
+
+
+def _erpnext_no_cierra(monkeypatch) -> None:
+    monkeypatch.setattr(
+        erpnext, "policy_update_status", Mock(side_effect=erpnext.ERPNextError("502"))
+    )
+
+
+def test_a_late_acceptance_that_cannot_close_the_draft_writes_no_terminal_state(
+    mundo, monkeypatch
+) -> None:
+    """THE gap in the late ending. The sweep already refused to write VENCIDA
+    without proof that the draft stopped reserving stock; a customer answering
+    twenty seconds after the deadline reached an ending that wrote it anyway.
+    Terminal means no deadline: vencimientos stopped reporting the hold, the
+    index forgot it, and a draft ERPNext was still counting held its units for
+    ever with nothing coming back for it."""
+    _oferta_vencida(mundo)
+    plazo = solicitudes.leer(SO).vence_en
+    _erpnext_no_cierra(monkeypatch)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert "Pasó el plazo" in respuesta
+    assert mundo["submits"] == []
+    despues = solicitudes.leer(SO)
+    assert despues.estado == solicitudes.ESPERANDO_CLIENTE
+    assert despues.con_plazo
+    assert solicitudes.vencimientos([SO]) == {SO: plazo}
+    assert solicitudes._indice_vacio() is False
+    assert "NO pude cerrar el borrador" in _mensaje_equipo(mundo)
+
+    # The sweep is what retries, with its bounded backoff and its counter.
+    solicitudes.tick(ahora=time.time())
+    reintentada = solicitudes.leer(SO)
+    assert reintentada.estado == solicitudes.ESPERANDO_CLIENTE
+    assert reintentada.intentos_cierre == 1
+    assert reintentada.vence_en > time.time()
+    assert solicitudes.trabadas() == 1
+
+
+def test_a_late_acceptance_on_an_order_a_person_already_submitted_is_resolved_not_expired(
+    mundo,
+) -> None:
+    """The owner confirmed it by hand before the deadline. Telling the customer
+    «no la puedo cerrar» about a confirmed order was false; the request is
+    closed as resolved by a person, the way the sweep already did it."""
+    _oferta_vencida(mundo)
+    mundo["so"]["docstatus"] = 1
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert "ya confirmó" in respuesta
+    assert "no la puedo cerrar" not in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_RESUELTA
+    assert mundo["estados"] == []
+    assert mundo["submits"] == []
+    assert "ya está confirmado" in _mensaje_equipo(mundo)
+
+
+def test_a_late_acceptance_on_an_order_a_person_cancelled_says_so(mundo) -> None:
+    _oferta_vencida(mundo)
+    mundo["so"]["docstatus"] = 2
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert "fue cancelado" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_RESUELTA
+    assert mundo["estados"] == []
+
+
+def test_a_late_acceptance_that_cannot_read_the_order_writes_nothing(mundo, monkeypatch) -> None:
+    """None is never 0: an unreadable order is neither a live draft to close
+    nor a confirmed one to resolve. Nothing is written; the sweep asks again."""
+    _oferta_vencida(mundo)
+    escritos = len(mundo["durables"])
+    monkeypatch.setattr(solicitudes, "_docstatus", lambda pedido: None)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert "No pude verificar" in respuesta
+    assert len(mundo["durables"]) == escritos
+    assert mundo["estados"] == []
+    assert solicitudes.leer(SO).estado == solicitudes.ESPERANDO_CLIENTE
+
+
+def test_duplicate_late_acceptances_are_idempotent_while_the_draft_is_stuck(
+    mundo, monkeypatch
+) -> None:
+    """Refusing twice says the same thing twice and writes nothing twice. In
+    particular the offer is NOT re-armed here: a re-armed ESPERANDO_CLIENTE
+    would let the second «acepto» confirm what the first was told had lapsed."""
+    _oferta_vencida(mundo)
+    _erpnext_no_cierra(monkeypatch)
+
+    primera = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+    escritos = len(mundo["durables"])
+    al_equipo = _mensaje_equipo(mundo)
+
+    segunda = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert segunda == primera
+    assert len(mundo["durables"]) == escritos
+    assert _mensaje_equipo(mundo) == al_equipo
+    assert solicitudes.leer(SO).estado == solicitudes.ESPERANDO_CLIENTE
+    assert mundo["submits"] == []
+
+
+def test_a_second_late_acceptance_after_a_proven_release_writes_nothing_more(mundo) -> None:
+    _oferta_vencida(mundo)
+
+    primera = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+    assert "Pasó el plazo" in primera
+    assert solicitudes.leer(SO).estado == solicitudes.VENCIDA
+    escritos = len(mundo["durables"])
+
+    segunda = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert "ya no tengo nada pendiente" in segunda
+    assert len(mundo["durables"]) == escritos
+    assert mundo["estados"] == ["Closed"]
+    assert mundo["submits"] == []
+
+
+def test_a_late_acceptance_never_drops_a_stuck_draft_from_the_hold_or_the_counter(
+    mundo, monkeypatch
+) -> None:
+    """The sweep found the draft stuck: counted, re-armed, retrying. Then the
+    retry window lapses too and the customer answers. Nothing about the hold
+    may change without proof — not the deadline policy sees, not the counter
+    the owner sees on /health."""
+    _oferta_vencida(mundo)
+    _erpnext_no_cierra(monkeypatch)
+    solicitudes.tick(ahora=time.time())
+    rearmada = solicitudes.leer(SO)
+    assert rearmada.intentos_cierre == 1 and rearmada.vence_en > time.time()
+    assert solicitudes.trabadas() == 1
+    solicitudes.registrar(rearmada, "prueba", vence_en=time.time() - 1)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert "Pasó el plazo" in respuesta
+    assert solicitudes.trabadas() == 1
+    assert SO in solicitudes.vencimientos([SO])
+    despues = solicitudes.leer(SO)
+    assert despues.estado == solicitudes.ESPERANDO_CLIENTE
+    assert despues.intentos_cierre == 1
+    assert mundo["submits"] == []
+
+
 def test_a_pending_draft_holds_its_stock_until_the_hold_lapses(mundo) -> None:
     solicitud = _abrir(mundo)
 
