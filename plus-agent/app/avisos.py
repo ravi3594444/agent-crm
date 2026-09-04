@@ -428,18 +428,33 @@ def texto_confirmacion_cliente(so: dict) -> str:
     )[:3500]
 
 
-def confirmacion_cliente(so: dict) -> bool:
+def confirmacion_cliente(so: dict, telefono_conocido: str = "") -> bool:
     """Queue the authoritative confirmation for the order's customer.
 
     Returns True when THIS call queued it. False means it was already queued or
-    already accepted by Meta — both of which mean the customer is covered.
-    Raises only when the queue itself is unavailable, so a caller can tell
-    "someone else did it" from "nobody did it".
+    already accepted by Meta — both of which mean the customer is covered — or
+    that the customer has no phone on record, which is written on the order.
+    Raises when NOBODY did it and nobody can: the queue is unavailable, or the
+    Customer could not be read and no verified phone was given. A caller must
+    be able to tell "someone else did it" from "nobody did it", and an ERPNext
+    read that failed is the second thing, never a customer without a phone.
+
+    ``telefono_conocido`` is a phone the caller already verified belongs to this
+    order's customer — the one that just accepted the offer under the lock. It
+    covers the notice when ERPNext cannot be asked for the Customer right now:
+    the order IS confirmed, and a confirmation must not be lost to a re-read.
     """
+    from app import telefono as telefonos
+
     nombre = str(so.get("name") or "").strip()
     if not nombre:
         return False
-    telefono = _telefono_del_cliente(so)
+    leido = _telefono_del_cliente(so)
+    telefono = leido or telefonos.normalizar(telefono_conocido) or ""
+    if not telefono and leido is None:
+        raise erpnext.ERPNextError(
+            f"{nombre}: no pude leer el cliente para avisarle la confirmación"
+        )
     if not telefono:
         try:
             erpnext.add_comment(
@@ -461,15 +476,22 @@ def confirmacion_cliente(so: dict) -> bool:
     )
 
 
-def _telefono_del_cliente(so: dict) -> str:
+def _telefono_del_cliente(so: dict) -> str | None:
+    """The customer's phone; '' when they have none; None when it is UNKNOWN.
+
+    None is never ''. A document with no customer code, or a Customer ERPNext
+    would not hand over, says nothing about whether the customer has a phone —
+    and recording "no tiene teléfono cargado" on the order in that state wrote
+    a false audit line and dropped the customer's confirmation on the floor.
+    """
     from app import telefono as telefonos
 
     codigo = str(so.get("customer") or "").strip()
     if not codigo:
-        return ""
+        return None
     try:
         cliente = erpnext.policy_get_doc("Customer", codigo)
     except Exception as exc:
         print(f"[avisos] no pude leer el cliente ({type(exc).__name__})")
-        return ""
+        return None
     return telefonos.normalizar(cliente.get("mobile_no")) or ""

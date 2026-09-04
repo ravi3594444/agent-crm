@@ -120,6 +120,41 @@ def test_confirming_queues_exactly_one_notice_for_the_customer(canal) -> None:
     assert SO in entrada["texto"]
 
 
+def test_an_unreadable_customer_is_not_recorded_as_a_customer_without_a_phone(
+    canal, monkeypatch
+) -> None:
+    """"I could not read the Customer" and "the customer has no phone" are
+    different facts. The old code wrote the second one on the order — a false
+    audit line — and returned False, which every caller reads as "covered"."""
+    monkeypatch.setattr(
+        erpnext, "policy_get_doc", Mock(side_effect=erpnext.ERPNextError("500"))
+    )
+
+    with pytest.raises(erpnext.ERPNextError):
+        avisos.confirmacion_cliente(PEDIDO)
+
+    assert canal["comentarios"] == []
+    assert _en_cola(canal) == []
+
+
+def test_a_verified_phone_covers_an_unreadable_customer_exactly_once(canal, monkeypatch) -> None:
+    """The phone that just accepted the offer under the lock is the customer's,
+    verified. With ERPNext refusing the Customer read, it is what keeps the
+    confirmation from being lost — and the (event, order) key keeps it one."""
+    monkeypatch.setattr(
+        erpnext, "policy_get_doc", Mock(side_effect=erpnext.ERPNextError("500"))
+    )
+
+    assert avisos.confirmacion_cliente(PEDIDO, telefono_conocido=CUSTOMER_PHONE) is True
+    assert avisos.confirmacion_cliente(PEDIDO, telefono_conocido=CUSTOMER_PHONE) is False
+
+    (entrada,) = _en_cola(canal)
+    assert entrada["evento"] == avisos.EVENTO_CONFIRMACION
+    assert entrada["telefono"] == CUSTOMER_PHONE
+    assert SO in entrada["texto"]
+    assert canal["comentarios"] == []
+
+
 def test_a_second_call_for_the_same_order_queues_nothing(canal) -> None:
     """The idempotency key is (event, order): the automatic path and a manager
     tapping Confirmar cannot produce two confirmations."""

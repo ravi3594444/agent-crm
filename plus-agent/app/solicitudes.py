@@ -2252,7 +2252,7 @@ def aceptar_cliente(pedido: str, telefono_cliente: str) -> str:
     except CoordinationError:
         return "Estoy procesando algo de este pedido. Escribime de nuevo en un momento."
 
-    _cerrar_confirmado(pedido, solicitud, confirmada)
+    _cerrar_confirmado(pedido, solicitud, confirmada, so, telefono_cliente)
     return (
         f"¡Listo! {pedido} quedó confirmado con lo que acordamos: "
         f"{terminos_texto(solicitud.ofrecido, solicitud.moneda)}. Te mando el "
@@ -2260,8 +2260,22 @@ def aceptar_cliente(pedido: str, telefono_cliente: str) -> str:
     )
 
 
-def _cerrar_confirmado(pedido: str, solicitud: Solicitud, confirmada: Solicitud | None) -> None:
-    """Audit, durable confirmation record, customer notice, manager notice."""
+def _cerrar_confirmado(
+    pedido: str,
+    solicitud: Solicitud,
+    confirmada: Solicitud | None,
+    so: dict,
+    telefono_cliente: str,
+) -> None:
+    """Audit, durable confirmation record, customer notice, manager notice.
+
+    ``so`` is the document read under the lock and ``telefono_cliente`` the
+    phone that accepted, verified against the order by _es_su_pedido. The order
+    IS submitted by the time this runs, so a re-read that fails must not cost
+    the customer their confirmation: the notice is built from ``so`` and, if
+    ERPNext will not hand over the Customer either, queued to that phone. The
+    queue is keyed on (event, order), so this stays exactly once.
+    """
     from app import avisos, confirmacion, notificar
 
     try:
@@ -2281,10 +2295,21 @@ def _cerrar_confirmado(pedido: str, solicitud: Solicitud, confirmada: Solicitud 
         print(f"[solicitudes] {pedido}: marca durable falló ({type(exc).__name__})")
     try:
         completo = erpnext.policy_get_doc("Sales Order", pedido)
-    except Exception:
-        completo = {"name": pedido}
+    except Exception as exc:
+        # A bare {"name"} here made confirmacion_cliente find no customer, write
+        # "no tiene teléfono cargado" on a real order and queue nothing, with no
+        # retry — right after the customer was told "te mando el detalle".
+        print(
+            f"[solicitudes] {pedido}: relectura tras el submit falló "
+            f"({type(exc).__name__}); uso el documento leído bajo el lock"
+        )
+        completo = {**so, "docstatus": 1}
+        fecha = str(solicitud.ofrecido.get("fecha") or "")
+        if fecha:
+            # _aplicar_terminos wrote it onto the order after `so` was read.
+            completo["delivery_date"] = fecha
     try:
-        avisos.confirmacion_cliente(completo)
+        avisos.confirmacion_cliente(completo, telefono_conocido=telefono_cliente)
     except Exception as exc:
         print(f"[solicitudes] {pedido}: confirmación al cliente no encolada ({type(exc).__name__})")
     try:

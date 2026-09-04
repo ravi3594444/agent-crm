@@ -40,7 +40,11 @@ from app import (
     outbound_status,
     solicitudes,
 )
-from tests.fakes import FakeMarcas, listar
+from tests.fakes import FakeMarcas, entrada_de_cola, listar
+
+# Captured before the `mundo` fixture stubs it: the tests about the customer's
+# confirmation surviving a failed re-read need the REAL queue.
+_CONFIRMACION_CLIENTE_REAL = avisos.confirmacion_cliente
 
 STAFF = "5493511111111"
 OTRO = "5490000000000"
@@ -217,7 +221,7 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("app.policy.descuento_efectivo", lambda so: 0.0)
     monkeypatch.setattr("app.policy.precio_de_lista", lambda item, dia, **k: True)
     monkeypatch.setattr("app.notificar.notificar_confirmacion", lambda so, f: True)
-    monkeypatch.setattr(avisos, "confirmacion_cliente", lambda so: True)
+    monkeypatch.setattr(avisos, "confirmacion_cliente", lambda so, **kw: True)
 
     monkeypatch.delenv("ENTREGA_EXCEPCION_ACTIVA", raising=False)
     monkeypatch.setenv("APROBACION_TIMEOUT_HORAS", "4")
@@ -773,7 +777,9 @@ def test_a_fee_with_a_configured_account_is_written_and_confirmed(mundo, monkeyp
 def test_the_customer_outcome_is_exactly_one_confirmation(mundo, monkeypatch) -> None:
     encoladas: list[str] = []
     monkeypatch.setattr(
-        avisos, "confirmacion_cliente", lambda so: encoladas.append(so.get("name")) or True
+        avisos,
+        "confirmacion_cliente",
+        lambda so, **kw: encoladas.append(so.get("name")) or True,
     )
     _aprobar_y_esperar(mundo)
 
@@ -836,6 +842,80 @@ def test_a_customer_accepting_after_the_deadline_is_not_confirmed(mundo) -> None
     assert mundo["submits"] == []
     assert solicitudes.leer(SO).estado == solicitudes.VENCIDA
     assert mundo["estados"] == ["Closed"]
+
+
+def _confirmaciones_en_cola() -> list[dict]:
+    entradas = [json.loads(e) for e in entrada_de_cola(outbound_status._client, avisos.COLA)]
+    return [e for e in entradas if e["evento"] == avisos.EVENTO_CONFIRMACION]
+
+
+def _erpnext_cae_tras_el_submit(mundo, monkeypatch, *, solo_el_pedido: bool) -> None:
+    """Every read AFTER the submit fails — the order alone, or the Customer too."""
+    original = erpnext.policy_get_doc
+
+    def leer(dt, name):
+        confirmado = int(mundo["so"].get("docstatus") or 0) == 1
+        if confirmado and (dt == "Sales Order" or not solo_el_pedido):
+            raise erpnext.ERPNextError("500 después del submit")
+        return original(dt, name)
+
+    monkeypatch.setattr(erpnext, "policy_get_doc", leer)
+
+
+def test_the_confirmation_is_queued_even_if_the_post_submit_read_fails(mundo, monkeypatch) -> None:
+    """The order IS submitted. One failed re-read used to hand avisos a bare
+    {"name"}: no customer, so it wrote "no tiene teléfono cargado" on a real
+    order, queued nothing, and nothing retried — right after the customer was
+    told «te mando el detalle enseguida». The document read under the lock,
+    with the agreed date written onto it, is the notice."""
+    _aprobar_y_esperar(mundo)
+    monkeypatch.setattr(avisos, "confirmacion_cliente", _CONFIRMACION_CLIENTE_REAL)
+    _erpnext_cae_tras_el_submit(mundo, monkeypatch, solo_el_pedido=True)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["submits"] == [SO]
+    assert "quedó confirmado" in respuesta
+    (entrada,) = _confirmaciones_en_cola()
+    assert entrada["telefono"] == CUSTOMER_PHONE
+    assert SO in entrada["texto"]
+    assert "2026-09-05" in entrada["texto"]  # the agreed date, not the draft's old one
+    assert not any("no tiene teléfono" in c for c in mundo["comentarios"])
+
+
+def test_the_confirmation_reaches_the_verified_phone_when_erpnext_is_down_after_the_submit(
+    mundo, monkeypatch
+) -> None:
+    """Sales Order AND Customer unreadable. The phone that accepted under the
+    lock was verified against the order by _es_su_pedido: it is the customer's,
+    and it gets the notice rather than a false "sin teléfono" on the order."""
+    _aprobar_y_esperar(mundo)
+    monkeypatch.setattr(avisos, "confirmacion_cliente", _CONFIRMACION_CLIENTE_REAL)
+    _erpnext_cae_tras_el_submit(mundo, monkeypatch, solo_el_pedido=False)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert "quedó confirmado" in respuesta
+    (entrada,) = _confirmaciones_en_cola()
+    assert entrada["telefono"] == CUSTOMER_PHONE
+    assert not any("no tiene teléfono" in c for c in mundo["comentarios"])
+
+
+def test_reprocessing_a_confirmed_order_queues_no_second_notice(mundo, monkeypatch) -> None:
+    """(event, order) is the key. Running the closing steps again — a retry, a
+    manager tapping Confirmar, the automatic path — adds nothing."""
+    _aprobar_y_esperar(mundo)
+    monkeypatch.setattr(avisos, "confirmacion_cliente", _CONFIRMACION_CLIENTE_REAL)
+    _erpnext_cae_tras_el_submit(mundo, monkeypatch, solo_el_pedido=True)
+    solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+    assert len(_confirmaciones_en_cola()) == 1
+
+    cumplida = solicitudes.leer(SO)
+    solicitudes._cerrar_confirmado(SO, cumplida, cumplida, dict(mundo["so"]), CUSTOMER_PHONE)
+    assert avisos.confirmacion_cliente(dict(mundo["so"]), telefono_conocido=CUSTOMER_PHONE) is False
+
+    assert len(_confirmaciones_en_cola()) == 1
+    assert not any("no tiene teléfono" in c for c in mundo["comentarios"])
 
 
 def _oferta_vencida(mundo) -> None:
