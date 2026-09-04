@@ -844,3 +844,19 @@ def test_a_url_with_no_host_is_refused_instead_of_hitting_localhost(url) -> None
 ])
 def test_a_url_with_a_host_is_left_alone(url) -> None:
     assert piloto._sin_host(url) is False
+
+
+def test_the_bench_knows_which_container_names_are_its_own() -> None:
+    """Los nombres son fijos, así que dos corridas se destruyen entre sí.
+
+    Pasó de verdad: tres sesiones sobre el mismo repo, cada una haciendo
+    `docker rm -f` sobre los contenedores de las otras. Una corrida seguía
+    andando contra contenedores recién creados por otra e informaba
+    resultados que no correspondían a lo que había medido.
+    """
+    nuestros = {piloto.AGENTE, piloto.RELEVO, piloto.SERVICIOS, piloto.REDIS}
+    assert len(nuestros) == 4, "dos contenedores comparten nombre"
+    for nombre in nuestros:
+        assert nombre.startswith("plus-demo-"), nombre
+    # y ninguno puede llamarse como los de staging de la máquina
+    assert not (nuestros & {"agent-redis", "frappe_docker-backend-1"})

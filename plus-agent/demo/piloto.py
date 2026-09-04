@@ -99,6 +99,21 @@ def _ip(contenedor: str, red: str = "") -> str:
     )
 
 
+def _corriendo() -> list[str]:
+    """Los contenedores del banco de pruebas que ya están levantados.
+
+    Existe porque los nombres son FIJOS. Dos corridas en paralelo —dos
+    terminales, dos sesiones— se destruyen entre sí en silencio: la segunda
+    hace `docker rm -f` sobre los contenedores de la primera, la primera sigue
+    andando contra los contenedores de la segunda, y las dos informan
+    resultados que no corresponden a lo que midieron. Pasó, y costó entender
+    por qué un escenario fallaba con «connection refused» sin motivo.
+    """
+    vivos = _correr("docker", "ps", "--format", "{{.Names}}", verificar=False)
+    nuestros = {AGENTE, RELEVO, SERVICIOS, REDIS}
+    return sorted(n for n in vivos.splitlines() if n.strip() in nuestros)
+
+
 def _sin_host(url: str) -> bool:
     """«http://:8999/x» — urllib lo manda a localhost en vez de fallar."""
     return "://:" in url or url.split("://", 1)[-1].startswith("/")
@@ -494,6 +509,18 @@ class Piloto:
         _correr("docker", "build", "-q", "-t", IMAGEN, str(RAIZ),
                 timeout=900)
 
+        ajenos = _corriendo()
+        if ajenos:
+            raise RuntimeError(
+                "ya hay un banco de pruebas levantado: "
+                + ", ".join(ajenos)
+                + ".\nLos nombres de los contenedores son fijos, así que arrancar "
+                "otra corrida BORRARÍA esa: si son de otra sesión o de otra "
+                "terminal, la dejarías hablando con contenedores nuevos y su "
+                "resultado no querría decir nada. Esperá a que termine, o "
+                "bajala a mano:\n"
+                "  python -m demo.piloto --bajar"
+            )
         self.bajar(silencioso=True)
         _correr("docker", "network", "create", "--internal", RED)
         guardas.exigir(guardas.red_es_interna(RED))
@@ -757,9 +784,14 @@ def main() -> int:
                     help="correr uno o varios escenarios, separados por coma")
     ap.add_argument("--modelo", default="",
                     help="otro modelo de Gemini (la cuota gratuita es por modelo)")
+    ap.add_argument("--bajar", action="store_true",
+                    help="sólo desarmar lo que quedó de una corrida anterior")
     args = ap.parse_args()
 
     piloto = Piloto(args.modo, pathlib.Path(args.salida), args.modelo)
+    if args.bajar:
+        piloto.bajar()
+        return 0
     try:
         piloto.levantar()
         piloto.calentar()
