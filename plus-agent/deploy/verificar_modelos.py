@@ -1,23 +1,25 @@
-"""Una llamada real, mínima y con herramientas, a cada modelo Qwen. MANUAL.
+"""Una llamada real, mínima y con herramientas, a cada modelo. MANUAL.
 
-    make verificar-qwen           (o: .venv/bin/python deploy/verificar_qwen.py)
+    make verificar-modelos    (o: .venv/bin/python deploy/verificar_modelos.py)
 
-Qué prueba: que la clave y el endpoint funcionan, que cada modelo existe en esa
-región y que sabe LLAMAR UNA HERRAMIENTA (function calling), que es lo único que
-los agentes le piden. No toca ERPNext, no manda WhatsApp, no usa datos de
-clientes: la única herramienta es un `ping` y el texto es sintético.
+Qué prueba, contra el proveedor que eligió LLM_PROVIDER (Qwen o Gemini): que la
+clave y el endpoint funcionan, que cada modelo existe ahí y que sabe LLAMAR UNA
+HERRAMIENTA (function calling), que es lo único que los agentes le piden.
+
+Qué NO toca: ERPNext, WhatsApp/Meta, Redis ni datos de clientes. La única
+herramienta es un `ping` y el texto es sintético, escrito acá. No lee un pedido,
+no escribe nada en ningún sistema y no manda ningún mensaje.
 
 Qué NO hace: correr en CI (se niega si ve la variable CI), imprimir la clave
-(nunca sale del objeto de configuración; los errores se sanitizan) ni cambiar
-nada en ningún sistema.
+(todo lo que se imprime pasa por modelos.enmascarar) ni cambiar nada.
 
 Salida: una línea por modelo con OK/FALLA, latencia y tokens usados si el
-proveedor los informa. Código de salida 1 si alguno falla.
+proveedor los informa. Código de salida 1 si alguno falla, 2 si no corresponde
+correrlo.
 """
 from __future__ import annotations
 
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -30,22 +32,14 @@ from langchain_core.tools import tool
 
 from app import modelos
 
-_CLAVE = re.compile(r"sk-[A-Za-z0-9_\-]{6,}")
+# El único "dato" de toda la prueba, y es inventado acá.
+TEXTO_DE_PRUEBA = "ok"
 
 
 @tool
 def ping(texto: str) -> str:
     """Devuelve 'pong:' seguido del texto recibido. Sólo para probar herramientas."""
     return f"pong:{texto}"
-
-
-def _sanitizar(texto: object) -> str:
-    """Nunca dejar pasar la clave ni nada que se le parezca."""
-    salida = str(texto)
-    clave = os.getenv("DASHSCOPE_API_KEY", "").strip()
-    if clave:
-        salida = salida.replace(clave, "sk-***")
-    return _CLAVE.sub("sk-***", salida)[:400]
 
 
 def _host(url: str) -> str:
@@ -56,7 +50,7 @@ def probar(rol: str) -> bool:
     try:
         cfg = modelos.configuracion(rol)
     except modelos.ConfiguracionModeloError as exc:
-        print(f"FALLA {rol}: configuración — {_sanitizar(exc)}")
+        print(f"FALLA {rol}: configuración — {modelos.enmascarar(exc)}")
         return False
     pensar = cfg["extra_body"].get("enable_thinking", False)
     print(
@@ -67,7 +61,10 @@ def probar(rol: str) -> bool:
     modelo = modelos.construir(rol).bind_tools([ping])
     mensajes = [
         SystemMessage(content="Sos un verificador. Cuando te lo pidan, usá la herramienta ping."),
-        HumanMessage(content="Llamá a la herramienta ping con el texto 'ok' y no hagas nada más."),
+        HumanMessage(
+            content=f"Llamá a la herramienta ping con el texto '{TEXTO_DE_PRUEBA}' "
+            "y no hagas nada más."
+        ),
     ]
     inicio = time.monotonic()
     try:
@@ -80,12 +77,16 @@ def probar(rol: str) -> bool:
             )
             return False
         llamada = llamadas[0]
-        resultado = ping.invoke(llamada.get("args") or {"texto": "ok"})
+        resultado = ping.invoke(llamada.get("args") or {"texto": TEXTO_DE_PRUEBA})
         final = modelo.invoke(
-            [*mensajes, primera, ToolMessage(content=str(resultado), tool_call_id=llamada.get("id") or "ping")]
+            [
+                *mensajes,
+                primera,
+                ToolMessage(content=str(resultado), tool_call_id=llamada.get("id") or "ping"),
+            ]
         )
     except Exception as exc:
-        print(f"FALLA {rol}: {type(exc).__name__} — {_sanitizar(exc)}")
+        print(f"FALLA {rol}: {type(exc).__name__} — {modelos.enmascarar(exc)}")
         return False
     latencia = time.monotonic() - inicio
     uso = getattr(final, "usage_metadata", None) or {}
@@ -93,8 +94,8 @@ def probar(rol: str) -> bool:
     if isinstance(uso, dict) and uso.get("total_tokens"):
         tokens = f" tokens={uso.get('input_tokens', '?')}+{uso.get('output_tokens', '?')}"
     print(
-        f"OK    {rol}: herramienta '{llamada.get('name')}' llamada y respondida en {latencia:.1f}s"
-        f"{tokens}"
+        f"OK    {rol}: herramienta '{llamada.get('name')}' llamada y respondida "
+        f"en {latencia:.1f}s{tokens}"
     )
     return True
 
@@ -103,10 +104,20 @@ def main() -> int:
     if os.getenv("CI", "").strip():
         print("Este chequeo hace llamadas reales al proveedor y no corre en CI.")
         return 2
-    if not os.getenv("DASHSCOPE_API_KEY", "").strip():
-        print("FALLA: DASHSCOPE_API_KEY vacía en .env; no hay nada que verificar.")
+    try:
+        prov = modelos.proveedor()
+    except modelos.ConfiguracionModeloError as exc:
+        print(f"FALLA: {modelos.enmascarar(exc)}")
         return 1
-    resultados = [probar("clientes"), probar("gerencia")]
+    variable, clave = modelos.clave_api(prov)
+    if not clave:
+        print(
+            f"FALLA: {prov.clave_principal} vacía en .env "
+            f"(proveedor {prov.nombre}); no hay nada que verificar."
+        )
+        return 1
+    print(f"Proveedor: {prov.etiqueta} — clave en {variable}")
+    resultados = [probar(rol) for rol in modelos.ROLES]
     return 0 if all(resultados) else 1
 
 

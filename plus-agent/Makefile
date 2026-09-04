@@ -6,7 +6,7 @@ PY     := $(VENV)/bin/python
 PIP    := $(VENV)/bin/pip
 PUERTO ?= 8081
 
-.PHONY: help install test lint fmt check check-env check-env-offline verificar-qwen build up down logs decisiones briefing seed
+.PHONY: help install test lint fmt check check-env check-env-offline verificar-modelos build up down logs decisiones briefing seed
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -36,8 +36,8 @@ check-env: install ## ¿Está todo listo para probar en vivo? Valida .env, Meta,
 check-env-offline: install ## Lo mismo sin llamar a Meta ni a ERPNext (sólo el .env y Redis)
 	$(PY) -m app.readiness --sin-red
 
-verificar-qwen: install ## Una llamada real con herramientas a cada modelo Qwen (manual, nunca en CI)
-	$(PY) deploy/verificar_qwen.py
+verificar-modelos: install ## Una llamada real con herramientas a cada modelo del proveedor elegido (manual, nunca en CI)
+	$(PY) deploy/verificar_modelos.py
 
 build: ## Buildear la imagen
 	docker build -t plus-agent .

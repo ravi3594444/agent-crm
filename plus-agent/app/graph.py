@@ -105,8 +105,8 @@ _checkpointer = RedisSaver(
 _checkpointer.setup()
 
 # Cheap+fast for the high-volume customer bot; stronger model for analysis.
-# Both are Qwen on one DashScope key (app/modelos.py). Missing configuration
-# raises here, at import: there is deliberately no fallback provider.
+# One provider, chosen explicitly with LLM_PROVIDER (app/modelos.py). Missing
+# configuration raises here, at import: there is deliberately no fallback.
 _modelo_clientes = modelos.construir("clientes")
 _modelo_gerencia = modelos.construir("gerencia")
 
