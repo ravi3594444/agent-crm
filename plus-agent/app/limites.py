@@ -493,9 +493,19 @@ _MILES = re.compile(r"^\d{1,3}(\.\d{3})+$")
 _CON_MILES = frozenset({"$", "unidad de stock"})
 
 
-def _numero(defi: Definicion, crudo: str) -> float:
+def _numero(defi: Definicion, crudo: str, *, tecleado: bool = True) -> float:
+    """El número, o LimiteError.
+
+    ``tecleado`` dice que este texto lo escribió una PERSONA, que es la única
+    vez que se puede aplicar la regla de miles — porque esa regla NO es
+    idempotente. "1,125" es un peso doce; normaliza a "1.125"; y volver a
+    normalizar ESO lee el punto como separador de miles y da 1125. Corriendo
+    dos veces, una en proponer() y otra en aplicar(), le muestra al dueño un
+    número y guarda otro mil veces más grande. Así que un valor que ya está en
+    forma normal se lee como float y nunca se re-agrupa.
+    """
     texto = str(crudo).strip().replace("$", "").strip()
-    if defi.unidad in _CON_MILES:
+    if tecleado and defi.unidad in _CON_MILES:
         entero, coma, decimales = texto.partition(",")
         if _MILES.match(entero):
             entero = entero.replace(".", "")
@@ -566,12 +576,17 @@ def _hora(defi: Definicion, crudo: str) -> str:
     return f"{int(encontrado.group(1)):02d}:{encontrado.group(2)}"
 
 
-def validar(nombre: str, crudo: str) -> str:
+def validar(nombre: str, crudo: str, *, tecleado: bool = True) -> str:
     """Normaliza un valor para ese ajuste, o levanta LimiteError.
 
     The normal form is what gets stored, shown back to the owner and written
     into the audit, so every kind has exactly one — and a value that validates
     here is a value app/excepciones.py can read without re-interpreting it.
+
+    ``tecleado=False`` re-lee un valor que YA está en forma normal: una
+    propuesta pendiente, o lo que el dueño confirmó hace un mes y está en el
+    almacén. Todas las clases de acá son idempotentes menos la plata; ver
+    ``_numero``.
     """
     defi = TODOS[nombre]
     if defi.opcional and _sin_tildes(crudo) in _NINGUNO_DICHO:
@@ -585,7 +600,7 @@ def validar(nombre: str, crudo: str) -> str:
     # 12 significant digits, not the default 6: at :g an owner who sets a
     # 1234567 ceiling gets "1.23457e+06" stored, shown back to him and audited,
     # and reads back as 1234570. Every money limit here reaches seven digits.
-    return f"{_numero(defi, crudo):.12g}"
+    return f"{_numero(defi, crudo, tecleado=tecleado):.12g}"
 
 
 def configuracion() -> Configuracion:
@@ -593,44 +608,35 @@ def configuracion() -> Configuracion:
     almacen = _almacen()
     # LIMITES only, deliberately: see the note above ENTREGA. A malformed
     # delivery day must not be able to stop an order from confirming.
-    crudos = {nombre: _resolver(nombre, almacen)[0] for nombre in LIMITES}
-    buffer_pct = _numero(LIMITES["STOCK_BUFFER_PCT"], crudos["STOCK_BUFFER_PCT"])
+    crudos = {nombre: _resolver(nombre, almacen) for nombre in LIMITES}
+
+    def _num(nombre: str) -> float:
+        """El número de ese límite, respetando de dónde salió el texto.
+
+        ESTE es el camino que decide si un pedido se auto-confirma, así que es
+        el que más importa que no re-agrupe: un "1.125" que el dueño confirmó
+        está guardado en forma normal, y leerlo como miles acá ensancharía el
+        tope por mil sin que nadie haya cambiado nada.
+        """
+        crudo, origen = crudos[nombre]
+        return _numero(LIMITES[nombre], crudo, tecleado=origen != "dueño")
+
     return Configuracion(
-        tope=_numero(LIMITES["AUTO_CONFIRM_MAX"], crudos["AUTO_CONFIRM_MAX"]),
-        tope_qty_por_producto=_numero(
-            LIMITES["AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO"],
-            crudos["AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO"],
-        ),
-        buffer=buffer_pct / 100.0,
-        tope_cliente_nuevo=_numero(
-            LIMITES["AUTO_CONFIRM_MAX_CLIENTE_NUEVO"],
-            crudos["AUTO_CONFIRM_MAX_CLIENTE_NUEVO"],
-        ),
-        tope_deuda=_numero(
-            LIMITES["AUTO_CONFIRM_MAX_DEBT"], crudos["AUTO_CONFIRM_MAX_DEBT"]
-        ),
+        tope=_num("AUTO_CONFIRM_MAX"),
+        tope_qty_por_producto=_num("AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO"),
+        buffer=_num("STOCK_BUFFER_PCT") / 100.0,
+        tope_cliente_nuevo=_num("AUTO_CONFIRM_MAX_CLIENTE_NUEVO"),
+        tope_deuda=_num("AUTO_CONFIRM_MAX_DEBT"),
         descuentos_aprueban=_bool(
             LIMITES["AUTO_CONFIRM_DESCUENTOS_APRUEBAN"],
-            crudos["AUTO_CONFIRM_DESCUENTOS_APRUEBAN"],
+            crudos["AUTO_CONFIRM_DESCUENTOS_APRUEBAN"][0],
         ),
-        tope_descuento_pct=_numero(
-            LIMITES["AUTO_CONFIRM_MAX_DESCUENTO_PCT"],
-            crudos["AUTO_CONFIRM_MAX_DESCUENTO_PCT"],
-        )
-        / 100.0,
+        tope_descuento_pct=_num("AUTO_CONFIRM_MAX_DESCUENTO_PCT") / 100.0,
         timeout_aprobacion=_timeout(
-            _numero(
-                LIMITES["APROBACION_TIMEOUT_HORAS"],
-                crudos["APROBACION_TIMEOUT_HORAS"],
-            ),
-            "APROBACION_TIMEOUT_HORAS",
+            _num("APROBACION_TIMEOUT_HORAS"), "APROBACION_TIMEOUT_HORAS"
         ),
         timeout_revision=_timeout(
-            _numero(
-                LIMITES["REVISION_TIMEOUT_HORAS"],
-                crudos["REVISION_TIMEOUT_HORAS"],
-            ),
-            "REVISION_TIMEOUT_HORAS",
+            _num("REVISION_TIMEOUT_HORAS"), "REVISION_TIMEOUT_HORAS"
         ),
     )
 
@@ -684,9 +690,11 @@ def _bruto(nombre: str, almacen: dict[str, str]) -> tuple[str, bool]:
     thing for a widening setting and OPPOSITE things for a narrowing one — see
     Entrega.excepcion_minimo. Callers that do not care use ``_crudo``.
     """
-    crudo, _ = _resolver(nombre, almacen)
+    crudo, origen = _resolver(nombre, almacen)
     try:
-        valor = validar(nombre, crudo)
+        # Lo que fijó el dueño ya está en forma normal; el entorno de arranque
+        # lo escribió una persona y conserva la lectura tecleada.
+        valor = validar(nombre, crudo, tecleado=origen != "dueño")
     except LimiteError as exc:
         print(f"[limites] {nombre} no usable: {exc}")
         return "", False
@@ -769,7 +777,7 @@ def resumen() -> list[dict]:
     for nombre, defi in TODOS.items():
         crudo, origen = _resolver(nombre, almacen)
         try:
-            valor = validar(nombre, crudo)
+            valor = validar(nombre, crudo, tecleado=origen != "dueño")
             problema = ""
         except LimiteError as exc:
             valor = crudo
@@ -830,9 +838,9 @@ def _codigo() -> str:
 
 def vigente(nombre: str) -> str:
     """El valor vigente de un límite, tal como se guardaría."""
-    crudo, _ = _resolver(nombre, _almacen())
+    crudo, origen = _resolver(nombre, _almacen())
     try:
-        return validar(nombre, crudo)
+        return validar(nombre, crudo, tecleado=origen != "dueño")
     except LimiteError:
         return crudo
 
@@ -933,7 +941,9 @@ def aplicar(codigo: str, telefono: str) -> dict:
     nombre = str(propuesta.get("limite") or "")
     if nombre not in TODOS:
         raise LimiteError("el cambio pendiente apunta a un ajuste que no existe")
-    nuevo = validar(nombre, str(propuesta.get("nuevo")))
+    # tecleado=False: proponer() ya normalizó esto. Re-agruparlo es el error
+    # de mil veces que describe el docstring de _numero.
+    nuevo = validar(nombre, str(propuesta.get("nuevo")), tecleado=False)
     anterior = vigente(nombre)
 
     entrada = {

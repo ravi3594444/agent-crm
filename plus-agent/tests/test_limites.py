@@ -1087,6 +1087,160 @@ def test_a_percentage_confirmed_end_to_end_is_never_regrouped(
 
 
 # ---------------------------------------------------------------------------
+# El valor que el dueño confirmó es el valor que se guarda.
+#
+# La regla de miles ("1.500" son mil quinientos pesos) NO es idempotente: al
+# normalizar deja "1.125", y volver a normalizar ESO lee el punto como
+# separador de miles y da 1125. proponer() normaliza una vez y aplicar()
+# volvía a normalizar, así que el dueño confirmaba un número y se guardaba
+# otro mil veces más grande — y en AUTO_CONFIRM_MAX eso ensancha por mil el
+# tope de lo que se confirma sin que lo mire nadie.
+# ---------------------------------------------------------------------------
+
+# Los ajustes a los que se les aplica la regla de miles, sacados del código y
+# no de una lista escrita a mano: si mañana aparece un séptimo, este test lo
+# incluye solo en vez de dejarlo sin cubrir.
+CON_MILES = tuple(
+    nombre for nombre, defi in limites.TODOS.items() if defi.unidad in limites._CON_MILES
+)
+
+
+def test_the_thousands_rule_covers_exactly_the_six_settings_this_file_tests() -> None:
+    """Pinned so the coverage claim below cannot go stale in silence."""
+    assert set(CON_MILES) == {
+        "AUTO_CONFIRM_MAX",
+        "AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO",
+        "AUTO_CONFIRM_MAX_CLIENTE_NUEVO",
+        "AUTO_CONFIRM_MAX_DEBT",
+        "ENTREGA_EXCEPCION_CARGO",
+        "ENTREGA_EXCEPCION_MIN_TOTAL",
+    }
+
+
+@pytest.mark.parametrize("nombre", CON_MILES)
+@pytest.mark.parametrize(
+    "dicho,canonico",
+    [
+        ("1,125", "1.125"),
+        ("0,125", "0.125"),
+        ("9,999", "9.999"),
+        ("999,125", "999.125"),
+    ],
+)
+def test_a_decimal_amount_is_stored_as_the_owner_confirmed_it(
+    almacen: FakeRedis, nombre: str, dicho: str, canonico: str
+) -> None:
+    """propose -> code -> confirm -> read back, for every setting with miles.
+
+    "1,125" is one peso doce en es-AR. It normalizes to "1.125", and the whole
+    bug is that re-normalizing THAT yields 1125: he confirms one number and a
+    thousandfold different one is stored, audited and used to decide orders.
+    """
+    respuesta = _proponer(nombre, dicho)
+    assert canonico in respuesta, respuesta
+
+    codigo = _codigo_enviado(almacen)
+    assert _confirmar(codigo) != ""
+
+    assert limites.vigente(nombre) == canonico
+    assert float(limites.vigente(nombre)) == float(canonico)
+    # And the audit says the same number, in both copies.
+    assert limites.auditoria()[0]["nuevo"] == canonico
+    texto_durable = limites.erpnext.registrar_comentario.call_args.args[2]
+    assert f"-> {canonico} " in texto_durable, texto_durable
+
+
+@pytest.mark.parametrize("nombre", CON_MILES)
+@pytest.mark.parametrize(
+    "dicho",
+    ["1,125", "0,125", "9,999", "999,125", "1.000", "1.500,50", "1500", "1,5", "999"],
+)
+def test_normalizing_an_already_normalized_amount_changes_nothing(
+    nombre: str, dicho: str
+) -> None:
+    """validar() must be a fixed point on its own output.
+
+    This is the property the propose/confirm path depends on, stated directly:
+    whatever the owner typed, normalizing the RESULT again may not move it.
+    """
+    canonico = limites.validar(nombre, dicho)
+    assert limites.validar(nombre, canonico, tecleado=False) == canonico
+    # And re-reading a stored value is the same read the second time too.
+    assert (
+        limites.validar(nombre, limites.validar(nombre, canonico, tecleado=False), tecleado=False)
+        == canonico
+    )
+
+
+@pytest.mark.parametrize("nombre", CON_MILES)
+@pytest.mark.parametrize("dicho,esperado", [("1.000", "1000"), ("1.500", "1500")])
+def test_a_typed_thousands_amount_still_means_thousands(
+    nombre: str, dicho: str, esperado: str
+) -> None:
+    """The fix must not cost the rule it is protecting: "1.000" typed by a
+    person is a thousand pesos, and a thousand litres, exactly as before."""
+    assert limites.validar(nombre, dicho) == esperado
+
+
+@pytest.mark.parametrize(
+    "nombre",
+    [
+        nombre
+        for nombre, defi in limites.TODOS.items()
+        if defi.unidad in ("%", "h") and not defi.opcional
+    ],
+)
+@pytest.mark.parametrize("dicho,esperado", [("1.5", "1.5"), ("1,5", "1.5"), ("20", "20")])
+def test_a_percentage_or_an_hour_count_is_never_regrouped_in_either_reading(
+    nombre: str, dicho: str, esperado: str
+) -> None:
+    """1.5% is one and a half per cent, and 1.5 h is ninety minutes. Nobody
+    groups either with a dot, so the thousands rule must not reach them.
+
+    Distinct from the validar()-level test of the same idea further down: this
+    one asserts it for BOTH readings, typed and canonical. Same name would
+    shadow it and ruff cannot see that — see
+    test_no_test_in_this_suite_is_shadowed_by_another.
+    """
+    assert limites.validar(nombre, dicho) == esperado
+    assert limites.validar(nombre, esperado, tecleado=False) == esperado
+
+
+def test_a_stored_decimal_is_read_back_as_the_number_it_says(
+    almacen: FakeRedis,
+) -> None:
+    """The read path has to agree with the write path.
+
+    A canonical "1.125" sitting in the store is one peso twelve. Re-grouping it
+    on the way OUT would hand app/policy.py and app/excepciones.py a number the
+    owner never confirmed, with no change ever being applied.
+    """
+    almacen.hashes[limites.CLAVE_VALORES] = {
+        "AUTO_CONFIRM_MAX": "1.125",
+        "ENTREGA_EXCEPCION_CARGO": "1.125",
+    }
+
+    assert limites.vigente("AUTO_CONFIRM_MAX") == "1.125"
+    assert limites.configuracion().tope == 1.125
+    assert limites.entrega().excepcion_cargo == 1.125
+    fila = next(f for f in limites.resumen() if f["nombre"] == "AUTO_CONFIRM_MAX")
+    assert fila["valor"] == "1.125"
+
+
+def test_a_bootstrap_environment_amount_is_still_read_as_typed(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The .env is written by a person, so it keeps the typed reading: nobody
+    puts a canonical float in there, they put "1.000" meaning a thousand."""
+    monkeypatch.setenv("AUTO_CONFIRM_MAX", "1.000")
+
+    assert limites.configuracion().tope == 1000.0
+    fila = next(f for f in limites.resumen() if f["nombre"] == "AUTO_CONFIRM_MAX")
+    assert fila["origen"] == "arranque"
+    assert fila["valor"] == "1000"
+
+
+# ---------------------------------------------------------------------------
 # Lo que salió de la revisión adversarial de las reglas de entrega.
 # ---------------------------------------------------------------------------
 
