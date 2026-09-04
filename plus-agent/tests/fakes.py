@@ -29,6 +29,12 @@ class FakeMarcas:
         if self.caido:
             raise RuntimeError("redis de prueba caído")
 
+    def ping(self) -> bool:
+        """Real Redis has it, and a liveness probe is the one thing that has to
+        actually ask (app/tools/operaciones.py)."""
+        self._vivo()
+        return True
+
     def set(self, key, value, nx=False, ex=None):
         self._vivo()
         if nx and key in self.values:

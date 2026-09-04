@@ -37,7 +37,7 @@ README.md.
 ```bash
 cd plus-agent
 docker run -d --name redis-test -p 6379:6379 redis/redis-stack-server:7.4.0-v1
-REDIS_URL=redis://localhost:6379/0 make test   # expect: 1179 passed
+REDIS_URL=redis://localhost:6379/0 make test   # expect: 1224 passed
 ```
 
 **Expect:** every test passes — nothing skipped, nothing xfailed. A skip means Redis was not reachable; set `REDIS_OBLIGATORIO=1` (as CI does) to turn that into a failure.

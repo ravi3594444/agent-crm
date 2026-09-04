@@ -30,6 +30,7 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `app/tools/catalogo.py` | Read tools — products, prices, stock levels, order status |
 | `app/tools/pedidos.py` | Write tools — **drafts only** — then hands the order to the policy |
 | `app/tools/gerencia.py` | Management read tools (owner assistant) |
+| `app/tools/operaciones.py` | Management read-only status: `estado_del_sistema`, `ver_avisos_fallidos` |
 | `app/tools/captura.py` | **Offline-sale capture** — the hard part |
 | `app/clientes.py` | Customer lookup by phone (`buscar_por_telefono`), against hand-entered data |
 | `app/policy.py` | **Auto-confirm engine** — deterministic, LLM-proof, fail-closed |
@@ -44,7 +45,7 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `docker-compose.yml` | Agent + Redis Stack (+ `briefing` on demand) |
 | `Dockerfile`, `Makefile`, `.env.example`, `pyproject.toml` | Build, shortcuts, configuration, lint config |
 | `.github/workflows/ci.yml` | Lint, tests, image build, container boot against a real Redis Stack |
-| `tests/` | 1179 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
+| `tests/` | 1224 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
 
 ## Two agents, one webhook
 
@@ -606,6 +607,31 @@ delivery, confirmation and dispatch decisions stay in Python (`policy.py`,
 `entrega.py`, `inventario.py`, `decisiones.py`). `tests/test_modelos.py` mocks
 the provider boundary, so CI never calls a provider.
 
+### Asking the system how it is
+
+Two management-only tools, read-only by construction (`app/tools/operaciones.py`,
+registered in `TOOLS_GERENCIA` and never in `TOOLS_CLIENTES`, with
+`require_management` re-checked inside each one):
+
+- **`estado_del_sistema`** — Redis liveness, one bounded ERPNext read with a
+  4-second timeout, WhatsApp configuration presence plus failed/undelivered
+  counts, the selected provider and both model names, stuck drafts, and the
+  decision and customer-notice queues.
+- **`ver_avisos_fallidos`** — how many notices, customer replies and Meta
+  deliveries failed, plus the newest 10 parked notices (hard maximum 20) with
+  order id, purpose and headline.
+
+What they never print: a key, a token, a whole phone number, a raw Redis
+payload or anything a customer wrote. A credential is reported as present with
+its length; a recipient as a truncated hash; a failed notice as its first
+non-quoted line, because the staff notice body carries the customer's quoted
+words. A check that fails says `NO DISPONIBLE` or `DESCONOCIDO` — never `0` and
+never `OK`, since "I could not look" and "there is nothing" are different
+answers and only one means nobody has to act. They make no model request, hold
+no lock, and write nothing: no retry, no delete, no acknowledge. Retrying a
+parked notice is deliberately not one of them; the ERPNext ToDo each failure
+already opens is what gets a person to it.
+
 ### Redis Stack is required
 
 `langgraph-checkpoint-redis` stores JSON checkpoints and creates search
@@ -718,7 +744,7 @@ then commit.
 
 ```bash
 make install       # .venv with requirements-dev.txt
-make test          # 1179 passed, needs a Redis Stack on REDIS_URL
+make test          # 1224 passed, needs a Redis Stack on REDIS_URL
 make check         # what CI runs (ruff check + tests)
 make check-env     # is .env complete, are the three ERPNext keys distinct
 make up            # docker compose up, wait for :8081/health
