@@ -823,7 +823,7 @@ def test_masking_covers_every_google_key_format() -> None:
     """
     formatos = {
         "AIza": "AIzaSyDejemploDeClaveInventada123456789",
-        "AQ.":  "AQ.Ab8RejemploDeClaveInventadaQueNoSirveParaNada",
+        "AQ.":  "AQ.Zz0qEJEMPLOinventadoQueNoEsLaClaveDeNadie",
         "sk-":  "sk-ejemploDeClaveInventada123456",
     }
     for etiqueta, clave in formatos.items():
