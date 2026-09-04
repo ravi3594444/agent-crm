@@ -158,6 +158,8 @@ class Turno:
     latencia_s: float = 0.0
     cambios: dict[str, dict] = field(default_factory=dict)
     problemas: list[str] = field(default_factory=list)
+    # Diferencias que no son fallas: la redacción de un modelo libre.
+    avisos: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -312,9 +314,22 @@ class Piloto:
                 problemas.append(
                     "el agente contestó con una disculpa técnica: se rompió algo")
                 break
+        # Los fragmentos de texto son EXACTOS contra un guión y sólo
+        # orientativos contra un modelo libre: "tengo leche entera" es una
+        # respuesta correcta que no contiene "LECHE-ENT-1L". Así que en modo
+        # gemini se informan pero no fallan. Lo que sí falla en los dos modos
+        # es el estado de los documentos y una disculpa técnica: eso no
+        # depende de cómo el modelo eligió redactar.
         for fragmento in paso.espera:
             if fragmento.lower() not in todo:
-                problemas.append(f"la respuesta no dice {fragmento!r}")
+                queja = f"la respuesta no dice {fragmento!r}"
+                if self.modo == "gemini":
+                    turno.avisos.append(queja + " (redacción del modelo)")
+                else:
+                    problemas.append(queja)
+        # Lo PROHIBIDO falla en los dos modos: que el modelo prometa un
+        # descuento o diga "confirmado" cuando no lo está es justo lo que hay
+        # que cazar, y no es una cuestión de redacción.
         for fragmento in paso.prohibe:
             if fragmento.lower() in todo:
                 problemas.append(f"la respuesta dice {fragmento!r} y no debería")
@@ -373,6 +388,8 @@ class Piloto:
                   f"({turno.latencia_s:.1f}s)", flush=True)
             for p in turno.problemas:
                 print(f"          -> {p}", flush=True)
+            for a in turno.avisos:
+                print(f"          ·  {a}", flush=True)
         return turnos
 
     def recrear_agente(self, cambios: dict[str, str]) -> None:
@@ -637,6 +654,8 @@ class Piloto:
                 lineas.append(f"- documento `{clave}`: {json.dumps(cambio, ensure_ascii=False)}")
             for p in t.problemas:
                 lineas.append(f"- **problema**: {p}")
+            for a in t.avisos:
+                lineas.append(f"- nota: {a}")
             lineas.append("")
         return "\n".join(lineas)
 
@@ -649,7 +668,7 @@ class Piloto:
                 "escenario": t.escenario, "paso": t.paso, "rol": t.rol,
                 "texto": t.texto, "respuestas": t.respuestas,
                 "latencia_s": round(t.latencia_s, 3), "cambios": t.cambios,
-                "problemas": t.problemas,
+                "problemas": t.problemas, "avisos": t.avisos,
             } for t in self.turnos], ensure_ascii=False, indent=2),
             encoding="utf-8")
         print(f"[piloto] transcripción en {self.salida}", flush=True)

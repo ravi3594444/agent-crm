@@ -45,7 +45,8 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `docker-compose.yml` | Agent + Redis Stack (+ `briefing` on demand) |
 | `Dockerfile`, `Makefile`, `.env.example`, `pyproject.toml` | Build, shortcuts, configuration, lint config |
 | `.github/workflows/ci.yml` | Lint, tests, image build, container boot against a real Redis Stack |
-| `tests/` | 1238 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
+| `demo/` | **Test bench**: fourteen release scenarios against the real image, inside a `--internal` docker network with no route out. See [demo/README.md](demo/README.md). |
+| `tests/` | 1300 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
 
 ## Two agents, one webhook
 
@@ -504,6 +505,27 @@ If the 07:15 count does not happen, do not flip `STOCK_CONFIABLE` to true.
 4. **Audit.** AI-created orders carry a hashed inbound reference and the
    service adds best-effort ERPNext audit comments for writes and delivery
    failures.
+
+## Trying the whole thing without touching anything real
+
+```bash
+make demo          # fourteen release scenarios, deterministic, no network at all
+make demo-gemini   # the same ones, against real Gemini (spends quota)
+```
+
+`make demo` builds the shipped image and drives it through an ordinary
+customer order, a registration, an automatic confirmation, a stock shortfall,
+a discount request, a delivery exception, a manager approving and rejecting by
+order id, a customer accepting, prepare/dispatch/cancel, and a restart with an
+open request — recording every reply, every document change and every latency.
+
+It runs in a docker network created `--internal`, which has no route to the
+internet and none to the host, so nothing can reach Meta, Google, or this
+machine's own staging ERPNext and Redis. That is verified by opening real
+sockets from inside the container, not assumed from the `.env`.
+
+Details, including what each mode can and cannot prove, are in
+[demo/README.md](demo/README.md).
 
 ## Setup
 

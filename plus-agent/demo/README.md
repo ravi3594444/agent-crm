@@ -49,6 +49,22 @@ Ninguna guarda imprime un valor: comparan y cuentan.
 | Determinístico | sí: la misma corrida da lo mismo siempre | no |
 | Para qué sirve | validar el SISTEMA: si un escenario falla, falló el código | validar el MODELO: si elige bien las herramientas |
 
+### Qué se exige en cada modo
+
+Un escenario declara texto esperado (`espera`), texto prohibido (`prohibe`) y
+estado de documentos (`documentos`). No pesan igual en los dos modos:
+
+- **`documentos` y las disculpas técnicas fallan siempre.** Que el pedido
+  quede en `docstatus` 0 o 1, que aparezca el remito, que el agente no
+  conteste "tuve un problema técnico": nada de eso depende de cómo redactó
+  nadie.
+- **`prohibe` falla siempre.** Que el modelo prometa un descuento o diga
+  "confirmado" cuando no lo está es exactamente lo que hay que cazar.
+- **`espera` sólo falla en modo offline.** Contra un guión el texto es exacto;
+  contra un modelo libre, "tengo leche entera" es una respuesta correcta que
+  no contiene la cadena `LECHE-ENT-1L`. En modo gemini esas diferencias se
+  informan como `nota:` y no cuentan como falla.
+
 El modo offline no usa un modelo falso *dentro* de la app: sirve el protocolo
 de OpenAI en `https://plus-demo-servicios:8444/v1/`, y el agente le habla con
 su `ChatGemini` de producción, sin saber que del otro lado hay un guión. El
