@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -505,6 +506,14 @@ def _borradores_que_reservan(company: str, desde: str, propio: str) -> list[str]
         defer to the other and a dairy that has the stock sells it to nobody;
         without the id in the key, the same happens whenever two drafts share a
         timestamp.
+      * waiting for a decision whose APPROVAL HOLD HAS LAPSED. A draft parked
+        on a pending exception holds the units it asked for — otherwise two
+        customers are promised the same milk — but only until its request
+        expires (app/solicitudes.py, the owner's APROBACION_TIMEOUT_HORAS).
+        After that it must stop competing with live orders even if the expiry
+        sweep has not run yet, so the answer comes from the durable record
+        rather than from a timer. An unreadable answer drops nobody, which is
+        the direction that never oversells.
     """
     filtros: list[list] = [
         ["docstatus", "=", 0],
@@ -544,7 +553,28 @@ def _borradores_que_reservan(company: str, desde: str, propio: str) -> list[str]
         ):
             continue
         vivos.append(nombre)
-    return vivos
+    return _sin_reservas_vencidas(vivos)
+
+
+def _sin_reservas_vencidas(vivos: list[str]) -> list[str]:
+    """Drop the drafts whose pending-approval hold has already run out."""
+    if not vivos:
+        return vivos
+    from app import solicitudes
+
+    try:
+        vencimientos = solicitudes.vencimientos(vivos)
+    except Exception as exc:
+        print(f"[policy] reservas pendientes no verificables causa={exc}")
+        return vivos
+    if not vencimientos:
+        return vivos
+    ahora = time.time()
+    return [
+        nombre
+        for nombre in vivos
+        if nombre not in vencimientos or vencimientos[nombre] > ahora
+    ]
 
 
 def _comprometido_en_borradores(
@@ -770,6 +800,46 @@ def _precio_estandar(
         if permitir_descuento or abs(configured_rate - rate) < 0.01:
             return True
     return False
+
+
+def hay_stock_para(
+    item_code: str,
+    qty: float,
+    warehouse: str,
+    *,
+    excluir: str = "",
+    company: str = "",
+    desde: str = "",
+) -> bool:
+    """Public entry point for the one stock rule there is.
+
+    app/solicitudes.py re-checks stock when a customer accepts an offer, and it
+    has to be the SAME rule as the automatic path — buffer, competing drafts,
+    lapsed holds and all — not a second implementation that could drift.
+    """
+    return _hay_stock(
+        item_code, qty, warehouse, excluir=excluir, company=company, desde=desde
+    )
+
+
+def descuento_efectivo(sales_order: dict) -> float:
+    """Worst combined discount on any line, as a fraction of the list price."""
+    return _descuento_efectivo(sales_order, sales_order.get("items") or [])
+
+
+def precio_de_lista(item: dict, order_day: date, *, permitir_descuento: bool) -> bool:
+    """Whether the line is priced off the authorized list."""
+    return _precio_estandar(item, order_day, permitir_descuento=permitir_descuento)
+
+
+def dia_del_pedido(sales_order: dict) -> date | None:
+    """The order's own transaction date, or None when it cannot be read."""
+    return _order_day(sales_order, [])
+
+
+def cantidad_en_stock_uom(item: dict) -> float:
+    """One line's quantity, converted to the product's stock unit."""
+    return _cantidad_en_stock_uom(item)
 
 
 @contextmanager

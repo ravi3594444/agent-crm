@@ -5,7 +5,8 @@ same server as ERPNext, talking to it over the internal Docker network.
 
 **Before you deploy anything, read [PRUEBAS.md](PRUEBAS.md).** It is a
 staged verification guide — nothing advances until the current stage passes.
-Start with `make test` (about a second, no credentials, no Redis, no network).
+Start with `make test` (a few seconds, no credentials and no network — but it
+does need a **Redis Stack** running; see [Tests and Redis](#tests-and-redis)).
 
 ## Architecture
 
@@ -43,7 +44,7 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `docker-compose.yml` | Agent + Redis Stack (+ `briefing` on demand) |
 | `Dockerfile`, `Makefile`, `.env.example`, `pyproject.toml` | Build, shortcuts, configuration, lint config |
 | `.github/workflows/ci.yml` | Lint, tests, image build, container boot against a real Redis Stack |
-| `tests/` | 260 tests + 3 strict xfails that document known gaps. No ERPNext, no Redis, no LLM, ~1 second. |
+| `tests/` | 1143 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
 
 ## Two agents, one webhook
 
@@ -159,17 +160,52 @@ rechazar SAL-ORD-2026-00008                  (also: rechazo / no) — the custom
 preparar SAL-ORD-2026-00008                  draft Delivery Note for a CONFIRMED order
 despachar SAL-ORD-2026-00008                 submits that draft: a separate human step
 cancelar SAL-ORD-2026-00008 <reason>         confirmed order, within CANCELACION_HORAS (24 h)
+despreparar SAL-ORD-2026-00008               deletes the agent's own draft Delivery Note
 ```
+
+When an order has an **open decision request**, three of those words mean
+something else, because the context is a durable record rather than a guess:
+
+```
+aprobar SAL-ORD-2026-00008                        approve what the customer asked for
+contraoferta SAL-ORD-2026-00008 mañana 18:00 1500 other date / time / fee
+retiro SAL-ORD-2026-00008 jueves 10:00            pickup instead of a delivery
+rechazar SAL-ORD-2026-00008 <reason>              refuse it; the customer is told
+ver SAL-ORD-2026-00008                            the order plus the request
+```
+
 
 `cancelar` (`app/decisiones.py`) re-checks the sender, requires a reason, and
 under the distributed lock re-reads the order with the policy identity: it must
-be submitted, confirmed by this system less than 24 hours ago (a confirmation
-made directly in ERPNext cannot be proven and is refused), and have no Delivery
-Note or Sales Invoice, draft or submitted, linked to it — nothing is ever
-cancelled in cascade. The cancellation is audited with the reason, repeated
-commands are idempotent, and the customer is told once: free text inside their
-24-hour window, `WHATSAPP_CUSTOMER_CANCELLED_TEMPLATE` outside it if configured,
-otherwise the notice is parked and one ERPNext ToDo is opened.
+be submitted and confirmed by this system less than 24 hours ago. That deadline
+is a durable ERPNext comment on the order (`app/confirmacion.py`), not a Redis
+key, so it survives a restart or an empty Redis; an order confirmed directly in
+ERPNext has no such record and is refused. Linked documents get three different
+answers, and none of them is a cascade: a **submitted** Delivery Note or Sales
+Invoice blocks the cancellation outright, a **draft** Delivery Note sends the
+manager to `despreparar` first, and a **draft** Sales Invoice goes to ERPNext.
+The cancellation is audited with the reason, repeated commands are idempotent,
+and the customer is told once.
+
+`despreparar` undoes a preparation, and it is the only command allowed to remove
+a linked draft. It deletes ONE draft Delivery Note and only if the agent created
+it (`preparar` stamps a marker in its remarks) and nobody has edited it: same
+customer, same company, exactly the order's own lines and quantities. Several
+drafts, a hand-made one, an edited one, any invoice or anything submitted are
+refused and sent to ERPNext. The reason and the draft's lines are written onto
+the Sales Order **before** the deletion, since a deleted document cannot be
+commented on. `erpnext.policy_delete_doc` re-reads the document and refuses
+anything that is not a draft.
+
+**The customer's confirmation is data, not a prompt.** After a successful
+confirmation — automatic or human — the order id, lines, total and fulfilment
+details are built from the ERPNext document and queued in `app/avisos.py` under
+an idempotency key of (event, order). A worker thread delivers it inside the
+customer's own 24-hour window, falls back to an optional template outside it,
+retries transient failures with bounded backoff, and after
+`AVISOS_MAX_INTENTOS` parks the notice and opens one deduplicated ERPNext ToDo.
+The model may add conversational text in the same turn; it is never responsible
+for the confirmation itself.
 
 **Templates are optional in the pilot.** Customers always write first, so every
 reply to them (acknowledgement, confirmation, rejection, cancellation) goes out
@@ -180,6 +216,169 @@ template is an AVISO in `make check-env`, never a blocker. The confirmed-order
 alert is informational: nothing to answer, the order stays confirmed, and a
 customer who read "confirmado" in the conversation never gets a second
 confirmation message.
+
+## Asking a person: the decision workflow
+
+> "Necesito 5 kg de leche. Hoy no hay reparto, ¿pero me lo pueden traer?"
+
+The sales agent may **ask** for an exception and repeat what was decided. It
+never decides, and neither does the management agent.
+
+1. **The owner's own rules go first** (`app/excepciones.py`). If off-day
+   delivery is pre-authorized — the switch, the days, the time, the fee, the
+   minimum order, and the address inside the normal zones — the configured
+   date, time and fee are offered straight away, as data, with nobody asked.
+2. **Otherwise a DecisionRequest is opened** (`app/solicitudes.py`): a durable
+   record on the Sales Order carrying the request id, the order, the type, the
+   requested terms, the customer and item summary, the total, the status, when
+   it was created, when it expires, the human decision and reason, and a
+   timestamp per event. Each event is an append-only ERPNext comment, so a
+   Redis flush loses nothing and resurrects nothing.
+3. **The customer is answered immediately**: a person has been asked, nothing
+   is confirmed, and stock will be re-checked when the answer comes. No hold is
+   promised, because none can be guaranteed.
+4. **Nothing waits.** The manager's notice goes through the durable queue, no
+   lock is held across a human decision, and both agents stay free for every
+   other conversation. The two models never talk to each other: what crosses
+   between them is the record's fields.
+5. **The manager answers with an exact command.** Prose gets the request
+   summarized back with the commands that would execute — the management model
+   has no tool that could approve anything, and that path does not give it the
+   chance.
+6. **A decision that changes the date, the method or the money needs the
+   customer's explicit yes** (`acepto <pedido>` / `no acepto <pedido>`, matched
+   before any model sees the message). On acceptance, the order is re-read and
+   stock, quantities, prices, discount, delivery and order state are all
+   re-validated under the distributed lock with `app/policy.py`'s own rules
+   before it is confirmed. If anything moved, nobody is told a half-truth: the
+   order stays a draft and a person is asked.
+7. **A pending draft holds its stock only until the request expires**, on the
+   owner's `APROBACION_TIMEOUT_HORAS`. The expiry is part of the durable
+   record, so `app/policy.py` stops counting a lapsed hold even before the
+   sweep runs, and the sweep marks the draft so ERPNext itself stops reserving
+   — reported as released only when a re-read proves it. A late decision does
+   not revive an expired request.
+8. **An expiry is still an answer.** Nobody answering is our failure, not the
+   customer's, so they are not sent away to write again. When a request
+   expires the original dies for good — `vencida` is terminal, its hold is
+   released, and no later decision reopens it — and a **second, separate**
+   request is opened carrying a concrete offer computed from the owner's own
+   configuration: the next normal delivery day (`ENTREGA_DIAS` /
+   `ENTREGA_HORA`, address still inside the zones), or a pickup at the shop
+   (`RETIRO_LOCAL_ACTIVO` / `RETIRO_LOCAL_DIAS` / `RETIRO_LOCAL_HORA`), which
+   needs no route and no zone. New id, new expiry, its own event trail. Both
+   carry no fee, so accepting can never stall on a missing charge account, and
+   today is excluded — that request sat unanswered for hours and today's round
+   may already have left.
+   It is still only an **offer**: the customer has to accept it in so many
+   words, and acceptance re-reads the order and re-validates stock, draft
+   commitments, quantities, total, price, discount, delivery details and order
+   state under the distributed lock, exactly like any other offer. Nothing was
+   held while they thought about it — the draft was closed when the original
+   expired — so accepting re-opens it first and the revalidation is what proves
+   the units are still there. A fallback never gets a fallback of its own, and
+   when nothing can be computed nothing is offered: the customer hears the
+   plain truth and the manager is told what was missing.
+9. **No draft holds stock without a deadline.** "Counts against stock" and
+   "waiting for somebody" are different questions here: ERPNext counts every
+   live draft by default and `app/policy.py` only ever *subtracts* the holds it
+   is told about. So the one exit that leaves a live draft behind — the
+   customer accepted, something had moved, a person was asked — gets its own
+   deadline from the owner's `REVISION_TIMEOUT_HORAS` (default 24 h), written
+   into the durable ERPNext record like every other expiry. `app/policy.py`
+   stops counting that draft the moment the deadline passes, even if the sweep
+   thread is dead; the sweep then closes the draft so ERPNext itself stops
+   reserving, and the customer is told plainly that it is not going ahead.
+   A manager's own `confirmar` or `rechazar` resolves the review first — which
+   is why the review state is deliberately *not* one of the "open" states:
+   `confirmar <pedido>` has to keep meaning "submit this draft". Duplicate
+   commands, a concurrent sweep and a late command are all no-ops, and a review
+   that cannot be recorded durably releases the hold immediately rather than
+   leaving an untracked draft.
+10. **Whatever the customer wrote is data.** It travels in one field, quoted and
+    labelled, and is never part of a prompt or an instruction.
+
+A delivery fee is only written into the order when `ENTREGA_CARGO_CUENTA` names
+the account to book it against. Without it the order is not confirmed and a
+person is asked to add the charge: a stock ERPNext has no plain fee field, and
+inventing a total is worse than waiting.
+
+### The delivery rules are the owner's, and he sets them from WhatsApp
+
+Every value the exception and fallback paths read is a setting he owns, on the
+same footing as the auto-confirmation limits: **Redis (what he set) → the
+bootstrap environment → a safe default**, read on *every* operation so a change
+applies to the next message with nothing restarted.
+
+```
+días de reparto          martes,viernes     the normal round
+hora de reparto          08:00
+entregas fuera de día    sí/no              off-schedule delivery, pre-authorized
+días fuera de día        jueves
+hora fuera de día        19:00
+cargo fuera de día       $1.500
+mínimo fuera de día      $8.000             0 means no minimum
+retiro en el local       sí/no              the shop counter
+días de retiro           sabado
+hora de retiro           10:00
+```
+
+He changes one by saying so — "los martes y viernes reparto" — and the
+management agent calls `proponer_limite`. **Nothing moves yet**: Python
+validates it and stores it as *pending*.
+
+The four-digit code does **not** come back through the agent. Python sends it
+straight to his own number (`notificar.pedir_codigo_de_ajuste`), and the model
+never sees it. The setting changes when he writes those four digits back and
+`app/main.py`'s deterministic handler applies them — on a signed webhook, from
+a phone `router.es_equipo` authenticated, before any model reads the message.
+There is no tool that confirms a setting, deliberately: an agent that could
+call both halves is not a two-step confirmation, it is one step, and the step
+would be taken by a model a message can steer. Same append-only audit in Redis
+*and* as a durable ERPNext comment written before the Redis write. `reglas de
+entrega` reads them back with where each value came from.
+
+Validation is deterministic, never a judgement: days are weekday names in any
+spelling or order and normalize to one form (`Miércoles, Sábado` →
+`miercoles,sabado`), times accept `8` / `9:30` / `18.00` / `7 hs` and normalize
+to `HH:MM`, booleans are sí/no, and money reads the way he writes it — `1.500`
+is fifteen hundred pesos, matching how the manager already types a counter-offer
+fee. Anything else is refused by name and nothing is stored. A vague word is
+asked about rather than guessed: `hora` matches six settings, and picking the
+first would let the model move one he never mentioned.
+
+These live in their **own registry**, deliberately. `limites.configuracion()`
+validates every auto-confirmation limit and raises on the first bad one, and
+`app/policy.py` calls it once per order *line* and again inside the submit lock
+— so a typo in `martes` would have become an outage for every customer. The
+delivery rules are read on their own instead, where an unreadable value fails
+soft to "not pre-authorized" and costs one WhatsApp message.
+
+**The accounting account head is not reachable by natural language.**
+`ENTREGA_CARGO_CUENTA` is a real ERPNext account: a wrong name does not break
+the bot, it unbalances the owner's books, and no model interpreting "poneme la
+cuenta de fletes" can check that the account exists. It is in no registry, so no
+tool can write it; it stays a server setting. Without it a fee is simply never
+written and a person is asked to add the charge.
+
+So `make check-env` checks it instead of the model, and checks the thing that
+actually fails: that the account **exists**, is not a group, is not disabled or
+frozen, belongs to `ERPNEXT_COMPANY`, and is not an asset or equity head — a
+charge billed to the customer cannot post against either. Income, Expense and
+Liability heads all pass, because "Freight and Forwarding Charges" is an expense
+head in ERPNext's standard chart and is what most businesses use for this.
+
+With a fee enabled, a bad account **blocks** readiness. Presence was the whole
+check before, and presence is not the failure mode: the charge write fails, and
+then every off-day delivery the customer accepts waits for a person instead of
+confirming — which the owner discovers as orders quietly stopping, days after
+typing the name in. With no fee configured yet it is an AVISO, so the typo is
+visible before he starts charging for delivery.
+
+`make check-env` reports all of it, and says plainly when **neither a normal
+round nor a pickup counter is configured** — an AVISO, not a blocker, because
+nothing is oversold: it means an expired request has nothing concrete to offer
+and the order is effectively dropped.
 
 Every command runs a deterministic handler in `app/aprobacion.py` /
 `app/decisiones.py` after `router.es_equipo()` authenticates the sender; none
@@ -450,6 +649,38 @@ as stored in Redis. What it cannot verify it reports as unverified; it never
 fills in a value. `deploy/verificar_qwen.py` refuses to run when `CI` is set and
 sanitizes anything that looks like a key from its output.
 
+### Tests and Redis
+
+The suite needs a **Redis Stack** — RedisJSON and RediSearch, not a plain
+`redis:7`. It reaches no other network service: `tests/conftest.py` fixes dummy
+credentials and in-memory doubles, so nothing touches ERPNext, Meta or
+DashScope.
+
+Redis is not optional and never was. `app/graph.py` builds the LangGraph
+checkpointer and calls `setup()` **at import**, and that creates RediSearch
+indices against a real server — so `tests/test_frontera_decisiones.py` and
+`tests/test_limites.py` cannot even be COLLECTED without one, and pytest aborts
+the whole run with `Interrupted: 2 errors during collection`. This file used to
+say the tests needed no Redis; that claim cost CI every assertion it was
+supposed to be running.
+
+**Database 0, and not by preference.** RediSearch refuses `FT.CREATE` on any
+other database (`Cannot create index on db != 0`). A `REDIS_URL` ending in `/15`
+looks like isolation and works only on a machine that already has those indices
+left over from before — and fails at collection on every clean server, which is
+every CI run and every new checkout. Isolation comes from the server being a
+**disposable container that dies with the job**, not from the database number.
+One test asserts `REDIS_URL` names database 0, so this cannot regress quietly.
+
+```bash
+docker run -d --name redis-test -p 6379:6379 redis/redis-stack-server:7.4.0-v1
+REDIS_URL=redis://localhost:6379/0 make test
+```
+
+Set `REDIS_OBLIGATORIO=1` — as CI does — to turn "no Redis" into a failure
+instead of a skip for the one test that talks to a real server. A suite that
+quietly shrinks by a skipped test is the failure this is guarding against.
+
 ### Install, test, and start
 
 Dependencies are **pinned** in `requirements.txt` to the exact versions the
@@ -459,7 +690,7 @@ then commit.
 
 ```bash
 make install       # .venv with requirements-dev.txt
-make test          # 260 tests + 3 xfails, ~1s, no credentials needed
+make test          # 1143 passed, needs a Redis Stack on REDIS_URL
 make check         # what CI runs (ruff check + tests)
 make check-env     # is .env complete, are the three ERPNext keys distinct
 make up            # docker compose up, wait for :8081/health

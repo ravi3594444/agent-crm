@@ -3,19 +3,42 @@
 Only phones on the staff list can approve. A stranger who somehow guesses a
 button payload gets nothing.
 """
-import os
-
-from app import erpnext, notificar, policy
+from app import avisos, confirmacion, erpnext, notificar, policy, solicitudes
 from app.formato import pesos
-from app.outbound_status import (
-    cliente_informado,
-    has_accepted,
-    marcar_confirmacion,
-    record_outbound,
-    window_open,
-)
 from app.router import es_equipo
-from app.whatsapp import enviar_mensaje, enviar_plantilla
+
+
+def _solicitud_abierta(nombre: str):
+    """The order's open decision request, or None. Never raises."""
+    try:
+        solicitud = solicitudes.leer(nombre)
+    except Exception as exc:
+        print(f"[approval] {nombre}: solicitud no legible ({type(exc).__name__})")
+        return None
+    return solicitud if solicitud is not None and solicitud.abierta else None
+
+
+def _texto_solicitud(nombre: str) -> str:
+    from app import decisiones
+
+    try:
+        return decisiones.ver_solicitud(nombre)
+    except Exception as exc:
+        print(f"[approval] {nombre}: estado de solicitud no legible ({type(exc).__name__})")
+        return ""
+
+
+def _cerrar_revision(nombre: str, telefono: str, motivo: str) -> None:
+    """End a human review a manager has just dealt with. Never raises.
+
+    The review's own deadline exists so a draft cannot reserve stock for ever
+    (app/solicitudes.py). A manager acting on the order settles it, so the
+    review is closed here rather than left for the sweep — and if this fails,
+    the sweep still reaches it, which is why nothing is escalated.
+    """
+    from app import decisiones
+
+    decisiones.cerrar_revision_si_hay(nombre, telefono, motivo)
 
 
 def _leer_doc(doctype: str, name: str) -> dict:
@@ -33,14 +56,72 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
     accion, nombre = reply_id.split(":", 1)
 
     if accion == "ok":
-        return confirmar_pedido(nombre, telefono)["detalle"]
+        # An order with an OPEN decision request is not confirmed by "aprobar":
+        # that word means "approve what the customer asked for", and the terms
+        # still have to be put to the customer before anything is submitted.
+        # See app/solicitudes.py.
+        pendiente = _solicitud_abierta(nombre)
+        if pendiente is not None:
+            from app import decisiones
+
+            return decisiones.aprobar_solicitud(nombre, telefono)["detalle"]
+        resultado = confirmar_pedido(nombre, telefono)
+        # "confirmar" is also the documented way out of a human review, and it
+        # is why REVISION_HUMANA is deliberately NOT one of solicitudes.ABIERTOS
+        # — this word has to keep meaning "submit this draft". Closing the
+        # review here takes the draft out of the expiry index at once instead
+        # of waiting for the sweep to notice; it is a no-op when there is no
+        # review, so a manager typing it three times costs three reads.
+        if resultado.get("ok"):
+            _cerrar_revision(nombre, telefono, "una persona confirmó el pedido")
+        return resultado["detalle"]
+
+    if accion == "contraoferta":
+        # "contraoferta:<pedido>:<fecha> <hora> <cargo>"
+        from app import decisiones
+
+        pedido, _, crudo = nombre.partition(":")
+        terminos = solicitudes.parsear_terminos(crudo)
+        if terminos is None:
+            return (
+                f"No entendí los términos. Escribí: contraoferta {pedido.strip()} "
+                "<fecha> <hora> <cargo>, por ejemplo "
+                f"'contraoferta {pedido.strip()} mañana 18:00 1500'."
+            )
+        return decisiones.contraofertar(pedido.strip(), telefono, terminos)["detalle"]
+
+    if accion == "retiro":
+        # "retiro:<pedido>:<fecha> <hora>" — pickup instead of a delivery.
+        from app import decisiones
+
+        pedido, _, crudo = nombre.partition(":")
+        terminos = solicitudes.parsear_terminos(crudo, con_cargo=False)
+        if terminos is None:
+            return (
+                f"No entendí los términos. Escribí: retiro {pedido.strip()} "
+                "<fecha> <hora>, por ejemplo "
+                f"'retiro {pedido.strip()} jueves 10:00'."
+            )
+        return decisiones.ofrecer_retiro(pedido.strip(), telefono, terminos)["detalle"]
 
     if accion == "no":
         # The customer was told the order was received and would be confirmed.
         # Rejecting must therefore tell them too — see app/decisiones.py.
         from app import decisiones
 
-        resultado = decisiones.rechazar(nombre, telefono)
+        # With an open request, "rechazar" refuses the EXCEPTION the customer
+        # asked for and frees the stock its draft was holding; the draft itself
+        # stays for the manager to amend.
+        pedido, _, motivo_libre = nombre.partition(":")
+        pendiente = _solicitud_abierta(pedido.strip())
+        if pendiente is not None:
+            return decisiones.rechazar_solicitud(
+                pedido.strip(), telefono, motivo_libre or "sin detalle"
+            )["detalle"]
+        nombre = pedido.strip()
+        resultado = decisiones.rechazar(nombre, telefono, motivo_libre)
+        if resultado.get("ok"):
+            _cerrar_revision(nombre, telefono, "una persona rechazó el pedido")
         cola = (
             "Ya le avisé al cliente."
             if resultado["aviso_cliente"]
@@ -70,6 +151,15 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
 
         return decisiones.despachar(nombre, telefono)["detalle"]
 
+    if accion == "despreparar":
+        # Undo a preparation: deletes ONLY a draft Delivery Note this system
+        # created and nobody edited, after auditing it on the order. It is the
+        # single place allowed to remove a linked draft, so "cancelar" never
+        # has to.
+        from app import decisiones
+
+        return decisiones.despreparar(nombre, telefono)["detalle"]
+
     if accion == "cancelar":
         # "cancelar:<pedido>:<motivo>" — a confirmed order, within the window,
         # with a reason. Everything is re-checked in app/decisiones.py.
@@ -83,15 +173,17 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
             so = _leer_doc("Sales Order", nombre)
         except erpnext.ERPNextError:
             return f"No pude abrir {nombre}. Revisalo en ERPNext."
+        estado_solicitud = _texto_solicitud(nombre)
         detalle = "\n".join(
             f"  · {i['qty']:g} x {i.get('item_name') or i['item_code']} "
             f"= {pesos(i.get('amount', 0))}"
             for i in so.get("items", [])
         )
-        return (
+        cuerpo = (
             f"{nombre} — {so.get('customer_name') or so['customer']}\n{detalle}\n"
             f"Total {pesos(so.get('grand_total', 0))} · entrega {so.get('delivery_date')}"
         )
+        return f"{cuerpo}\n\n{estado_solicitud}" if estado_solicitud else cuerpo
 
     return "Acción desconocida."
 
@@ -146,8 +238,9 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
                 nombre,
                 f"Confirmado por un integrante autorizado mediante WhatsApp ({por}).",
             )
-            # Opens the manual cancellation window (cancelar <pedido> <motivo>).
-            marcar_confirmacion(nombre)
+            # Durable record of WHEN, in ERPNext: it opens the manual
+            # cancellation window and survives any Redis restart.
+            confirmacion.registrar(nombre, f"manual (confirmación humana, {por})")
     except erpnext.ERPNextError as error:
         print(f"[approval] {nombre}: {type(error).__name__}")
         return {
@@ -163,30 +256,32 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
     _notificar_confirmada(nombre, actual)
 
     prefix = "ℹ️ Ya estaba confirmado." if ya_confirmado else f"✅ {nombre} confirmado."
-    if cliente_informado(nombre):
-        # The customer read "confirmado" in the conversation itself (automatic
-        # path). A second confirmation, template or not, is never sent.
-        return {
-            "ok": True,
-            "aviso_cliente": True,
-            "detalle": f"{prefix} El cliente ya recibió la confirmación en la conversación.",
-        }
-    if _avisar_cliente(nombre):
-        return {
-            "ok": True,
-            "aviso_cliente": True,
-            "detalle": (
-                f"{prefix} Meta aceptó o ya tenía registrado el aviso al cliente; "
-                "la entrega se controla con sus estados de WhatsApp."
-            ),
-        }
-    return {
-        "ok": True,
-        "aviso_cliente": False,
-        "detalle": (
-            f"{prefix} No pude enviar el aviso al cliente; contactalo manualmente."
-        ),
-    }
+    estado_aviso = _encolar_confirmacion(nombre, actual)
+    return {"ok": True, "aviso_cliente": estado_aviso[0], "detalle": f"{prefix} {estado_aviso[1]}"}
+
+
+def _encolar_confirmacion(nombre: str, conocido: dict) -> tuple[bool, str]:
+    """Queue the customer's authoritative confirmation. Never raises.
+
+    Returns (the customer is covered, what to tell the manager). "Covered"
+    includes a notice queued by the automatic path minutes earlier: the queue
+    is keyed on (event, order), so the customer is told exactly once no matter
+    how many paths reach this point or how many times a button is tapped.
+    """
+    try:
+        completo = _leer_doc("Sales Order", nombre)
+    except Exception:
+        completo = conocido
+    try:
+        nuevo = avisos.confirmacion_cliente(completo)
+    except Exception as exc:
+        print(f"[approval] {nombre}: no pude encolar el aviso ({type(exc).__name__})")
+        return False, (
+            "NO pude poner en cola el aviso al cliente; contactalo vos."
+        )
+    if nuevo:
+        return True, "El aviso al cliente quedó en cola y sale enseguida."
+    return True, "El cliente ya tenía su confirmación; no le mando otra."
 
 
 def _notificar_confirmada(nombre: str, conocido: dict) -> None:
@@ -199,81 +294,3 @@ def _notificar_confirmada(nombre: str, conocido: dict) -> None:
         notificar.notificar_confirmacion(completo, "manual (confirmación humana)")
     except Exception as exc:
         print(f"[approval] {nombre}: aviso de confirmación falló ({type(exc).__name__})")
-
-
-def _avisar_cliente(nombre: str) -> bool:
-    """Prefer a template: approval may happen after the 24-hour window.
-
-    Without a configured template, a free-form confirmation is sent only while
-    the customer's own window is still open (they wrote within 24 hours).
-    """
-    try:
-        purpose = "customer_order_confirmation"
-        if has_accepted(nombre, purpose):
-            return True
-        plantilla = os.getenv("WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE", "").strip()
-
-        so = _leer_doc("Sales Order", nombre)
-        cliente = _leer_doc("Customer", so["customer"])
-        tel = cliente.get("mobile_no")
-        if not tel:
-            erpnext.add_comment(
-                "Sales Order",
-                nombre,
-                "Aviso de confirmación no enviado: el cliente no tiene teléfono.",
-            )
-            return False
-        entrega = str(so.get("delivery_date") or "a coordinar")
-        if plantilla:
-            result = enviar_plantilla(
-                tel,
-                plantilla,
-                os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR",
-                [nombre, entrega],
-            )
-        elif window_open(tel):
-            result = enviar_mensaje(
-                tel,
-                f"✅ Tu pedido {nombre} quedó confirmado. Entrega: {entrega}. "
-                "¡Gracias!",
-            )
-        else:
-            print(
-                f"[customer-notify] {nombre}: falta "
-                "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE y la ventana de 24 h cerró"
-            )
-            erpnext.add_comment(
-                "Sales Order",
-                nombre,
-                "Aviso de confirmación no enviado: falta la plantilla de WhatsApp "
-                "y la ventana de 24 h del cliente está cerrada. Avisarle manualmente.",
-            )
-            return False
-        wamid = result["messages"][0]["id"]
-        try:
-            record_outbound(wamid, purpose, order_name=nombre)
-        except Exception as tracking_error:
-            print(
-                f"[customer-notify] {nombre}: tracking falló "
-                f"({type(tracking_error).__name__})"
-            )
-            erpnext.add_comment(
-                "Sales Order",
-                nombre,
-                "Meta aceptó la confirmación, pero no se pudo guardar su "
-                "seguimiento de entrega.",
-            )
-        erpnext.add_comment(
-            "Sales Order",
-            nombre,
-            "Meta aceptó el aviso de confirmación para el cliente.",
-        )
-        return True
-    except Exception as e:
-        print(f"[customer-notify] {nombre}: falló ({type(e).__name__})")
-        erpnext.add_comment(
-            "Sales Order",
-            nombre,
-            "Aviso de confirmación no enviado; requiere seguimiento manual.",
-        )
-        return False

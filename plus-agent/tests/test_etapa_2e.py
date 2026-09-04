@@ -115,7 +115,8 @@ def test_the_manager_hears_about_a_confirmed_order_exactly_once_across_both_path
     monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: phone == STAFF)
     monkeypatch.setattr(aprobacion, "_leer_doc", lambda dt, name: dict(SO))
     monkeypatch.setattr(aprobacion.erpnext, "submit_doc", Mock(side_effect=AssertionError("ya confirmado")))
-    monkeypatch.setattr(aprobacion, "_avisar_cliente", lambda nombre: True)
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
+    monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
     aprobacion.manejar_boton(f"ok:{SO['name']}", STAFF)
     aprobacion.manejar_boton(f"ok:{SO['name']}", STAFF)
 
@@ -129,7 +130,8 @@ def test_a_human_confirmation_notifies_once_and_a_later_automatic_path_is_silent
     monkeypatch.setattr(aprobacion, "_leer_doc", lambda dt, name: next(lecturas))
     submit = Mock(return_value=dict(SO))
     monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
-    monkeypatch.setattr(aprobacion, "_avisar_cliente", lambda nombre: True)
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
+    monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
 
     respuesta = aprobacion.manejar_boton(f"ok:{SO['name']}", STAFF)
     assert "confirmado" in respuesta
@@ -203,7 +205,7 @@ def remitos(monkeypatch: pytest.MonkeyPatch):
     submits: list[tuple[str, str]] = []
     monkeypatch.setattr(decisiones, "_leer_doc", lambda dt, name: dict(estado["so"]) if dt == "Sales Order" else {"name": name, "docstatus": 1})
 
-    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None):
+    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0):
         assert doctype == "Delivery Note Item" and parent == "Delivery Note"
         return [{"parent": n, "against_sales_order": SO["name"], "docstatus": 0} for n in estado["borradores"]]
 
@@ -294,7 +296,7 @@ def test_no_llm_tool_can_prepare_or_dispatch_and_none_can_submit(monkeypatch) ->
 
 @pytest.fixture
 def erp_digest(monkeypatch: pytest.MonkeyPatch):
-    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None):
+    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0):
         if doctype == "Sales Order":
             docstatus = next(f[2] for f in filters if f[0] == "docstatus")
             if docstatus == 1:

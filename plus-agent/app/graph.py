@@ -34,10 +34,10 @@ from app.tools.catalogo import (
     pedido_habitual,
 )
 from app.tools.configuracion import (
-    confirmar_limite,
     historial_limites,
     proponer_limite,
     ver_limites,
+    ver_reglas_de_entrega,
 )
 from app.tools.gerencia import (
     cobranzas_vencidas,
@@ -52,6 +52,7 @@ from app.tools.pedidos import (
     crear_lead,
     crear_pedido,
     escalar_a_humano,
+    pedir_excepcion_de_entrega,
 )
 
 TOOLS_CLIENTES = [
@@ -60,6 +61,9 @@ TOOLS_CLIENTES = [
     # acepta un teléfono como argumento, así que ningún mensaje puede pedir
     # el alta de otra persona.
     crear_cliente, crear_lead, crear_pedido, escalar_a_humano,
+    # Pide una excepción de entrega. NO decide: o el dueño la dejó autorizada
+    # de antemano, o abre una solicitud para una persona (app/solicitudes.py).
+    pedir_excepcion_de_entrega,
 ]
 
 TOOLS_GERENCIA = [
@@ -70,9 +74,15 @@ TOOLS_GERENCIA = [
     # offline capture — how reality gets back into the system
     registrar_venta_offline, contar_stock, confirmar_entrega,
     redactar_mensaje_cliente,
-    # the owner's own limits: read them out, propose a change, confirm it.
+    # the owner's own limits: read them out and PROPOSE a change. There is no
+    # tool that confirms one, deliberately — the four-digit code never enters
+    # this agent's context and the deterministic router in app/main.py is what
+    # applies the change. An agent that could call both steps is one step.
     # NEVER in TOOLS_CLIENTES — a customer cannot be allowed near these.
-    ver_limites, proponer_limite, confirmar_limite, historial_limites,
+    ver_limites, proponer_limite, historial_limites,
+    # ...and his delivery rules, through the SAME propose/confirm pair. Reading
+    # them is its own tool; changing one is proponer_limite like everything else.
+    ver_reglas_de_entrega,
 ]
 
 # from_conn_string() is a CONTEXT MANAGER, not a constructor — using it

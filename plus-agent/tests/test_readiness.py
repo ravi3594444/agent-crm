@@ -6,9 +6,11 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import readiness
+from app import limites, readiness
 
 TOKEN = "EAAG" + "x" * 180
 KEY = "sk-" + "a" * 30
@@ -64,13 +66,61 @@ def _http_sano(url, headers=None, params=None):
         return 200, {"data": {"roles": [{"role": r} for r in roles]}}
     if "/api/resource/Warehouse/" in url:
         return 200, {"data": {"is_group": 0, "disabled": 0, "company": "Lacteos Test SA"}}
+    if "/api/resource/Account/" in url:
+        return 200, {"data": CUENTA_SANA}
     raise AssertionError(f"URL inesperada {url}")
+
+
+# What a usable delivery-charge head looks like: a real ledger of the configured
+# company. "Freight and Forwarding Charges" is an Expense head in ERPNext's
+# standard chart, which is what most businesses actually use for this.
+CUENTA_SANA = {
+    "name": "Fletes - LT",
+    "is_group": 0,
+    "disabled": 0,
+    "freeze_account": "No",
+    "company": "Lacteos Test SA",
+    "root_type": "Expense",
+    "account_type": "Chargeable",
+}
+
+
+# The delivery rules live in the owner's store like every other setting, so the
+# stub answers for them too. "-" is limites.NINGUNO: set, and set to nothing.
+def _entrega(**cambios):
+    filas = {
+        "ENTREGA_DIAS": "martes,viernes",
+        "ENTREGA_HORA": "08:00",
+        "ENTREGA_EXCEPCION_ACTIVA": "false",
+        "ENTREGA_EXCEPCION_DIAS": "-",
+        "ENTREGA_EXCEPCION_HORA": "-",
+        "ENTREGA_EXCEPCION_CARGO": "-",
+        "ENTREGA_EXCEPCION_MIN_TOTAL": "0",
+        "RETIRO_LOCAL_ACTIVO": "false",
+        "RETIRO_LOCAL_DIAS": "-",
+        "RETIRO_LOCAL_HORA": "-",
+    }
+    filas.update(cambios)
+    from app import limites
+
+    return [
+        {
+            "nombre": nombre,
+            "alias": limites.ENTREGA[nombre].alias[0],
+            "unidad": limites.ENTREGA[nombre].unidad,
+            "valor": valor,
+            "origen": "dueño",
+            "problema": "",
+        }
+        for nombre, valor in filas.items()
+    ]
 
 
 def _limites_ok():
     return [
         {"nombre": "AUTO_CONFIRM_MAX", "alias": "tope", "valor": "30000", "origen": "dueño", "problema": ""},
         {"nombre": "STOCK_BUFFER_PCT", "alias": "colchón", "valor": "20", "origen": "default", "problema": ""},
+        *_entrega(),
     ]
 
 
@@ -82,6 +132,7 @@ def _correr(env, http=_http_sano, limites=_limites_ok):
     readiness.chequear_plantillas(env, reporte, http, waba)
     readiness.chequear_erpnext(env, reporte, http)
     readiness.chequear_stock_y_limites(env, reporte, limites)
+    readiness.chequear_entrega(env, reporte, limites, http)
     return reporte
 
 
@@ -235,3 +286,353 @@ def test_the_command_exits_nonzero_when_not_ready(monkeypatch, capsys) -> None:
     monkeypatch.setattr(readiness, "ejecutar", lambda con_red=True: _correr({k: v for k, v in BASE.items() if k != "DASHSCOPE_API_KEY"}))
     assert readiness.main(["--sin-red"]) == 1
     assert "NO LISTO" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# The delivery rules, and the line that actually matters: is the expiry
+# fallback on? Without it an expired decision request has nothing concrete to
+# offer, the customer is told "write to me again", and the order is dropped.
+# ---------------------------------------------------------------------------
+
+
+def test_a_configured_round_is_reported_as_the_fallback_being_on() -> None:
+    reporte = _correr(BASE)
+    texto = reporte.texto()
+
+    assert reporte.listo, texto
+    assert "reparto martes,viernes a las 08:00" in texto
+    assert "Respaldo de vencimiento" not in texto
+
+
+def test_with_neither_a_round_nor_a_pickup_the_owner_is_warned() -> None:
+    """The requirement: at least an AVISO that the fallback is disabled."""
+    def sin_nada():
+        return _entrega(ENTREGA_DIAS="-", ENTREGA_HORA="-")
+
+    reporte = _correr(BASE, limites=sin_nada)
+    texto = reporte.texto()
+
+    assert "Respaldo de vencimiento" in texto
+    assert "el pedido se cae" in texto
+    assert [n for n, c, _ in reporte.lineas if c == "Respaldo de vencimiento"] == [
+        readiness.AVISO
+    ]
+    # An AVISO, not a blocker: nothing is oversold by having no fallback.
+    assert reporte.listo, texto
+
+
+def test_a_pickup_counter_alone_is_enough_of_a_fallback() -> None:
+    def solo_retiro():
+        return _entrega(
+            ENTREGA_DIAS="-",
+            ENTREGA_HORA="-",
+            RETIRO_LOCAL_ACTIVO="true",
+            RETIRO_LOCAL_DIAS="sabado",
+            RETIRO_LOCAL_HORA="10:00",
+        )
+
+    texto = _correr(BASE, limites=solo_retiro).texto()
+
+    assert "retiro sabado a las 10:00" in texto
+    assert "Respaldo de vencimiento" not in texto
+
+
+def test_half_a_round_is_not_a_round() -> None:
+    """Days with no time cannot produce an offer, so it is not configured."""
+    def media():
+        return _entrega(ENTREGA_HORA="-")
+
+    assert "Respaldo de vencimiento" in _correr(BASE, limites=media).texto()
+
+
+def test_a_malformed_delivery_rule_is_an_error_naming_the_setting() -> None:
+    def roto():
+        return [
+            {
+                "nombre": "ENTREGA_DIAS",
+                "alias": "días de reparto",
+                "unidad": "días",
+                "valor": "lunez",
+                "origen": "arranque",
+                "problema": "«lunez» no es un día de la semana",
+            }
+        ]
+
+    reporte = _correr(BASE, limites=roto)
+    texto = reporte.texto()
+
+    assert not reporte.listo
+    assert "ENTREGA_DIAS" in texto and "no es un día de la semana" in texto
+
+
+def test_an_enabled_exception_missing_its_terms_is_called_out() -> None:
+    def a_medias():
+        return _entrega(ENTREGA_EXCEPCION_ACTIVA="true")
+
+    texto = _correr(BASE, limites=a_medias).texto()
+
+    assert "en sí pero falta" in texto
+    assert "nada queda pre-autorizado" in texto
+
+
+def test_a_fee_with_no_account_says_a_person_has_to_add_the_charge() -> None:
+    def completa():
+        return _entrega(
+            ENTREGA_EXCEPCION_ACTIVA="true",
+            ENTREGA_EXCEPCION_DIAS="jueves",
+            ENTREGA_EXCEPCION_HORA="19:00",
+            ENTREGA_EXCEPCION_CARGO="1500",
+        )
+
+    texto = _correr(BASE, limites=completa).texto()
+
+    assert "ENTREGA_CARGO_CUENTA" in texto
+    assert "nunca por WhatsApp" in texto
+
+
+def test_lost_delivery_rules_are_a_failure_and_the_env_is_not_shown_as_active() -> None:
+    """After a Redis loss with [entrega] history on record, limites.resumen()
+    reports every delivery row as PERDIDO — nothing is in effect, not the .env
+    either, because that is what limites.entrega() decides in that state. The
+    report has to say the loss, once, as a failure — never OK for a round that
+    will not run, and never one "mal configurado" per row."""
+    from app import limites
+
+    def perdidas():
+        return [
+            {
+                **fila,
+                "valor": "",
+                "origen": limites.PERDIDO,
+                "problema": limites.PROBLEMA_ENTREGA_PERDIDA,
+            }
+            for fila in _entrega()
+        ]
+
+    reporte = _correr(BASE, limites=perdidas)
+    texto = reporte.texto()
+
+    assert not reporte.listo
+    assert texto.count("se PERDIERON") == 1
+    assert "vuelva a fijar" in texto
+    assert "reparto martes" not in texto
+    assert "mal configurado" not in texto
+    assert "Respaldo de vencimiento" in texto
+
+
+def test_without_redis_the_delivery_rules_are_not_guessed_at() -> None:
+    reporte = readiness.Reporte()
+    readiness.chequear_entrega(BASE, reporte, None)
+
+    assert "no se verificaron las reglas de entrega" in reporte.texto()
+
+
+def test_an_unreadable_store_is_an_error_not_an_empty_configuration() -> None:
+    def explota():
+        raise RuntimeError("redis caído")
+
+    reporte = readiness.Reporte()
+    readiness.chequear_entrega(BASE, reporte, explota)
+
+    assert not reporte.listo
+    assert "reglas no legibles" in reporte.texto()
+
+
+def test_the_end_to_end_report_includes_the_delivery_check(monkeypatch) -> None:
+    """chequear_entrega is wired into ejecutar(), not only into this file's
+    own harness — otherwise it would have zero real coverage."""
+    monkeypatch.setattr(readiness, "_http_real", _http_sano)
+    from app import limites
+
+    monkeypatch.setattr(limites, "resumen", lambda: list(_limites_ok()))
+
+    reporte = readiness.ejecutar(BASE, con_red=False)
+
+    assert "reparto martes,viernes" in reporte.texto()
+
+
+# ---------------------------------------------------------------------------
+# ENTREGA_CARGO_CUENTA. "Present" was the whole check, and presence is not the
+# failure mode: a wrong account name does not break the bot, it makes every
+# accepted off-day delivery with a fee wait for a person, days later.
+# ---------------------------------------------------------------------------
+
+CON_CARGO = dict(BASE, ENTREGA_CARGO_CUENTA="Fletes - LT")
+
+
+def _con_fee(**cambios):
+    """The owner's store with off-day delivery ON and a fee configured."""
+
+    def limites():
+        return _entrega(
+            ENTREGA_EXCEPCION_ACTIVA="true",
+            ENTREGA_EXCEPCION_DIAS="jueves",
+            ENTREGA_EXCEPCION_HORA="19:00",
+            ENTREGA_EXCEPCION_CARGO="1500",
+            **cambios,
+        )
+
+    return limites
+
+
+def _http_con_cuenta(cuenta: dict | None, estado: int = 200):
+    def http(url, headers=None, params=None):
+        if "/api/resource/Account/" in url:
+            return estado, ({"data": cuenta} if cuenta is not None else {})
+        return _http_sano(url, headers, params)
+
+    return http
+
+
+def _linea(reporte, clave: str) -> tuple[str, str]:
+    for nivel, k, mensaje in reporte.lineas:
+        if k == clave:
+            return nivel, mensaje
+    raise AssertionError(f"{clave} no está en el reporte")
+
+
+def test_a_usable_charge_account_is_verified_not_just_present() -> None:
+    reporte = _correr(CON_CARGO, limites=_con_fee())
+
+    nivel, mensaje = _linea(reporte, "ENTREGA_CARGO_CUENTA")
+    assert nivel == readiness.OK
+    assert "existe, habilitada, de la compañía configurada" in mensaje
+    assert reporte.listo
+
+
+@pytest.mark.parametrize(
+    "cuenta, estado, esperado",
+    [
+        (None, 404, "no existe o no se puede leer"),
+        (dict(CUENTA_SANA, is_group=1), 200, "es un grupo"),
+        (dict(CUENTA_SANA, disabled=1), 200, "está deshabilitada"),
+        (dict(CUENTA_SANA, freeze_account="Yes"), 200, "está congelada"),
+        (dict(CUENTA_SANA, company="Otra SA"), 200, "pertenece a otra compañía"),
+        (dict(CUENTA_SANA, root_type="Asset"), 200, "cuenta de tipo Asset"),
+        (dict(CUENTA_SANA, root_type="Equity"), 200, "cuenta de tipo Equity"),
+    ],
+    ids=["no existe", "grupo", "deshabilitada", "congelada", "otra compañía", "activo", "patrimonio"],
+)
+def test_a_fee_with_an_unusable_account_blocks_readiness(
+    cuenta, estado, esperado
+) -> None:
+    """The charge write would fail, and then a customer who said yes waits for
+    a person instead of getting their order confirmed."""
+    reporte = _correr(
+        CON_CARGO, http=_http_con_cuenta(cuenta, estado), limites=_con_fee()
+    )
+
+    nivel, mensaje = _linea(reporte, "ENTREGA_CARGO_CUENTA")
+    assert nivel == readiness.ERROR
+    assert esperado in mensaje
+    assert "termina esperando a una persona" in mensaje
+    assert not reporte.listo
+
+
+@pytest.mark.parametrize(
+    "raiz", ["Income", "Expense", "Liability"], ids=["ingreso", "gasto", "pasivo"]
+)
+def test_the_heads_a_business_actually_uses_for_a_delivery_fee_are_accepted(
+    raiz,
+) -> None:
+    """Freight is an Expense head in ERPNext's standard chart, a delivery-income
+    head is Income, and a fee treated as a tax is a Liability. Refusing any of
+    those would fail a correct configuration."""
+    reporte = _correr(
+        CON_CARGO,
+        http=_http_con_cuenta(dict(CUENTA_SANA, root_type=raiz)),
+        limites=_con_fee(),
+    )
+
+    assert _linea(reporte, "ENTREGA_CARGO_CUENTA")[0] == readiness.OK
+    assert reporte.listo
+
+
+def test_a_bad_account_is_visible_before_fees_are_turned_on_but_does_not_block() -> None:
+    """Nothing is broken while no fee is configured — but he should not find out
+    about the typo the day he starts charging for delivery."""
+    reporte = _correr(
+        CON_CARGO, http=_http_con_cuenta(dict(CUENTA_SANA, is_group=1))
+    )
+
+    nivel, mensaje = _linea(reporte, "ENTREGA_CARGO_CUENTA")
+    assert nivel == readiness.AVISO
+    assert "es un grupo" in mensaje
+    assert "todavía sin cargo configurado" in mensaje
+    assert reporte.listo
+
+
+def test_an_exception_enabled_with_a_zero_fee_does_not_block_either() -> None:
+    """A fee of 0 is a real answer: no charge is ever written, so no account is
+    ever needed."""
+    reporte = _correr(
+        CON_CARGO,
+        http=_http_con_cuenta(dict(CUENTA_SANA, disabled=1)),
+        limites=lambda: _entrega(
+            ENTREGA_EXCEPCION_ACTIVA="true",
+            ENTREGA_EXCEPCION_DIAS="jueves",
+            ENTREGA_EXCEPCION_HORA="19:00",
+            ENTREGA_EXCEPCION_CARGO="0",
+        ),
+    )
+
+    assert _linea(reporte, "ENTREGA_CARGO_CUENTA")[0] == readiness.AVISO
+    assert reporte.listo
+
+
+def test_without_the_network_the_account_is_reported_as_unverified_not_as_fine() -> None:
+    reporte = readiness.Reporte()
+    readiness.chequear_entrega(CON_CARGO, reporte, _con_fee(), None)
+
+    nivel, mensaje = _linea(reporte, "ENTREGA_CARGO_CUENTA")
+    assert nivel == readiness.AVISO
+    assert "sin red no se verificó" in mensaje
+
+
+def test_an_account_whose_type_cannot_be_read_is_not_declared_fine() -> None:
+    sin_raiz = {k: v for k, v in CUENTA_SANA.items() if k != "root_type"}
+    reporte = _correr(
+        CON_CARGO, http=_http_con_cuenta(sin_raiz), limites=_con_fee()
+    )
+
+    nivel, mensaje = _linea(reporte, "ENTREGA_CARGO_CUENTA")
+    assert nivel == readiness.AVISO
+    assert "no pude leer su root_type" in mensaje
+
+
+def test_the_account_name_is_never_printed_by_itself_as_a_secret() -> None:
+    """It is not a secret — but the report must not leak the credential used to
+    read it, and the check must survive a name with spaces and a dash."""
+    reporte = _correr(CON_CARGO, limites=_con_fee())
+
+    texto = reporte.texto()
+    for secreto in SECRETOS:
+        assert secreto not in texto
+
+
+def test_the_account_check_is_wired_into_ejecutar(monkeypatch) -> None:
+    """Not only into this file: `make check-env` has to run it, WITH the
+    network. Wiring it in but not passing the network through would report
+    every account as unverified for ever, which reads like a pass."""
+    monkeypatch.setattr(readiness, "_http_real", _http_sano)
+    monkeypatch.setattr(
+        limites, "resumen", _con_fee()
+    )
+
+    reporte = readiness.ejecutar(dict(CON_CARGO), con_red=True)
+
+    nivel, mensaje = _linea(reporte, "ENTREGA_CARGO_CUENTA")
+    assert nivel == readiness.OK, mensaje
+    assert "existe, habilitada" in mensaje
+
+
+def test_ejecutar_without_the_network_still_reports_the_account_honestly(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        limites, "resumen", _con_fee()
+    )
+
+    reporte = readiness.ejecutar(dict(CON_CARGO), con_red=False)
+
+    assert _linea(reporte, "ENTREGA_CARGO_CUENTA")[0] == readiness.AVISO

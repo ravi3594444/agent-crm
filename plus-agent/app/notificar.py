@@ -227,6 +227,16 @@ def _renglones(so: dict) -> str:
     return "; ".join(partes) or "sin renglones"
 
 
+def renglones(so: dict) -> str:
+    """The order's lines as a person reads them. Same text for every channel."""
+    return _renglones(so)
+
+
+def direccion_de_entrega(so: dict) -> str:
+    """The order's delivery address as a person reads it, or ''."""
+    return _direccion_de_entrega(so)
+
+
 def texto_confirmacion(so: dict, fuente: str, momento: str | None = None) -> str:
     """What the manager reads: every field the client asked for, in order."""
     direccion = _direccion_de_entrega(so)
@@ -439,6 +449,32 @@ def pedir_confirmacion_conteo(telefono: str, nombre: str, texto: str) -> bool:
         return True
     except Exception as exc:
         print(f"[staff-notify] botón de conteo {nombre} falló ({type(exc).__name__})")
+        return False
+
+
+def pedir_codigo_de_ajuste(telefono: str, texto: str) -> bool:
+    """Send the owner the confirmation code for a setting he asked to change.
+
+    DIRECT, and to HIS number — not through the model's reply. A code that came
+    back inside a tool result is a code the model has read, and a model that has
+    read it can confirm the change on its own: the second step stops being a
+    person and becomes the same turn as the first. This path is the reason the
+    two steps are two.
+
+    He is by definition inside the 24-hour window — he just wrote to ask for the
+    change — so free-form text works and no template is needed. Never raises;
+    False means he was NOT told, and the caller must not leave a change pending
+    on a code nobody can read.
+    """
+    from app import whatsapp
+
+    if not telefono:
+        return False
+    try:
+        whatsapp.enviar_mensaje(telefono, texto)
+        return True
+    except Exception as exc:
+        print(f"[staff-notify] código de ajuste no enviado ({type(exc).__name__})")
         return False
 
 

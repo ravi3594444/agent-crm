@@ -29,17 +29,20 @@ def _clean_templates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(notificar, "has_accepted", lambda *args: False)
     monkeypatch.setattr(notificar, "record_outbound", Mock())
     monkeypatch.setattr(notificar, "window_open", lambda phone: False)
-    monkeypatch.setattr(aprobacion, "has_accepted", lambda *args: False)
-    monkeypatch.setattr(aprobacion, "record_outbound", Mock())
-    monkeypatch.setattr(aprobacion, "window_open", lambda phone: False)
+    monkeypatch.setattr(aprobacion.avisos, "has_accepted", lambda *args: False)
+    monkeypatch.setattr(aprobacion.avisos, "record_outbound", Mock())
+    monkeypatch.setattr(aprobacion.avisos, "window_open", lambda phone: False)
     # Stage 2e pieces are tested in tests/test_etapa_2e.py; keep these
     # focused and independent of Redis.
     monkeypatch.setattr(notificar, "claim_once", lambda *args, **kwargs: True)
     monkeypatch.setattr(notificar, "release_claim", lambda *args, **kwargs: None)
     monkeypatch.setattr(notificar, "registrar_aviso_fallido", lambda *args, **kwargs: False)
     monkeypatch.setattr(aprobacion, "_notificar_confirmada", lambda *args, **kwargs: None)
-    monkeypatch.setattr(aprobacion, "marcar_confirmacion", lambda *args, **kwargs: None)
-    monkeypatch.setattr(aprobacion, "cliente_informado", lambda nombre: False)
+    # The durable confirmation record and the customer's notice have their own
+    # files (tests/test_confirmacion.py, tests/test_avisos.py). Here they are
+    # stubbed so a test about staff alerts stays about staff alerts.
+    monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
 
 
 def test_template_quick_replies_use_approved_template_components(
@@ -181,12 +184,16 @@ def test_approval_does_not_claim_customer_was_notified_on_send_failure(
     submit = Mock(return_value={"name": "SAL-ORD-0001", "docstatus": 1})
     monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
     monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
-    monkeypatch.setattr(aprobacion, "_avisar_cliente", lambda name: False)
+    monkeypatch.setattr(
+        aprobacion.avisos,
+        "confirmacion_cliente",
+        Mock(side_effect=RuntimeError("redis caído")),
+    )
 
     result = aprobacion.manejar_boton("ok:SAL-ORD-0001", "5491100000000")
 
     assert "confirmado" in result
-    assert "No pude enviar" in result
+    assert "NO pude poner en cola" in result
     assert "Ya le avisé" not in result
     submit.assert_called_once_with("Sales Order", "SAL-ORD-0001")
 
@@ -537,7 +544,7 @@ def test_a_delivery_review_draft_is_confirmed_by_the_manager_not_the_model(
     submit = Mock(return_value={"name": "SAL-ORD-0100", "docstatus": 1})
     monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
     monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
-    monkeypatch.setattr(aprobacion, "_avisar_cliente", lambda nombre: True)
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
 
     reply = aprobacion.manejar_boton("ok:SAL-ORD-0100", GERENTE)
 
@@ -592,13 +599,14 @@ def test_duplicate_approval_skips_submit_and_recovers_customer_notice(
     submit = Mock()
     notify = Mock(return_value=True)
     monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
-    monkeypatch.setattr(aprobacion, "_avisar_cliente", notify)
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", notify)
 
     result = aprobacion.manejar_boton("ok:SAL-ORD-0001", "5491100000000")
 
     assert "Ya estaba confirmado" in result
     submit.assert_not_called()
-    notify.assert_called_once_with("SAL-ORD-0001")
+    notify.assert_called_once()
+    assert notify.call_args.args[0]["name"] == "SAL-ORD-0001"
 
 
 def test_submit_timeout_reconciles_committed_erp_state(
@@ -609,6 +617,9 @@ def test_submit_timeout_reconciles_committed_erp_state(
         side_effect=[
             {"name": "SAL-ORD-0001", "docstatus": 0},
             {"name": "SAL-ORD-0001", "docstatus": 1},
+            # The third read builds the customer's notice from the order as it
+            # now stands, rather than from the copy this turn started with.
+            {"name": "SAL-ORD-0001", "docstatus": 1},
         ]
     )
     monkeypatch.setattr(aprobacion, "_leer_doc", read)
@@ -618,60 +629,13 @@ def test_submit_timeout_reconciles_committed_erp_state(
         Mock(side_effect=aprobacion.erpnext.ERPNextError("timeout")),
     )
     monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
-    monkeypatch.setattr(aprobacion, "_avisar_cliente", Mock(return_value=True))
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", Mock(return_value=True))
 
     result = aprobacion.manejar_boton("ok:SAL-ORD-0001", "5491100000000")
 
     assert "confirmado" in result
     assert "No pude comprobar" not in result
-    assert read.call_count == 2
-
-
-def test_delayed_customer_confirmation_uses_template(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(
-        "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE", "pedido_confirmado_cliente"
-    )
-    docs = {
-        ("Sales Order", "SAL-ORD-0001"): {
-            "name": "SAL-ORD-0001",
-            "customer": "CUST-001",
-            "delivery_date": "2026-08-31",
-        },
-        ("Customer", "CUST-001"): {
-            "name": "CUST-001",
-            "mobile_no": "5491100000001",
-        },
-    }
-    monkeypatch.setattr(aprobacion, "_leer_doc", lambda doctype, name: docs[(doctype, name)])
-    monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
-    send = Mock(return_value={"messages": [{"id": "wamid.out"}]})
-    monkeypatch.setattr(aprobacion, "enviar_plantilla", send)
-
-    assert aprobacion._avisar_cliente("SAL-ORD-0001") is True
-    send.assert_called_once_with(
-        "5491100000001",
-        "pedido_confirmado_cliente",
-        "es_AR",
-        ["SAL-ORD-0001", "2026-08-31"],
-    )
-    aprobacion.record_outbound.assert_called_once_with(
-        "wamid.out",
-        "customer_order_confirmation",
-        order_name="SAL-ORD-0001",
-    )
-
-
-def test_customer_confirmation_replay_uses_recorded_acceptance_without_resend(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(aprobacion, "has_accepted", lambda *args: True)
-    send = Mock(side_effect=AssertionError("no debe reenviar"))
-    monkeypatch.setattr(aprobacion, "enviar_plantilla", send)
-
-    assert aprobacion._avisar_cliente("SAL-ORD-0001") is True
-    send.assert_not_called()
+    assert read.call_count == 3
 
 
 _SO = {
@@ -743,45 +707,3 @@ def test_pending_alert_without_template_and_closed_window_fails_closed_with_audi
     assert "24 h" in texto
 
 
-def test_customer_confirmation_without_template_uses_text_inside_customer_window(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    docs = {
-        ("Sales Order", "SAL-ORD-0001"): {
-            "name": "SAL-ORD-0001",
-            "customer": "CUST-001",
-            "delivery_date": "2026-08-31",
-        },
-        ("Customer", "CUST-001"): {"name": "CUST-001", "mobile_no": "+5491100000001"},
-    }
-    monkeypatch.setattr(aprobacion, "_leer_doc", lambda doctype, name: docs[(doctype, name)])
-    monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
-    monkeypatch.setattr(aprobacion, "window_open", lambda phone: phone == "+5491100000001")
-    text = Mock(return_value={"messages": [{"id": "wamid.out"}]})
-    template = Mock(side_effect=AssertionError("sin plantilla no se usa enviar_plantilla"))
-    monkeypatch.setattr(aprobacion, "enviar_mensaje", text)
-    monkeypatch.setattr(aprobacion, "enviar_plantilla", template)
-
-    assert aprobacion._avisar_cliente("SAL-ORD-0001") is True
-    phone, body = text.call_args.args
-    assert phone == "+5491100000001"
-    assert "SAL-ORD-0001" in body and "2026-08-31" in body
-    aprobacion.record_outbound.assert_called_once_with(
-        "wamid.out", "customer_order_confirmation", order_name="SAL-ORD-0001"
-    )
-
-
-def test_customer_confirmation_without_template_and_closed_window_fails_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    docs = {
-        ("Sales Order", "SAL-ORD-0001"): {"name": "SAL-ORD-0001", "customer": "CUST-001"},
-        ("Customer", "CUST-001"): {"name": "CUST-001", "mobile_no": "+5491100000001"},
-    }
-    monkeypatch.setattr(aprobacion, "_leer_doc", lambda doctype, name: docs[(doctype, name)])
-    comment = Mock()
-    monkeypatch.setattr(aprobacion.erpnext, "add_comment", comment)
-    monkeypatch.setattr(aprobacion, "enviar_mensaje", Mock(side_effect=AssertionError("cerrada")))
-
-    assert aprobacion._avisar_cliente("SAL-ORD-0001") is False
-    assert "ventana de 24 h" in comment.call_args.args[2]

@@ -24,16 +24,23 @@ system works for real customers at all — do not skip it.
 
 ## Stage 0 — The tests (do this first, always)
 
-No credentials, no docker, no network, no Redis, no LLM tokens. About one
-second. `tests/conftest.py` sets dummy values for every variable the app
-requires at import, so a clean checkout passes with no `.env` at all.
+No credentials, no network, no LLM tokens: `tests/conftest.py` sets dummy
+values for every variable the app requires at import, so a clean checkout
+passes with no `.env` at all.
+
+It DOES need a Redis Stack. `app/graph.py` creates the checkpointer's
+RediSearch indices at import, so two test modules cannot even be collected
+without one and pytest aborts the whole run. Database 0 is not a preference —
+RediSearch refuses `FT.CREATE` anywhere else. See "Tests and Redis" in
+README.md.
 
 ```bash
 cd plus-agent
-make test
+docker run -d --name redis-test -p 6379:6379 redis/redis-stack-server:7.4.0-v1
+REDIS_URL=redis://localhost:6379/0 make test   # expect: 1143 passed
 ```
 
-**Expect:** `260 passed, 3 xfailed`. The 3 xfails are strict and deliberate: each documents a known gap in the code (see the `reason=` in the test). If one of them ever *passes*, the gap was fixed and the marker must be removed.
+**Expect:** every test passes — nothing skipped, nothing xfailed. A skip means Redis was not reachable; set `REDIS_OBLIGATORIO=1` (as CI does) to turn that into a failure.
 
 Also run the full check that CI runs:
 

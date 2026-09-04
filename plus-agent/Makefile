@@ -18,7 +18,7 @@ $(VENV):
 install: $(VENV) ## Instalar dependencias de desarrollo (versiones fijas)
 	$(PIP) install -q -r requirements-dev.txt
 
-test: install ## Correr los tests (offline, ~1s, sin credenciales ni Redis)
+test: install ## Correr los tests (sin credenciales ni red, pero NECESITA un Redis Stack en REDIS_URL, base 0 — ver README)
 	$(PY) -m pytest -q
 
 lint: install ## Lint (ruff check; el formato todavía no se exige)

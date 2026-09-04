@@ -62,6 +62,8 @@ _STATE_TTL_SECONDS = 30 * 24 * 60 * 60
 _WORKER_LOCK_TTL_SECONDS = 90
 _ITEM_LEASE_TTL_SECONDS = 90
 _WORKER_POLL_SECONDS = 1.0
+_AVISOS_POLL_SECONDS = 5.0
+_SOLICITUDES_TICK_SECONDS = 60.0
 _RETRY_SECONDS = 2.0
 _ACK_CLAIM_TTL_SECONDS = 30
 _ACK_WAIT_SECONDS = 16
@@ -276,22 +278,52 @@ _STAFF_ACTIONS = {
     "despachar": "despachar",
     "despacha": "despachar",
     "despacho": "despachar",
+    # Undo a preparation: deletes only the agent's own untouched draft remito,
+    # so a prepared order can be cancelled without anything being deleted
+    # behind the manager's back. See app/decisiones.py::despreparar.
+    "despreparar": "despreparar",
+    "desprepara": "despreparar",
+    "desprepare": "despreparar",
 }
 _ORDER_IN_TEXT = re.compile(r"\b[A-Z]{2,6}(?:-[A-Z]{2,6})?-\d{2,}[0-9-]*\b")
-# "cancelar SAL-ORD-2026-00009 el cliente se arrepintió": the reason is the rest
-# of the line and travels in the payload after a second colon.
-_CANCEL_RE = re.compile(
-    r"^\s*(?P<verb>[^\W\d_]+)\s+" + _ORDER_REF + r"(?:\s+(?P<motivo>.*))?\s*$", re.DOTALL
+# Commands that carry something after the order number: a reason, or the terms
+# of a counter-offer. "cancelar SAL-ORD-2026-00009 el cliente se arrepintió",
+# "contraoferta SAL-ORD-2026-00009 mañana 18:00 1500". The rest of the line
+# travels in the payload after a second colon and is parsed deterministically
+# by app/solicitudes.py — never by a model.
+_ARG_RE = re.compile(
+    r"^\s*(?P<verb>[^\W\d_]+)\s+" + _ORDER_REF + r"(?:\s+(?P<resto>.*))?\s*$", re.DOTALL
 )
-_CANCEL_VERBS = frozenset({"cancelar", "cancela", "cancelo", "anular", "anula", "anulo"})
+# verb -> (action, does the payload keep an empty argument?)
+_ARG_ACTIONS = {
+    "cancelar": ("cancelar", True),
+    "cancela": ("cancelar", True),
+    "cancelo": ("cancelar", True),
+    "anular": ("cancelar", True),
+    "anula": ("cancelar", True),
+    "anulo": ("cancelar", True),
+    # Decision requests (app/solicitudes.py). "rechazar" carries the reason the
+    # customer is told, so it belongs here too.
+    "rechazar": ("no", False),
+    "rechaza": ("no", False),
+    "rechazo": ("no", False),
+    "contraoferta": ("contraoferta", True),
+    "contraofertar": ("contraoferta", True),
+    "contraoferto": ("contraoferta", True),
+    "retiro": ("retiro", True),
+    "retirar": ("retiro", True),
+}
 
 
 def _staff_command(text: str) -> str | None:
     """Map a short manager message to a button payload, or None."""
-    cancel = _CANCEL_RE.match(text or "")
-    if cancel and _sin_tildes(cancel.group("verb")) in _CANCEL_VERBS:
-        motivo = " ".join((cancel.group("motivo") or "").split())
-        return f"cancelar:{cancel.group('order').upper()}:{motivo}"
+    con_argumento = _ARG_RE.match(text or "")
+    if con_argumento:
+        accion = _ARG_ACTIONS.get(_sin_tildes(con_argumento.group("verb")))
+        resto = " ".join((con_argumento.group("resto") or "").split())
+        if accion and (resto or accion[1]):
+            pedido = con_argumento.group("order").upper()
+            return f"{accion[0]}:{pedido}:{resto}"
     match = _STAFF_COMMAND_RE.match(text or "")
     if not match:
         return None
@@ -299,6 +331,130 @@ def _staff_command(text: str) -> str | None:
     if not action:
         return None
     return f"{action}:{match.group('order').upper()}"
+
+
+# The owner confirming a setting change. Exactly four digits and nothing else —
+# what app/limites.py generates and what he is asked to send back.
+_CODIGO_AJUSTE_RE = re.compile(r"^\s*(\d{4})\s*$")
+
+
+def _codigo_de_ajuste(text: str, telefono: str) -> str | None:
+    """Apply a pending settings change the owner just confirmed, or None.
+
+    THIS is the second step, and it is deliberately not a tool. The management
+    agent proposes a change and never sees the code — app/notificar.py sends it
+    straight to the owner's own number — so the only thing that can apply one is
+    an inbound message that arrived through the signed webhook from a phone
+    router.es_equipo authenticated, handled here before any model reads it.
+
+    An agent able to call both halves is not a two-step confirmation: it is one
+    step with extra words, and the words come from a model that a customer's
+    message can steer.
+
+    Returns None when the message is NOT a confirmation — no four digits, or
+    nothing pending for that phone — so an ordinary message that happens to be
+    a number still reaches the agent. A code that does not MATCH is answered
+    here, because that is something he has to know.
+    """
+    from app import limites
+
+    match = _CODIGO_AJUSTE_RE.match(str(text or ""))
+    if not match:
+        return None
+    if limites.pendiente(telefono) is None:
+        return None
+    try:
+        cambio = limites.aplicar(match.group(1), telefono)
+    except limites.LimiteError as exc:
+        return f"No apliqué nada: {exc}."
+    except Exception as error:
+        print(f"[limites] confirmación falló type={_error_name(error)}")
+        return "No pude aplicar el cambio en este momento. No cambié nada."
+    defi = limites.TODOS.get(cambio["limite"])
+    alias = defi.alias[0] if defi else cambio["limite"]
+    return (
+        f"Listo: *{alias}* pasó de {cambio['anterior']} a {cambio['nuevo']}. "
+        "Rige desde el próximo pedido, sin reiniciar nada. "
+        f"Queda registrado a tu nombre ({cambio['ts']})."
+    )
+
+
+# A customer accepting or refusing an offer is a DECISION about money and a
+# delivery date. It is matched here, before any model sees the message, so the
+# answer cannot depend on a paraphrase.
+_ACEPTA_RE = re.compile(
+    r"^\s*(?P<no>no\s+)?(?:acepto|acepta|aceptar|de\s*acuerdo|dale)\b"
+    r"(?:[^A-Za-z0-9]*(?P<order>[A-Za-z]{1,6}(?:-[A-Za-z]{1,6})?-\d[\w-]*))?",
+    re.IGNORECASE,
+)
+_RECHAZA_RE = re.compile(
+    r"^\s*(?:no\s+(?:acepto|acepta|aceptar|gracias)|rechazo|no\s+me\s+sirve)\b"
+    r"(?:[^A-Za-z0-9]*(?P<order>[A-Za-z]{1,6}(?:-[A-Za-z]{1,6})?-\d[\w-]*))?",
+    re.IGNORECASE,
+)
+
+
+def _customer_command(text: str, telefono: str, customer_code: str) -> str | None:
+    """A customer's explicit yes or no to a pending offer, or None.
+
+    Deterministic on purpose: this is where a price and a delivery date get
+    agreed. With no order number in the message it is resolved only when the
+    customer has exactly ONE offer waiting; otherwise they are asked which
+    order, because guessing would confirm the wrong one.
+    """
+    from app import solicitudes
+
+    crudo = str(text or "")
+    rechaza = _RECHAZA_RE.match(crudo)
+    acepta = None if rechaza else _ACEPTA_RE.match(crudo)
+    if not rechaza and not acepta:
+        return None
+    if acepta is not None and acepta.group("no"):
+        rechaza, acepta = acepta, None
+
+    encontrado = rechaza or acepta
+    pedido = (encontrado.group("order") or "").upper() if encontrado else ""
+    try:
+        if not pedido:
+            esperando = solicitudes.esperando_para(customer_code)
+            if esperando is None:
+                return None
+            pedido = esperando.pedido
+        if rechaza is not None:
+            return solicitudes.rechazar_cliente(pedido, telefono)
+        return solicitudes.aceptar_cliente(pedido, telefono)
+    except Exception as error:
+        print(
+            f"[solicitudes] respuesta de cliente falló phone={_correlation(telefono)} "
+            f"type={_error_name(error)}"
+        )
+        return None
+
+
+def _resumen_de_solicitud(text: str) -> str | None:
+    """An ambiguous instruction about a pending decision, answered with facts.
+
+    The management model is never asked to interpret "dale, mandáselo" into an
+    approval: it has no tool that could, and this path does not give it the
+    chance. The manager gets the request as a summary and the exact commands
+    that would execute, and confirms with one of them.
+    """
+    from app import solicitudes
+
+    for referencia in sorted(set(_ORDER_IN_TEXT.findall(str(text or "")))):
+        try:
+            solicitud = solicitudes.leer(referencia)
+        except Exception as error:
+            print(f"[solicitudes] {referencia}: no legible type={_error_name(error)}")
+            continue
+        if solicitud is None or not solicitud.abierta:
+            continue
+        return (
+            "No ejecuto una instrucción que no sea exacta: esto cambia una fecha "
+            "y un precio que después hay que cumplir.\n\n"
+            f"{solicitudes.texto_para_equipo(solicitud)}"
+        )
+    return None
 
 
 def _alert_technical_failure(error: Exception, telefono: str, data: object) -> bool:
@@ -363,15 +519,24 @@ def _generate_response(item: dict) -> str:
         if kind != "text":
             return TEXT_REQUIRED
         if es_equipo(telefono):
+            ajuste = _codigo_de_ajuste(data, telefono)
+            if ajuste:
+                return ajuste
             command = _staff_command(data)
             if command:
                 return str(manejar_boton(command, telefono))
+            ambiguo = _resumen_de_solicitud(data)
+            if ambiguo:
+                return ambiguo
             return _non_empty(
                 responder_gerencia(data, thread_id=thread_tag, usuario=thread_tag),
                 message_id,
             )
 
         customer_code, contexto = _contexto(telefono)
+        acuerdo = _customer_command(data, telefono, customer_code)
+        if acuerdo:
+            return acuerdo
         return _non_empty(
             responder_cliente(
                 data,
@@ -1042,6 +1207,45 @@ def _startup_checks() -> None:
     print(f"[whatsapp] {'OK' if ok else 'ERROR'} {detail}")
 
 
+def _avisos_worker(stop: threading.Event) -> None:
+    """Drain the durable notice queue (app/avisos.py).
+
+    Its own thread, so a customer confirmation is never coupled to the inbound
+    FIFO: a notice cannot delay somebody else's reply and a quiet system still
+    delivers what is already queued. ``avisos.despertar`` is set by every
+    enqueue, so the usual latency is milliseconds; the timeout is only the
+    floor for retries and for a process that missed the wake-up.
+    """
+    from app import avisos
+
+    while not stop.is_set():
+        avisos.despertar.clear()
+        try:
+            hechos = avisos.procesar()
+        except Exception as error:
+            print(f"[avisos] ciclo type={_error_name(error)}")
+            hechos = 0
+        if hechos:
+            continue
+        avisos.despertar.wait(_AVISOS_POLL_SECONDS)
+
+
+def _solicitudes_scheduler(stop: threading.Event) -> None:
+    """Expire decision requests whose time is up, and free the stock they held.
+
+    Its own thread: a pending decision must not depend on another customer
+    writing in, and the sweep must not sit in front of the inbound FIFO. A
+    failure only skips one round.
+    """
+    from app import solicitudes
+
+    while not stop.wait(_SOLICITUDES_TICK_SECONDS):
+        try:
+            solicitudes.tick()
+        except Exception as error:
+            print(f"[solicitudes] tick type={_error_name(error)}")
+
+
 def _digest_scheduler(stop: threading.Event) -> None:
     """Once a minute, let app/digest.py decide whether today's 18:00 summary is due."""
     from app import digest
@@ -1061,6 +1265,15 @@ async def _lifespan(application: FastAPI):
         threading.Thread(
             target=_digest_scheduler, args=(stop,), daemon=True, name="digest-scheduler"
         ).start()
+    threading.Thread(
+        target=_avisos_worker, args=(stop,), daemon=True, name="avisos-worker"
+    ).start()
+    threading.Thread(
+        target=_solicitudes_scheduler,
+        args=(stop,),
+        daemon=True,
+        name="solicitudes-scheduler",
+    ).start()
     worker = threading.Thread(
         target=_worker_supervisor,
         args=(stop,),
@@ -1084,7 +1297,17 @@ app = FastAPI(title="Plus Agent", lifespan=_lifespan)
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    """Alive, plus the one number that is invisible everywhere else.
+
+    A draft ERPNext will not close is not a failed message and not a pending
+    decision — it is stock nobody can sell, and until it showed up here the only
+    way to find one was to notice the sales going missing. None means the
+    counter could not be read; it never makes /health fail, because a monitor
+    that goes red for an unreadable counter stops being watched.
+    """
+    from app import solicitudes
+
+    return {"ok": True, "borradores_trabados": solicitudes.trabadas()}
 
 
 @app.get("/webhook/whatsapp")

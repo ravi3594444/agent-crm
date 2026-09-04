@@ -32,7 +32,14 @@ _DUMMY = {
     "ERPNEXT_POLICY_API_SECRET": "policy-secret",
     "META_APP_SECRET": "test-app-secret",
     "META_VERIFY_TOKEN": "test-verify-token",
-    "REDIS_URL": "redis://localhost:6379/15",
+    # DATABASE 0, and not by preference: RediSearch refuses FT.CREATE on any
+    # other one ("Cannot create index on db != 0"), and app/graph.py creates the
+    # checkpointer's indices AT IMPORT. This used to say /15, which looked like
+    # isolation and worked on any machine that happened to have those indices
+    # left on db 15 from before — and failed at COLLECTION on every clean Redis
+    # Stack, which is every CI run and every new checkout. Isolation comes from
+    # the server being a throwaway one, not from the database number.
+    "REDIS_URL": "redis://localhost:6379/0",
     "WHATSAPP_PHONE_NUMBER_ID": "test-phone-id",
     "WHATSAPP_TOKEN": "test-token",
     # app/graph.py builds the chat models at import (app/modelos.py refuses to
@@ -56,6 +63,8 @@ from unittest.mock import Mock
 
 import pytest
 from redis.exceptions import RedisError
+
+from tests.fakes import FakeMarcas
 
 
 class FakeRedis:
@@ -183,6 +192,12 @@ def limites_sin_redis(monkeypatch):
         "AUTO_CONFIRM_MAX_DESCUENTO_PCT",
         "STOCK_CONFIABLE",
         "STOCK_CONFIABLE_HORAS",
+        # The two hold deadlines. Without them here, a developer machine with a
+        # real .env resolves them from that file and a test that says "the
+        # owner's number decides" proves nothing — the exact leak this
+        # conftest's docstring exists to describe.
+        "APROBACION_TIMEOUT_HORAS",
+        "REVISION_TIMEOUT_HORAS",
     ):
         monkeypatch.delenv(nombre, raising=False)
     vacio = FakeRedis()
@@ -194,51 +209,28 @@ def limites_sin_redis(monkeypatch):
 
     monkeypatch.setattr(limites, "_hubo_cambios_durables", lambda: False)
     monkeypatch.setattr(limites, "_durable_cache", None)
+    # The delivery rules have their OWN durable marker, so their own question.
+    # Answering it False here is what lets a test use the bootstrap environment
+    # for a delivery rule; the tests about a wiped store say otherwise.
+    monkeypatch.setattr(limites, "_hubo_cambios_durables_entrega", lambda: False)
+    monkeypatch.setattr(limites, "_durable_cache_entrega", None)
     # Applying a limit change writes a durable copy to ERPNext. No test may
     # reach a real one; the tests about that record assert on this mock.
     monkeypatch.setattr(limites.erpnext, "registrar_comentario", Mock())
     return vacio
 
 
-class _MarcasSinRedis:
-    """Enough of Redis for app/outbound_status.py's markers and claims."""
-
-    def __init__(self) -> None:
-        self.values: dict = {}
-        self.lists: dict = {}
-
-    def set(self, key, value, nx=False, ex=None):
-        if nx and key in self.values:
-            return False
-        self.values[key] = value
-        return True
-
-    def get(self, key):
-        return self.values.get(key)
-
-    def delete(self, key):
-        self.values.pop(key, None)
-        return 1
-
-    def rpush(self, key, value):
-        self.lists.setdefault(key, []).append(value)
-
-    def llen(self, key):
-        return len(self.lists.get(key, []))
-
-    def scan_iter(self, match="*", count=100):
-        return iter([k for k in self.values if k.startswith(match.rstrip("*"))])
-
-    def eval(self, *args):
-        return "accepted_by_meta"
-
-
 @pytest.fixture(autouse=True)
 def marcas_sin_redis(monkeypatch):
     """Every test starts with an empty, in-memory marker store; tests that need
-    their own fake (the webhook harness) override it."""
+    their own fake (the webhook harness) override it.
+
+    app/avisos.py and app/confirmacion.py both reach Redis through
+    outbound_status.cliente(), so patching this one attribute keeps the notice
+    queue and the confirmation cache in memory too.
+    """
     from app import outbound_status
 
-    marcas = _MarcasSinRedis()
+    marcas = FakeMarcas()
     monkeypatch.setattr(outbound_status, "_client", marcas)
     return marcas

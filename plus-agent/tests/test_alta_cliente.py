@@ -53,7 +53,7 @@ class _ErpDePrueba:
         self.creados: list[tuple[str, dict]] = []
         self.fallar_customer_una_vez = False
 
-    def get_list(self, doctype, filters=None, fields=None, limit=20, parent=None, order_by=None):
+    def get_list(self, doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0):
         if doctype == "Customer":
             return [dict(c) for c in self.customers.values()]
         if doctype == "Dynamic Link":

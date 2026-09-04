@@ -74,7 +74,7 @@ def _conteos(
         ]
 
     def policy_get_list(
-        doctype, filters=None, fields=None, limit=20, parent=None, order_by=None
+        doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0
     ):
         if doctype == "Stock Reconciliation Item":
             return [dict(r) for r in renglones]
@@ -242,7 +242,7 @@ def test_the_newest_confirmed_count_is_the_one_that_counts(
     nuevo = AHORA - timedelta(hours=2)
 
     def policy_get_list(
-        doctype, filters=None, fields=None, limit=20, parent=None, order_by=None
+        doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0
     ):
         if doctype == "Stock Reconciliation Item":
             return [

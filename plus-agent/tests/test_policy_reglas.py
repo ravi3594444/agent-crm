@@ -13,6 +13,7 @@ time, so they are monkeypatched on the module, not through the environment.
 """
 from __future__ import annotations
 
+import time
 from datetime import date
 from unittest.mock import Mock
 
@@ -127,7 +128,13 @@ def _stock_erp(
             for nombre in sorted({str(r.get("parent")) for r in renglones})
         )
 
-    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None):
+    def policy_get_list(
+        doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0
+    ):
+        if doctype == "Comment":
+            # app/solicitudes.py asks whether any of those drafts is parked on a
+            # pending decision whose stock hold has lapsed. Here none is.
+            return []
         if doctype == "Sales Order":
             filas = [dict(order) for order in pedidos]
             if not honra_filtros:
@@ -880,6 +887,7 @@ def test_competing_drafts_are_never_read_with_the_customer_identity(
     assert policy._hay_stock("LECHE-1L", 1, "Depósito A - LP") is True
     assert [call.args[0] for call in lector.call_args_list] == [
         "Sales Order",
+        "Comment",
         "Sales Order Item",
     ]
     # Bin stays on the restricted identity, exactly as before.
@@ -898,12 +906,17 @@ def test_the_two_policy_reads_ask_for_what_they_claim_to(
     policy._hay_stock(
         "LECHE-1L", 1, "Depósito A - LP", company="Lácteos Plus SA"
     )
-    pedidos, renglones = lector.call_args_list
+    pedidos, reservas, renglones = lector.call_args_list
 
     assert pedidos.args[0] == "Sales Order"
     assert ["docstatus", "=", 0] in pedidos.kwargs["filters"]
     assert ["status", "not in", list(policy.ESTADOS_SIN_RESERVA)] in pedidos.kwargs["filters"]
     assert ["company", "=", "Lácteos Plus SA"] in pedidos.kwargs["filters"]
+
+    # The lapsed-hold question is asked about those orders and nothing else.
+    assert reservas.args[0] == "Comment"
+    assert ["reference_doctype", "=", "Sales Order"] in reservas.kwargs["filters"]
+    assert ["reference_name", "in", ["SO-A"]] in reservas.kwargs["filters"]
 
     assert renglones.args[0] == "Sales Order Item"
     assert renglones.kwargs["parent"] == "Sales Order"
@@ -1478,3 +1491,54 @@ def test_hostile_text_in_any_string_field_can_only_narrow_a_green_decision(
     decision = policy.evaluar(_with_injection(_order(), where, key))
 
     assert decision == clean or decision.auto is False
+
+
+# ---------------------------------------------------------------------------
+# A draft parked on a pending decision holds its units — but not for ever.
+# ---------------------------------------------------------------------------
+
+
+def test_a_draft_waiting_for_a_decision_still_holds_its_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Otherwise two customers are promised the same milk while one waits."""
+    monkeypatch.setenv("STOCK_BUFFER_PCT", "0")
+    _stock_erp(monkeypatch, fisico=10, renglones=(_renglon("SO-A", 8),))
+    _con_solicitud(monkeypatch, {"SO-A": time.time() + 3600})
+
+    assert policy._hay_stock("LECHE-1L", 8, "Dep\u00f3sito A - LP") is False
+    assert policy._hay_stock("LECHE-1L", 2, "Dep\u00f3sito A - LP") is True
+
+
+def test_a_draft_whose_hold_lapsed_stops_competing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner's APROBACION_TIMEOUT_HORAS ran out: those units are free again,
+    and the next customer can have them even before the sweep runs."""
+    monkeypatch.setenv("STOCK_BUFFER_PCT", "0")
+    _stock_erp(monkeypatch, fisico=10, renglones=(_renglon("SO-A", 8),))
+    _con_solicitud(monkeypatch, {"SO-A": time.time() - 1})
+
+    assert policy._hay_stock("LECHE-1L", 8, "Dep\u00f3sito A - LP") is True
+
+
+def test_an_unreadable_hold_leaves_every_draft_competing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not knowing is never "those units are free": that is how stock is sold
+    twice."""
+    monkeypatch.setenv("STOCK_BUFFER_PCT", "0")
+    _stock_erp(monkeypatch, fisico=10, renglones=(_renglon("SO-A", 8),))
+    from app import solicitudes
+
+    monkeypatch.setattr(
+        solicitudes, "vencimientos", Mock(side_effect=RuntimeError("redis"))
+    )
+
+    assert policy._hay_stock("LECHE-1L", 8, "Dep\u00f3sito A - LP") is False
+
+
+def _con_solicitud(monkeypatch: pytest.MonkeyPatch, vencimientos: dict) -> None:
+    from app import solicitudes
+
+    monkeypatch.setattr(solicitudes, "vencimientos", lambda pedidos: dict(vencimientos))

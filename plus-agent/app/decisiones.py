@@ -30,11 +30,10 @@ from __future__ import annotations
 import os
 import time
 
-from app import erpnext, telefono
+from app import confirmacion, erpnext, solicitudes, telefono
 from app.locks import CoordinationError, distributed_lock
 from app.outbound_status import (
     has_accepted,
-    momento_confirmacion,
     record_outbound,
     registrar_aviso_fallido,
     window_open,
@@ -49,6 +48,11 @@ _PURPOSE_CANCELACION = "customer_order_cancelled"
 # the states its own get_reserved_qty does not count — see
 # policy.ESTADOS_SIN_RESERVA.
 _ESTADO_SIN_RESERVA = "Closed"
+
+# Stamped into the remarks of every Delivery Note this system prepares, so
+# "despreparar" can tell a draft the agent created from one a person made by
+# hand in ERPNext. A draft without it is never touched.
+MARCA_REMITO_AGENTE = "[remito-preparado-por-agente]"
 
 
 def _resultado(ok: bool, aviso_cliente: bool, detalle: str) -> dict:
@@ -429,7 +433,10 @@ def preparar(nombre: str, por: str) -> dict:
                 "posting_date": _hoy(),
                 "set_posting_time": 1,
                 "items": renglones,
-                "remarks": f"Preparado por WhatsApp por un integrante autorizado ({por}).",
+                "remarks": (
+                    f"{MARCA_REMITO_AGENTE} Preparado por WhatsApp por un "
+                    f"integrante autorizado ({por})."
+                ),
             },
         )
     except Exception as exc:
@@ -503,8 +510,12 @@ def despachar(nombre: str, por: str) -> dict:
 # Twelve rules, all here and in tests/test_cancelacion.py:
 #   1. only TELEFONOS_EQUIPO (checked again here, not just in the router);
 #   2. only a SUBMITTED Sales Order, within CANCELACION_HORAS (24) of the
-#      confirmation THIS system recorded — no record, no cancellation;
-#   3. refused when a Delivery Note or Sales Invoice exists for it;
+#      confirmation THIS system recorded DURABLY in ERPNext
+#      (app/confirmacion.py) — no durable record, no cancellation, and a Redis
+#      flush or restart cannot take the window away;
+#   3. refused when a Delivery Note or Sales Invoice is CONFIRMED for it; a
+#      draft remito is undone by "despreparar" first and a draft invoice in
+#      ERPNext — never deleted from here;
 #   4. never cancels linked documents; 5. re-read and validated under the
 #   distributed lock; 6. policy identity only; 7. reason required, audited;
 #   8. idempotent; 9-11. the customer is told once — free text inside the
@@ -514,41 +525,200 @@ def despachar(nombre: str, por: str) -> dict:
 
 
 def horas_cancelacion() -> float:
-    try:
-        horas = float(os.getenv("CANCELACION_HORAS", "24"))
-    except (TypeError, ValueError):
-        return 24.0
-    return horas if horas > 0 else 24.0
+    """The cancellation window, from app/confirmacion.py (CANCELACION_HORAS)."""
+    return confirmacion.horas_ventana()
 
 
-def _documentos_vinculados(nombre: str) -> list[str]:
-    """Delivery Notes and Sales Invoices (draft or submitted) tied to the order.
+def _vinculados(nombre_so: str) -> tuple[list[str], list[str], list[str]]:
+    """(confirmados, remitos en borrador, facturas en borrador) for the order.
 
-    Raises on a read failure: not knowing is not "there are none".
+    Raises on a read failure: not knowing is never "there are none".
+
+    The three groups get three different answers, because only one of them is
+    something this system may undo:
+      * a SUBMITTED Delivery Note or Sales Invoice blocks the WhatsApp
+        cancellation outright. Cancelling the order would mean cancelling them
+        first, and cascade-cancelling a document that already moved stock or
+        money is not a decision a chat command gets to make.
+      * a DRAFT Delivery Note is undone by the separate ``despreparar``
+        command, which checks that the agent created it and nobody edited it.
+        ``cancelar`` never deletes it silently.
+      * a DRAFT Sales Invoice belongs to ERPNext: this system never creates
+        invoices, so it has no way to know what is safe to remove.
     """
-    vinculados: list[str] = []
+    confirmados: list[str] = []
+    remitos_borrador: list[str] = []
+    facturas_borrador: list[str] = []
     for doctype, campo, etiqueta in (
         ("Delivery Note", "against_sales_order", "remito"),
         ("Sales Invoice", "sales_order", "factura"),
     ):
         filas = erpnext.policy_get_list(
             f"{doctype} Item",
-            filters=[[campo, "=", nombre], ["docstatus", "in", [0, 1]]],
+            filters=[[campo, "=", nombre_so], ["docstatus", "in", [0, 1]]],
             fields=["parent", campo, "docstatus"],
             limit=20,
             parent=doctype,
         )
         vistos: set[str] = set()
         for fila in filas:
-            if str(fila.get(campo) or nombre).strip() != nombre:
+            if str(fila.get(campo) or nombre_so).strip() != nombre_so:
                 continue
             padre = str(fila.get("parent") or "").strip()
             if not padre or padre in vistos:
                 continue
             vistos.add(padre)
-            estado = "confirmado" if int(float(fila.get("docstatus") or 0)) == 1 else "borrador"
-            vinculados.append(f"{etiqueta} {padre} ({estado})")
-    return vinculados
+            estado = int(float(fila.get("docstatus") or 0))
+            if estado == 1:
+                confirmados.append(f"{etiqueta} {padre} (confirmado)")
+            elif doctype == "Delivery Note":
+                remitos_borrador.append(padre)
+            else:
+                facturas_borrador.append(padre)
+    return confirmados, remitos_borrador, facturas_borrador
+
+
+# ---------------------------------------------------------------------------
+# despreparar <pedido> — undo a preparation this system made, and nothing else.
+#
+# It exists so that "cancelar" never has to choose between refusing for ever
+# and deleting a document behind the manager's back. Both are wrong: the first
+# leaves an order nobody can cancel by WhatsApp after one accidental
+# "preparar", and the second destroys a document a person may have edited.
+#
+# So the destructive step is its own explicit human command, and it only ever
+# touches a DRAFT Delivery Note that this system created and nobody changed:
+# same customer, same company, exactly the order's own lines. Anything else —
+# a hand-made draft, an edited one, several of them, any invoice, anything
+# submitted — is left alone and the manager is sent to ERPNext.
+# ---------------------------------------------------------------------------
+
+
+def _renglones_esperados(so: dict) -> dict[tuple[str, str], float]:
+    """What a Delivery Note prepared from this order must contain, line by line."""
+    esperado: dict[tuple[str, str], float] = {}
+    for item in so.get("items") or []:
+        if not isinstance(item, dict) or not item.get("item_code"):
+            continue
+        clave = (str(item.get("item_code")).strip(), str(item.get("name") or "").strip())
+        esperado[clave] = esperado.get(clave, 0.0) + float(item.get("qty") or 0)
+    return esperado
+
+
+def _remito_intacto(remito: dict, so: dict, nombre_so: str) -> tuple[bool, str]:
+    """Whether this draft is one the agent prepared and nobody has touched."""
+    if int(remito.get("docstatus") or 0) != 0:
+        return False, "ya no es un borrador"
+    if MARCA_REMITO_AGENTE not in str(remito.get("remarks") or ""):
+        return False, "no lo preparó el agente"
+    if str(remito.get("customer") or "").strip() != str(so.get("customer") or "").strip():
+        return False, "el cliente del remito no es el del pedido"
+    empresa_so = str(so.get("company") or "").strip()
+    empresa_dn = str(remito.get("company") or "").strip()
+    if empresa_so and empresa_dn and empresa_so != empresa_dn:
+        return False, "la compañía del remito no es la del pedido"
+
+    esperado = _renglones_esperados(so)
+    real: dict[tuple[str, str], float] = {}
+    for item in remito.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("against_sales_order") or "").strip() != nombre_so:
+            return False, "tiene renglones de otro pedido"
+        clave = (
+            str(item.get("item_code") or "").strip(),
+            str(item.get("so_detail") or "").strip(),
+        )
+        real[clave] = real.get(clave, 0.0) + float(item.get("qty") or 0)
+    if set(real) != set(esperado):
+        return False, "los renglones del remito ya no son los del pedido"
+    for clave, cantidad in esperado.items():
+        if abs(real[clave] - cantidad) > 0.000001:
+            return False, "alguien cambió las cantidades del remito"
+    return True, ""
+
+
+def despreparar(nombre: str, por: str) -> dict:
+    """Undo the preparation of an order: delete the agent's DRAFT Delivery Note.
+
+    HUMAN ONLY, deterministic, in no tool list. Idempotent: with no draft left
+    it reports that there is nothing prepared and the order can be cancelled.
+    """
+    if not es_equipo(por):
+        return _resultado(False, False, "No tenés permiso para despreparar pedidos.")
+
+    try:
+        with distributed_lock(f"despreparar:{nombre}", lease_seconds=60, wait_seconds=10):
+            so = _leer_doc("Sales Order", nombre)
+            confirmados, borradores, facturas = _vinculados(nombre)
+            if confirmados:
+                return _resultado(
+                    False,
+                    False,
+                    f"No toco {nombre}: ya tiene {', '.join(confirmados)}. Un documento "
+                    "confirmado se resuelve en ERPNext; no cancelo en cascada.",
+                )
+            if facturas:
+                return _resultado(
+                    False,
+                    False,
+                    f"{nombre} tiene la factura {', '.join(facturas)} en borrador. "
+                    "Las facturas se resuelven en ERPNext.",
+                )
+            if not borradores:
+                return _resultado(
+                    True,
+                    False,
+                    f"{nombre} no tiene remito preparado. Si querés anularlo: "
+                    f"cancelar {nombre} <motivo>.",
+                )
+            if len(borradores) > 1:
+                return _resultado(
+                    False,
+                    False,
+                    f"{nombre} tiene {len(borradores)} remitos en borrador "
+                    f"({', '.join(borradores)}). Dejá uno solo en ERPNext y reintentá.",
+                )
+
+            remito_nombre = borradores[0]
+            remito = _leer_doc("Delivery Note", remito_nombre)
+            intacto, problema = _remito_intacto(remito, so, nombre)
+            if not intacto:
+                return _resultado(
+                    False,
+                    False,
+                    f"No borro el remito {remito_nombre}: {problema}. Resolvelo en "
+                    "ERPNext y después volvé a intentar.",
+                )
+
+            # The record goes in BEFORE the deletion: a deleted document cannot
+            # be commented on, and a deletion with no trace is not auditable.
+            renglones = "; ".join(
+                f"{float(i.get('qty') or 0):g} x {i.get('item_code')}"
+                for i in remito.get("items") or []
+                if isinstance(i, dict)
+            )
+            _comentar(
+                nombre,
+                f"Despreparado por un integrante autorizado ({por}): se borra el remito "
+                f"BORRADOR {remito_nombre} que había preparado el agente "
+                f"({renglones or 'sin renglones'}). Nada se despachó ni se canceló en cascada.",
+            )
+            erpnext.policy_delete_doc("Delivery Note", remito_nombre)
+    except CoordinationError:
+        return _resultado(
+            False, False, f"No pude coordinar el desprepare de {nombre}; reintentá en un momento."
+        )
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: desprepare falló ({type(exc).__name__})")
+        return _resultado(False, False, f"No pude despreparar {nombre}. Revisalo en ERPNext.")
+
+    return _resultado(
+        True,
+        False,
+        f"↩️ Remito {remito_nombre} borrado; {nombre} vuelve a estar sólo confirmado. "
+        f"Para anularlo: cancelar {nombre} <motivo>.",
+    )
 
 
 def cancelar(nombre: str, por: str, motivo: str) -> dict:
@@ -576,13 +746,13 @@ def cancelar(nombre: str, por: str, motivo: str) -> dict:
                         f"{nombre} no está confirmado; un borrador se rechaza con "
                         f"'rechazar {nombre}'.",
                     )
-                momento = momento_confirmacion(nombre)
+                momento = confirmacion.momento(nombre)
                 if momento is None:
                     return _resultado(
                         False,
                         False,
-                        f"No puedo establecer cuándo se confirmó {nombre} (no lo confirmó este "
-                        "sistema o la marca venció). Cancelalo en ERPNext.",
+                        f"No puedo establecer cuándo se confirmó {nombre}: no hay registro "
+                        "durable de que lo haya confirmado este sistema. Cancelalo en ERPNext.",
                     )
                 horas = (time.time() - momento) / 3600.0
                 if horas > horas_cancelacion():
@@ -592,13 +762,30 @@ def cancelar(nombre: str, por: str, motivo: str) -> dict:
                         f"{nombre} se confirmó hace {horas:.0f} h; el límite para cancelar por "
                         f"WhatsApp es {horas_cancelacion():g} h. Cancelalo en ERPNext.",
                     )
-                vinculados = _documentos_vinculados(nombre)
-                if vinculados:
+                confirmados, borradores, facturas = _vinculados(nombre)
+                if confirmados:
                     return _resultado(
                         False,
                         False,
-                        f"No cancelo {nombre}: ya tiene {', '.join(vinculados)}. No cancelo "
+                        f"No cancelo {nombre}: ya tiene {', '.join(confirmados)}. No cancelo "
                         "documentos vinculados en cascada; resolvelo en ERPNext.",
+                    )
+                if facturas:
+                    return _resultado(
+                        False,
+                        False,
+                        f"No cancelo {nombre}: tiene la factura {', '.join(facturas)} en "
+                        "borrador. Las facturas se resuelven en ERPNext.",
+                    )
+                if borradores:
+                    # Never deleted from here, and never in cascade: undoing a
+                    # preparation is its own audited human command.
+                    return _resultado(
+                        False,
+                        False,
+                        f"No cancelo {nombre}: tiene el remito {', '.join(borradores)} "
+                        f"preparado en borrador y no lo borro solo. Escribí "
+                        f"'despreparar {nombre}' y después 'cancelar {nombre} <motivo>'.",
                     )
                 try:
                     erpnext.policy_cancel_doc("Sales Order", nombre)
@@ -621,6 +808,11 @@ def cancelar(nombre: str, por: str, motivo: str) -> dict:
 
     if ya_cancelado:
         return _resultado(True, False, f"{nombre} ya estaba cancelado; no cambié nada.")
+
+    # Outside the cancelar lock (never nested), and a no-op unless the order was
+    # in review: otherwise the manager keeps reading a "Vence:" line for a
+    # document that no longer exists to review.
+    cerrar_revision_si_hay(nombre, por, "una persona canceló el pedido")
 
     tel = telefono_del_cliente(nombre)
     avisado = _avisar_cliente_cancelacion(nombre, tel, razon) if tel else False
@@ -686,3 +878,210 @@ def _avisar_cliente_cancelacion(nombre: str, tel: str, razon: str) -> bool:
     except Exception as exc:
         print(f"[decisiones] {nombre}: tracking de la cancelación falló ({type(exc).__name__})")
     return True
+
+
+# ---------------------------------------------------------------------------
+# The Sales -> Management decision workflow (app/solicitudes.py).
+#
+# The sales side opens a DecisionRequest and answers the customer immediately.
+# These functions are the other end: a HUMAN decides, deterministically, and
+# the order only moves after the customer has said yes to the terms and every
+# rule has been re-checked under the lock.
+#
+# Authority, stated once: nothing here is an LLM tool, every entry point
+# re-checks TELEFONOS_EQUIPO itself, and the only writes are the policy
+# identity's (erpnext.submit_doc, policy_update_status, policy_aplicar_terminos).
+# ---------------------------------------------------------------------------
+
+
+def _abierta(nombre: str) -> tuple[object | None, str]:
+    """(the order's open request, why there is none). Never raises."""
+    try:
+        solicitud = solicitudes.leer(nombre)
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: solicitud no legible ({type(exc).__name__})")
+        return None, f"No pude leer la solicitud de {nombre}. Revisalo en ERPNext."
+    if solicitud is None:
+        return None, f"{nombre} no tiene ninguna decisión pendiente."
+    if solicitud.estado == solicitudes.ESPERANDO_CLIENTE:
+        if solicitud.es_respaldo:
+            # Nobody decided this one: it expired and the fallback answered for
+            # us. Saying "already decided" would let the manager believe their
+            # late command was the decision.
+            return None, solicitudes.texto_superada_equipo(solicitud)
+        return None, (
+            f"{nombre} ya está decidido y esperando al cliente: le ofrecí "
+            f"{solicitudes.terminos_texto(solicitud.ofrecido, solicitud.moneda)}. "
+            "Sin su respuesta no cierro nada."
+        )
+    if not solicitud.abierta:
+        return None, (
+            f"La solicitud de {nombre} ya está {solicitud.estado}"
+            f"{f' ({solicitud.motivo})' if solicitud.motivo else ''}."
+        )
+    return solicitud, ""
+
+
+def _decidir(nombre: str, por: str, decision: str, ofrecido: dict, motivo: str = "") -> dict:
+    """Record ONE human decision and put the offer to the customer.
+
+    A decision never confirms the order by itself: the terms change the date,
+    the method or the money, so the customer has to accept them explicitly
+    first (solicitudes.aceptar_cliente re-checks everything after that).
+    """
+    if not es_equipo(por):
+        return _resultado(False, False, "No tenés permiso para decidir solicitudes.")
+
+    try:
+        with distributed_lock(f"solicitud:{nombre}", lease_seconds=60, wait_seconds=10):
+            solicitud, problema = _abierta(nombre)
+            if solicitud is None:
+                return _resultado(False, False, problema)
+            if solicitud.vencida():
+                return _resultado(False, False, solicitudes.texto_vencida_equipo(solicitud))
+
+            decidida = solicitudes.registrar(
+                solicitud,
+                decision,
+                estado=solicitudes.ESPERANDO_CLIENTE,
+                decision=decision,
+                decidida_por=por,
+                decidida_en=time.time(),
+                ofrecido=dict(ofrecido),
+                motivo=motivo,
+            )
+            if decidida is None:
+                return _resultado(
+                    False,
+                    False,
+                    f"No pude registrar la decisión de {nombre} en ERPNext; reintentá.",
+                )
+    except CoordinationError:
+        return _resultado(
+            False, False, f"No pude coordinar la decisión de {nombre}; reintentá en un momento."
+        )
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: decisión falló ({type(exc).__name__})")
+        return _resultado(False, False, f"No pude decidir {nombre}. Revisalo en ERPNext.")
+
+    _comentar(
+        nombre,
+        f"Decisión de la solicitud {decidida.id}: {decision} por un integrante "
+        f"autorizado ({por}). Términos ofrecidos: "
+        f"{solicitudes.terminos_texto(decidida.ofrecido, decidida.moneda)}. "
+        f"{motivo or ''}".strip(),
+    )
+    avisado = solicitudes.ofrecer_al_cliente(decidida)
+    cola = (
+        "Le mandé la oferta al cliente y espero su respuesta."
+        if avisado
+        else "NO pude ponerle la oferta en cola al cliente; quedó una tarea para contactarlo."
+    )
+    return _resultado(
+        True,
+        avisado,
+        f"✅ {nombre}: registré «{decision}» "
+        f"({solicitudes.terminos_texto(decidida.ofrecido, decidida.moneda)}). {cola}",
+    )
+
+
+def aprobar_solicitud(nombre: str, por: str) -> dict:
+    """Approve exactly what the customer asked for. HUMAN ONLY."""
+    solicitud, problema = _abierta(nombre)
+    if solicitud is None:
+        return _resultado(False, False, problema)
+    return _decidir(nombre, por, solicitudes.APROBADA, dict(solicitud.solicitado))
+
+
+def contraofertar(nombre: str, por: str, terminos: dict) -> dict:
+    """Offer different terms: another date, another time, another fee. HUMAN ONLY."""
+    if not terminos:
+        return _resultado(
+            False,
+            False,
+            f"Falta qué ofrecer. Escribí: contraoferta {nombre} <fecha> <hora> <cargo>",
+        )
+    return _decidir(nombre, por, solicitudes.CONTRAOFERTA, terminos)
+
+
+def ofrecer_retiro(nombre: str, por: str, terminos: dict) -> dict:
+    """Offer pickup at the shop instead of a delivery. HUMAN ONLY."""
+    propuesta = {**terminos, "metodo": "retiro", "cargo": 0.0}
+    return _decidir(nombre, por, solicitudes.RETIRO, propuesta)
+
+
+def rechazar_solicitud(nombre: str, por: str, motivo: str) -> dict:
+    """Refuse the exception, tell the customer, and stop holding stock. HUMAN ONLY."""
+    if not es_equipo(por):
+        return _resultado(False, False, "No tenés permiso para decidir solicitudes.")
+    razon = " ".join(str(motivo or "").split())
+    if len(razon) < 3:
+        return _resultado(
+            False, False, f"Falta el motivo. Escribí: rechazar {nombre} <motivo>"
+        )
+
+    try:
+        with distributed_lock(f"solicitud:{nombre}", lease_seconds=60, wait_seconds=10):
+            solicitud, problema = _abierta(nombre)
+            if solicitud is None:
+                return _resultado(False, False, problema)
+            _liberado, detalle = solicitudes.soltar_reserva(nombre)
+            rechazada = solicitudes.registrar(
+                solicitud,
+                "rechazada",
+                estado=solicitudes.RECHAZADA,
+                decision="rechazada",
+                decidida_por=por,
+                decidida_en=time.time(),
+                motivo=razon,
+            )
+            if rechazada is None:
+                return _resultado(
+                    False, False, f"No pude registrar el rechazo de {nombre}; reintentá."
+                )
+    except CoordinationError:
+        return _resultado(
+            False, False, f"No pude coordinar el rechazo de {nombre}; reintentá en un momento."
+        )
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: rechazo de solicitud falló ({type(exc).__name__})")
+        return _resultado(False, False, f"No pude rechazar {nombre}. Revisalo en ERPNext.")
+
+    _comentar(
+        nombre,
+        f"Solicitud {rechazada.id} rechazada por un integrante autorizado ({por}). "
+        f"Motivo: {razon}. {detalle.capitalize()}.",
+    )
+    avisado = solicitudes.avisar_rechazo(rechazada)
+    cola = (
+        "Ya le avisé al cliente."
+        if avisado
+        else "NO pude avisarle al cliente; quedó una tarea para contactarlo."
+    )
+    return _resultado(True, avisado, f"❌ {nombre}: solicitud rechazada. {detalle.capitalize()}. {cola}")
+
+
+def cerrar_revision_si_hay(nombre: str, por: str, motivo: str) -> bool:
+    """Close a human review a manager's command has just settled. Never raises.
+
+    Called after cancelar/confirmar/rechazar succeed. A no-op unless the order
+    really is in review (app/solicitudes.py::resolver_revision), so it is safe
+    on every order and idempotent on repeats.
+    """
+    try:
+        return solicitudes.resolver_revision(nombre, por, motivo)
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: cierre de revisión falló ({type(exc).__name__})")
+        return False
+
+
+def ver_solicitud(nombre: str) -> str:
+    """The pending request as a person reads it, or '' when there is none."""
+    try:
+        solicitud = solicitudes.leer(nombre)
+    except Exception as exc:
+        print(f"[decisiones] {nombre}: solicitud no legible ({type(exc).__name__})")
+        return ""
+    if solicitud is None:
+        return ""
+    return solicitudes.texto_estado(solicitud)

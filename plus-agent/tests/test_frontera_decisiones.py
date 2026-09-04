@@ -73,18 +73,38 @@ def test_a_customer_is_never_offered_the_tools_that_move_a_limit() -> None:
     one — not even by asking nicely, because the tool is not there."""
     from app import graph
 
-    de_limites = {
-        "ver_limites",
-        "proponer_limite",
-        "confirmar_limite",
-        "historial_limites",
-    }
+    de_limites = {"ver_limites", "proponer_limite", "historial_limites"}
     de_clientes = {t.name for t in graph.TOOLS_CLIENTES}
     de_gerencia = {t.name for t in graph.TOOLS_GERENCIA}
 
     assert de_limites & de_clientes == set()
     # And they ARE available to the owner, or the feature does not exist.
     assert de_limites <= de_gerencia
+
+
+def test_no_agent_can_take_both_halves_of_a_settings_confirmation() -> None:
+    """Two steps are only two if different actors take them.
+
+    The management agent proposes a change. It never receives the four-digit
+    code — Python sends that straight to the owner's own number — and there is
+    no tool that applies one, for EITHER agent. If an agent could call both
+    halves, a misread instruction (or one hidden in a message it was asked to
+    summarise) would move a limit in a single turn with nobody involved.
+    """
+    from app import graph
+    from app.tools import configuracion
+
+    for lista in (graph.TOOLS_CLIENTES, graph.TOOLS_GERENCIA):
+        for herramienta in lista:
+            nombre = herramienta.name.lower()
+            assert nombre != "confirmar_limite"
+            assert not ("confirm" in nombre and "limite" in nombre), nombre
+    # Not merely unregistered: the tool does not exist to be registered.
+    assert not hasattr(configuracion, "confirmar_limite")
+    # And the only thing that applies one is the deterministic router.
+    from app import main
+
+    assert callable(main._codigo_de_ajuste)
 
 
 def test_no_tool_can_submit_or_adjust_anything() -> None:
@@ -124,7 +144,8 @@ def test_manual_confirmation_uses_the_policy_credential_not_the_agent_one(
     submit = Mock(return_value={"name": "SAL-ORD-0001", "docstatus": 1})
     monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
     monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
-    monkeypatch.setattr(aprobacion, "_avisar_cliente", lambda nombre: True)
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
+    monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
 
     resultado = decisiones.confirmar("SAL-ORD-0001", "5493511111111")
 

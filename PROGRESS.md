@@ -3,14 +3,27 @@
 Working branch: **`feat/experiencia`** (based on `main`). Do **not** merge to `main`
 or delete any branch yet.
 
-Run everything from `plus-agent/`. Tests need no credentials, no Redis, no
-ERPNext, no network:
+Run everything from `plus-agent/`. Tests need no credentials, no ERPNext and no
+network — but they DO need a Redis Stack on `REDIS_URL`, database 0 (see "Tests
+and Redis" in `plus-agent/README.md`):
 
 ```bash
 cd plus-agent
-.venv/bin/python -m pytest -q      # expect: 277 passed, 1 xfailed
+REDIS_URL=redis://localhost:6379/0 .venv/bin/python -m pytest -q   # expect: 1143 passed, nothing skipped or xfailed
 .venv/bin/ruff check app tests     # expect: All checks passed!
 ```
+
+## Readiness after a Redis loss
+
+Fixed. `limites.resumen()` and `limites.vigente()` ask the same durable question
+`limites.entrega()` asks (`_reglas_de_entrega_perdidas`): with the delivery
+store empty and `[entrega]` changes on record, every delivery row reads
+`valor=""`, `origen="perdido"` with the problem spelled out. `make check-env`
+reports ONE error naming the loss, `ver_reglas_de_entrega` tells the owner his
+rules were lost and that the `.env` values do NOT apply, and a proposal shows
+«-» as the previous value. What he is shown is what the system will do. The
+former strict xfail (`test_readiness_agrees_with_the_decision_path_after_a_wipe`)
+is a normal passing test.
 
 The venv lives at `/workspaces/agent-crm/plus-agent/.venv`.
 
@@ -235,14 +248,18 @@ a limit the owner had tightened. It raises, and the order waits for a person.
 re-checking `router.es_equipo` itself (`runtime_context.require_management`):
 - `ver_limites` — all six, with the value and where it came from.
 - `proponer_limite(limite, valor)` — validates and stores the change as
-  **pending**. Nothing moves. Returns a four-digit code.
-- `confirmar_limite(codigo)` — applies it, only for the phone that proposed it,
-  only with that code, and only one setting at a time. Audited with phone,
-  timestamp, old and new value; the pending change expires in 10 minutes.
+  **pending**. Nothing moves. The four-digit code does NOT come back here:
+  Python sends it to the owner's own number and the agent never sees it.
+- there is **no** confirm tool. `app/main.py::_codigo_de_ajuste` applies the
+  change when the owner writes those four digits — a signed webhook, a phone
+  `es_equipo` authenticated, handled before any model reads the message. Only
+  for the phone that proposed it, only with that code, one setting at a time.
+  Audited with phone, timestamp, old and new value; pending expires in 10 min.
 - `historial_limites` — the last ten changes.
 
-The LLM interprets what the owner wrote and relays the code. It cannot move a
-limit on its own, and it still decides nothing about any order: `policy.evaluar`
+The LLM interprets what the owner wrote and proposes. It never learns the code,
+so it cannot take both halves of the confirmation. It cannot move a limit on
+its own, and it still decides nothing about any order: `policy.evaluar`
 reads the numbers and decides, in Python, including in the locked revalidation
 (`test_the_locked_revalidation_uses_the_limits_in_force_at_that_moment` —
 lowering the ceiling while the lock is held stops that order).
