@@ -1,7 +1,0 @@
-/workspaces/agent-crm/plus-agent/.venv/bin/pip install -q -r requirements-dev.txt
-/workspaces/agent-crm/plus-agent/.venv/bin/python deploy/verificar_modelos.py
-Proveedor: Gemini (Google, endpoint OpenAI-compatible) — clave en GOOGLE_API_KEY
-...   clientes: modelo=gemini-3.5-flash endpoint=generativelanguage.googleapis.com región=global (Google) thinking=no timeout=60s
-OK    clientes: herramienta 'ping' llamada y respondida en 21.7s tokens=223+3
-...   gerencia: modelo=gemini-3.5-flash endpoint=generativelanguage.googleapis.com región=global (Google) thinking=no timeout=60s
-OK    gerencia: herramienta 'ping' llamada y respondida en 24.2s tokens=264+0

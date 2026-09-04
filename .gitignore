@@ -6,3 +6,6 @@
 
 # worktrees temporales de las herramientas de revisión
 .claude/worktrees/
+
+# logs de verificaciones corridas a mano
+*.log
