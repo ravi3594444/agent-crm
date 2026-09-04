@@ -209,6 +209,11 @@ def limites_sin_redis(monkeypatch):
 
     monkeypatch.setattr(limites, "_hubo_cambios_durables", lambda: False)
     monkeypatch.setattr(limites, "_durable_cache", None)
+    # The delivery rules have their OWN durable marker, so their own question.
+    # Answering it False here is what lets a test use the bootstrap environment
+    # for a delivery rule; the tests about a wiped store say otherwise.
+    monkeypatch.setattr(limites, "_hubo_cambios_durables_entrega", lambda: False)
+    monkeypatch.setattr(limites, "_durable_cache_entrega", None)
     # Applying a limit change writes a durable copy to ERPNext. No test may
     # reach a real one; the tests about that record assert on this mock.
     monkeypatch.setattr(limites.erpnext, "registrar_comentario", Mock())

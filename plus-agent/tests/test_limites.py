@@ -33,6 +33,7 @@ from app.tools import configuracion
 # Captured before the autouse fixture in conftest replaces it: the two tests
 # below are about the real ERPNext cross-check, not about a stub of it.
 _CONSULTA_DURABLE_REAL = limites._hubo_cambios_durables
+_CONSULTA_ENTREGA_REAL = limites._hubo_cambios_durables_entrega
 
 EQUIPO = "5493511111111"
 OTRO_DEL_EQUIPO = "5493512222222"
@@ -769,7 +770,11 @@ def test_every_delivery_change_is_audited_in_redis_and_in_erpnext(
     assert entrada["ts"]
 
     texto = limites.erpnext.registrar_comentario.call_args[0][2]
-    assert limites.MARCA_DURABLE in texto
+    # The DELIVERY marker, not the limits one. This assertion used to say
+    # MARCA_DURABLE, which is precisely the coupling that let a schedule edit
+    # arm the auto-confirm tripwire for ever.
+    assert limites.MARCA_DURABLE_ENTREGA in texto
+    assert limites.MARCA_DURABLE not in texto
     assert "RETIRO_LOCAL_HORA" in texto and "10:30" in texto and EQUIPO in texto
 
     historial = configuracion.historial_limites.invoke({}, config=_gerencia())
@@ -1238,6 +1243,210 @@ def test_a_bootstrap_environment_amount_is_still_read_as_typed(
     fila = next(f for f in limites.resumen() if f["nombre"] == "AUTO_CONFIRM_MAX")
     assert fila["origen"] == "arranque"
     assert fila["valor"] == "1000"
+
+
+# ---------------------------------------------------------------------------
+# Dos marcas durables, porque son dos hechos distintos.
+#
+# «Se perdió el almacén de límites» tiene que frenar las confirmaciones
+# automáticas. «Se perdió el almacén de reglas de entrega» NO: cuesta un
+# mensaje de WhatsApp. Con una sola marca, cambiar los días de reparto una vez
+# dejaba armado el fusible de los límites para siempre.
+# ---------------------------------------------------------------------------
+
+
+def _historia_durable(
+    monkeypatch: pytest.MonkeyPatch, *, limite: bool, entrega: bool
+) -> Mock:
+    """Lo que ERPNext contesta a «¿se configuró algo alguna vez?», por marca.
+
+    Instala las consultas REALES: lo que se prueba acá es justamente qué marca
+    pregunta cada una.
+    """
+
+    def lector(doctype, filters=None, fields=None, limit=None, **kwargs):
+        buscado = next((str(f[2]) for f in (filters or []) if f[1] == "like"), "")
+        if limites.MARCA_DURABLE_ENTREGA in buscado:
+            return [{"name": "COMMENT-ENTREGA"}] if entrega else []
+        if limites.MARCA_DURABLE in buscado:
+            return [{"name": "COMMENT-LIMITE"}] if limite else []
+        return []
+
+    espia = Mock(side_effect=lector)
+    monkeypatch.setattr(limites.erpnext, "policy_get_list", espia)
+    monkeypatch.setattr(limites, "_hubo_cambios_durables", _CONSULTA_DURABLE_REAL)
+    monkeypatch.setattr(
+        limites, "_hubo_cambios_durables_entrega", _CONSULTA_ENTREGA_REAL
+    )
+    monkeypatch.setattr(limites, "_durable_cache", None)
+    monkeypatch.setattr(limites, "_durable_cache_entrega", None)
+    return espia
+
+
+def _entorno_de_reparto(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bootstrap .env that offers MORE than an empty store would."""
+    monkeypatch.setenv("ENTREGA_DIAS", "lunes,martes,miercoles,jueves,viernes")
+    monkeypatch.setenv("ENTREGA_HORA", "09:00")
+    monkeypatch.setenv("ENTREGA_EXCEPCION_ACTIVA", "sí")
+    monkeypatch.setenv("ENTREGA_EXCEPCION_DIAS", "sabado,domingo")
+    monkeypatch.setenv("ENTREGA_EXCEPCION_HORA", "10:00")
+
+
+def test_a_delivery_only_history_does_not_arm_the_auto_confirm_tripwire(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE bug this commit fixes.
+
+    He changed his delivery days months ago. Redis is lost today. With one
+    shared marker, ERPNext answered "yes, something was configured" and every
+    order stopped confirming because of a SCHEDULE edit.
+    """
+    monkeypatch.setenv("AUTO_CONFIRM_MAX", "1000")
+    _historia_durable(monkeypatch, limite=False, entrega=True)
+    almacen.hashes.clear()
+
+    assert limites.configuracion().tope == 1_000.0
+    decision = policy.evaluar({"name": "SO-1", "customer": "CUST-001"})
+    assert not any("límites sin verificar" in m for m in decision.motivos)
+
+
+def test_a_limit_only_history_still_fails_closed_after_a_wipe(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The protection that must NOT be lost in the split: a real limit change
+    plus an empty store is data loss, and nothing confirms until it is back."""
+    monkeypatch.setenv("AUTO_CONFIRM_MAX", "1000000")  # the looser bootstrap
+    _historia_durable(monkeypatch, limite=True, entrega=False)
+    almacen.hashes.clear()
+
+    with pytest.raises(limites.LimiteError) as fallo:
+        limites.configuracion()
+    assert "restaurarlos" in str(fallo.value)
+
+    decision = policy.evaluar({"name": "SO-1", "customer": "CUST-001"})
+    assert decision.auto is False
+    assert any("límites sin verificar" in m for m in decision.motivos)
+
+
+def test_both_histories_still_fail_closed_after_a_wipe(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delivery change does not EXCUSE a lost limit."""
+    monkeypatch.setenv("AUTO_CONFIRM_MAX", "1000000")
+    _historia_durable(monkeypatch, limite=True, entrega=True)
+    almacen.hashes.clear()
+
+    with pytest.raises(limites.LimiteError):
+        limites.configuracion()
+
+
+def test_no_history_at_all_is_a_fresh_install_for_both_registries(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty store with nothing on record is a new deployment, and the
+    bootstrap environment is exactly what it is for — in BOTH registries."""
+    monkeypatch.setenv("AUTO_CONFIRM_MAX", "1000")
+    _entorno_de_reparto(monkeypatch)
+    _historia_durable(monkeypatch, limite=False, entrega=False)
+    almacen.hashes.clear()
+
+    assert limites.configuracion().tope == 1_000.0
+    reglas = limites.entrega()
+    assert reglas.dias_reparto == (0, 1, 2, 3, 4)
+    assert reglas.excepcion_activa is True
+
+
+def test_a_wiped_delivery_store_offers_nothing_instead_of_the_environment(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failing soft must not mean failing OPEN.
+
+    Everything in Entrega only widens what the system offers by itself, so a
+    wiped store falling back to the .env would restore a round he moved and an
+    exception he turned off — and pre-authorise deliveries nobody authorised.
+    Offering nothing costs one WhatsApp message to a person.
+    """
+    _entorno_de_reparto(monkeypatch)
+    _historia_durable(monkeypatch, limite=False, entrega=True)
+    almacen.hashes.clear()
+
+    reglas = limites.entrega()
+    assert reglas.dias_reparto == ()
+    assert reglas.hora_reparto == ""
+    assert reglas.excepcion_activa is False
+    assert reglas.excepcion_dias == ()
+    assert reglas.retiro_activo is False
+
+
+def test_a_delivery_rule_the_owner_set_survives_a_restart_with_an_empty_redis(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And the store being POPULATED is what says the rules are his.
+
+    A restart that still has Redis reads his days, not the .env's — the
+    durable-marker question is only asked when the store has nothing.
+    """
+    _entorno_de_reparto(monkeypatch)
+    _proponer("días de reparto", "martes y viernes")
+    _confirmar(_codigo_enviado(almacen))
+    _historia_durable(monkeypatch, limite=False, entrega=True)
+
+    # A "restart": nothing in memory, the same store, the same ERPNext.
+    assert limites.entrega().dias_reparto == (1, 4)
+
+
+def test_an_erpnext_that_cannot_be_asked_about_delivery_offers_nothing(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"I could not check" is not "nothing was configured" — and it is not an
+    exception either: a delivery rule must never be an outage."""
+    _entorno_de_reparto(monkeypatch)
+    monkeypatch.setattr(
+        limites.erpnext,
+        "policy_get_list",
+        Mock(side_effect=limites.erpnext.ERPNextError("caído")),
+    )
+    monkeypatch.setattr(
+        limites, "_hubo_cambios_durables_entrega", _CONSULTA_ENTREGA_REAL
+    )
+    monkeypatch.setattr(limites, "_durable_cache_entrega", None)
+    almacen.hashes.clear()
+
+    reglas = limites.entrega()
+    assert reglas.dias_reparto == ()
+    assert reglas.excepcion_activa is False
+
+
+def test_a_limit_change_is_recorded_under_the_limit_marker(
+    almacen: FakeRedis,
+) -> None:
+    """The other half of the split: a real limit change still arms the
+    tripwire, so the protection is not gone, only narrowed to what it is for."""
+    _proponer("tope", "30000")
+    _confirmar(_codigo_enviado(almacen))
+
+    texto = limites.erpnext.registrar_comentario.call_args[0][2]
+    assert limites.MARCA_DURABLE in texto
+    assert limites.MARCA_DURABLE_ENTREGA not in texto
+
+
+def test_the_two_durable_questions_ask_erpnext_for_different_markers(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stated directly, because the whole fix is which marker each one reads."""
+    espia = _historia_durable(monkeypatch, limite=False, entrega=True)
+
+    assert limites._hubo_cambios_durables() is False
+    assert limites._hubo_cambios_durables_entrega() is True
+
+    preguntados = [
+        str(f[2])
+        for llamada in espia.call_args_list
+        for f in llamada.kwargs["filters"]
+        if f[1] == "like"
+    ]
+    assert any(limites.MARCA_DURABLE in q for q in preguntados)
+    assert any(limites.MARCA_DURABLE_ENTREGA in q for q in preguntados)
 
 
 # ---------------------------------------------------------------------------

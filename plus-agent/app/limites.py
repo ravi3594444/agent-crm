@@ -43,6 +43,16 @@ from app import erpnext, locks
 # copia durable de cada cambio vive en ERPNext, así que un almacén vacío CON
 # cambios registrados es pérdida de datos, no una instalación nueva.
 MARCA_DURABLE = "[limite]"
+# Marca APARTE para las reglas de entrega, y en esto está TODO el punto de
+# haber separado los dos registros. _hubo_cambios_durables() le pregunta a
+# ERPNext por MARCA_DURABLE para distinguir «nunca se configuró» de «se perdió
+# el almacén», y un almacén vacío CON cambios registrados hace que
+# configuracion() levante — o sea, que no se confirme solo ningún pedido.
+# Compartir la marca significaba que un cambio de días de reparto de hoy dejaba
+# armado ese fusible para siempre, y un flush de Redis el mes que viene frenaba
+# las ventas por un cambio de horario. Son dos hechos distintos y se anotan
+# distinto.
+MARCA_DURABLE_ENTREGA = "[entrega]"
 DURABLE_CACHE_SEGUNDOS = 60.0
 
 CLAVE_VALORES = "plus-agent:limites"
@@ -411,36 +421,79 @@ def _texto(valor: object) -> str:
 
 
 _durable_cache: tuple[float, bool] | None = None
+_durable_cache_entrega: tuple[float, bool] | None = None
 
 
-def _hubo_cambios_durables() -> bool:
-    """Si ERPNext recuerda que alguna vez se configuró un límite.
+def _consultar_marca(marca: str, queja: str) -> bool:
+    """¿Hay en ERPNext algún comentario de auditoría con esa marca?
 
-    Es la única pregunta que Redis no puede contestar sobre sí mismo. La
-    respuesta se cachea un minuto: si es «sí» el sistema ya está fallando
-    cerrado, y si es «no» es porque nunca se configuró nada y no hay nada que
-    perder.
+    Sin cachear: los dos que preguntan tienen su propio caché, porque una marca
+    puede estar y la otra no y ésa es exactamente la distinción que importa.
     """
-    global _durable_cache
-    ahora = time.monotonic()
-    if _durable_cache and _durable_cache[0] > ahora:
-        return _durable_cache[1]
     try:
         filas = erpnext.policy_get_list(
             "Comment",
             filters=[
                 ["reference_doctype", "=", "Company"],
-                ["content", "like", f"%{MARCA_DURABLE}%"],
+                ["content", "like", f"%{marca}%"],
             ],
             fields=["name"],
             limit=1,
         )
     except erpnext.ERPNextError as exc:
-        raise LimiteError(
-            "no pude verificar en ERPNext si los límites se configuraron antes"
-        ) from exc
-    hubo = bool(filas)
+        raise LimiteError(queja) from exc
+    return bool(filas)
+
+
+def _hubo_cambios_durables() -> bool:
+    """Si ERPNext recuerda que alguna vez se configuró un LÍMITE.
+
+    Es la única pregunta que Redis no puede contestar sobre sí mismo. La
+    respuesta se cachea un minuto: si es «sí» el sistema ya está fallando
+    cerrado, y si es «no» es porque nunca se configuró nada y no hay nada que
+    perder.
+
+    Pregunta SÓLO por MARCA_DURABLE. Un cambio de reglas de entrega no arma
+    este fusible: no es un límite y no decide si un pedido se confirma solo.
+    """
+    global _durable_cache
+    ahora = time.monotonic()
+    if _durable_cache and _durable_cache[0] > ahora:
+        return _durable_cache[1]
+    hubo = _consultar_marca(
+        MARCA_DURABLE,
+        "no pude verificar en ERPNext si los límites se configuraron antes",
+    )
     _durable_cache = (ahora + DURABLE_CACHE_SEGUNDOS, hubo)
+    return hubo
+
+
+def _hubo_cambios_durables_entrega() -> bool:
+    """Si ERPNext recuerda que alguna vez se configuró una regla de ENTREGA.
+
+    NUNCA levanta: una regla de entrega que no se puede resolver cuesta un
+    mensaje de WhatsApp, no una venta que no cierra, y ésa es la asimetría
+    entera entre los dos registros.
+
+    «No pude averiguarlo» devuelve True, o sea se trata como almacén perdido.
+    No es pesimismo: lo único que hace ese True es NO habilitar el entorno de
+    arranque, y todo lo que hay en Entrega sólo puede ensanchar lo que el
+    sistema ofrece por su cuenta. Fallar para el otro lado sería restaurar un
+    día de reparto que el dueño borró.
+    """
+    global _durable_cache_entrega
+    ahora = time.monotonic()
+    if _durable_cache_entrega and _durable_cache_entrega[0] > ahora:
+        return _durable_cache_entrega[1]
+    try:
+        hubo = _consultar_marca(MARCA_DURABLE_ENTREGA, "entrega no verificable")
+    except LimiteError:
+        print(
+            "[limites] no pude verificar en ERPNext si las reglas de entrega "
+            "se configuraron antes: no habilito el entorno de arranque"
+        )
+        return True
+    _durable_cache_entrega = (ahora + DURABLE_CACHE_SEGUNDOS, hubo)
     return hubo
 
 
@@ -735,6 +788,25 @@ def entrega() -> Entrega:
         # exception nobody was promised, not an order that cannot confirm.
         print(f"[limites] reglas de entrega no legibles: {exc}")
         return Entrega()
+    # An empty delivery store plus changes on record means the store was WIPED,
+    # and falling back to the bootstrap environment here would restore whatever
+    # the .env says — a day he removed, an exception he turned off. That is a
+    # silent WIDENING of what the system offers on its own, so it offers
+    # nothing instead and a person is asked. Unlike the limits this never
+    # raises: see _hubo_cambios_durables_entrega.
+    sin_reglas_del_dueno = not any(
+        almacen.get(nombre, "").strip() for nombre in ENTREGA
+    )
+    # ponytail: la autoridad es ésta, que es la que habilita ofertas. resumen()
+    # sigue mostrando los valores de arranque en ese estado, así que el reporte
+    # de readiness dice «configurado» donde entrega() no ofrece nada. Si eso
+    # confunde a alguien en el piloto, la señal va también ahí.
+    if sin_reglas_del_dueno and _hubo_cambios_durables_entrega():
+        print(
+            "[limites] las reglas de entrega no están en el almacén y ERPNext "
+            "tiene cambios registrados: no ofrezco nada por mi cuenta"
+        )
+        return Entrega()
     # Read through _bruto, not _crudo: a minimum nobody can parse must not
     # read as "no minimum". See Entrega.excepcion_minimo.
     minimo_texto, minimo_legible = _bruto("ENTREGA_EXCEPCION_MIN_TOTAL", almacen)
@@ -979,9 +1051,11 @@ def _auditar_en_erpnext(entrada: dict) -> None:
     configuró» de «se perdió el almacén». Si no se puede escribir, el cambio
     NO se aplica: prefiero no mover el límite antes que moverlo sin registro.
     """
-    global _durable_cache
+    global _durable_cache, _durable_cache_entrega
+    entrega_cambio = entrada["limite"] in ENTREGA
+    marca = MARCA_DURABLE_ENTREGA if entrega_cambio else MARCA_DURABLE
     texto = (
-        f"{MARCA_DURABLE} {entrada['limite']}: {entrada['anterior']} -> "
+        f"{marca} {entrada['limite']}: {entrada['anterior']} -> "
         f"{entrada['nuevo']} · lo cambió {entrada['telefono']} "
         f"el {entrada['ts']}"
     )
@@ -993,7 +1067,10 @@ def _auditar_en_erpnext(entrada: dict) -> None:
         raise LimiteError(
             "no pude registrar el cambio en ERPNext, así que no lo apliqué"
         ) from exc
-    _durable_cache = None
+    if entrega_cambio:
+        _durable_cache_entrega = None
+    else:
+        _durable_cache = None
 
 
 def auditoria(maximo: int = 10) -> list[dict]:
