@@ -484,6 +484,37 @@ class Piloto:
                 "-v", f"{cert}:/demo/cert.pem:ro", *argumentos, IMAGEN)
         self.ip_agente = _ip(AGENTE)
         self.esperar_salud()
+        self.esperar_candado_del_worker()
+
+    def esperar_candado_del_worker(self) -> None:
+        """Espera a que caduque el candado que dejó el contenedor que maté.
+
+        app/main.py toma UN candado global para drenar la cola
+        (wa:{inbound}:worker-lock) y lo renueva con un latido; su TTL es de 90
+        segundos. Si mato el contenedor que lo tiene, el candado queda puesto
+        sin dueño y el agente nuevo NO puede trabajar hasta que expire: el
+        primer mensaje se queda en la cola, el turno se va en timeout y el
+        cliente recibe una disculpa técnica.
+
+        No se borra a mano a propósito. Ese candado es lo que impide que dos
+        procesos manden el mismo pedido dos veces, y un banco de pruebas que
+        lo saltea deja de probar justamente eso. Se espera, y se dice por qué.
+        """
+        clave = "wa:{inbound}:worker-lock"
+        for i in range(120):
+            queda = _correr("docker", "exec", REDIS, "redis-cli", "exists",
+                            clave, verificar=False)
+            if queda.strip() in ("0", ""):
+                if i:
+                    print(f"  ·· el candado del worker caducó ({i}s)", flush=True)
+                return
+            if i == 0:
+                print("  ·· esperando que caduque el candado del worker que "
+                      "dejó el contenedor anterior (TTL 90 s)", flush=True)
+            time.sleep(1)
+        raise RuntimeError(
+            f"{clave} sigue puesto: el agente nuevo no va a poder drenar la cola"
+        )
 
     def reiniciar_agente(self) -> None:
         """Redis vacío y proceso nuevo: el estado tiene que venir de ERPNext."""
