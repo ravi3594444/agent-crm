@@ -536,16 +536,25 @@ own fault; that is the point of having one.
 calls `responder_gerencia(data, thread_id=thread_tag, usuario=thread_tag)`, so
 `configurable["actor_phone"]` is `wa:<sha256 of the phone>` and never a phone.
 `runtime_context.require_management` then asks `router.es_equipo()` about that
-hash, which is always False. Ten tools answer "that number is not authorized"
-to the owner himself: `ver_limites`, `proponer_limite`, `historial_limites`,
-`ver_reglas_de_entrega`, `estado_del_sistema`, `ver_avisos_fallidos` and the
-four capture tools. `app/briefing.py` passes a hash the same way.
+hash, which is always False. Seven tools answer "that number is not
+authorized" to the owner himself — every tool that calls `require_management`:
+`ver_limites`, `proponer_limite`, `historial_limites`, `ver_reglas_de_entrega`,
+`estado_del_sistema`, `ver_avisos_fallidos` and `contar_stock`.
+`app/briefing.py` passes a hash the same way.
+
+The other management tools are unaffected because they do not gate on the
+actor at all: `pedidos_pendientes`, `ventas_del_periodo`, `stock_bajo`,
+`cobranzas_vencidas`, `ficha_cliente`, `ejecutar_reporte`,
+`registrar_venta_offline`, `confirmar_entrega` and `redactar_mensaje_cliente`
+answer normally. Worth knowing in both directions: the read-only reports still
+work, and the three capture tools that write to ERPNext are reachable by
+anyone the router lets through, with no second check.
 
 Everything deterministic is fine — `confirmar <SO>`, `rechazar`, `preparar`,
 `despachar`, `cancelar` and the four-digit limit code all run on the real phone
 through `manejar_boton`. It is only the management *agent* that is locked out.
 Consequence worth naming: the owner cannot change a limit at all, because
-`proponer_limite` is the only way in and it is one of the ten.
+`proponer_limite` is the only way in and it is one of the seven.
 
 Scenario `gerencia_estado_del_sistema` pins the current behaviour, so it will
 fail the day someone fixes it. That is deliberate — it is the witness, not
