@@ -39,6 +39,8 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatResult
 from langchain_openai import ChatOpenAI
 
 ROLES = ("clientes", "gerencia")
@@ -81,6 +83,10 @@ class Proveedor:
     modelo_default: Mapping[str, str]
     # ¿Acepta los controles de razonamiento QWEN_THINKING_*?
     razona: bool
+    # Nombre de la clase de cliente, resuelto en construir() por globals(): el
+    # protocolo es el mismo, pero Gemini necesita que se le devuelva la firma
+    # de su llamada a herramienta (ver ChatGemini).
+    clase: str = "ChatOpenAI"
 
     @property
     def clave_principal(self) -> str:
@@ -125,6 +131,7 @@ PROVEEDORES: Mapping[str, Proveedor] = {
             "gerencia": GEMINI_MODELO_DEFAULT,
         },
         razona=False,
+        clase="ChatGemini",
     ),
 }
 
@@ -316,6 +323,110 @@ def configuracion(rol: str, env: Mapping[str, str] | None = None) -> dict:
     }
 
 
+# Dónde guarda ChatGemini las firmas dentro del AIMessage: en
+# additional_kwargs, que es lo que el checkpointer de LangGraph serializa junto
+# con el mensaje, así que la firma sobrevive al turno y al reinicio.
+CLAVE_FIRMAS = "gemini_thought_signatures"
+
+
+def firmas_de_respuesta(respuesta: object) -> dict[str, dict]:
+    """{tool_call_id: extra_content} de una respuesta cruda de Gemini.
+
+    Gemini devuelve cada llamada a herramienta con
+    ``extra_content.google.thought_signature``, y el cliente OpenAI la descarta
+    porque no es un campo del protocolo. Acá se rescata para poder devolverla.
+    """
+    if hasattr(respuesta, "model_dump"):
+        try:
+            respuesta = respuesta.model_dump()
+        except Exception:  # pragma: no cover - defensivo
+            return {}
+    if not isinstance(respuesta, dict):
+        return {}
+    firmas: dict[str, dict] = {}
+    for eleccion in respuesta.get("choices") or []:
+        if not isinstance(eleccion, dict):
+            continue
+        mensaje = eleccion.get("message")
+        if not isinstance(mensaje, dict):
+            continue
+        for llamada in mensaje.get("tool_calls") or []:
+            if not isinstance(llamada, dict):
+                continue
+            extra = llamada.get("extra_content")
+            identificador = llamada.get("id")
+            if extra and identificador:
+                firmas[str(identificador)] = extra
+    return firmas
+
+
+class ChatGemini(ChatOpenAI):
+    """ChatOpenAI que le devuelve a Gemini la firma de su llamada a herramienta.
+
+    EL PROBLEMA, QUE NO ES TEÓRICO
+    Gemini contesta una llamada a herramienta con un campo propio,
+    ``extra_content.google.thought_signature``. El cliente OpenAI lo descarta
+    —no es del protocolo— y en el turno siguiente reenvía la llamada sin él.
+    Gemini rechaza ESO con 400: «Function call is missing a thought_signature
+    in functionCall parts». Verificado contra el endpoint real: sin la firma da
+    400, con la firma los dos pasos dan 200.
+
+    Y no es un detalle de un script de verificación: los dos agentes viven de
+    llamar herramientas y leer su resultado. Sin esto, el primer cliente que
+    pregunta un precio recibe un error. Apagar el razonamiento no lo evita
+    (también probado): la firma se exige igual.
+
+    Sólo el camino sin streaming, que es el único que usa este sistema con
+    Gemini (configuracion() deja streaming=False porque los controles de
+    razonamiento son de Qwen). Si algún día se enciende, hay que hacer lo mismo
+    en el camino de chunks.
+    """
+
+    def _create_chat_result(
+        self, response: object, generation_info: dict | None = None
+    ) -> ChatResult:
+        resultado = super()._create_chat_result(response, generation_info)
+        firmas = firmas_de_respuesta(response)
+        if not firmas:
+            return resultado
+        for generacion in resultado.generations:
+            mensaje = generacion.message
+            if isinstance(mensaje, AIMessage):
+                mensaje.additional_kwargs[CLAVE_FIRMAS] = firmas
+        return resultado
+
+    def _get_request_payload(self, input_: object, *, stop: object = None, **kwargs) -> dict:
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        try:
+            mensajes = self._convert_input(input_).to_messages()
+        except Exception:  # pragma: no cover - la conversión ya la hizo super()
+            return payload
+        firmas: dict[str, dict] = {}
+        for mensaje in mensajes:
+            if isinstance(mensaje, AIMessage):
+                guardadas = mensaje.additional_kwargs.get(CLAVE_FIRMAS)
+                if isinstance(guardadas, dict):
+                    firmas.update(guardadas)
+        if not firmas:
+            return payload
+        for mensaje in payload.get("messages") or []:
+            if not isinstance(mensaje, dict):
+                continue
+            for llamada in mensaje.get("tool_calls") or []:
+                if not isinstance(llamada, dict) or llamada.get("extra_content"):
+                    continue
+                extra = firmas.get(str(llamada.get("id")))
+                if extra:
+                    llamada["extra_content"] = extra
+        return payload
+
+
 def construir(rol: str) -> ChatOpenAI:
-    """El modelo listo para el agente. No hace ninguna llamada de red."""
-    return ChatOpenAI(**configuracion(rol))
+    """El modelo listo para el agente. No hace ninguna llamada de red.
+
+    La clase sale del proveedor por nombre y se resuelve acá, así el cliente de
+    Gemini es el que devuelve la firma y el de Qwen sigue siendo el de siempre.
+    """
+    prov = proveedor()
+    clase = globals().get(prov.clase, ChatOpenAI)
+    return clase(**configuracion(rol))

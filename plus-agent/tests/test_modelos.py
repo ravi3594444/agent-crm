@@ -23,6 +23,10 @@ from app import modelos
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
+# Captured before the autouse fixture stands it in: the tests about the
+# signature carry-through need the REAL client, not a recorder.
+_ChatGeminiReal = modelos.ChatGemini
+
 
 class _ChatOpenAIGrabado(RunnableLambda):
     """Stands in for langchain_openai.ChatOpenAI: records kwargs, no network.
@@ -60,6 +64,9 @@ def _entorno(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test-not-real")
     _ChatOpenAIGrabado.instancias = []
     monkeypatch.setattr(modelos, "ChatOpenAI", _ChatOpenAIGrabado)
+    # construir() resolves the client class by name from the provider, so the
+    # Gemini one has to be stood in too or the real class would be built.
+    monkeypatch.setattr(modelos, "ChatGemini", _ChatOpenAIGrabado)
 
 
 def test_sales_agent_is_qwen_plus_with_thinking_off_by_default() -> None:
@@ -611,3 +618,197 @@ def test_the_check_runs_both_roles_and_masks_the_key(monkeypatch, capsys) -> Non
     assert "OK    clientes" in salida and "OK    gerencia" in salida
     assert "AIzaSyNotARealGeminiKey00" not in salida
     assert "clave en GEMINI_API_KEY" in salida  # the variable, never the value
+
+
+# ---------------------------------------------------------------------------
+# Gemini's thought signature. Verified against the real endpoint: replaying a
+# tool call WITHOUT it answers 400, with it both steps answer 200, and turning
+# thinking off does not lift the requirement. Both agents live on calling tools
+# and reading the result, so without this the first customer who asks a price
+# gets an error.
+# ---------------------------------------------------------------------------
+
+_FIRMA = "EooDCocDARFNMg-firma-de-prueba"
+
+
+def _respuesta_con_firma(firma: str = _FIRMA, *, id_llamada: str = "call_1") -> dict:
+    """Lo que contesta Gemini cuando decide llamar una herramienta."""
+    return {
+        "id": "chatcmpl-1",
+        "created": 0,
+        "model": "gemini-3.5-flash",
+        "object": "chat.completion",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": id_llamada,
+                            "type": "function",
+                            "function": {"name": "ping", "arguments": '{"texto":"ok"}'},
+                            "extra_content": {"google": {"thought_signature": firma}},
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+def test_the_signature_is_extracted_from_a_raw_gemini_answer() -> None:
+    firmas = modelos.firmas_de_respuesta(_respuesta_con_firma())
+
+    assert firmas == {"call_1": {"google": {"thought_signature": _FIRMA}}}
+
+
+@pytest.mark.parametrize(
+    "respuesta",
+    [
+        {},
+        {"choices": []},
+        {"choices": [{"message": {"role": "assistant", "content": "hola"}}]},
+        {"choices": [{"message": {"tool_calls": [{"id": "x", "function": {}}]}}]},
+        {"choices": ["no es un dict"]},
+        "ni siquiera es un dict",
+        None,
+    ],
+)
+def test_an_answer_without_signatures_yields_nothing_and_never_raises(respuesta) -> None:
+    assert modelos.firmas_de_respuesta(respuesta) == {}
+
+
+def _cliente_gemini():
+    """A real ChatGemini. Constructing it makes no request."""
+    return _ChatGeminiReal(
+        model="gemini-3.5-flash", api_key="AIza-test-not-real-0000", base_url=GEMINI_BASE_URL
+    )
+
+
+def test_the_signature_is_kept_on_the_message_so_it_survives_the_turn(monkeypatch) -> None:
+    """It goes in additional_kwargs because that is what LangGraph's
+    checkpointer serializes with the message: the next turn — and the next
+    process — still has it."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    resultado = _cliente_gemini()._create_chat_result(_respuesta_con_firma())
+
+    mensaje = resultado.generations[0].message
+    assert mensaje.additional_kwargs[modelos.CLAVE_FIRMAS] == {
+        "call_1": {"google": {"thought_signature": _FIRMA}}
+    }
+    # The tool call itself is parsed as usual.
+    assert [c["name"] for c in mensaje.tool_calls] == ["ping"]
+
+
+def test_the_signature_is_sent_back_on_the_tool_call(monkeypatch) -> None:
+    """THE fix. The replay carries extra_content again, which is what Gemini
+    demands and what langchain-openai drops on its own."""
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    cliente = _cliente_gemini()
+    respondido = cliente._create_chat_result(_respuesta_con_firma()).generations[0].message
+
+    payload = cliente._get_request_payload(
+        [
+            HumanMessage(content="llamá a ping"),
+            respondido,
+            ToolMessage(content="pong:ok", tool_call_id="call_1"),
+        ]
+    )
+
+    asistentes = [m for m in payload["messages"] if m.get("tool_calls")]
+    assert len(asistentes) == 1
+    (llamada,) = asistentes[0]["tool_calls"]
+    assert llamada["extra_content"] == {"google": {"thought_signature": _FIRMA}}
+    assert llamada["id"] == "call_1"
+
+
+def test_a_tool_call_with_no_stored_signature_is_left_alone(monkeypatch) -> None:
+    """Nothing is invented: a message that never carried a signature is sent
+    exactly as before."""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    sin_firma = AIMessage(
+        content="",
+        tool_calls=[{"name": "ping", "args": {"texto": "ok"}, "id": "call_9"}],
+    )
+
+    payload = _cliente_gemini()._get_request_payload(
+        [
+            HumanMessage(content="hola"),
+            sin_firma,
+            ToolMessage(content="pong:ok", tool_call_id="call_9"),
+        ]
+    )
+
+    (asistente,) = [m for m in payload["messages"] if m.get("tool_calls")]
+    assert "extra_content" not in asistente["tool_calls"][0]
+
+
+def test_signatures_are_matched_by_tool_call_id_not_by_position(monkeypatch) -> None:
+    """Two calls in one conversation must not swap signatures."""
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    cliente = _cliente_gemini()
+    primero = cliente._create_chat_result(
+        _respuesta_con_firma("firma-A", id_llamada="call_A")
+    ).generations[0].message
+    segundo = cliente._create_chat_result(
+        _respuesta_con_firma("firma-B", id_llamada="call_B")
+    ).generations[0].message
+
+    payload = cliente._get_request_payload(
+        [
+            HumanMessage(content="uno"),
+            primero,
+            ToolMessage(content="pong:A", tool_call_id="call_A"),
+            segundo,
+            ToolMessage(content="pong:B", tool_call_id="call_B"),
+        ]
+    )
+
+    firmas = {
+        m["tool_calls"][0]["id"]: m["tool_calls"][0]["extra_content"]["google"][
+            "thought_signature"
+        ]
+        for m in payload["messages"]
+        if m.get("tool_calls")
+    }
+    assert firmas == {"call_A": "firma-A", "call_B": "firma-B"}
+
+
+def test_the_gemini_provider_builds_the_signature_carrying_client(monkeypatch) -> None:
+    """And the plain client stays plain for Qwen: the fix reaches production
+    only through the provider that needs it."""
+    assert modelos.PROVEEDORES["gemini"].clase == "ChatGemini"
+    assert modelos.PROVEEDORES["qwen"].clase == "ChatOpenAI"
+
+    construidas: list[str] = []
+    monkeypatch.setattr(
+        modelos, "ChatGemini", lambda **kw: construidas.append("ChatGemini") or object()
+    )
+    monkeypatch.setattr(
+        modelos, "ChatOpenAI", lambda **kw: construidas.append("ChatOpenAI") or object()
+    )
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza-test-not-real-0000")
+    modelos.construir("clientes")
+    monkeypatch.setenv("LLM_PROVIDER", "qwen")
+    modelos.construir("clientes")
+
+    assert construidas == ["ChatGemini", "ChatOpenAI"]
+
+
+def test_chat_gemini_is_a_chat_openai_so_nothing_else_changes() -> None:
+    """One client, one protocol: the subclass only re-attaches a dropped field."""
+    from langchain_openai import ChatOpenAI as Real
+
+    assert issubclass(_ChatGeminiReal, Real)

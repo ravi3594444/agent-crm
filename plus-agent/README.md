@@ -45,7 +45,7 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `docker-compose.yml` | Agent + Redis Stack (+ `briefing` on demand) |
 | `Dockerfile`, `Makefile`, `.env.example`, `pyproject.toml` | Build, shortcuts, configuration, lint config |
 | `.github/workflows/ci.yml` | Lint, tests, image build, container boot against a real Redis Stack |
-| `tests/` | 1224 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
+| `tests/` | 1238 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
 
 ## Two agents, one webhook
 
@@ -586,6 +586,18 @@ Shared, either way: `LLM_TIMEOUT_SECONDS` (60), `LLM_MAX_RETRIES` (2),
 `LLM_MODEL_CLIENTES` / `LLM_MODEL_GERENCIA` names are still accepted under both
 providers, and the provider-specific variable wins.
 
+**Gemini's thought signature.** Gemini answers a tool call with a field of its
+own, `extra_content.google.thought_signature`, and the OpenAI client drops it
+because it is not part of the protocol — so the next turn replays the tool call
+without it and Gemini answers `400 Function call is missing a
+thought_signature`. Since both agents live on calling tools and reading the
+result, that is every tool turn, not an edge case. `modelos.ChatGemini` keeps
+the signature on the message (in `additional_kwargs`, which LangGraph's
+checkpointer serializes, so it survives the turn and a restart) and re-attaches
+it to the tool call on the way out. Verified against the live endpoint: without
+it 400, with it 200, and turning thinking off does not lift the requirement.
+Only the Gemini client does this; the Qwen path is the plain `ChatOpenAI`.
+
 Reasoning (`QWEN_THINKING_CLIENTES`, `QWEN_THINKING_GERENCIA`,
 `QWEN_THINKING_BUDGET`) is **Qwen only** — DashScope requires streaming with
 thinking and the code enables it alongside. Under `gemini` those variables are
@@ -744,7 +756,7 @@ then commit.
 
 ```bash
 make install       # .venv with requirements-dev.txt
-make test          # 1224 passed, needs a Redis Stack on REDIS_URL
+make test          # 1238 passed, needs a Redis Stack on REDIS_URL
 make check         # what CI runs (ruff check + tests)
 make check-env     # is .env complete, are the three ERPNext keys distinct
 make up            # docker compose up, wait for :8081/health

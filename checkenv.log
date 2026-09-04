@@ -1,0 +1,51 @@
+/workspaces/agent-crm/plus-agent/.venv/bin/pip install -q -r requirements-dev.txt
+/workspaces/agent-crm/plus-agent/.venv/bin/python -m app.readiness --sin-red
+OK     LLM_PROVIDER: gemini — Gemini (Google, endpoint OpenAI-compatible) (explícito)
+OK     GEMINI_API_KEY: presente vía GOOGLE_API_KEY (39 caracteres; no se muestra)
+OK     GEMINI_BASE_URL: región global (Google) (default)
+OK     GEMINI_SALES_MODEL: gemini-3.5-flash (GEMINI_SALES_MODEL)
+OK     GEMINI_MANAGER_MODEL: gemini-3.5-flash (GEMINI_MANAGER_MODEL)
+OK     LLM_TIMEOUT_SECONDS: timeout 60s por llamada
+AVISO  gemini: la conexión real se prueba a mano con `make verificar-modelos` (no en CI)
+AVISO  PAIS_TELEFONO: vacío: se asume 54 (Argentina)
+FALTA  TELEFONOS_EQUIPO: vacío: sin agente de gestión, sin alertas y nadie puede confirmar pedidos
+FALTA  ZONAS_ENTREGA: ninguna lista configurada: ningún pedido se entrega solo
+OK     WHATSAPP_TOKEN: presente (295 caracteres; no se muestra)
+OK     WHATSAPP_PHONE_NUMBER_ID: presente (16 caracteres; no se muestra)
+OK     META_APP_SECRET: presente (32 caracteres; no se muestra)
+OK     META_VERIFY_TOKEN: presente (19 caracteres; no se muestra)
+AVISO  WhatsApp: sin red: el token y las plantillas no se verificaron
+AVISO  WHATSAPP_STAFF_PENDING_TEMPLATE: vacía (opcional en el piloto): ese aviso sale como texto libre mientras el destinatario haya escrito en las últimas 24 h
+AVISO  WHATSAPP_STAFF_CONFIRMED_TEMPLATE: vacía (opcional en el piloto): ese aviso sale como texto libre mientras el destinatario haya escrito en las últimas 24 h
+AVISO  WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE: vacía (opcional en el piloto): ese aviso sale como texto libre mientras el destinatario haya escrito en las últimas 24 h
+AVISO  WHATSAPP_CUSTOMER_REJECTED_TEMPLATE: vacía (opcional en el piloto): ese aviso sale como texto libre mientras el destinatario haya escrito en las últimas 24 h
+AVISO  WHATSAPP_CUSTOMER_CANCELLED_TEMPLATE: vacía (opcional en el piloto): ese aviso sale como texto libre mientras el destinatario haya escrito en las últimas 24 h
+AVISO  WHATSAPP_STAFF_ALERT_TEMPLATE: vacía (opcional en el piloto): ese aviso sale como texto libre mientras el destinatario haya escrito en las últimas 24 h
+OK     ERPNEXT_URL: presente
+OK     ERPNEXT_COMPANY: presente
+OK     ERPNEXT_WAREHOUSE: presente
+OK     ERPNext agente: credencial presente
+OK     ERPNext gerencia: credencial presente
+OK     ERPNext politica: credencial presente
+FALTA  ERPNext credenciales: dos de las tres claves son iguales: el LLM tendría Submit o lectura total. Tres usuarios distintos.
+AVISO  ERPNext: sin red: permisos y depósito no se verificaron
+AVISO  STOCK_CONFIABLE: false: el bot nunca promete stock y nada se auto-confirma
+OK     STOCK_CONFIABLE_HORAS: ventana de confianza default
+OK     AUTO_CONFIRM_PRICE_LIST: presente
+OK     AUTO_CONFIRM_CURRENCY: presente
+AVISO  AUTO_CONFIRM_MAX: en 0 (del .env): todo pedido espera al dueño
+OK     AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO: válido (default del código)
+OK     STOCK_BUFFER_PCT: válido (del .env)
+OK     AUTO_CONFIRM_MAX_CLIENTE_NUEVO: válido (default del código)
+OK     AUTO_CONFIRM_MAX_DEBT: válido (del .env)
+OK     AUTO_CONFIRM_MAX_DESCUENTO_PCT: válido (default del código)
+OK     APROBACION_TIMEOUT_HORAS: válido (default del código)
+OK     REVISION_TIMEOUT_HORAS: válido (default del código)
+OK     AUTO_CONFIRM_DESCUENTOS_APRUEBAN: válido (default del código)
+AVISO  Respaldo de vencimiento: sin días/hora de reparto ni retiro habilitado: una solicitud que vence no puede ofrecerle nada concreto al cliente y el pedido se cae. Configurá «días de reparto» y «hora de reparto», o el retiro por el local
+AVISO  ENTREGA_EXCEPCION_ACTIVA: en no: toda entrega fuera de día la decide una persona
+AVISO  ENTREGA_CARGO_CUENTA: vacía: un cargo de envío no se escribe en el pedido y queda para que lo agregue una persona (se configura sólo acá, nunca por WhatsApp)
+OK     Borradores trabados: ninguno
+
+NO LISTO: 3 problema(s) que bloquean, 15 aviso(s)
+make: *** [Makefile:37: check-env-offline] Error 1
