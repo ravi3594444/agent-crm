@@ -527,6 +527,47 @@ sockets from inside the container, not assumed from the `.env`.
 Details, including what each mode can and cannot prove, are in
 [demo/README.md](demo/README.md).
 
+### What the bench found
+
+Three things, in order of how much they matter. None of them are the bench's
+own fault; that is the point of having one.
+
+**1. Every management-only tool is unreachable from WhatsApp.** `app/main.py`
+calls `responder_gerencia(data, thread_id=thread_tag, usuario=thread_tag)`, so
+`configurable["actor_phone"]` is `wa:<sha256 of the phone>` and never a phone.
+`runtime_context.require_management` then asks `router.es_equipo()` about that
+hash, which is always False. Ten tools answer "that number is not authorized"
+to the owner himself: `ver_limites`, `proponer_limite`, `historial_limites`,
+`ver_reglas_de_entrega`, `estado_del_sistema`, `ver_avisos_fallidos` and the
+four capture tools. `app/briefing.py` passes a hash the same way.
+
+Everything deterministic is fine — `confirmar <SO>`, `rechazar`, `preparar`,
+`despachar`, `cancelar` and the four-digit limit code all run on the real phone
+through `manejar_boton`. It is only the management *agent* that is locked out.
+Consequence worth naming: the owner cannot change a limit at all, because
+`proponer_limite` is the only way in and it is one of the ten.
+
+Scenario `gerencia_estado_del_sistema` pins the current behaviour, so it will
+fail the day someone fixes it. That is deliberate — it is the witness, not
+acceptance.
+
+**2. `AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO` defaults to 0, and 0 blocks every
+auto-confirmation** (`policy.py`: "an unconfigured limit is not permission").
+Correctly fail-closed. But `make check-env` reports it `OK ... válido (default
+del código)`, while the identically-shaped `AUTO_CONFIRM_MAX=0` gets an
+`AVISO ... todo pedido espera al dueño`. The same 0-means-off semantics should
+read the same way in the report.
+
+**3. A bare `ok` on a delivery exception creates an offer that can never
+close.** `decisiones.aprobar_solicitud` offers back exactly `solicitado`, and
+for a request phrased in prose ("me lo lleven el domingo") that carries no
+date — the system deliberately will not parse one out of the customer's words.
+`solicitudes.revalidar` then refuses forever with "la oferta no dice qué día se
+entrega", and the customer is told "something changed since the offer" when
+nothing changed. The path that works is `contraoferta <SO> <fecha> <hora>
+<cargo>`. Scenarios `cliente_acepta` (works) and `aceptacion_sin_fecha` (the
+dead end) hold both halves.
+
 ## Setup
 
 1. **In ERPNext, create THREE users** (see the table above). This is the most
@@ -867,6 +908,9 @@ changes if the Codespace is recreated, so re-check Meta's callback URL.
 
 ## Not done yet
 
+- **Blocker.** The management agent cannot use any tool that checks
+  authorization: `app/main.py` hands `responder_gerencia` a hash where a phone
+  belongs. See "What the bench found" above.
 - Outbound confirmation when a human submits the order **in the ERPNext UI**
   (Frappe Webhook on `Sales Order` `on_submit` -> `POST /hooks/order-confirmed`).
   Approving from the WhatsApp button already notifies the customer.
