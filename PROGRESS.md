@@ -9,35 +9,21 @@ and Redis" in `plus-agent/README.md`):
 
 ```bash
 cd plus-agent
-REDIS_URL=redis://localhost:6379/0 .venv/bin/python -m pytest -q   # expect: 1124 passed, 1 xfailed
+REDIS_URL=redis://localhost:6379/0 .venv/bin/python -m pytest -q   # expect: 1131 passed, nothing skipped or xfailed
 .venv/bin/ruff check app tests     # expect: All checks passed!
 ```
 
-## Known gap — fix before production
+## Readiness after a Redis loss
 
-**What the owner is SHOWN can disagree with what the system will DO, after a
-Redis loss.** One `xfail(strict=True)` records it:
-`tests/test_limites.py::test_readiness_agrees_with_the_decision_path_after_a_wipe`.
-
-If the delivery-rule store is wiped and ERPNext has `[entrega]` changes on
-record, `limites.entrega()` is correct — it offers NOTHING, so nothing is
-oversold and no delivery is pre-authorised. But `limites.resumen()` still
-resolves those rows from the bootstrap environment and reports
-`origen="arranque"`, and two surfaces read `resumen()`:
-
-* `make check-env` (readiness), and
-* `app/tools/configuracion.py::ver_reglas_de_entrega` — the tool the **owner**
-  uses when he asks which days he delivers on.
-
-So he is told he has a round the system will not offer, and is not told his
-rules are gone, which is the one thing he needs to know in order to set them
-again. Safe, because the decision path is `entrega()`; wrong, because it hides
-a data loss from the person who has to repair it.
-
-**The fix:** `resumen()` has to ask the same durable question `entrega()` asks
-(`_hubo_cambios_durables_entrega()`) and report those rows as lost rather than
-as bootstrap values. The xfail is strict on purpose — fixing it turns that test
-into a FAILURE, so nobody can fix the code and leave this record behind.
+Fixed. `limites.resumen()` and `limites.vigente()` ask the same durable question
+`limites.entrega()` asks (`_reglas_de_entrega_perdidas`): with the delivery
+store empty and `[entrega]` changes on record, every delivery row reads
+`valor=""`, `origen="perdido"` with the problem spelled out. `make check-env`
+reports ONE error naming the loss, `ver_reglas_de_entrega` tells the owner his
+rules were lost and that the `.env` values do NOT apply, and a proposal shows
+«-» as the previous value. What he is shown is what the system will do. The
+former strict xfail (`test_readiness_agrees_with_the_decision_path_after_a_wipe`)
+is a normal passing test.
 
 The venv lives at `/workspaces/agent-crm/plus-agent/.venv`.
 

@@ -602,9 +602,25 @@ def chequear_entrega(
         valor = str(fila.get("valor") or "")
         return "" if valor in ("", limites.NINGUNO) else valor
 
+    # After a Redis loss with [entrega] changes on record, limites.resumen()
+    # reports every delivery row as PERDIDO: nothing is in effect, not the .env
+    # either, because that is exactly what limites.entrega() decides in that
+    # state. One line for the loss rather than ten "mal configurado" — and an
+    # ERROR, because the repair is a person's: the owner has to set the rules
+    # again, and a live test started before he does offers no delivery at all
+    # while the .env looks fully configured.
+    perdidas = {n for n, f in filas.items() if str(f.get("origen")) == limites.PERDIDO}
     for nombre, fila in filas.items():
-        if fila.get("problema"):
+        if fila.get("problema") and nombre not in perdidas:
             reporte.error(nombre, f"mal configurado: {fila['problema']}")
+    if perdidas:
+        reporte.error(
+            "Entrega",
+            "las reglas de entrega se PERDIERON del almacén (Redis) y ERPNext "
+            "tiene cambios registrados: no rige ningún valor, tampoco el del "
+            ".env, y el sistema no ofrece reparto, entrega fuera de día ni "
+            "retiro hasta que el dueño las vuelva a fijar por WhatsApp",
+        )
 
     reparto = bool(_puesto("ENTREGA_DIAS") and _puesto("ENTREGA_HORA"))
     retiro = bool(

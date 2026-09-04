@@ -1417,42 +1417,128 @@ def test_an_erpnext_that_cannot_be_asked_about_delivery_offers_nothing(
     assert reglas.excepcion_activa is False
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "GAP — RECORDED, NOT FIXED. Fix before production. After a wipe the "
-        "DECISION path is right: entrega() offers nothing, so nothing is "
-        "oversold and no delivery is pre-authorised. But resumen() still "
-        "resolves the delivery rows from the bootstrap environment and reports "
-        "origen='arranque', and TWO surfaces read resumen(): readiness "
-        "(make check-env) and app/tools/configuracion.py::ver_reglas_de_entrega "
-        "— the tool the OWNER asks «qué días reparto». So he is told he has a "
-        "Mon-Fri round the system will not offer, and is NOT told his rules are "
-        "gone, which is the one thing he needs to know to put them back. "
-        "The fix is for resumen() to ask the same durable question entrega() "
-        "asks, and report those rows as lost rather than as bootstrap values. "
-        "Strict on purpose: whoever fixes it gets a FAILURE here and has to "
-        "come back and delete this marker."
-    ),
-)
 def test_readiness_agrees_with_the_decision_path_after_a_wipe(
     almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """What the owner is SHOWN has to match what the system will DO."""
+    """What the owner is SHOWN has to match what the system will DO.
+
+    After a wipe the decision path offers nothing. resumen() used to resolve
+    the delivery rows from the bootstrap environment anyway, and TWO surfaces
+    read resumen(): readiness (make check-env) and ver_reglas_de_entrega, the
+    tool the owner asks «qué días reparto». He was shown a Mon-Fri round the
+    system would not offer, and never told his rules were gone — the one thing
+    he needed in order to set them again. Now resumen() asks the same durable
+    question entrega() asks and reports the rows as LOST.
+    """
     _entorno_de_reparto(monkeypatch)
     _historia_durable(monkeypatch, limite=False, entrega=True)
     almacen.hashes.clear()
 
-    # The decision path is correct today, and that is what makes this safe.
+    # The decision path offers nothing, and that is what makes the loss safe.
     assert limites.entrega().dias_reparto == ()
     assert limites.entrega().excepcion_activa is False
 
-    # The display has to say the same thing, and today it does not.
+    # The display says the same thing.
     fila = next(f for f in limites.resumen() if f["nombre"] == "ENTREGA_DIAS")
-    assert fila["valor"] == "", (
-        f"readiness shows {fila['valor']!r} (origen {fila['origen']!r}) while "
-        "entrega() offers nothing"
+    assert fila["valor"] == ""
+    assert fila["origen"] == limites.PERDIDO
+    assert "se perdieron" in fila["problema"] and "vuelvas a fijar" in fila["problema"]
+
+
+def test_after_a_wipe_every_delivery_row_reads_as_lost_and_no_limit_does(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loss is the whole delivery registry, and ONLY that registry."""
+    monkeypatch.setenv("AUTO_CONFIRM_MAX", "1000")
+    _entorno_de_reparto(monkeypatch)
+    _historia_durable(monkeypatch, limite=False, entrega=True)
+    almacen.hashes.clear()
+
+    filas = {f["nombre"]: f for f in limites.resumen()}
+
+    for nombre in limites.ENTREGA:
+        assert (filas[nombre]["valor"], filas[nombre]["origen"]) == ("", limites.PERDIDO), nombre
+        assert filas[nombre]["problema"] == limites.PROBLEMA_ENTREGA_PERDIDA
+    # A delivery loss does not touch the limits: same answer as configuracion().
+    assert (filas["AUTO_CONFIRM_MAX"]["valor"], filas["AUTO_CONFIRM_MAX"]["origen"]) == (
+        "1000",
+        "arranque",
     )
+    assert limites.configuracion().tope == 1_000.0
+
+
+def test_a_delivery_rule_in_the_store_is_never_reported_as_lost(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store being POPULATED is what says the rules are his — for the
+    display exactly as for the decision."""
+    _entorno_de_reparto(monkeypatch)
+    _proponer("días de reparto", "martes y viernes")
+    _confirmar(_codigo_enviado(almacen))
+    _historia_durable(monkeypatch, limite=False, entrega=True)
+
+    fila = next(f for f in limites.resumen() if f["nombre"] == "ENTREGA_DIAS")
+
+    assert (fila["valor"], fila["origen"], fila["problema"]) == ("martes,viernes", "dueño", "")
+    assert limites.entrega().dias_reparto == (1, 4)
+
+
+def test_readiness_reports_lost_delivery_rules_as_a_failure_not_as_configured(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """make check-env reads resumen(). It must say the rules were lost — never
+    OK for a round taken from the .env that the system will not run."""
+    from app import readiness
+
+    _entorno_de_reparto(monkeypatch)
+    _historia_durable(monkeypatch, limite=False, entrega=True)
+    almacen.hashes.clear()
+
+    reporte = readiness.Reporte()
+    readiness.chequear_entrega(os.environ, reporte, limites.resumen, http=None)
+    niveles = {clave: nivel for nivel, clave, _ in reporte.lineas}
+    texto = reporte.texto()
+
+    assert not reporte.listo
+    assert niveles["Entrega"] == readiness.ERROR
+    assert "se PERDIERON" in texto and "vuelva a fijar" in texto
+    assert "ENTREGA_DIAS" not in niveles  # no OK line for a round that will not run
+    assert "lunes" not in texto  # the .env days are not shown as active
+    assert "Respaldo de vencimiento" in texto  # and the consequence is spelled out
+    assert "mal configurado" not in texto  # a loss is not ten typos
+
+
+def test_the_owner_tool_says_the_delivery_rules_have_to_be_set_again(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ver_reglas_de_entrega is where he asks «qué días reparto». The answer
+    has to be the loss, in words, and what to do about it."""
+    _entorno_de_reparto(monkeypatch)
+    _historia_durable(monkeypatch, limite=False, entrega=True)
+    almacen.hashes.clear()
+
+    vista = configuracion.ver_reglas_de_entrega.invoke({}, config=_gerencia())
+
+    assert "Se perdieron tus reglas de entrega" in vista
+    assert "vuelvas a fijar" in vista
+    assert "sin valor vigente" in vista and "se perdió del almacén" in vista
+    assert "lunes" not in vista and "valor de arranque" not in vista
+    assert "mal configurado" not in vista
+
+
+def test_a_proposal_after_a_wipe_shows_nothing_as_the_previous_value(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The «anterior» in a proposal and in the audit is what is in effect —
+    nothing — not the .env's Mon-Fri."""
+    _entorno_de_reparto(monkeypatch)
+    _historia_durable(monkeypatch, limite=False, entrega=True)
+    almacen.hashes.clear()
+
+    respuesta = _proponer("días de reparto", "martes y viernes")
+
+    assert "lunes" not in respuesta
+    assert f"{limites.NINGUNO} → martes,viernes" in respuesta
 
 
 def test_a_limit_change_is_recorded_under_the_limit_marker(

@@ -53,7 +53,11 @@ _SIN_PERMISO = (
 
 def _mostrar(fila: dict) -> str:
     valor = fila["valor"]
-    if valor == limites.NINGUNO:
+    if fila["origen"] == limites.PERDIDO:
+        # Not "sin configurar": he DID configure it, and the store lost it.
+        # Nothing is in effect — not the .env either — see limites.resumen().
+        valor = "sin valor vigente"
+    elif valor == limites.NINGUNO:
         valor = "sin configurar"
     elif fila["unidad"] == "$":
         try:
@@ -70,9 +74,12 @@ def _mostrar(fila: dict) -> str:
         "dueño": "lo fijaste vos",
         "arranque": "valor de arranque",
         "default": "default del sistema",
+        limites.PERDIDO: "se perdió del almacén",
     }.get(fila["origen"], fila["origen"])
     linea = f"*{fila['alias']}*: {valor}  ({origen})"
-    if fila["problema"]:
+    # A lost row carries the same problem as every other lost row; the tool
+    # says it once, at the end, instead of ten times here.
+    if fila["problema"] and fila["origen"] != limites.PERDIDO:
         linea += f"\n   ⚠️ mal configurado: {fila['problema']}"
     # He should know the ceiling is not the only thing standing between a new
     # customer and an automatic order: the address has to check out too.
@@ -195,6 +202,18 @@ def ver_reglas_de_entrega(config: RunnableConfig) -> str:
             "leer, no se ofrece ninguna entrega fuera de día ni retiro."
         )
     cuerpo = "\n".join(_mostrar(fila) for fila in filas)
+    # The owner has to hear this in words, because it is the one thing he needs
+    # in order to repair it: the store lost his rules, the .env is NOT what the
+    # system is running on, and nothing is offered until he sets them again.
+    perdidas = any(fila["origen"] == limites.PERDIDO for fila in filas)
+    alerta = (
+        "\n⚠️ Se perdieron tus reglas de entrega: el almacén está vacío y ERPNext "
+        "tiene cambios tuyos registrados. Los valores del servidor NO rigen. Hasta "
+        "que las vuelvas a fijar no se ofrece reparto, entrega fuera de día ni "
+        "retiro: decime cada regla con su valor y te pido confirmación."
+        if perdidas
+        else ""
+    )
     cuenta = limites.cuenta_cargo()
     nota = (
         f"\nCuenta contable del cargo: {cuenta} (se configura en el servidor)."
@@ -204,7 +223,7 @@ def ver_reglas_de_entrega(config: RunnableConfig) -> str:
     )
     return (
         "Reglas de entrega:\n"
-        f"{cuerpo}\n{nota}\n\n"
+        f"{cuerpo}{alerta}\n{nota}\n\n"
         "Para cambiar una, decime cuál y el valor nuevo. Te pido confirmación "
         "antes de aplicarla."
     )

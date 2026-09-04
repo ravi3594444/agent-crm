@@ -390,6 +390,36 @@ def test_a_fee_with_no_account_says_a_person_has_to_add_the_charge() -> None:
     assert "nunca por WhatsApp" in texto
 
 
+def test_lost_delivery_rules_are_a_failure_and_the_env_is_not_shown_as_active() -> None:
+    """After a Redis loss with [entrega] history on record, limites.resumen()
+    reports every delivery row as PERDIDO — nothing is in effect, not the .env
+    either, because that is what limites.entrega() decides in that state. The
+    report has to say the loss, once, as a failure — never OK for a round that
+    will not run, and never one "mal configurado" per row."""
+    from app import limites
+
+    def perdidas():
+        return [
+            {
+                **fila,
+                "valor": "",
+                "origen": limites.PERDIDO,
+                "problema": limites.PROBLEMA_ENTREGA_PERDIDA,
+            }
+            for fila in _entrega()
+        ]
+
+    reporte = _correr(BASE, limites=perdidas)
+    texto = reporte.texto()
+
+    assert not reporte.listo
+    assert texto.count("se PERDIERON") == 1
+    assert "vuelva a fijar" in texto
+    assert "reparto martes" not in texto
+    assert "mal configurado" not in texto
+    assert "Respaldo de vencimiento" in texto
+
+
 def test_without_redis_the_delivery_rules_are_not_guessed_at() -> None:
     reporte = readiness.Reporte()
     readiness.chequear_entrega(BASE, reporte, None)

@@ -84,6 +84,18 @@ HORA = "hora"
 NINGUNO = "-"
 _NINGUNO_DICHO = frozenset({"-", "ninguno", "ninguna", "nada", "no", "vacio", "vacío"})
 
+# Where a delivery value comes from when the store was WIPED: not the owner,
+# not the bootstrap environment, not a default — NOTHING is in effect, because
+# entrega() offers nothing in that state. resumen() reports the row this way so
+# readiness and ver_reglas_de_entrega say what the system will actually do,
+# instead of showing .env values it will not offer.
+PERDIDO = "perdido"
+PROBLEMA_ENTREGA_PERDIDA = (
+    "las reglas de entrega se perdieron del almacén y ERPNext tiene cambios "
+    "registrados: no rige ningún valor, tampoco el del .env, y no se ofrece "
+    "reparto, entrega fuera de día ni retiro hasta que las vuelvas a fijar"
+)
+
 
 @dataclass(frozen=True)
 class Definicion:
@@ -497,6 +509,20 @@ def _hubo_cambios_durables_entrega() -> bool:
     return hubo
 
 
+def _reglas_de_entrega_perdidas(almacen: dict[str, str]) -> bool:
+    """An EMPTY delivery store with [entrega] changes on record: it was wiped.
+
+    ONE question, asked by entrega() — which decides — and by resumen() and
+    vigente() — which show — so what the owner is shown cannot disagree with
+    what the system will do. Falling back to the bootstrap environment in this
+    state would restore whatever the .env says: a day he removed, an exception
+    he turned off. A silent WIDENING, so nothing is in effect until he sets
+    the rules again.
+    """
+    sin_reglas_del_dueno = not any(almacen.get(nombre, "").strip() for nombre in ENTREGA)
+    return sin_reglas_del_dueno and _hubo_cambios_durables_entrega()
+
+
 def _almacen() -> dict[str, str]:
     """Lo que fijó el dueño. Falla cerrada si Redis no contesta.
 
@@ -793,23 +819,10 @@ def entrega() -> Entrega:
     # the .env says — a day he removed, an exception he turned off. That is a
     # silent WIDENING of what the system offers on its own, so it offers
     # nothing instead and a person is asked. Unlike the limits this never
-    # raises: see _hubo_cambios_durables_entrega.
-    sin_reglas_del_dueno = not any(
-        almacen.get(nombre, "").strip() for nombre in ENTREGA
-    )
-    # ponytail: la autoridad es ésta, que es la que habilita ofertas — así que
-    # NADA se sobrevende por lo que sigue. Pero resumen() todavía resuelve
-    # estas filas desde el entorno de arranque en este estado, y de resumen()
-    # leen readiness (make check-env) y ver_reglas_de_entrega, que es la
-    # herramienta con la que el DUEÑO pregunta qué días reparte. O sea: se le
-    # muestra un reparto que el sistema no va a ofrecer, y no se le dice que
-    # sus reglas se perdieron. GAP registrado, hay que arreglarlo antes de
-    # producción; resumen() tiene que hacer la misma pregunta durable que
-    # entrega(). Lo fija
-    # tests/test_limites.py::test_readiness_agrees_with_the_decision_path_after_a_wipe
-    # como xfail(strict=True): cuando alguien lo arregle, ese test FALLA y lo
-    # obliga a volver acá.
-    if sin_reglas_del_dueno and _hubo_cambios_durables_entrega():
+    # raises: see _hubo_cambios_durables_entrega. resumen() and vigente() ask
+    # the SAME question, so readiness and the owner's ver_reglas_de_entrega
+    # report these rows as lost rather than as .env values.
+    if _reglas_de_entrega_perdidas(almacen):
         print(
             "[limites] las reglas de entrega no están en el almacén y ERPNext "
             "tiene cambios registrados: no ofrezco nada por mi cuenta"
@@ -851,17 +864,28 @@ def cuenta_cargo() -> str:
 
 
 def resumen() -> list[dict]:
-    """Cada límite con su valor vigente y de dónde salió, para el dueño."""
+    """Cada límite con su valor vigente y de dónde salió, para el dueño.
+
+    The delivery rows after a wipe read as LOST — valor "", origen PERDIDO and
+    the problem spelled out — because that is the state entrega() decides in,
+    and this list is what readiness and ver_reglas_de_entrega show. Resolving
+    them from the .env here told him he had a round the system would not run,
+    and hid the one thing he needed to know: that his rules were gone.
+    """
     almacen = _almacen()
+    entrega_perdida = _reglas_de_entrega_perdidas(almacen)
     filas = []
     for nombre, defi in TODOS.items():
-        crudo, origen = _resolver(nombre, almacen)
-        try:
-            valor = validar(nombre, crudo, tecleado=origen != "dueño")
-            problema = ""
-        except LimiteError as exc:
-            valor = crudo
-            problema = str(exc)
+        if entrega_perdida and nombre in ENTREGA:
+            valor, origen, problema = "", PERDIDO, PROBLEMA_ENTREGA_PERDIDA
+        else:
+            crudo, origen = _resolver(nombre, almacen)
+            try:
+                valor = validar(nombre, crudo, tecleado=origen != "dueño")
+                problema = ""
+            except LimiteError as exc:
+                valor = crudo
+                problema = str(exc)
         filas.append(
             {
                 "nombre": nombre,
@@ -917,8 +941,16 @@ def _codigo() -> str:
 
 
 def vigente(nombre: str) -> str:
-    """El valor vigente de un límite, tal como se guardaría."""
-    crudo, origen = _resolver(nombre, _almacen())
+    """El valor vigente de un límite, tal como se guardaría.
+
+    A lost delivery rule has NO value in effect — not the .env's either — so it
+    reads as NINGUNO: the «anterior» a proposal shows and the audit records is
+    what entrega() is actually working with.
+    """
+    almacen = _almacen()
+    if nombre in ENTREGA and _reglas_de_entrega_perdidas(almacen):
+        return NINGUNO
+    crudo, origen = _resolver(nombre, almacen)
     try:
         return validar(nombre, crudo, tecleado=origen != "dueño")
     except LimiteError:
