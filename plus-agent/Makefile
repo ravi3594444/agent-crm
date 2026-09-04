@@ -6,7 +6,7 @@ PY     := $(VENV)/bin/python
 PIP    := $(VENV)/bin/pip
 PUERTO ?= 8081
 
-.PHONY: help install test lint fmt check check-env check-env-offline verificar-modelos build up down logs decisiones briefing seed
+.PHONY: help install test lint fmt check check-env check-env-offline verificar-modelos build up down logs decisiones briefing demo demo-gemini seed
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -22,11 +22,11 @@ test: install ## Correr los tests (sin credenciales ni red, pero NECESITA un Red
 	$(PY) -m pytest -q
 
 lint: install ## Lint (ruff check; el formato todavía no se exige)
-	$(VENV)/bin/ruff check app tests
+	$(VENV)/bin/ruff check app demo tests
 
 fmt: install ## Formatear y autocorregir lo que ruff sabe arreglar
-	$(VENV)/bin/ruff format app tests
-	$(VENV)/bin/ruff check --fix app tests
+	$(VENV)/bin/ruff format app demo tests
+	$(VENV)/bin/ruff check --fix app demo tests
 
 check: lint test ## Todo lo que corre CI
 
@@ -62,6 +62,12 @@ decisiones: ## Ver qué hizo la política y los avisos en cada pedido
 
 briefing: ## Mandar el briefing ahora (sin esperar al cron)
 	docker compose run --rm briefing
+
+demo: install ## Banco de pruebas: los 14 escenarios, determinístico y sin red (ver demo/README.md)
+	$(PY) -m demo.piloto --modo offline
+
+demo-gemini: install ## Lo mismo pero con Gemini de verdad, por un relevo aislado (consume cuota)
+	$(PY) -m demo.piloto --modo gemini
 
 seed: install ## Cargar catálogo y clientes de demo en ERPNext (staging; usa credenciales temporales, ver README)
 	$(PY) deploy/seed_dairy.py

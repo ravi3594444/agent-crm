@@ -63,7 +63,7 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Lint
-        run: ruff check app tests
+        run: ruff check app demo tests
 
       - name: Tests
         # -rs lists every skip in the log. A suite whose coverage quietly
