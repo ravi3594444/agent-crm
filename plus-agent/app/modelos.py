@@ -156,6 +156,12 @@ CLAVES_CONOCIDAS = tuple(
 _FORMAS_DE_CLAVE = (
     re.compile(r"sk-[A-Za-z0-9_\-]{6,}"),
     re.compile(r"AIza[0-9A-Za-z_\-]{10,}"),
+    # Google emite claves con este otro formato ("AQ." y después base64url).
+    # No lo cubría ninguna de las de arriba, así que una clave nueva sólo
+    # quedaba tapada si su valor exacto estaba en el entorno — y en un mensaje
+    # de error del proveedor, o en una clave que alguien pegó a mano en otra
+    # variable, no lo está.
+    re.compile(r"AQ\.[A-Za-z0-9_\-]{20,}"),
 )
 OCULTO = "***"
 # Debajo de esto un "secreto" es demasiado corto para reemplazarlo sin

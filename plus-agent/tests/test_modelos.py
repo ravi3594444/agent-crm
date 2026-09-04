@@ -812,3 +812,29 @@ def test_chat_gemini_is_a_chat_openai_so_nothing_else_changes() -> None:
     from langchain_openai import ChatOpenAI as Real
 
     assert issubclass(_ChatGeminiReal, Real)
+
+
+def test_masking_covers_every_google_key_format() -> None:
+    """Google emite claves AIza… y también AQ.…; las dos tienen que taparse.
+
+    enmascarar() se llama antes de imprimir cualquier cosa que vino de la red.
+    Una forma de clave que no reconoce es una clave que puede terminar en un
+    log si el proveedor la repite en su respuesta de error.
+    """
+    formatos = {
+        "AIza": "AIzaSyDejemploDeClaveInventada123456789",
+        "AQ.":  "AQ.Ab8RejemploDeClaveInventadaQueNoSirveParaNada",
+        "sk-":  "sk-ejemploDeClaveInventada123456",
+    }
+    for etiqueta, clave in formatos.items():
+        salida = modelos.enmascarar(
+            f"el proveedor rechazó api_key={clave}", env={}
+        )
+        assert clave not in salida, f"la forma {etiqueta} quedó sin tapar"
+        assert modelos.OCULTO in salida
+
+
+def test_masking_does_not_wreck_ordinary_text() -> None:
+    """Tapar de más deja mensajes de error ilegibles."""
+    texto = "AQ es una sigla y AIzados no es una clave; sk-  tampoco"
+    assert modelos.enmascarar(texto, env={}) == texto
