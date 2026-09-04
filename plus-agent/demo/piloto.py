@@ -400,15 +400,21 @@ class Piloto:
         for fragmento in paso.prohibe:
             if fragmento.lower() in todo:
                 problemas.append(f"la respuesta dice {fragmento!r} y no debería")
-        # Que un documento NO exista es una afirmación distinta de que exista
+        # Que un documento NO aparezca es una afirmación distinta de que exista
         # con cierto estado, y es la única forma de probar que una escritura no
         # autorizada no escribió: "no hay ninguna factura" no se puede decir
         # con `documentos`, que exige al menos una.
+        #
+        # Se mira lo que CAMBIÓ en este turno, no la foto entera: los datos
+        # semilla ya traen una factura y un conteo, y un escenario anterior de
+        # la misma corrida dejó un remito. Contra la foto esto fallaba siempre
+        # y no decía nada sobre el turno.
         for doctype in paso.sin_documentos:
-            aparecidos = [k for k in foto if k.startswith(doctype + "/")]
+            aparecidos = [k for k in turno.cambios if k.startswith(doctype + "/")]
             if aparecidos:
                 problemas.append(
-                    f"apareció un {doctype} y no debería: {aparecidos}"
+                    f"este turno creó o cambió un {doctype} y no debería: "
+                    f"{aparecidos}"
                 )
         for patron, exigido in paso.documentos.items():
             doctype = patron.split("/", 1)[0]

@@ -1635,7 +1635,17 @@ def texto_para_equipo(solicitud: Solicitud) -> str:
         lineas.append(solicitud.nota_cliente)
     lineas.append("")
     lineas.append("Respondé con uno de estos, tal cual:")
-    lineas.append(f"  aprobar {solicitud.pedido}")
+    # `aprobar` se ofrece SÓLO si lo que pidió el cliente ya son términos
+    # completos. Si no, aprobarlo armaría una oferta que después no se puede
+    # cumplir, así que ni se sugiere: hay que decir los términos.
+    faltan = terminos_incompletos(solicitud.solicitado)
+    if faltan:
+        lineas.append(
+            f"  (no hay «aprobar»: de lo que pidió falta {enumerar(faltan)}, "
+            "así que decí los términos)"
+        )
+    else:
+        lineas.append(f"  aprobar {solicitud.pedido}")
     lineas.append(f"  contraoferta {solicitud.pedido} <fecha> <hora> <cargo>")
     lineas.append(f"  retiro {solicitud.pedido} <fecha> <hora>")
     lineas.append(f"  rechazar-solicitud {solicitud.pedido} <motivo>")
@@ -1905,6 +1915,66 @@ def parsear_terminos(texto: str, *, con_cargo: bool = True) -> dict | None:
     elif cargo is not None:
         return None
     return terminos
+
+
+# Lo que una oferta necesita para poder cumplirse, y cómo se le pregunta al
+# que decide por lo que falta.
+#
+# EL AGUJERO QUE ESTO TAPA
+# Un pedido de excepción escrito en prosa —"necesito que me lo lleven el
+# domingo"— se abre con solicitado={"metodo": "entrega"} y nada más
+# (app/tools/pedidos.py), a propósito: NADIE le saca una fecha a las palabras
+# de un cliente. Pero `aprobar <pedido>` ofrecía exactamente ese solicitado, y
+# entonces `revalidar` rechazaba la aceptación para siempre con "la oferta no
+# dice qué día se entrega", y al cliente se le decía que algo había cambiado
+# cuando no había cambiado nada. Un "ok" no puede fabricar los términos que
+# el cliente no dio.
+TERMINOS_DE_UNA_OFERTA = (
+    ("fecha", "qué día"),
+    ("hora", "a qué hora"),
+    ("cargo", "cuánto se cobra"),
+)
+
+
+def enumerar(partes: list[str]) -> str:
+    """["a", "b", "c"] -> "a, b y c". Para decirle qué falta en una frase."""
+    if not partes:
+        return ""
+    if len(partes) == 1:
+        return partes[0]
+    return ", ".join(partes[:-1]) + " y " + partes[-1]
+
+
+def terminos_incompletos(solicitado: dict | None) -> list[str]:
+    """Qué le falta a estos términos para ser una oferta. Vacío es que están.
+
+    Un cargo en 0 está PRESENTE: envío sin cargo es una decisión, no un dato
+    ausente. Un retiro no lleva cargo por definición.
+    """
+    datos = dict(solicitado or {})
+    metodo = str(datos.get("metodo") or "entrega").strip()
+    faltan = []
+    for campo, pregunta in TERMINOS_DE_UNA_OFERTA:
+        if campo == "cargo" and metodo == "retiro":
+            continue
+        valor = datos.get(campo)
+        if valor is None or str(valor).strip() == "":
+            faltan.append(pregunta)
+    return faltan
+
+
+def como_pedir_los_terminos(pedido: str, solicitado: dict | None = None) -> str:
+    """El comando exacto que sí ejecuta, con un ejemplo. Nunca prosa."""
+    metodo = str(dict(solicitado or {}).get("metodo") or "entrega").strip()
+    if metodo == "retiro":
+        return (
+            f"retiro {pedido} <fecha> <hora>\n"
+            f"por ejemplo: retiro {pedido} jueves 10:00"
+        )
+    return (
+        f"contraoferta {pedido} <fecha> <hora> <cargo>\n"
+        f"por ejemplo: contraoferta {pedido} mañana 18:00 1500"
+    )
 
 
 def texto_estado(solicitud: Solicitud) -> str:

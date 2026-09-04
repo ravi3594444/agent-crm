@@ -986,10 +986,31 @@ def _decidir(nombre: str, por: str, decision: str, ofrecido: dict, motivo: str =
 
 
 def aprobar_solicitud(nombre: str, por: str) -> dict:
-    """Approve exactly what the customer asked for. HUMAN ONLY."""
+    """Approve exactly what the customer asked for. HUMAN ONLY.
+
+    "Exactly what the customer asked for" only exists when the customer said
+    it in a form the system parsed. A request phrased in prose carries no date
+    and no time — app/tools/pedidos.py opens it with `{"metodo": "entrega"}`
+    because nothing may read a delivery date out of a customer's words — and
+    approving that used to create an offer solicitudes.revalidar then refused
+    forever ("la oferta no dice qué día se entrega"), telling the customer
+    something had changed when nothing had. So an "ok" with nothing to approve
+    changes NO state and asks for the terms instead.
+    """
     solicitud, problema = _abierta(nombre)
     if solicitud is None:
         return _resultado(False, False, problema)
+    faltan = solicitudes.terminos_incompletos(solicitud.solicitado)
+    if faltan:
+        return _resultado(
+            False,
+            False,
+            f"«aprobar {nombre}» aprueba lo que pidió el cliente, y de eso "
+            f"falta {solicitudes.enumerar(faltan)}: no puedo ofrecer una entrega "
+            "cuyos términos nadie fijó. No cambié nada.\n\n"
+            "Decime los términos completos:\n"
+            f"{solicitudes.como_pedir_los_terminos(nombre, solicitud.solicitado)}",
+        )
     return _decidir(nombre, por, solicitudes.APROBADA, dict(solicitud.solicitado))
 
 

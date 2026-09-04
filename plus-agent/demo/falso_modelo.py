@@ -62,6 +62,18 @@ def contiene(*fragmentos: str) -> Callable[[str, str], bool]:
     return matchea
 
 
+def exacto(*mensajes: str) -> Callable[[str, str], bool]:
+    """Matchea el mensaje COMPLETO. Para los que son una palabra sola.
+
+    `contiene("ok")` matchearía cualquier mensaje con "ok" adentro, así que un
+    "ok" pelado —el caso que hay que probar— no se puede escribir con eso.
+    """
+    buscados = tuple(_normalizar(m) for m in mensajes)
+    def matchea(mensaje: str, _rol: str) -> bool:
+        return _normalizar(mensaje) in buscados
+    return matchea
+
+
 def _normalizar(texto: str) -> str:
     import unicodedata
     sin_tildes = "".join(

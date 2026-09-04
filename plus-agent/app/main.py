@@ -315,12 +315,26 @@ _ARG_ACTIONS = {
 }
 
 
+# WhatsApp quote lines. app/solicitudes.py::citar prefixes every line of a
+# customer's words with "> " exactly so it reads as a quotation, and the team
+# notification carries them. When the manager replies by quoting that message,
+# those lines arrive back here — and `resto` is what becomes the terms of a
+# counter-offer or the reason a customer is given. So the quote comes out
+# before anything is read as an argument: what a customer wrote is never an
+# instruction, not even after a person forwarded it.
+_CITA = re.compile(r"^\s*>.*$", re.MULTILINE)
+
+
+def _sin_citas(texto: str) -> str:
+    return " ".join(_CITA.sub(" ", str(texto or "")).split())
+
+
 def _staff_command(text: str) -> str | None:
     """Map a short manager message to a button payload, or None."""
     con_argumento = _ARG_RE.match(text or "")
     if con_argumento:
         accion = _ARG_ACTIONS.get(_sin_tildes(con_argumento.group("verb")))
-        resto = " ".join((con_argumento.group("resto") or "").split())
+        resto = _sin_citas(con_argumento.group("resto"))
         if accion and (resto or accion[1]):
             pedido = con_argumento.group("order").upper()
             return f"{accion[0]}:{pedido}:{resto}"

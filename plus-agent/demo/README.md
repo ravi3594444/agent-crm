@@ -4,7 +4,7 @@ Corre los escenarios de release contra **la imagen real del agente**, sin
 tocar ERPNext, ni Meta, ni WhatsApp, ni el Redis de staging.
 
 ```bash
-make demo          # 14 escenarios, determinístico, sin ninguna red
+make demo          # 15 escenarios, determinístico, sin ninguna red
 make demo-gemini   # los mismos, con Gemini de verdad (consume cuota)
 ```
 
@@ -145,11 +145,19 @@ modo offline sepa qué herramienta llamar; los comandos de gerencia y el
 Usá `ULTIMO_PEDIDO` donde vaya un número de pedido: no se puede escribir uno
 que todavía no existe.
 
+Para lo que un paso tiene que dejar en ERPNext hay dos afirmaciones, y no son
+la misma: `documentos={"Sales Order/*": {"docstatus": 0}}` exige que exista al
+menos uno del tipo y en ese estado, y `sin_documentos=["Sales Invoice"]` exige
+que ESTE paso no haya creado ni cambiado ninguno. La segunda mira las
+diferencias del turno, no la foto: los datos semilla ya traen una factura y un
+conteo, así que contra la foto nunca se podría probar que una escritura no
+autorizada no escribió.
+
 ## Límites conocidos
 
 - **El modo gemini no cabe en el tier gratuito.** Son 20 pedidos por día y por
   modelo (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), y un turno de
-  cliente gasta dos o más. Los 14 escenarios necesitan ~80. Con `--modelo` se
+  cliente gasta dos o más. Los 15 escenarios necesitan ~85. Con `--modelo` se
   puede usar otro modelo de Gemini, que tiene su propia cuota diaria, para
   probar un subconjunto.
 - El reloj no se controla: los escenarios que dependen de un vencimiento

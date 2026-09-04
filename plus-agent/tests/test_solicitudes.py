@@ -228,10 +228,26 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
     return estado
 
 
-def _abrir(mundo, nota: str = "hoy no hay reparto, ¿me lo traen igual?"):
+# Lo que pide un cliente EN PROSA: ni fecha ni hora ni cargo. Es lo que abre
+# app/tools/pedidos.py, porque nada le saca una fecha a las palabras de un
+# cliente — y por eso «aprobar» no tiene qué aprobar (ver la sección de
+# términos incompletos más abajo).
+PROSA = {"metodo": "entrega"}
+# Lo que abre una excepción PREAUTORIZADA: el dueño ya fijó los términos, así
+# que aprobar lo que pidió el cliente sí es una oferta que se puede cumplir.
+COMPLETO = {"metodo": "entrega", "fecha": "2026-09-05", "hora": "18:00", "cargo": 0}
+
+
+def _abrir(
+    mundo,
+    nota: str = "hoy no hay reparto, ¿me lo traen igual?",
+    solicitado: dict | None = None,
+):
     """What the sales tool does: open the request and tell the team."""
     solicitud = solicitudes.crear(
-        dict(mundo["so"]), solicitado={"metodo": "entrega"}, nota_cliente=nota
+        dict(mundo["so"]),
+        solicitado=dict(PROSA if solicitado is None else solicitado),
+        nota_cliente=nota,
     )
     assert solicitud is not None
     solicitudes.notificar_equipo_nueva(solicitud)
@@ -432,7 +448,7 @@ def test_control_characters_and_length_cannot_break_the_summary(mundo) -> None:
 
 
 def test_an_unauthorized_phone_cannot_decide_anything(mundo) -> None:
-    _abrir(mundo)
+    _abrir(mundo, solicitado=COMPLETO)
 
     for respuesta in (
         decisiones.aprobar_solicitud(SO, OTRO),
@@ -478,7 +494,7 @@ def test_the_exact_commands_are_parsed_deterministically(texto, esperado) -> Non
 
 
 def test_an_ambiguous_instruction_is_summarized_and_never_executed(mundo) -> None:
-    _abrir(mundo)
+    _abrir(mundo, solicitado=COMPLETO)
 
     respuesta = main._resumen_de_solicitud(
         "dale, mandáselo igual al de SAL-ORD-2026-00021 y cobrale lo que sea"
@@ -512,7 +528,7 @@ def test_unparseable_counter_terms_are_refused_with_an_example(mundo) -> None:
 
 
 def test_approving_puts_the_offer_to_the_customer_and_confirms_nothing_yet(mundo) -> None:
-    _abrir(mundo)
+    _abrir(mundo, solicitado=COMPLETO)
 
     respuesta = aprobacion.manejar_boton(f"ok:{SO}", STAFF)
 
@@ -528,8 +544,8 @@ def test_approving_puts_the_offer_to_the_customer_and_confirms_nothing_yet(mundo
 
 def test_a_decision_resumes_only_its_own_order(mundo) -> None:
     otro_pedido = {**PEDIDO, "name": "SAL-ORD-2026-00099"}
-    _abrir(mundo)
-    otra = solicitudes.crear(otro_pedido, solicitado={"metodo": "entrega"})
+    _abrir(mundo, solicitado=COMPLETO)
+    otra = solicitudes.crear(otro_pedido, solicitado=dict(COMPLETO))
     assert otra is not None
 
     aprobacion.manejar_boton(f"ok:{SO}", STAFF)
@@ -600,7 +616,7 @@ def test_ver_shows_the_pending_request_next_to_the_order(mundo) -> None:
 
 
 def test_a_second_approval_changes_nothing_and_re_offers_nothing(mundo) -> None:
-    _abrir(mundo)
+    _abrir(mundo, solicitado=COMPLETO)
     aprobacion.manejar_boton(f"ok:{SO}", STAFF)
     avisos.procesar()
     enviados_antes = len(mundo["enviados"])
@@ -616,7 +632,7 @@ def test_a_second_approval_changes_nothing_and_re_offers_nothing(mundo) -> None:
 
 
 def test_approving_after_a_rejection_is_refused(mundo) -> None:
-    _abrir(mundo)
+    _abrir(mundo, solicitado=COMPLETO)
     decisiones.rechazar_solicitud(SO, STAFF, "no llego")
 
     resultado = decisiones.aprobar_solicitud(SO, STAFF)
@@ -627,7 +643,7 @@ def test_approving_after_a_rejection_is_refused(mundo) -> None:
 
 def test_two_managers_deciding_at_once_produce_one_decision(mundo) -> None:
     """The lock serializes them; the second finds the request already decided."""
-    _abrir(mundo)
+    _abrir(mundo, solicitado=COMPLETO)
 
     primera = decisiones.aprobar_solicitud(SO, STAFF)
     segunda = decisiones.rechazar_solicitud(SO, STAFF, "me arrepentí")
@@ -1186,7 +1202,7 @@ def test_an_event_erpnext_refuses_is_not_reported_as_recorded(mundo, monkeypatch
 
 
 def test_a_decision_that_cannot_be_recorded_does_not_offer_anything(mundo, monkeypatch) -> None:
-    _abrir(mundo)
+    _abrir(mundo, solicitado=COMPLETO)
     monkeypatch.setattr(
         erpnext, "registrar_comentario", Mock(side_effect=erpnext.ERPNextError("no"))
     )
@@ -1204,7 +1220,7 @@ def test_a_decision_that_cannot_be_recorded_does_not_offer_anything(mundo, monke
 
 
 def test_no_notice_in_this_workflow_is_sent_inline(mundo) -> None:
-    _abrir(mundo)
+    _abrir(mundo, solicitado=COMPLETO)
     aprobacion.manejar_boton(f"ok:{SO}", STAFF)
 
     # Everything is still in the durable queue: not one Meta call has happened.
@@ -1230,7 +1246,7 @@ def test_the_sweep_never_raises_out_of_its_thread(mundo, monkeypatch) -> None:
 
 
 def test_a_decision_holds_the_lock_only_for_its_own_write(mundo) -> None:
-    _abrir(mundo)
+    _abrir(mundo, solicitado=COMPLETO)
     mundo["locks"].clear()
 
     aprobacion.manejar_boton(f"ok:{SO}", STAFF)
@@ -3160,3 +3176,354 @@ def test_an_unreadable_counter_is_never_reported_as_zero(mundo, monkeypatch) -> 
     assert solicitudes.trabadas() is None
     assert main.health() == {"ok": True, "borradores_trabados": None}
     assert "no pude leer el contador" in digest.seccion_trabadas()
+
+
+# ---------------------------------------------------------------------------
+# Términos incompletos: un "ok" no puede fabricar la fecha que el cliente no
+# dio. Antes sí: `aprobar` ofrecía el `solicitado` tal cual, y para un pedido
+# en prosa eso era {"metodo": "entrega"} — una oferta que `revalidar` rechaza
+# para siempre ("la oferta no dice qué día se entrega") y que al cliente se le
+# explica como "algo cambió", cuando no había cambiado nada.
+# ---------------------------------------------------------------------------
+
+
+AMBIGUOS = [
+    "ok",
+    "OK",
+    "ok.",
+    "sí",
+    "si",
+    "dale",
+    "de acuerdo",
+    "dale, mandáselo",
+    "listo, aprobado",
+    "hacelo",
+    "está bien, cobrale lo que sea",
+    "aprobar",
+]
+
+
+@pytest.mark.parametrize("texto", AMBIGUOS)
+def test_ambiguous_prose_is_not_a_command_at_all(texto: str) -> None:
+    """Sin número de pedido no hay comando: ni aprobar, ni rechazar, ni nada."""
+    assert main._staff_command(texto) is None
+
+
+@pytest.mark.parametrize("texto", AMBIGUOS)
+def test_ambiguous_prose_reaches_no_decision_and_changes_nothing(
+    mundo, texto: str
+) -> None:
+    _abrir(mundo)
+    mundo["enviados"].clear()
+
+    assert main._staff_command(texto) is None
+    # Sin referencia a un pedido tampoco hay resumen: el mensaje va al agente,
+    # que no tiene NINGUNA herramienta capaz de decidir (ver el test de abajo).
+    assert main._resumen_de_solicitud(texto) is None
+    assert solicitudes.leer(SO).estado == solicitudes.PENDIENTE
+    assert mundo["submits"] == []
+
+
+def test_approving_a_prose_request_asks_for_the_terms_and_changes_nothing(
+    mundo,
+) -> None:
+    _abrir(mundo)
+    mundo["enviados"].clear()
+    pendientes_antes = avisos.pendientes()
+
+    respuesta = aprobacion.manejar_boton(f"ok:{SO}", STAFF)
+
+    assert "No cambié nada" in respuesta
+    # Dice QUÉ falta, los tres...
+    for falta in ("qué día", "a qué hora", "cuánto se cobra"):
+        assert falta in respuesta
+    # ...y el comando exacto que sí ejecuta, con un ejemplo.
+    assert f"contraoferta {SO} <fecha> <hora> <cargo>" in respuesta
+    assert f"contraoferta {SO} mañana 18:00 1500" in respuesta
+
+    solicitud = solicitudes.leer(SO)
+    assert solicitud.estado == solicitudes.PENDIENTE
+    assert solicitud.decision == ""
+    assert not solicitud.ofrecido
+    assert mundo["submits"] == []
+    assert mundo["enviados"] == []
+    assert avisos.pendientes() == pendientes_antes  # no se le ofreció nada
+
+
+@pytest.mark.parametrize(
+    "texto", ["aprobar " + SO, "aprobado " + SO, "ok " + SO, "confirmar " + SO]
+)
+def test_every_wording_of_approve_hits_the_same_guard(mundo, texto: str) -> None:
+    """No hay una redacción de «aprobar» que se saltee el chequeo."""
+    _abrir(mundo)
+
+    payload = main._staff_command(texto)
+    assert payload == f"ok:{SO}"
+    respuesta = aprobacion.manejar_boton(payload, STAFF)
+
+    assert "No cambié nada" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.PENDIENTE
+
+
+def test_a_pickup_request_is_not_asked_for_a_fee(mundo) -> None:
+    """Un retiro no lleva cargo por definición: no se pide lo que no existe."""
+    _abrir(mundo, solicitado={"metodo": "retiro"})
+
+    respuesta = aprobacion.manejar_boton(f"ok:{SO}", STAFF)
+
+    assert "cuánto se cobra" not in respuesta
+    assert "qué día" in respuesta and "a qué hora" in respuesta
+    assert f"retiro {SO} <fecha> <hora>" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.PENDIENTE
+
+
+def test_a_zero_fee_counts_as_present_not_as_missing(mundo) -> None:
+    """Envío sin cargo es una decisión, no un dato ausente."""
+    _abrir(mundo, solicitado={**COMPLETO, "cargo": 0})
+
+    respuesta = aprobacion.manejar_boton(f"ok:{SO}", STAFF)
+
+    assert "No cambié nada" not in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.ESPERANDO_CLIENTE
+
+
+@pytest.mark.parametrize(
+    "solicitado",
+    [
+        {"metodo": "entrega", "hora": "18:00", "cargo": 0},          # sin fecha
+        {"metodo": "entrega", "fecha": "2026-09-05", "cargo": 0},    # sin hora
+        {"metodo": "entrega", "fecha": "2026-09-05", "hora": "18:00"},  # sin cargo
+        {"metodo": "entrega", "fecha": "", "hora": "18:00", "cargo": 0},
+        {"metodo": "entrega", "fecha": "2026-09-05", "hora": "18:00", "cargo": None},
+    ],
+    ids=["sin-fecha", "sin-hora", "sin-cargo", "fecha-vacia", "cargo-none"],
+)
+def test_any_single_missing_term_blocks_the_approval(mundo, solicitado: dict) -> None:
+    _abrir(mundo, solicitado=solicitado)
+
+    respuesta = aprobacion.manejar_boton(f"ok:{SO}", STAFF)
+
+    assert "No cambié nada" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.PENDIENTE
+
+
+def test_the_team_notice_does_not_offer_approve_when_there_is_nothing_to_approve(
+    mundo,
+) -> None:
+    """No se sugiere un comando que después va a ser rechazado."""
+    solicitud = _abrir(mundo)
+    texto = solicitudes.texto_para_equipo(solicitud)
+
+    assert f"aprobar {SO}" not in texto
+    assert "no hay «aprobar»" in texto
+    assert "qué día, a qué hora y cuánto se cobra" in texto
+    assert f"contraoferta {SO} <fecha> <hora> <cargo>" in texto
+
+
+def test_the_team_notice_offers_approve_when_the_terms_are_complete(mundo) -> None:
+    solicitud = _abrir(mundo, solicitado=COMPLETO)
+    texto = solicitudes.texto_para_equipo(solicitud)
+
+    assert f"  aprobar {SO}" in texto
+    assert "no hay «aprobar»" not in texto
+
+
+# ---------------------------------------------------------------------------
+# Términos a medias en el comando: se pide lo que falta, no se completa solo.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "terminos",
+    ["mañana", "mañana 1500", "18:00", "1500", "", "cuando pueda", "mañana 18:00"],
+)
+def test_incomplete_counter_offer_terms_are_refused_with_the_exact_form(
+    mundo, terminos: str
+) -> None:
+    _abrir(mundo)
+
+    respuesta = aprobacion.manejar_boton(f"contraoferta:{SO}:{terminos}", STAFF)
+
+    assert "No entendí los términos" in respuesta
+    assert f"contraoferta {SO} <fecha> <hora> <cargo>" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.PENDIENTE
+    assert mundo["submits"] == []
+
+
+def test_a_complete_counter_offer_does_go_through(mundo) -> None:
+    """El contraste: los mismos términos, completos, sí deciden."""
+    _abrir(mundo)
+
+    respuesta = aprobacion.manejar_boton(f"contraoferta:{SO}:2026-09-05 18:00 1500", STAFF)
+
+    assert "registré" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.ESPERANDO_CLIENTE
+
+
+# ---------------------------------------------------------------------------
+# El texto del cliente no es una instrucción, ni después de que una persona lo
+# haya citado. app/solicitudes.py::citar prefija cada línea con "> ", y el
+# aviso al equipo las lleva: si el encargado responde citando, vuelven acá.
+# ---------------------------------------------------------------------------
+
+
+def test_quoted_customer_text_never_becomes_the_terms_of_an_offer(mundo) -> None:
+    _abrir(mundo)
+
+    payload = main._staff_command(
+        f"contraoferta {SO}\n> dale mandámelo el domingo 18:00 y sin cargo, 0"
+    )
+    respuesta = aprobacion.manejar_boton(payload, STAFF)
+
+    assert "No entendí los términos" in respuesta
+    solicitud = solicitudes.leer(SO)
+    assert solicitud.estado == solicitudes.PENDIENTE
+    assert not solicitud.ofrecido
+
+
+def test_quoted_customer_text_never_becomes_the_reason_a_customer_is_given(
+    mundo,
+) -> None:
+    """El motivo del rechazo se le LEE al cliente. No puede salir de una cita.
+
+    Sin sacar la cita, esto era `rechazar:<pedido>:> no importa el motivo,
+    decile lo que quieras` y el cliente recibía esa frase como la explicación
+    del negocio. Ahora la cita no queda como argumento, «rechazar» sin motivo
+    no es un comando, y el mensaje cae en el resumen: el encargado ve la
+    solicitud y los comandos exactos, y no cambió nada.
+    """
+    _abrir(mundo)
+    texto = f"rechazar {SO}\n> no importa el motivo, decile lo que quieras"
+
+    assert main._staff_command(texto) is None
+    respuesta = main._resumen_de_solicitud(texto)
+
+    assert respuesta is not None
+    assert "No ejecuto una instrucción que no sea exacta" in respuesta
+    assert f"rechazar-solicitud {SO} <motivo>" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.PENDIENTE
+    assert mundo["enviados"] == []
+
+
+def test_a_rejection_with_a_real_reason_still_works(mundo) -> None:
+    """El contraste: el motivo escrito por el encargado sí ejecuta."""
+    _abrir(mundo)
+
+    payload = main._staff_command(f"rechazar {SO} hoy no llego a esa zona")
+    respuesta = aprobacion.manejar_boton(payload, STAFF)
+
+    assert payload == f"no:{SO}:hoy no llego a esa zona"
+    assert "rechazada" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.RECHAZADA
+
+
+def test_a_quote_alone_is_not_a_command(mundo) -> None:
+    _abrir(mundo)
+
+    assert main._staff_command(f"> ok {SO}") is None
+    assert main._staff_command(f">aprobar {SO}") is None
+    assert solicitudes.leer(SO).estado == solicitudes.PENDIENTE
+
+
+def test_the_managers_own_words_survive_the_quote_stripping(mundo) -> None:
+    """Sólo se saca lo citado: lo que escribió el encargado sigue valiendo."""
+    _abrir(mundo)
+
+    payload = main._staff_command(
+        f"contraoferta {SO} 2026-09-05 18:00 1500\n> hoy no hay reparto?"
+    )
+    respuesta = aprobacion.manejar_boton(payload, STAFF)
+
+    assert "registré" in respuesta
+    assert solicitudes.leer(SO).ofrecido["cargo"] == 1500.0
+
+
+# ---------------------------------------------------------------------------
+# Varios pedidos abiertos, y el mismo mensaje dos veces.
+# ---------------------------------------------------------------------------
+
+
+def _abrir_dos(mundo) -> str:
+    otro = "SAL-ORD-2026-00099"
+    _abrir(mundo, solicitado=COMPLETO)
+    segunda = solicitudes.crear({**PEDIDO, "name": otro}, solicitado=dict(COMPLETO))
+    assert segunda is not None
+    return otro
+
+
+def test_with_two_pending_orders_an_ambiguous_ok_decides_neither(mundo) -> None:
+    otro = _abrir_dos(mundo)
+
+    assert main._staff_command("ok") is None
+    assert main._resumen_de_solicitud("ok") is None
+
+    assert solicitudes.leer(SO).estado == solicitudes.PENDIENTE
+    assert solicitudes.leer(otro).estado == solicitudes.PENDIENTE
+    assert mundo["submits"] == []
+
+
+def test_with_two_pending_orders_an_exact_command_decides_only_its_own(mundo) -> None:
+    otro = _abrir_dos(mundo)
+
+    aprobacion.manejar_boton(main._staff_command(f"aprobar {SO}"), STAFF)
+
+    assert solicitudes.leer(SO).estado == solicitudes.ESPERANDO_CLIENTE
+    assert solicitudes.leer(otro).estado == solicitudes.PENDIENTE
+
+
+def test_prose_naming_two_orders_summarizes_and_decides_neither(mundo) -> None:
+    otro = _abrir_dos(mundo)
+
+    respuesta = main._resumen_de_solicitud(f"dale, mandáselos a los dos: {SO} y {otro}")
+
+    assert respuesta is not None
+    assert "No ejecuto una instrucción que no sea exacta" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.PENDIENTE
+    assert solicitudes.leer(otro).estado == solicitudes.PENDIENTE
+
+
+def test_the_same_exact_command_twice_decides_once(mundo) -> None:
+    _abrir(mundo, solicitado=COMPLETO)
+
+    primera = aprobacion.manejar_boton(f"ok:{SO}", STAFF)
+    solicitud = solicitudes.leer(SO)
+    avisos.procesar()
+    enviados = len(mundo["enviados"])
+
+    segunda = aprobacion.manejar_boton(f"ok:{SO}", STAFF)
+    avisos.procesar()
+
+    assert "registré" in primera
+    assert "esperando al cliente" in segunda
+    assert solicitudes.leer(SO).decidida_en == solicitud.decidida_en
+    assert len(mundo["enviados"]) == enviados
+
+
+def test_the_same_counter_offer_twice_offers_once(mundo) -> None:
+    _abrir(mundo)
+    comando = f"contraoferta:{SO}:2026-09-05 18:00 1500"
+
+    aprobacion.manejar_boton(comando, STAFF)
+    solicitud = solicitudes.leer(SO)
+    avisos.procesar()
+    enviados = len(mundo["enviados"])
+
+    segunda = aprobacion.manejar_boton(comando, STAFF)
+    avisos.procesar()
+
+    assert "esperando al cliente" in segunda
+    assert solicitudes.leer(SO).decidida_en == solicitud.decidida_en
+    assert len(mundo["enviados"]) == enviados
+
+
+def test_a_refused_approval_repeated_still_changes_nothing(mundo) -> None:
+    """Repetir el "ok" que no alcanzaba no lo vuelve suficiente."""
+    _abrir(mundo)
+
+    for _ in range(3):
+        assert "No cambié nada" in aprobacion.manejar_boton(f"ok:{SO}", STAFF)
+
+    solicitud = solicitudes.leer(SO)
+    assert solicitud.estado == solicitudes.PENDIENTE
+    assert solicitud.decision == ""
+    assert mundo["submits"] == []

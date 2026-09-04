@@ -530,7 +530,8 @@ Details, including what each mode can and cannot prove, are in
 ### What the bench found
 
 Three things, in order of how much they matter. None of them are the bench's
-own fault; that is the point of having one.
+own fault; that is the point of having one. All three are fixed now; each
+entry says what changed and which test or scenario holds it.
 
 **1. Every management-only tool was unreachable from WhatsApp. FIXED.**
 `app/main.py` called `responder_gerencia(data, thread_id=thread_tag,
@@ -587,15 +588,38 @@ how the owner says "every order waits for a person", so it is a decision
 rather than a missing value. That is the one asymmetry left, and it is on
 purpose.
 
-**3. A bare `ok` on a delivery exception creates an offer that can never
-close.** `decisiones.aprobar_solicitud` offers back exactly `solicitado`, and
-for a request phrased in prose ("me lo lleven el domingo") that carries no
-date — the system deliberately will not parse one out of the customer's words.
-`solicitudes.revalidar` then refuses forever with "la oferta no dice qué día se
-entrega", and the customer is told "something changed since the offer" when
-nothing changed. The path that works is `contraoferta <SO> <fecha> <hora>
-<cargo>`. Scenarios `cliente_acepta` (works) and `aceptacion_sin_fecha` (the
-dead end) hold both halves.
+**3. A bare `ok` on a delivery exception created an offer that could never
+close. FIXED.** `decisiones.aprobar_solicitud` offered back exactly
+`solicitado`, and for a request phrased in prose ("me lo lleven el domingo")
+that carries no date — the system deliberately will not parse one out of the
+customer's words. `solicitudes.revalidar` then refused forever with "la oferta
+no dice qué día se entrega", and the customer was told "something changed since
+the offer" when nothing had changed.
+
+`aprobar_solicitud` now checks the terms first. Missing a date, a time or a fee,
+it changes **no** state, says which of the three is missing, and gives the exact
+command that does work — `contraoferta <SO> <fecha> <hora> <cargo>`, or
+`retiro <SO> <fecha> <hora>` for a pickup, which is never asked for a fee. A
+fee of 0 counts as present: free delivery is a decision, not a missing value.
+The team notification stops offering `aprobar <SO>` when there is nothing to
+approve, so the suggested command is never one that will be refused.
+
+A bare "ok", "sí" or "dale" was never a command — `_STAFF_COMMAND_RE` requires
+a verb and an order number — and the management agent has no tool that can
+decide a request at all (`test_no_tool_can_decide_a_request_or_move_an_order`).
+Both are now pinned rather than incidental.
+
+One more thing closed while here: `_ARG_RE` runs with `re.DOTALL`, so a manager
+replying **with the customer's quote still attached** fed those `> ` lines into
+the payload — and that payload becomes the terms of a counter-offer or the
+reason a customer is read out loud. Quote lines are stripped before anything is
+read as an argument, so `rechazar <SO>` followed by a quote is no longer a
+command with a reason invented by the customer; it falls through to the request
+summary and changes nothing.
+
+Scenario `ok_sin_terminos` walks the whole thing end to end: bare "ok", then
+"ok <SO>", then the complete command, then the customer's acceptance
+confirming the order.
 
 ## Setup
 

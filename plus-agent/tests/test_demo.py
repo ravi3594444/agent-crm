@@ -680,6 +680,9 @@ def test_every_release_scenario_the_task_asked_for_exists() -> None:
         "gerente_aprueba", "gerente_rechaza", "cliente_acepta",
         "preparar_despachar_cancelar", "cancelacion_sin_remito",
         "reinicio_con_pendiente",
+        # Los tres hallazgos de la primera corrida, cada uno con su escenario.
+        "gerencia_estado_del_sistema", "cliente_no_alcanza_gerencia",
+        "ok_sin_terminos",
     }
     assert esperados <= claves, esperados - claves
 
@@ -740,11 +743,13 @@ def test_the_fake_phones_are_obviously_invented() -> None:
 # ------------------------------------------- qué se exige en cada modo
 
 
-def _turno_con(modo: str, paso, respuestas: list[str], foto: dict | None = None):
+def _turno_con(modo: str, paso, respuestas: list[str], foto: dict | None = None,
+               cambios: dict | None = None):
     """Corre sólo la revisión de un paso, sin Docker ni red."""
     piloto_ = piloto.Piloto(modo, pathlib.Path("/tmp/no-se-escribe"))
     turno = piloto.Turno("x", 1, "549", "cliente", paso.texto,
-                         respuestas=list(respuestas))
+                         respuestas=list(respuestas),
+                         cambios=dict(cambios or {}))
     turno.problemas.extend(piloto_._revisar(paso, turno, foto or {}))
     return turno
 
@@ -801,6 +806,43 @@ def test_the_document_state_is_demanded_in_both_modes(modo: str) -> None:
     confirmado = _turno_con(modo, paso, ["listo"],
                             {"Sales Order/SO-1": {"docstatus": 1}})
     assert confirmado.ok, confirmado.problemas
+
+
+@pytest.mark.parametrize("modo", ["offline", "gemini"])
+def test_a_document_that_must_not_exist_fails_in_both_modes(modo: str) -> None:
+    """«No apareció ninguna factura» no se puede decir con `documentos`.
+
+    `documentos` exige al menos un documento del tipo, así que probar que una
+    escritura no autorizada NO escribió necesita la afirmación contraria.
+    """
+    paso = escenarios.Paso("549", "registrame una venta",
+                           sin_documentos=["Sales Invoice"])
+    apareció = _turno_con(modo, paso, ["listo"],
+                          cambios={"Sales Invoice/ACC-SINV-1": {"nuevo": {}}})
+    assert not apareció.ok
+    assert any("y no debería" in p for p in apareció.problemas)
+
+    # Una factura que YA estaba —los datos semilla traen una— no es una
+    # escritura de este turno y no puede hacerlo fallar.
+    limpio = _turno_con(modo, paso, ["listo"],
+                        foto={"Sales Invoice/ACC-SINV-SEMILLA": {"docstatus": 1}},
+                        cambios={"Sales Order/SO-1": {"nuevo": {}}})
+    assert limpio.ok, limpio.problemas
+
+
+def test_the_exact_matcher_does_not_match_a_message_that_merely_contains_it() -> None:
+    """`contiene("ok")` matchea todo; un "ok" pelado necesita match exacto."""
+    from demo.falso_modelo import contiene, exacto
+
+    solo_ok = exacto("ok", "dale")
+
+    assert solo_ok("ok", "gerencia")
+    assert solo_ok("  OK  ", "gerencia")
+    assert solo_ok("dale", "gerencia")
+    assert not solo_ok("ok SAL-ORD-2026-00001", "gerencia")
+    assert not solo_ok("dale, mandáselo igual", "gerencia")
+    # Justo lo que hace falta distinguir.
+    assert contiene("ok")("ok SAL-ORD-2026-00001", "gerencia")
 
 
 @pytest.mark.parametrize("modo", ["offline", "gemini"])

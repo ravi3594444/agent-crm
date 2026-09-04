@@ -20,6 +20,7 @@ from demo.falso_modelo import (
     Regla,
     Texto,
     contiene,
+    exacto,
 )
 
 # --------------------------------------------------------------- los pasos
@@ -38,7 +39,7 @@ class Paso:
     prohibe: list[str] = field(default_factory=list)
     # Documentos que tienen que quedar así: {"Sales Order/*": {"docstatus": 0}}
     documentos: dict[str, dict] = field(default_factory=dict)
-    # Doctypes que NO pueden existir después del paso: ["Sales Invoice"].
+    # Doctypes que este paso NO puede crear ni cambiar: ["Sales Invoice"].
     sin_documentos: list[str] = field(default_factory=list)
     nota: str = ""
 
@@ -178,31 +179,44 @@ def escenarios() -> list[Escenario]:
                 Paso(CLIENTE, "necesito que me lo lleven el domingo"),
                 # Con fecha concreta: 'ok' aprueba lo que el cliente pidió
                 # EN SUS PALABRAS, y esas palabras no traen una fecha que el
-                # sistema pueda escribir (ver escenario aceptacion_sin_fecha).
+                # sistema pueda escribir (ver escenario ok_sin_terminos).
                 Paso(DUENO, "contraoferta " + ULTIMO_PEDIDO + " 2026-09-07 10:00 0"),
                 Paso(CLIENTE, "acepto",
                      documentos={"Sales Order/*": {"docstatus": 1}}),
             ],
         ),
         Escenario(
-            "aceptacion_sin_fecha",
-            "El dueño aprueba con 'ok' una excepción que el cliente pidió en prosa",
-            porque="HALLAZGO. 'ok' ofrece de vuelta exactamente lo que pidió el "
-                   "cliente, y sus palabras ('el domingo') no traen una fecha "
-                   "que el sistema pueda escribir. La oferta queda sin fecha y "
-                   "la aceptación NUNCA puede cerrar: siempre cae en revisión "
-                   "humana, con un mensaje que dice que algo cambió cuando no "
-                   "cambió nada.",
+            "ok_sin_terminos",
+            "El dueño contesta 'ok' a una excepción que el cliente pidió en prosa",
+            porque="Era el hallazgo: «ok» ofrecía de vuelta exactamente lo que "
+                   "pidió el cliente, y sus palabras («el domingo») no traen "
+                   "una fecha que el sistema pueda escribir, así que la "
+                   "aceptación caía siempre en revisión humana con un mensaje "
+                   "que decía que algo había cambiado cuando no había cambiado "
+                   "nada. Ahora un «ok» pelado no es un comando, un «ok» con "
+                   "número pide los términos que faltan sin cambiar nada, y "
+                   "sólo el comando completo cierra el circuito.",
             pasos=[
                 Paso(CLIENTE, "dame 20 unidades de yogur de frutilla para mañana",
                      espera=["SAL-ORD"]),
                 Paso(CLIENTE, "necesito que me lo lleven el domingo"),
-                Paso(DUENO, "ok " + ULTIMO_PEDIDO),
-                # Lo que se ve hoy: cae en revisión humana. Si algún día se
-                # arregla, este escenario falla y hay que actualizarlo.
-                Paso(CLIENTE, "acepto",
-                     espera=["revisarlo con una persona"],
+                # Un "ok" pelado: sin número de pedido no hay nada que aprobar,
+                # y el agente de gerencia no tiene ninguna herramienta que
+                # pueda decidir una solicitud.
+                Paso(DUENO, "ok",
+                     prohibe=["registre", "aprobada", "acepto"],
                      documentos={"Sales Order/*": {"docstatus": 0}}),
+                # Con el número, pero sin términos: dice qué falta, da el
+                # comando exacto y no toca el documento.
+                Paso(DUENO, "ok " + ULTIMO_PEDIDO,
+                     espera=["No cambié nada", "qué día", "contraoferta"],
+                     prohibe=["registré"],
+                     documentos={"Sales Order/*": {"docstatus": 0}}),
+                # Los términos completos sí deciden, y el cliente puede cerrar.
+                Paso(DUENO, "contraoferta " + ULTIMO_PEDIDO + " 2026-09-07 10:00 0",
+                     espera=["registré"]),
+                Paso(CLIENTE, "acepto",
+                     documentos={"Sales Order/*": {"docstatus": 1}}),
             ],
         ),
         Escenario(
@@ -305,6 +319,14 @@ def escenarios() -> list[Escenario]:
 def reglas() -> list[Regla]:
     """Lo que haría un modelo, escrito a mano. El primer match gana."""
     return [
+        # -- un "ok" pelado del dueño. Llega al agente de gerencia porque no
+        # es un comando; el agente no tiene con qué decidir, así que contesta y
+        # nada más. `exacto` y no `contiene`: "ok" adentro matchea todo.
+        (exacto("ok", "dale", "si", "sí"), [
+            Texto("¿De cuál pedido? Decime el número y los términos, tal cual: "
+                  "contraoferta <pedido> <fecha> <hora> <cargo>."),
+        ]),
+
         # -- un cliente pidiendo lo de gerencia. Va PRIMERO porque su texto
         # también contiene "como esta el sistema", y el primer match gana. El
         # guión pide las dos herramientas que no existen en su registro: lo
