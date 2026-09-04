@@ -606,8 +606,29 @@ class Piloto:
                        verificar=False)
 
     def bajar(self, silencioso: bool = False) -> None:
-        for c in (AGENTE, RELEVO, SERVICIOS, REDIS):
+        nombres = (AGENTE, RELEVO, SERVICIOS, REDIS)
+        for c in nombres:
             _correr("docker", "rm", "-f", c, verificar=False)
+        # `docker rm -f` vuelve antes de que el nombre quede libre si el
+        # contenedor estaba reiniciándose, y el `docker run` siguiente falla
+        # con "name already in use" — que se lee como un bug del banco de
+        # pruebas y no como lo que es: una corrida anterior que no terminó.
+        for _ in range(30):
+            quedan = [
+                c for c in nombres
+                if _correr("docker", "ps", "-aq", "-f", f"name=^{c}$",
+                           verificar=False)
+            ]
+            if not quedan:
+                break
+            time.sleep(1)
+            for c in quedan:
+                _correr("docker", "rm", "-f", c, verificar=False)
+        else:
+            raise RuntimeError(
+                f"no pude liberar los nombres {', '.join(quedan)}: "
+                "borralos a mano con `docker rm -f`"
+            )
         _correr("docker", "network", "rm", RED, verificar=False)
         if not silencioso:
             print("[piloto] banco de pruebas desarmado", flush=True)

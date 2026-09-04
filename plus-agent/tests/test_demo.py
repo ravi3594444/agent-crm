@@ -735,3 +735,79 @@ def test_the_fake_phones_are_obviously_invented() -> None:
         cuerpo = t[5:]
         assert len(set(cuerpo)) <= 4, f"{t} no parece inventado"
     assert len(set(telefonos)) == len(telefonos)
+
+
+# ------------------------------------------- qué se exige en cada modo
+
+
+def _turno_con(modo: str, paso, respuestas: list[str], foto: dict | None = None):
+    """Corre sólo la revisión de un paso, sin Docker ni red."""
+    piloto_ = piloto.Piloto(modo, pathlib.Path("/tmp/no-se-escribe"))
+    turno = piloto.Turno("x", 1, "549", "cliente", paso.texto,
+                         respuestas=list(respuestas))
+    turno.problemas.extend(piloto_._revisar(paso, turno, foto or {}))
+    return turno
+
+
+def test_expected_wording_is_hard_offline_and_advisory_against_a_real_model() -> None:
+    """Contra un guión el texto es exacto; contra un modelo libre, no.
+
+    "tengo leche entera" es una respuesta correcta que no contiene la cadena
+    LECHE-ENT-1L. Fallar por eso convertiría cada corrida con Gemini en un
+    muro de rojo que no dice nada sobre el sistema.
+    """
+    paso = escenarios.Paso("549", "tenés leche?", espera=["LECHE-ENT-1L"])
+    respuestas = ["Sí, tengo leche entera y descremada."]
+
+    offline = _turno_con("offline", paso, respuestas)
+    assert not offline.ok
+    assert any("LECHE-ENT-1L" in p for p in offline.problemas)
+
+    gemini = _turno_con("gemini", paso, respuestas)
+    assert gemini.ok, gemini.problemas
+    assert any("LECHE-ENT-1L" in a for a in gemini.avisos)
+
+
+@pytest.mark.parametrize("modo", ["offline", "gemini"])
+def test_a_forbidden_phrase_fails_in_both_modes(modo: str) -> None:
+    """Que el modelo diga «confirmado» cuando no lo está es lo que hay que
+    cazar, y no es una cuestión de redacción."""
+    paso = escenarios.Paso("549", "dame 10", prohibe=["confirmado"])
+    turno = _turno_con(modo, paso, ["Tu pedido quedó confirmado."])
+    assert not turno.ok
+    assert any("confirmado" in p for p in turno.problemas)
+
+
+@pytest.mark.parametrize("modo", ["offline", "gemini"])
+def test_a_technical_apology_fails_in_both_modes(modo: str) -> None:
+    """app/main.py convierte cualquier excepción en una disculpa. Sin este
+    chequeo, un escenario cuyas condiciones son sólo «prohibe» pasaría con el
+    agente completamente roto."""
+    paso = escenarios.Paso("549", "hola", prohibe=["confirmado"])
+    turno = _turno_con(
+        modo, paso, ["Perdón, tuve un problema técnico. Ya avisé al equipo."])
+    assert not turno.ok
+    assert any("disculpa técnica" in p for p in turno.problemas)
+
+
+@pytest.mark.parametrize("modo", ["offline", "gemini"])
+def test_the_document_state_is_demanded_in_both_modes(modo: str) -> None:
+    """El estado de los documentos no depende de cómo redactó nadie."""
+    paso = escenarios.Paso("549", "dame 10",
+                           documentos={"Sales Order/*": {"docstatus": 1}})
+    sin_confirmar = _turno_con(modo, paso, ["listo"],
+                               {"Sales Order/SO-1": {"docstatus": 0}})
+    assert not sin_confirmar.ok
+    confirmado = _turno_con(modo, paso, ["listo"],
+                            {"Sales Order/SO-1": {"docstatus": 1}})
+    assert confirmado.ok, confirmado.problemas
+
+
+@pytest.mark.parametrize("modo", ["offline", "gemini"])
+def test_only_the_acknowledgement_is_never_a_pass(modo: str) -> None:
+    """Todo turno de texto manda el acuse; la respuesta es la segunda."""
+    paso = escenarios.Paso("549", "hola")
+    turno = _turno_con(modo, paso, [
+        "Recibido, dame un momento mientras lo verifico."])
+    assert not turno.ok
+    assert any("sólo llegó el acuse" in p for p in turno.problemas)
