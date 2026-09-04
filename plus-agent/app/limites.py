@@ -797,10 +797,18 @@ def entrega() -> Entrega:
     sin_reglas_del_dueno = not any(
         almacen.get(nombre, "").strip() for nombre in ENTREGA
     )
-    # ponytail: la autoridad es ésta, que es la que habilita ofertas. resumen()
-    # sigue mostrando los valores de arranque en ese estado, así que el reporte
-    # de readiness dice «configurado» donde entrega() no ofrece nada. Si eso
-    # confunde a alguien en el piloto, la señal va también ahí.
+    # ponytail: la autoridad es ésta, que es la que habilita ofertas — así que
+    # NADA se sobrevende por lo que sigue. Pero resumen() todavía resuelve
+    # estas filas desde el entorno de arranque en este estado, y de resumen()
+    # leen readiness (make check-env) y ver_reglas_de_entrega, que es la
+    # herramienta con la que el DUEÑO pregunta qué días reparte. O sea: se le
+    # muestra un reparto que el sistema no va a ofrecer, y no se le dice que
+    # sus reglas se perdieron. GAP registrado, hay que arreglarlo antes de
+    # producción; resumen() tiene que hacer la misma pregunta durable que
+    # entrega(). Lo fija
+    # tests/test_limites.py::test_readiness_agrees_with_the_decision_path_after_a_wipe
+    # como xfail(strict=True): cuando alguien lo arregle, ese test FALLA y lo
+    # obliga a volver acá.
     if sin_reglas_del_dueno and _hubo_cambios_durables_entrega():
         print(
             "[limites] las reglas de entrega no están en el almacén y ERPNext "

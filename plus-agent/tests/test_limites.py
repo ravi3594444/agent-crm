@@ -1417,6 +1417,44 @@ def test_an_erpnext_that_cannot_be_asked_about_delivery_offers_nothing(
     assert reglas.excepcion_activa is False
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "GAP — RECORDED, NOT FIXED. Fix before production. After a wipe the "
+        "DECISION path is right: entrega() offers nothing, so nothing is "
+        "oversold and no delivery is pre-authorised. But resumen() still "
+        "resolves the delivery rows from the bootstrap environment and reports "
+        "origen='arranque', and TWO surfaces read resumen(): readiness "
+        "(make check-env) and app/tools/configuracion.py::ver_reglas_de_entrega "
+        "— the tool the OWNER asks «qué días reparto». So he is told he has a "
+        "Mon-Fri round the system will not offer, and is NOT told his rules are "
+        "gone, which is the one thing he needs to know to put them back. "
+        "The fix is for resumen() to ask the same durable question entrega() "
+        "asks, and report those rows as lost rather than as bootstrap values. "
+        "Strict on purpose: whoever fixes it gets a FAILURE here and has to "
+        "come back and delete this marker."
+    ),
+)
+def test_readiness_agrees_with_the_decision_path_after_a_wipe(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What the owner is SHOWN has to match what the system will DO."""
+    _entorno_de_reparto(monkeypatch)
+    _historia_durable(monkeypatch, limite=False, entrega=True)
+    almacen.hashes.clear()
+
+    # The decision path is correct today, and that is what makes this safe.
+    assert limites.entrega().dias_reparto == ()
+    assert limites.entrega().excepcion_activa is False
+
+    # The display has to say the same thing, and today it does not.
+    fila = next(f for f in limites.resumen() if f["nombre"] == "ENTREGA_DIAS")
+    assert fila["valor"] == "", (
+        f"readiness shows {fila['valor']!r} (origen {fila['origen']!r}) while "
+        "entrega() offers nothing"
+    )
+
+
 def test_a_limit_change_is_recorded_under_the_limit_marker(
     almacen: FakeRedis,
 ) -> None:

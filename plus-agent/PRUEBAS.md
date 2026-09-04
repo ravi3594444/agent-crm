@@ -37,7 +37,7 @@ README.md.
 ```bash
 cd plus-agent
 docker run -d --name redis-test -p 6379:6379 redis/redis-stack-server:7.4.0-v1
-REDIS_URL=redis://localhost:6379/0 make test   # expect: 1124 passed
+REDIS_URL=redis://localhost:6379/0 make test   # expect: 1124 passed, 1 xfailed
 ```
 
 **Expect:** `260 passed, 3 xfailed`. The 3 xfails are strict and deliberate: each documents a known gap in the code (see the `reason=` in the test). If one of them ever *passes*, the gap was fixed and the marker must be removed.
