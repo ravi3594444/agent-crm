@@ -56,6 +56,13 @@ class Escenario:
     porque: str = ""
 
 
+# El código de cuatro dígitos que Python le manda al dueño para confirmar un
+# cambio de ajuste. Se define ACÁ y no en demo/falso_modelo.py a propósito: el
+# modelo no lo ve nunca —por eso los dos pasos son dos— así que el marcador
+# vive en el lenguaje de los escenarios y lo resuelve el piloto leyendo el
+# buzón, igual que lo leería el dueño en su teléfono.
+ULTIMO_CODIGO = "<ULTIMO_CODIGO>"
+
 CLIENTE = datos.TELEFONO_HABITUAL
 NUEVO = datos.TELEFONO_NUEVO
 DUENO = datos.TELEFONO_DUENO
@@ -287,6 +294,31 @@ def escenarios() -> list[Escenario]:
             ],
         ),
         Escenario(
+            "gerencia_cambia_zona",
+            "El dueño agrega una localidad de reparto por WhatsApp",
+            porque="Las zonas eran la ÚNICA regla de entrega que no se podía "
+                   "cambiar por WhatsApp: app/entrega.py las leía del entorno "
+                   "con os.getenv, así que agregar una localidad pedía editar "
+                   "el .env y reiniciar. Ahora son un límite y pasan por el "
+                   "mismo propose+código de cuatro dígitos: el agente propone, "
+                   "Python le manda el código al dueño —el modelo NO lo ve— y "
+                   "el router determinista lo aplica. La lista REEMPLAZA a la "
+                   "anterior, así que el mensaje de confirmación tiene que "
+                   "mostrar el valor viejo y el nuevo antes de que confirme.",
+            pasos=[
+                Paso(DUENO, "quiero repartir tambien en Rio Ceballos",
+                     # El código sale por un mensaje aparte, no por la
+                     # herramienta: es lo que hace que los dos pasos sean dos.
+                     espera=["Código para confirmar", "Cordoba, Villa Allende",
+                             "Rio Ceballos"]),
+                # El dueño contesta los cuatro dígitos que le llegaron.
+                Paso(DUENO, ULTIMO_CODIGO,
+                     espera=["Rio Ceballos"], prohibe=["no apliqué"]),
+                Paso(DUENO, "reglas de entrega",
+                     espera=["Rio Ceballos", "Villa Allende"]),
+            ],
+        ),
+        Escenario(
             "cliente_no_alcanza_gerencia",
             "Un cliente intenta usar una herramienta de gerencia",
             porque="La frontera que un mensaje SÍ puede atacar. El router "
@@ -319,6 +351,22 @@ def escenarios() -> list[Escenario]:
 def reglas() -> list[Regla]:
     """Lo que haría un modelo, escrito a mano. El primer match gana."""
     return [
+        # -- las zonas de reparto: la lista completa, porque reemplaza a la
+        # anterior en vez de agregarse (lo dice el docstring de la
+        # herramienta). El escenario verifica que el pedido de confirmación
+        # muestre el valor viejo, que es lo que le deja ver una pérdida.
+        (contiene("quiero repartir"), [
+            Llamada("proponer_limite", {
+                "limite": "localidades de reparto",
+                "valor": "Cordoba, Villa Allende, Rio Ceballos",
+            }),
+            Texto(ULTIMO_RESULTADO),
+        ]),
+        (contiene("reglas de entrega"), [
+            Llamada("ver_reglas_de_entrega", {}),
+            Texto(ULTIMO_RESULTADO),
+        ]),
+
         # -- un "ok" pelado del dueño. Llega al agente de gerencia porque no
         # es un comando; el agente no tiene con qué decidir, así que contesta y
         # nada más. `exacto` y no `contiene`: "ok" adentro matchea todo.

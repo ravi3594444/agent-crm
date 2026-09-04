@@ -1758,3 +1758,224 @@ def test_what_is_left_pending_never_includes_the_code(almacen: FakeRedis) -> Non
     assert pendiente["nuevo"] == "30000"
     assert "codigo" not in pendiente
     assert "4242" not in json.dumps(pendiente, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------- zonas
+# Las zonas de reparto eran la ÚNICA regla de entrega que el dueño no podía
+# cambiar por WhatsApp: app/entrega.py las leía de ZONAS_ENTREGA_CP y
+# ZONAS_ENTREGA_LOCALIDADES con os.getenv, así que "permití reparto en tal
+# ciudad" pedía editar el .env y reiniciar. Ahora son dos límites como los
+# demás y pasan por el mismo código de cuatro dígitos.
+
+
+@pytest.mark.parametrize(
+    ("crudo", "esperado"),
+    [
+        ("Villa Allende", "Villa Allende"),
+        ("Villa Allende, Cordoba", "Villa Allende, Cordoba"),
+        # Así escribe una lista una persona.
+        ("Villa Allende y Cordoba", "Villa Allende, Cordoba"),
+        ("Villa Allende, Cordoba y Unquillo", "Villa Allende, Cordoba, Unquillo"),
+        # Dedup sin tildes ni caso, conservando cómo lo escribió el dueño.
+        ("Córdoba, cordoba, CORDOBA", "Córdoba"),
+        ("  Villa   Allende  ", "Villa Allende"),
+        ("Villa Allende, villa allende", "Villa Allende"),
+    ],
+)
+def test_localities_are_a_list_a_person_can_type(crudo: str, esperado: str) -> None:
+    assert limites.validar("ZONAS_ENTREGA_LOCALIDADES", crudo) == esperado
+
+
+def test_a_locality_is_never_split_on_a_space() -> None:
+    """El bug obvio de reusar el validador de días: "Villa Allende" es UNA."""
+    valor = limites.validar("ZONAS_ENTREGA_LOCALIDADES", "Villa Allende")
+
+    assert valor == "Villa Allende"
+    assert "," not in valor
+
+
+@pytest.mark.parametrize(
+    ("crudo", "esperado"),
+    [
+        ("5000", "5000"),
+        ("5105, X5000ABC", "5105, X5000ABC"),
+        ("x5000abc", "X5000ABC"),
+        ("5000 5105", "5000, 5105"),
+        ("5000 y 5105", "5000, 5105"),
+        # CPA argentino, que se escribe sin espacios.
+        ("X5000ABC", "X5000ABC"),
+        ("X5000ABC, 5105", "X5000ABC, 5105"),
+        ("5000, 5000", "5000"),
+    ],
+)
+def test_postcodes_normalize_the_way_entrega_compares_them(crudo, esperado) -> None:
+    """Se guarda EXACTAMENTE la forma con la que se va a comparar."""
+    from app import entrega
+
+    valor = limites.validar("ZONAS_ENTREGA_CP", crudo)
+
+    assert valor == esperado
+    for parte in valor.split(", "):
+        assert entrega.normalizar_cp(parte) == parte
+
+
+@pytest.mark.parametrize("nombre", ["ZONAS_ENTREGA_LOCALIDADES", "ZONAS_ENTREGA_CP"])
+@pytest.mark.parametrize("crudo", ["", "   ", ",", " , , ", "-.-"])
+def test_an_empty_zone_list_is_refused_not_stored_as_nothing(nombre, crudo) -> None:
+    """«no me dijiste nada» y «ninguna» son respuestas distintas."""
+    with pytest.raises(limites.LimiteError):
+        limites.validar(nombre, crudo)
+
+
+def test_an_ambiguous_postcode_is_refused_by_name_not_guessed() -> None:
+    """"X 5000 - ABC" puede ser un CPA con espacios o tres códigos.
+
+    Se corta por espacios a propósito, porque "5000 5105" son dos códigos. Con
+    algo que no se puede leer de una sola manera, adivinar mal ensancha o
+    encoge la zona de reparto sin que nadie lo decida, así que se rechaza
+    diciendo qué parte no se entendió.
+    """
+    with pytest.raises(limites.LimiteError, match="no es un código postal"):
+        limites.validar("ZONAS_ENTREGA_CP", "X 5000 - ABC")
+
+
+@pytest.mark.parametrize("nombre", ["ZONAS_ENTREGA_LOCALIDADES", "ZONAS_ENTREGA_CP"])
+@pytest.mark.parametrize("dicho", ["ninguno", "ninguna", "nada", "-"])
+def test_the_owner_can_clear_a_zone_list_on_purpose(nombre, dicho) -> None:
+    assert limites.validar(nombre, dicho) == limites.NINGUNO
+
+
+@pytest.mark.parametrize(
+    ("nombre", "crudo"),
+    [
+        ("ZONAS_ENTREGA_LOCALIDADES", "Villa Allende y Cordoba"),
+        ("ZONAS_ENTREGA_CP", "5105 y x5000abc"),
+    ],
+)
+def test_normalizing_a_zone_list_twice_gives_the_same_thing(nombre, crudo) -> None:
+    """validar() corre en proponer() y otra vez en aplicar(): tiene que ser
+    idempotente o el dueño confirma una cosa y se guarda otra."""
+    una = limites.validar(nombre, crudo)
+
+    assert limites.validar(nombre, una, tecleado=False) == una
+    assert limites.validar(nombre, una) == una
+
+
+@pytest.mark.parametrize(
+    ("alias", "nombre"),
+    [
+        ("localidades de reparto", "ZONAS_ENTREGA_LOCALIDADES"),
+        ("localidades", "ZONAS_ENTREGA_LOCALIDADES"),
+        ("zonas de reparto", "ZONAS_ENTREGA_LOCALIDADES"),
+        ("ciudades", "ZONAS_ENTREGA_LOCALIDADES"),
+        ("códigos postales", "ZONAS_ENTREGA_CP"),
+        ("codigos postales", "ZONAS_ENTREGA_CP"),
+        ("cp", "ZONAS_ENTREGA_CP"),
+    ],
+)
+def test_the_owner_can_name_a_zone_list_the_way_he_says_it(alias, nombre) -> None:
+    assert limites.definicion(alias).nombre == nombre
+
+
+def test_a_zone_change_needs_the_four_digit_code_like_everything_else(
+    almacen: FakeRedis,
+) -> None:
+    """El camino completo: el agente propone, el dueño confirma, y recién ahí
+    cambia lo que app/entrega.py va a leer."""
+    from app import entrega
+
+    respuesta = configuracion.proponer_limite.invoke(
+        {"limite": "localidades de reparto", "valor": "Villa Allende y Cordoba"},
+        config=_gerencia(),
+    )
+
+    assert "todavía sin aplicar" in respuesta
+    # Nada cambió: el código no salió por la herramienta.
+    assert limites.vigente("ZONAS_ENTREGA_LOCALIDADES") == limites.NINGUNO
+    assert entrega.zonas_configuradas() == (frozenset(), frozenset())
+    assert _codigo_enviado(almacen) == "4242"
+
+    detalle = _confirmar()
+
+    assert "Villa Allende, Cordoba" in detalle
+    assert limites.vigente("ZONAS_ENTREGA_LOCALIDADES") == "Villa Allende, Cordoba"
+    _cps, localidades = entrega.zonas_configuradas()
+    assert localidades == frozenset({"villa allende", "cordoba"})
+
+
+def test_a_confirmed_zone_replaces_the_env_and_takes_effect_at_once(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El .env es el valor de ARRANQUE; lo que fijó el dueño manda, sin reinicio."""
+    from app import entrega
+
+    monkeypatch.setenv("ZONAS_ENTREGA_CP", "9999")
+    assert entrega.zonas_configuradas()[0] == frozenset({"9999"})
+
+    configuracion.proponer_limite.invoke(
+        {"limite": "cp", "valor": "5105, x5000abc"}, config=_gerencia()
+    )
+    _confirmar()
+
+    assert entrega.zonas_configuradas()[0] == frozenset({"5105", "X5000ABC"})
+
+
+def test_a_zone_change_is_audited_with_the_phone_and_both_values(
+    almacen: FakeRedis,
+) -> None:
+    configuracion.proponer_limite.invoke(
+        {"limite": "localidades", "valor": "Cordoba"}, config=_gerencia()
+    )
+    _confirmar()
+
+    entradas = limites.auditoria(10)
+    ultima = entradas[-1]
+    assert ultima["limite"] == "ZONAS_ENTREGA_LOCALIDADES"
+    assert ultima["anterior"] == limites.NINGUNO
+    assert ultima["nuevo"] == "Cordoba"
+    assert ultima["telefono"] == EQUIPO
+
+
+def test_zones_read_as_lost_when_the_store_was_wiped(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un flush de Redis no puede devolver la zona al valor del .env.
+
+    Ensanchar la zona de reparto sin que nadie lo haya decidido es vender una
+    entrega que no se va a hacer. Con el almacén vacío y cambios registrados en
+    ERPNext no rige ninguna zona y no se entrega nada solo.
+    """
+    from app import entrega
+
+    monkeypatch.setenv("ZONAS_ENTREGA_CP", "5000")
+    monkeypatch.setenv("ZONAS_ENTREGA_LOCALIDADES", "Cordoba")
+    monkeypatch.setattr(limites, "_reglas_de_entrega_perdidas", lambda almacen: True)
+
+    assert limites.zonas() == ((), ())
+    assert entrega.zonas_configuradas() == (frozenset(), frozenset())
+
+
+def test_an_unreadable_store_does_not_invent_a_zone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import entrega
+
+    monkeypatch.setattr(
+        limites, "_almacen", Mock(side_effect=limites.LimiteError("sin redis"))
+    )
+
+    assert limites.zonas() == ((), ())
+    assert entrega.zonas_configuradas() == (frozenset(), frozenset())
+
+
+def test_a_customer_cannot_change_a_delivery_zone(almacen: FakeRedis) -> None:
+    """Es la regla que decide si su propia dirección entra: no la toca él."""
+    from app import entrega
+
+    for config in (_cliente(), _gerencia(DESCONOCIDO), {}):
+        assert "no está autorizado" in configuracion.proponer_limite.invoke(
+            {"limite": "localidades", "valor": "Villa Allende"}, config=config
+        )
+
+    assert limites.vigente("ZONAS_ENTREGA_LOCALIDADES") == limites.NINGUNO
+    assert entrega.zonas_configuradas() == (frozenset(), frozenset())

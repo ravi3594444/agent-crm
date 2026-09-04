@@ -683,6 +683,8 @@ def test_every_release_scenario_the_task_asked_for_exists() -> None:
         # Los tres hallazgos de la primera corrida, cada uno con su escenario.
         "gerencia_estado_del_sistema", "cliente_no_alcanza_gerencia",
         "ok_sin_terminos",
+        # Las zonas de reparto, que dejaron de ser sólo del entorno.
+        "gerencia_cambia_zona",
     }
     assert esperados <= claves, esperados - claves
 
@@ -691,6 +693,19 @@ def test_every_scenario_says_why_it_exists() -> None:
     for e in escenarios.escenarios():
         assert e.porque.strip(), f"{e.clave} no dice qué prueba"
         assert e.pasos, f"{e.clave} no tiene pasos"
+
+
+def test_a_step_that_sends_the_code_comes_after_one_that_produces_it() -> None:
+    """El código lo lee el piloto del buzón. Sin un paso que lo genere antes,
+    el mensaje saldría vacío y el escenario fallaría por otra razón."""
+    for e in escenarios.escenarios():
+        propuso = False
+        for i, paso in enumerate(e.pasos):
+            if escenarios.ULTIMO_CODIGO in paso.texto:
+                assert propuso, (
+                    f"{e.clave} paso {i + 1} manda un código que nadie pidió")
+            if "Código para confirmar" in " ".join(paso.espera):
+                propuso = True
 
 
 def test_a_step_that_names_an_order_comes_after_one_that_creates_it() -> None:

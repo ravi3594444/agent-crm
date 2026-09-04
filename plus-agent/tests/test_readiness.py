@@ -89,6 +89,10 @@ CUENTA_SANA = {
 # stub answers for them too. "-" is limites.NINGUNO: set, and set to nothing.
 def _entrega(**cambios):
     filas = {
+        # Las zonas son reglas de entrega desde que el dueño las cambia por
+        # WhatsApp: un entorno "completo" las tiene puestas.
+        "ZONAS_ENTREGA_LOCALIDADES": "Villa Allende, Cordoba",
+        "ZONAS_ENTREGA_CP": "5105, X5000",
         "ENTREGA_DIAS": "martes,viernes",
         "ENTREGA_HORA": "08:00",
         "ENTREGA_EXCEPCION_ACTIVA": "false",
@@ -173,8 +177,11 @@ def test_a_complete_environment_is_ready_and_the_report_exposes_no_value() -> No
 
 
 def test_missing_configuration_is_reported_not_fabricated() -> None:
-    env = {k: v for k, v in BASE.items() if k not in ("DASHSCOPE_API_KEY", "TELEFONOS_EQUIPO", "ZONAS_ENTREGA_CP", "ZONAS_ENTREGA_LOCALIDADES", "ERPNEXT_WAREHOUSE")}
-    reporte = _correr(env)
+    env = {k: v for k, v in BASE.items() if k not in ("DASHSCOPE_API_KEY", "TELEFONOS_EQUIPO", "ERPNEXT_WAREHOUSE")}
+    # Las zonas ya no salen del entorno: para que falten hay que vaciarlas en
+    # el almacén del dueño, que es de donde las lee el sistema.
+    reporte = _correr(env, limites=_limites_con_zonas(
+        ZONAS_ENTREGA_LOCALIDADES="-", ZONAS_ENTREGA_CP="-"))
     texto = reporte.texto()
     assert not reporte.listo
     assert "FALTA  DASHSCOPE_API_KEY" in texto
@@ -281,11 +288,52 @@ def test_offline_mode_makes_no_network_call_and_says_what_was_not_verified() -> 
     assert "sin red: permisos y depósito no se verificaron" in texto
 
 
-def test_zone_rule_mode_is_described(monkeypatch) -> None:
-    solo_cp = {**BASE, "ZONAS_ENTREGA_LOCALIDADES": ""}
-    assert "la localidad no se evalúa" in _correr(solo_cp).texto()
-    solo_loc = {**BASE, "ZONAS_ENTREGA_CP": ""}
-    assert "el código postal no se evalúa" in _correr(solo_loc).texto()
+def _limites_con_zonas(**cambios):
+    """El resumen completo, con las zonas en el valor que pida el test.
+
+    Se arma sobre `_entrega()` y no sobre el entorno: las zonas salen del
+    almacén del dueño (app/limites.py), que es de donde las lee el runtime.
+    """
+    from app import limites as limites_mod
+
+    def resumen():
+        sin_entrega = [
+            f for f in _limites_ok() if f["nombre"] not in limites_mod.ENTREGA
+        ]
+        return sin_entrega + _entrega(**cambios)
+
+    return resumen
+
+
+def test_zone_rule_mode_is_described() -> None:
+    solo_cp = _correr(BASE, limites=_limites_con_zonas(ZONAS_ENTREGA_LOCALIDADES="-"))
+    assert "la localidad no se evalúa" in solo_cp.texto()
+    solo_loc = _correr(BASE, limites=_limites_con_zonas(ZONAS_ENTREGA_CP="-"))
+    assert "el código postal no se evalúa" in solo_loc.texto()
+
+
+def test_no_zone_at_all_blocks_and_says_the_owner_can_set_it_by_whatsapp() -> None:
+    reporte = _correr(BASE, limites=_limites_con_zonas(
+        ZONAS_ENTREGA_LOCALIDADES="-", ZONAS_ENTREGA_CP="-"))
+    texto = reporte.texto()
+
+    assert not reporte.listo, texto
+    assert "FALTA  ZONAS_ENTREGA: ninguna lista configurada" in texto
+    assert "localidades de reparto" in texto
+
+
+def test_zones_are_read_from_the_owners_store_not_from_the_env() -> None:
+    """El .env puede decir una cosa y el dueño haber fijado otra.
+
+    Es el mismo desacuerdo que teníamos con la cantidad por producto: un
+    chequeo contra el entorno llamaba "sin configurar" a lo que el dueño sí
+    configuró, o al revés.
+    """
+    env_dice_que_no = {**BASE, "ZONAS_ENTREGA_CP": "", "ZONAS_ENTREGA_LOCALIDADES": ""}
+    reporte = _correr(env_dice_que_no, limites=_limites_ok)
+
+    assert reporte.listo, reporte.texto()
+    assert "2 código(s) postal(es) y 2 localidad(es)" in reporte.texto()
 
 
 def test_unparsable_staff_numbers_and_bad_country_code_are_errors() -> None:

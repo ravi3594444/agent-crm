@@ -133,10 +133,15 @@ def proponer_limite(limite: str, valor: str, config: RunnableConfig) -> str:
 
     Sirve para los límites de auto-confirmación ("tope", "colchón de stock",
     "cantidad por producto", "cliente nuevo", "deuda", "descuentos", "plazo de
-    revisión") y también para las reglas de entrega ("días de reparto", "hora
-    de reparto", "entregas fuera de día", "días fuera de día", "hora fuera de
-    día", "cargo fuera de día", "mínimo fuera de día", "retiro en el local",
-    "días de retiro", "hora de retiro").
+    revisión") y también para las reglas de entrega ("localidades de
+    reparto", "códigos postales", "días de reparto", "hora de reparto",
+    "entregas fuera de día", "días fuera de día", "hora fuera de día", "cargo
+    fuera de día", "mínimo fuera de día", "retiro en el local", "días de
+    retiro", "hora de retiro").
+
+    Las localidades y los códigos postales son LISTAS separadas por comas
+    ("Villa Allende, Córdoba"): pasá la lista completa tal como la dijo, porque
+    reemplaza a la anterior, no se le agrega.
 
     Pasá `limite` y `valor` TAL COMO los dijo el dueño, sin interpretarlos ni
     convertirlos: los días, las horas, los sí/no y la plata los valida Python.
@@ -184,11 +189,12 @@ def proponer_limite(limite: str, valor: str, config: RunnableConfig) -> str:
 
 @tool
 def ver_reglas_de_entrega(config: RunnableConfig) -> str:
-    """Muestra las reglas de entrega vigentes: reparto, excepciones y retiro.
+    """Muestra las reglas de entrega vigentes: zonas, reparto, excepciones y retiro.
 
-    Usala cuando el dueño pregunta qué días se reparte, si se entrega fuera de
-    día, cuánto se cobra por eso, o si se puede retirar por el local — y antes
-    de proponerle un cambio.
+    Usala cuando el dueño pregunta dónde se reparte, en qué localidades o
+    códigos postales, qué días se reparte, si se entrega fuera de día, cuánto
+    se cobra por eso, o si se puede retirar por el local — y antes de
+    proponerle un cambio.
     """
     try:
         require_management(config)

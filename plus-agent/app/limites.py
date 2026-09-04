@@ -77,6 +77,11 @@ NUMERO = "numero"
 BOOLEANO = "booleano"
 DIAS = "dias"
 HORA = "hora"
+# Las zonas de reparto. Son dos listas y no una porque app/entrega.py las
+# evalúa por separado: con las dos cargadas la dirección necesita LOS DOS
+# datos permitidos, y con una sola manda esa sobre su dato.
+LOCALIDADES = "localidades"
+CODIGOS_POSTALES = "codigos_postales"
 
 # The normal form for "nothing configured". An EMPTY string cannot mean that:
 # _resolver treats "" in the store as "unset" and falls through to the
@@ -269,6 +274,53 @@ _FALSOS = frozenset({"false", "no", "0", "off", "n"})
 # in the same append-only audit — in Redis and in the durable ERPNext comment.
 
 ENTREGA: dict[str, Definicion] = {
+    # Las zonas van PRIMERO porque son la regla que gatea a todas las demás:
+    # sin ninguna lista, app/entrega.py no entrega nada solo, no importa qué
+    # días ni a qué hora esté configurado. Hasta ahora salían únicamente del
+    # entorno, así que "permití reparto en tal ciudad" era la única regla de
+    # entrega que el dueño NO podía cambiar por WhatsApp — tenía que editar el
+    # .env y reiniciar. Ahora pasa por el mismo propose+código de cuatro
+    # dígitos que el resto.
+    "ZONAS_ENTREGA_LOCALIDADES": Definicion(
+        nombre="ZONAS_ENTREGA_LOCALIDADES",
+        alias=(
+            "localidades de reparto",
+            "localidades",
+            "zonas de reparto",
+            "zonas",
+            "ciudades de reparto",
+            "ciudades",
+        ),
+        significado=(
+            "Las localidades donde se reparte sin que lo mire una persona. Con "
+            "los códigos postales también cargados, la dirección necesita LOS "
+            "DOS datos permitidos"
+        ),
+        unidad="localidades",
+        default=NINGUNO,
+        tipo=LOCALIDADES,
+        opcional=True,
+    ),
+    "ZONAS_ENTREGA_CP": Definicion(
+        nombre="ZONAS_ENTREGA_CP",
+        alias=(
+            "codigos postales",
+            "códigos postales",
+            "codigo postal",
+            "código postal",
+            "cp de reparto",
+            "cp",
+        ),
+        significado=(
+            "Los códigos postales donde se reparte sin que lo mire una "
+            "persona. Con las localidades también cargadas, la dirección "
+            "necesita LOS DOS datos permitidos"
+        ),
+        unidad="códigos postales",
+        default=NINGUNO,
+        tipo=CODIGOS_POSTALES,
+        opcional=True,
+    ),
     "ENTREGA_DIAS": Definicion(
         nombre="ENTREGA_DIAS",
         alias=("días de reparto", "dias de reparto", "días de entrega", "dias de entrega"),
@@ -644,6 +696,71 @@ def _dias(defi: Definicion, crudo: str) -> str:
     return ",".join(dia for dia in _ORDEN_DIAS if dia in elegidos)
 
 
+def _partes_de_lista(crudo: str) -> list[str]:
+    """Lo que una persona escribe como lista: comas, y la palabra "y".
+
+    NO se corta por espacios: "Villa Allende" es UNA localidad. Por eso esto
+    no es `_dias`, que sí puede cortar por espacios porque ningún día de la
+    semana lleva uno.
+    """
+    texto = str(crudo or "")
+    # " y " sólo como separador entre elementos, nunca dentro de una palabra.
+    texto = re.sub(r"\s+y\s+", ",", texto, flags=re.IGNORECASE)
+    return [parte.strip() for parte in texto.split(",") if parte.strip()]
+
+
+def _localidades(defi: Definicion, crudo: str) -> str:
+    """"Villa Allende y Cordoba" -> "Villa Allende, Cordoba".
+
+    Se guarda COMO LO ESCRIBIÓ el dueño, porque esto se le muestra de vuelta
+    en `ver_reglas_de_entrega` y en el pedido de confirmación. La comparación
+    contra la dirección de un pedido la normaliza app/entrega.py, que ya lo
+    hacía cuando esto salía del entorno: acá no hay criterio, hay una lista.
+    """
+    partes = _partes_de_lista(crudo)
+    if not partes:
+        raise LimiteError(
+            f"«{defi.alias[0]}» está vacío: decime en qué localidades repartís"
+        )
+    elegidas: list[str] = []
+    vistas: set[str] = set()
+    for parte in partes:
+        limpia = " ".join(parte.split())
+        # Dedup sin tildes y sin caso: "Córdoba" y "cordoba" son la misma.
+        clave = re.sub(r"[^a-z0-9]+", " ", _sin_tildes(limpia)).strip()
+        if not clave:
+            raise LimiteError(
+                f"«{parte}» no es una localidad: no tiene ni una letra ni un número"
+            )
+        if clave not in vistas:
+            vistas.add(clave)
+            elegidas.append(limpia)
+    return ", ".join(elegidas)
+
+
+def _codigos_postales(defi: Definicion, crudo: str) -> str:
+    """"5000, x5105abc" -> "5000, X5105ABC". Alfanumérico, en mayúsculas.
+
+    Misma forma normal que usa app/entrega.py::normalizar_cp para comparar, así
+    que lo que se guarda es exactamente lo que se va a comparar.
+    """
+    partes: list[str] = []
+    for grupo in _partes_de_lista(crudo):
+        partes.extend(p for p in re.split(r"\s+", grupo) if p)
+    if not partes:
+        raise LimiteError(
+            f"«{defi.alias[0]}» está vacío: decime qué códigos postales"
+        )
+    elegidos: list[str] = []
+    for parte in partes:
+        limpio = re.sub(r"[^A-Z0-9]+", "", parte.upper())
+        if not limpio:
+            raise LimiteError(f"«{parte}» no es un código postal")
+        if limpio not in elegidos:
+            elegidos.append(limpio)
+    return ", ".join(elegidos)
+
+
 def _hora(defi: Definicion, crudo: str) -> str:
     """"9", "9:30", "09:30" -> "09:30". Refuses anything that is not a time."""
     texto = _sin_tildes(crudo).replace(".", ":").replace("hs", "").replace("h", "").strip()
@@ -678,6 +795,10 @@ def validar(nombre: str, crudo: str, *, tecleado: bool = True) -> str:
         return _dias(defi, crudo)
     if defi.tipo == HORA:
         return _hora(defi, crudo)
+    if defi.tipo == LOCALIDADES:
+        return _localidades(defi, crudo)
+    if defi.tipo == CODIGOS_POSTALES:
+        return _codigos_postales(defi, crudo)
     # 12 significant digits, not the default 6: at :g an owner who sets a
     # 1234567 ceiling gets "1.23457e+06" stored, shown back to him and audited,
     # and reads back as 1234570. Every money limit here reaches seven digits.
@@ -850,6 +971,37 @@ def entrega() -> Entrega:
         retiro_dias=_indices(_crudo("RETIRO_LOCAL_DIAS", almacen)),
         retiro_hora=_crudo("RETIRO_LOCAL_HORA", almacen),
     )
+
+
+def zonas() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(códigos postales, localidades) donde se reparte. Nunca levanta.
+
+    Misma resolución y mismo fusible que `entrega()`: almacén -> entorno ->
+    default, y con el almacén de entrega VACÍO y cambios registrados en
+    ERPNext devuelve las dos listas vacías. Eso hace que app/entrega.py
+    conteste SIN_ZONAS y ningún pedido se entregue solo — que es lo correcto
+    cuando se perdió la configuración: un flush de Redis no puede ensanchar
+    la zona de reparto de vuelta a lo que decía el .env.
+
+    Se lee en cada llamada, así que un cambio confirmado rige en el próximo
+    pedido sin reiniciar nada.
+    """
+    try:
+        almacen = _almacen()
+    except LimiteError as exc:
+        print(f"[limites] zonas de reparto no legibles: {exc}")
+        return (), ()
+    if _reglas_de_entrega_perdidas(almacen):
+        print(
+            "[limites] las zonas de reparto no están en el almacén y ERPNext "
+            "tiene cambios registrados: no entrego nada por mi cuenta"
+        )
+        return (), ()
+    def _partes(nombre: str) -> tuple[str, ...]:
+        valor = _crudo(nombre, almacen)
+        return tuple(p.strip() for p in valor.split(",") if p.strip())
+
+    return _partes("ZONAS_ENTREGA_CP"), _partes("ZONAS_ENTREGA_LOCALIDADES")
 
 
 def cuenta_cargo() -> str:

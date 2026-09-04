@@ -7,7 +7,7 @@ criterio, hay comparaciones contra las zonas que configuró el negocio. El
 modelo puede PEDIR la dirección y repetir lo que se decidió; no puede decidir.
 
 LA REGLA (release gate RC1)
-  * Con ZONAS_ENTREGA_CP y ZONAS_ENTREGA_LOCALIDADES configuradas, la dirección
+  * Con los códigos postales y las localidades configurados, la dirección
     tiene que traer LOS DOS datos y LOS DOS tienen que estar permitidos.
   * Con una sola lista configurada, manda esa lista sobre su dato.
   * Sin ninguna lista, nada se entrega solo.
@@ -20,12 +20,11 @@ código postal o la localidad a la lista. Así la regla es la misma para todos.
 """
 from __future__ import annotations
 
-import os
 import re
 import unicodedata
 from dataclasses import dataclass
 
-from app import erpnext
+from app import erpnext, limites
 
 # Todos los motivos de esta capa arrancan igual, para que el resto del sistema
 # sepa que ESTE pedido está esperando por la entrega y no por otra regla: el
@@ -67,18 +66,20 @@ def normalizar_cp(texto: object) -> str:
     return re.sub(r"[^A-Z0-9]+", "", str(texto or "").upper())
 
 
-def _lista(variable: str) -> list[str]:
-    return [parte.strip() for parte in os.getenv(variable, "").split(",") if parte.strip()]
-
-
 def zonas_configuradas() -> tuple[frozenset[str], frozenset[str]]:
     """(códigos postales, localidades) donde el negocio reparte.
 
+    Salen de app/limites.py, no del entorno: son una regla de entrega como los
+    días y la hora, y el dueño las cambia por WhatsApp con el mismo código de
+    cuatro dígitos. El entorno sigue siendo el valor de ARRANQUE (lo resuelve
+    `limites.zonas()`), así que un .env existente sigue funcionando igual.
+
     Se leen en cada llamada: cambiar una zona no necesita reiniciar nada.
     """
-    codigos = frozenset(normalizar_cp(cp) for cp in _lista("ZONAS_ENTREGA_CP"))
+    codigos_crudos, localidades_crudas = limites.zonas()
+    codigos = frozenset(normalizar_cp(cp) for cp in codigos_crudos)
     localidades = frozenset(
-        normalizar_localidad(loc) for loc in _lista("ZONAS_ENTREGA_LOCALIDADES")
+        normalizar_localidad(loc) for loc in localidades_crudas
     )
     return (
         frozenset(cp for cp in codigos if cp),

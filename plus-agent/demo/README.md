@@ -4,7 +4,7 @@ Corre los escenarios de release contra **la imagen real del agente**, sin
 tocar ERPNext, ni Meta, ni WhatsApp, ni el Redis de staging.
 
 ```bash
-make demo          # 15 escenarios, determinístico, sin ninguna red
+make demo          # 16 escenarios, determinístico, sin ninguna red
 make demo-gemini   # los mismos, con Gemini de verdad (consume cuota)
 ```
 
@@ -142,8 +142,12 @@ modo offline sepa qué herramienta llamar; los comandos de gerencia y el
 `acepto` del cliente los resuelve `app/main.py` sin modelo y no la necesitan.
 `tests/test_demo.py` verifica que ningún mensaje de cliente quede sin regla.
 
-Usá `ULTIMO_PEDIDO` donde vaya un número de pedido: no se puede escribir uno
-que todavía no existe.
+Usá `ULTIMO_PEDIDO` donde vaya un número de pedido, y `ULTIMO_CODIGO` donde
+vaya el código de cuatro dígitos de un cambio de ajuste: ninguno de los dos se
+puede escribir a mano, y el piloto los resuelve como los leería una persona —el
+pedido de lo que cambió en ERPNext, el código del buzón, porque Python se lo
+manda al dueño en un mensaje aparte y el modelo no lo ve. Un marcador sin
+resolver corta la corrida en el paso, en vez de mandar un mensaje vacío.
 
 Para lo que un paso tiene que dejar en ERPNext hay dos afirmaciones, y no son
 la misma: `documentos={"Sales Order/*": {"docstatus": 0}}` exige que exista al
@@ -157,7 +161,7 @@ autorizada no escribió.
 
 - **El modo gemini no cabe en el tier gratuito.** Son 20 pedidos por día y por
   modelo (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), y un turno de
-  cliente gasta dos o más. Los 15 escenarios necesitan ~85. Con `--modelo` se
+  cliente gasta dos o más. Los 16 escenarios necesitan ~90. Con `--modelo` se
   puede usar otro modelo de Gemini, que tiene su propia cuota diaria, para
   probar un subconjunto.
 - El reloj no se controla: los escenarios que dependen de un vencimiento

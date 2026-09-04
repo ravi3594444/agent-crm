@@ -220,6 +220,9 @@ def _diferencia(antes: dict, despues: dict) -> dict[str, dict]:
 
 
 _RE_PEDIDO = re.compile(r"\b[A-Z]{2,6}(?:-[A-Z]{2,6})?-\d{2,}[0-9-]*\b")
+# El código de confirmación de un ajuste, como lo recibe el dueño:
+# app/notificar.py::pedir_codigo_de_ajuste lo manda entre asteriscos.
+_RE_CODIGO = re.compile(r"\*(\d{4})\*")
 
 
 class Piloto:
@@ -230,6 +233,7 @@ class Piloto:
         self.salida = salida
         self.turnos: list[Turno] = []
         self.ultimo_pedido = ""
+        self.ultimo_codigo = ""
         self.n_mensaje = 0
         self.ip_servicios = ""
         self.ip_agente = ""
@@ -328,6 +332,16 @@ class Piloto:
 
     def correr_paso(self, escenario: esc.Escenario, i: int, paso: esc.Paso) -> Turno:
         texto = paso.texto.replace(esc.ULTIMO_PEDIDO, self.ultimo_pedido)
+        texto = texto.replace(esc.ULTIMO_CODIGO, self.ultimo_codigo)
+        # Un marcador que no se resolvió manda un mensaje VACÍO o mutilado, y
+        # el escenario después falla veinte líneas más abajo por otra razón.
+        # Es el mismo modo de falla que la URL sin host: se corta acá.
+        if not texto.strip() or "<ULTIMO_" in texto:
+            raise RuntimeError(
+                f"{escenario.clave} paso {i + 1}: el marcador no se resolvió "
+                f"({paso.texto!r} -> {texto!r}). Falta un paso anterior que lo "
+                "produzca."
+            )
         rol = "gerencia" if paso.quien in {
             datos.TELEFONO_DUENO, datos.TELEFONO_EQUIPO} else "cliente"
         turno = Turno(escenario.clave, i + 1, paso.quien, rol, texto)
@@ -357,6 +371,15 @@ class Piloto:
                 hallados = _RE_PEDIDO.findall(t)
                 if hallados:
                     self.ultimo_pedido = hallados[-1]
+
+        # El código de un ajuste pendiente, leído del buzón igual que lo leería
+        # el dueño en su teléfono. NO sale de la respuesta de la herramienta:
+        # Python se lo manda directo, y eso es justo lo que hace que el modelo
+        # no pueda aplicar un cambio por su cuenta.
+        for t in turno.respuestas:
+            hallado = _RE_CODIGO.search(t)
+            if hallado:
+                self.ultimo_codigo = hallado.group(1)
 
         turno.problemas.extend(self._revisar(paso, turno, despues))
         return turno
@@ -454,6 +477,7 @@ class Piloto:
     def correr_escenario(self, escenario: esc.Escenario) -> list[Turno]:
         print(f"\n=== {escenario.clave}: {escenario.titulo}", flush=True)
         self.ultimo_pedido = ""
+        self.ultimo_codigo = ""
         if escenario.entorno:
             self.recrear_agente(escenario.entorno)
         elif self.entorno_cambiado:

@@ -233,20 +233,6 @@ def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
         if _valor(env, "NOTIFICAR_SOLO_PRIMERO").lower() != "false" and len(unicos) > 1:
             reporte.aviso("NOTIFICAR_SOLO_PRIMERO", "sólo el primer número recibe los avisos")
 
-    cps = [c for c in _valor(env, "ZONAS_ENTREGA_CP").split(",") if c.strip()]
-    locs = [c for c in _valor(env, "ZONAS_ENTREGA_LOCALIDADES").split(",") if c.strip()]
-    if cps and locs:
-        reporte.ok(
-            "ZONAS_ENTREGA", f"{len(cps)} código(s) postal(es) y {len(locs)} localidad(es): la "
-            "dirección necesita LOS DOS datos permitidos"
-        )
-    elif cps:
-        reporte.ok("ZONAS_ENTREGA", f"{len(cps)} código(s) postal(es); la localidad no se evalúa")
-    elif locs:
-        reporte.ok("ZONAS_ENTREGA", f"{len(locs)} localidad(es); el código postal no se evalúa")
-    else:
-        reporte.falta("ZONAS_ENTREGA", "ninguna lista configurada: ningún pedido se entrega solo")
-
 
 # --------------------------------------------------------------- WhatsApp
 
@@ -732,6 +718,38 @@ def chequear_entrega(
             ".env, y el sistema no ofrece reparto, entrega fuera de día ni "
             "retiro hasta que el dueño las vuelva a fijar por WhatsApp",
         )
+
+    # Las zonas se leen de ACÁ y no del entorno desde que son un límite: el
+    # dueño las cambia por WhatsApp, así que un chequeo contra el .env
+    # reportaría el valor de arranque y llamaría "sin configurar" a un sistema
+    # que sí lo está — o al revés. Es el mismo desacuerdo entre el reporte y el
+    # runtime que teníamos con la cantidad por producto.
+    if not perdidas:
+        cps = [c for c in _puesto("ZONAS_ENTREGA_CP").split(",") if c.strip()]
+        locs = [c for c in _puesto("ZONAS_ENTREGA_LOCALIDADES").split(",") if c.strip()]
+        if cps and locs:
+            reporte.ok(
+                "ZONAS_ENTREGA",
+                f"{len(cps)} código(s) postal(es) y {len(locs)} localidad(es): "
+                "la dirección necesita LOS DOS datos permitidos",
+            )
+        elif cps:
+            reporte.ok(
+                "ZONAS_ENTREGA",
+                f"{len(cps)} código(s) postal(es); la localidad no se evalúa",
+            )
+        elif locs:
+            reporte.ok(
+                "ZONAS_ENTREGA",
+                f"{len(locs)} localidad(es); el código postal no se evalúa",
+            )
+        else:
+            reporte.falta(
+                "ZONAS_ENTREGA",
+                "ninguna lista configurada: ningún pedido se entrega solo. El "
+                "dueño puede cargarlas por WhatsApp: «localidades de reparto» "
+                "o «códigos postales»",
+            )
 
     reparto = bool(_puesto("ENTREGA_DIAS") and _puesto("ENTREGA_HORA"))
     retiro = bool(

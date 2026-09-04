@@ -91,7 +91,7 @@ Those confirm INSTANTLY. Only unusual ones wake a human. Every rule must pass:
 | No more than X of one product, in stock units | 0 = nothing passes | owner |
 | Stock above the buffer, minus what other open orders already promised | 20% | owner |
 | A customer with no real history stays under their own ceiling | 0 = they always wait | owner |
-| Delivery address allowed: with both `ZONAS_ENTREGA_CP` and `ZONAS_ENTREGA_LOCALIDADES` set, postcode AND locality must be present and listed; with one list, that list decides; contradictions, missing or unreadable values stay pending | no zones = nothing delivers | `ZONAS_ENTREGA_*` |
+| Delivery address allowed: with both the postcode and the locality list set, an address must carry BOTH and both must be listed; with one list, that list decides; contradictions, missing or unreadable values stay pending | no zones = nothing delivers | owner, from WhatsApp |
 | No overdue balance | 0 | owner |
 | Any discount goes to a person | yes | owner |
 | If not, line + document discount combined stays under the cap | 5% | owner |
@@ -313,6 +313,8 @@ bootstrap environment → a safe default**, read on *every* operation so a chang
 applies to the next message with nothing restarted.
 
 ```
+localidades de reparto   Villa Allende, Cordoba    where it delivers at all
+códigos postales         5105, X5000ABC
 días de reparto          martes,viernes     the normal round
 hora de reparto          08:00
 entregas fuera de día    sí/no              off-schedule delivery, pre-authorized
@@ -339,6 +341,14 @@ call both halves is not a two-step confirmation, it is one step, and the step
 would be taken by a model a message can steer. Same append-only audit in Redis
 *and* as a durable ERPNext comment written before the Redis write. `reglas de
 entrega` reads them back with where each value came from.
+
+The two zone lists were the last delivery rule he could **not** change this
+way — `app/entrega.py` read them from the environment with `os.getenv`, so
+"deliver to Villa Allende too" meant editing `.env` and restarting. They are
+settings now, on the same footing as the rest, and `make check-env` reads them
+from his store rather than the environment so the report and the runtime cannot
+disagree. Each list REPLACES the previous one rather than adding to it, and the
+change is shown back to him before he confirms.
 
 Validation is deterministic, never a judgement: days are weekday names in any
 spelling or order and normalize to one form (`Miércoles, Sábado` →
