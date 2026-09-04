@@ -119,9 +119,27 @@ def _entrega(**cambios):
 def _limites_ok():
     return [
         {"nombre": "AUTO_CONFIRM_MAX", "alias": "tope", "valor": "30000", "origen": "dueño", "problema": ""},
+        # Con esta en 0 no se auto-confirma NADA, así que un entorno "listo"
+        # tiene que tenerla en positivo. Faltaba en este fixture, y por eso el
+        # test de entorno completo pasaba sin decir nada sobre ella.
+        {"nombre": "AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO", "alias": "cantidad por producto", "valor": "100", "origen": "dueño", "problema": ""},
         {"nombre": "STOCK_BUFFER_PCT", "alias": "colchón", "valor": "20", "origen": "default", "problema": ""},
         *_entrega(),
     ]
+
+
+def _limites_con_qty(valor, problema=""):
+    """El mismo resumen, con la cantidad por producto en un valor dado."""
+    def resumen():
+        filas = []
+        for fila in _limites_ok():
+            if fila["nombre"] == "AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO":
+                fila = {**fila, "valor": valor, "problema": problema,
+                        "origen": "default" if problema else fila["origen"]}
+            filas.append(fila)
+        return filas
+
+    return resumen
 
 
 def _correr(env, http=_http_sano, limites=_limites_ok):
@@ -751,3 +769,119 @@ def test_the_graph_url_that_readiness_probes_follows_the_configured_host() -> No
     assert readiness._graph({**BASE, "META_GRAPH_BASE_URL": "https://demo:8443/"}) == (
         "https://demo:8443/v21.0"
     )
+
+
+# --------------------------------------------------------------------------
+# La cantidad máxima por producto: en 0 apaga la auto-confirmación entera, y
+# eso NO puede leerse como "válido". app/policy.py ya falla cerrado ("an
+# unconfigured limit is not permission"); lo que faltaba era decirlo acá.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("valor", ["0", "0.0", "0,00", 0, 0.0, "", None])
+def test_a_zero_per_product_ceiling_blocks_readiness(valor) -> None:
+    """Cero, escrito como sea, y sin configurar: todos son el mismo estado."""
+    reporte = _correr(BASE, limites=_limites_con_qty(valor))
+    texto = reporte.texto()
+
+    assert not reporte.listo, texto
+    assert "FALTA  AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO" in texto
+    assert "NINGÚN pedido se auto-confirma" in texto
+    # No se interpreta como "sin tope": lo contrario de lo que el 0 significa.
+    assert "sin límite" not in texto and "ilimitado" not in texto
+
+
+@pytest.mark.parametrize("valor", ["1", "0.5", "100", "1000000"])
+def test_a_positive_per_product_ceiling_is_valid_and_ready(valor) -> None:
+    reporte = _correr(BASE, limites=_limites_con_qty(valor))
+    texto = reporte.texto()
+
+    assert reporte.listo, texto
+    assert "OK     AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO: válido" in texto
+
+
+@pytest.mark.parametrize("valor", ["-1", "-0.5", "abc", "1e9", "2000000"])
+def test_a_negative_or_unreadable_per_product_ceiling_is_an_error(valor) -> None:
+    """Ilegible no es cero: se reporta como ERROR con el motivo, no como FALTA.
+
+    El motivo lo escribe el validador de verdad (app/limites.py), no este
+    test: si mañana cambia el texto, cambia el reporte y no hay que tocar nada.
+    """
+    from app import limites as _limites
+
+    with pytest.raises(_limites.LimiteError) as caught:
+        _limites.validar("AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO", valor)
+    problema = str(caught.value)
+
+    reporte = _correr(BASE, limites=_limites_con_qty(valor, problema))
+    texto = reporte.texto()
+
+    assert not reporte.listo, texto
+    assert "ERROR  AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO: mal configurado" in texto
+    assert problema in texto
+    assert "FALTA  AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO" not in texto
+
+
+@pytest.mark.parametrize(
+    ("valor", "nivel"),
+    [("0", readiness.FALTA), ("100", readiness.OK), ("0.5", readiness.OK)],
+)
+def test_the_real_limits_resolver_feeds_the_same_verdict(
+    monkeypatch: pytest.MonkeyPatch, valor: str, nivel: str
+) -> None:
+    """El mismo veredicto, pero con limites.resumen() de verdad y un .env real.
+
+    Los tests de arriba le dan a readiness un resumen armado a mano. Este pasa
+    por el resolvedor entero —almacén vacío, valor del entorno— para que el
+    acuerdo entre los dos módulos quede probado y no supuesto.
+    """
+    from app import limites as _limites
+
+    monkeypatch.setenv("AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO", valor)
+    reporte = readiness.Reporte()
+    readiness.chequear_stock_y_limites(BASE, reporte, _limites.resumen)
+
+    niveles = {
+        clave: nv for nv, clave, _ in reporte.lineas
+        if clave == "AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO"
+    }
+
+    assert niveles["AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO"] == nivel
+
+
+def test_an_unset_per_product_ceiling_resolves_to_zero_and_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sin configurar es el caso real del dueño hoy: el default del código es 0."""
+    from app import limites as _limites
+
+    monkeypatch.delenv("AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO", raising=False)
+    reporte = readiness.Reporte()
+    readiness.chequear_stock_y_limites(BASE, reporte, _limites.resumen)
+    texto = reporte.texto()
+
+    assert not reporte.listo, texto
+    assert "FALTA  AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO" in texto
+    assert "default del código" in texto
+
+
+def test_the_top_ceiling_at_zero_is_still_only_a_warning() -> None:
+    """AUTO_CONFIRM_MAX en 0 SÍ es la forma de decir «que lo mire una persona»."""
+    def resumen():
+        return [
+            {**fila, "valor": "0"} if fila["nombre"] == "AUTO_CONFIRM_MAX" else fila
+            for fila in _limites_ok()
+        ]
+
+    reporte = _correr(BASE, limites=resumen)
+    texto = reporte.texto()
+
+    assert reporte.listo, texto
+    assert "AVISO  AUTO_CONFIRM_MAX: en 0" in texto
+
+
+def test_zero_and_unreadable_are_different_answers() -> None:
+    assert readiness._es_cero("0") and readiness._es_cero("") and readiness._es_cero(None)
+    assert readiness._es_cero("0,00") and readiness._es_cero(0.0)
+    assert not readiness._es_cero("abc")
+    assert not readiness._es_cero("-1") and not readiness._es_cero("0.1")

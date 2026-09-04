@@ -573,10 +573,19 @@ and no management data.
 
 **2. `AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO` defaults to 0, and 0 blocks every
 auto-confirmation** (`policy.py`: "an unconfigured limit is not permission").
-Correctly fail-closed. But `make check-env` reports it `OK ... válido (default
-del código)`, while the identically-shaped `AUTO_CONFIRM_MAX=0` gets an
-`AVISO ... todo pedido espera al dueño`. The same 0-means-off semantics should
-read the same way in the report.
+Correctly fail-closed, and it stays that way — zero is never read as
+unlimited. But `make check-env` reported it `OK ... válido (default del
+código)`, so the one value that silently switches the whole feature off was
+also the one the readiness report called valid. **FIXED**: at zero — or
+unconfigured, which resolves to zero — it is now a `FALTA` and readiness says
+NO LISTO until the owner sets a positive value. Ilegible is still an `ERROR`
+with the validator's own reason, because "I could not read it" and "it is
+zero" are different answers.
+
+`AUTO_CONFIRM_MAX` at 0 is deliberately left as an `AVISO`: there, zero *is*
+how the owner says "every order waits for a person", so it is a decision
+rather than a missing value. That is the one asymmetry left, and it is on
+purpose.
 
 **3. A bare `ok` on a delivery exception creates an offer that can never
 close.** `decisiones.aprobar_solicitud` offers back exactly `solicitado`, and

@@ -475,6 +475,34 @@ def _auth(par: tuple[str, str]) -> dict:
 # ------------------------------------------------------------ stock/límites
 
 
+# Topes que en 0 apagan TODA la auto-confirmación, sin que el 0 sea una
+# decisión que alguien tomó. app/policy.py lo dice así: "an unconfigured limit
+# is not permission", y con la cantidad por producto en 0 el motivo que se
+# acumula es "falta configurar la cantidad máxima por producto" — para todo
+# pedido, siempre. Reportar eso como OK ("válido (default del código)") era el
+# único lugar del sistema donde un valor que apaga la función se leía como si
+# la función estuviera lista.
+#
+# AUTO_CONFIRM_MAX queda aparte a propósito: ahí el 0 SÍ es la forma de decir
+# "que todo lo mire una persona", así que sigue siendo un AVISO.
+TOPES_QUE_BLOQUEAN_TODO = ("AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO",)
+
+
+def _es_cero(valor: object) -> bool:
+    """Cero, escrito como sea. "", "0", "0.0" y "0,00" son todos cero.
+
+    Ilegible NO es cero: eso lo reporta la fila con `problema`, que es un
+    error, y llamarlo cero acá lo taparía con otro mensaje.
+    """
+    texto = str(valor if valor is not None else "").strip().replace(",", ".")
+    if not texto:
+        return True
+    try:
+        return float(texto) == 0.0
+    except ValueError:
+        return False
+
+
 def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_limites: Callable[[], list[dict]] | None) -> None:
     maestra = _valor(env, "STOCK_CONFIABLE").lower()
     if maestra == "true":
@@ -517,7 +545,15 @@ def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_l
         )
         if fila.get("problema"):
             reporte.error(nombre, f"mal configurado ({origen}): {fila['problema']}")
-        elif nombre == "AUTO_CONFIRM_MAX" and str(fila.get("valor")) in ("0", "0.0"):
+        elif nombre in TOPES_QUE_BLOQUEAN_TODO and _es_cero(fila.get("valor")):
+            reporte.falta(
+                nombre,
+                f"en 0 ({origen}): NINGÚN pedido se auto-confirma. Es correcto "
+                "—un límite sin configurar no es un permiso— pero no es una "
+                "configuración lista: hay que fijarle un valor positivo, o "
+                "asumir que todo pedido espera al dueño",
+            )
+        elif nombre == "AUTO_CONFIRM_MAX" and _es_cero(fila.get("valor")):
             reporte.aviso(nombre, f"en 0 ({origen}): todo pedido espera al dueño")
         else:
             reporte.ok(nombre, f"válido ({origen})")
