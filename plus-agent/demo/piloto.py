@@ -484,36 +484,51 @@ class Piloto:
                 "-v", f"{cert}:/demo/cert.pem:ro", *argumentos, IMAGEN)
         self.ip_agente = _ip(AGENTE)
         self.esperar_salud()
-        self.esperar_candado_del_worker()
+        self.esperar_candados_huerfanos()
 
-    def esperar_candado_del_worker(self) -> None:
-        """Espera a que caduque el candado que dejó el contenedor que maté.
+    def esperar_candados_huerfanos(self) -> None:
+        """Espera a que caduquen los candados que dejó el contenedor que maté.
 
-        app/main.py toma UN candado global para drenar la cola
-        (wa:{inbound}:worker-lock) y lo renueva con un latido; su TTL es de 90
-        segundos. Si mato el contenedor que lo tiene, el candado queda puesto
-        sin dueño y el agente nuevo NO puede trabajar hasta que expire: el
-        primer mensaje se queda en la cola, el turno se va en timeout y el
-        cliente recibe una disculpa técnica.
+        Matar el contenedor no suelta lo que estaba tomado en Redis, y el
+        agente nuevo se topa con candados sin dueño:
 
-        No se borra a mano a propósito. Ese candado es lo que impide que dos
-        procesos manden el mismo pedido dos veces, y un banco de pruebas que
-        lo saltea deja de probar justamente eso. Se espera, y se dice por qué.
+          wa:{inbound}:worker-lock          drena la cola; TTL 90 s
+          plus-agent:business-lock:…        una operación en curso, y el peor
+                                            es auto-submit-global, que
+                                            app/policy.py toma con un lease de
+                                            300 s y espera sólo 5
+
+        Con cualquiera de ellos puesto, el primer mensaje del escenario
+        siguiente se queda en la cola o la operación no consigue el candado, y
+        el cliente recibe una disculpa técnica. No es un fallo del sistema: es
+        el banco de pruebas matando un proceso a mitad de algo.
+
+        No se borran a mano a propósito. Son lo que impide que dos procesos
+        confirmen el mismo pedido dos veces, y un banco que los saltea deja de
+        probar justamente eso. Se esperan, y se dice cuánto.
         """
-        clave = "wa:{inbound}:worker-lock"
-        for i in range(120):
-            queda = _correr("docker", "exec", REDIS, "redis-cli", "exists",
-                            clave, verificar=False)
-            if queda.strip() in ("0", ""):
+        limite = 310  # el lease más largo que toma la app, con aire
+        for i in range(limite):
+            puestos = [
+                c for c in ("wa:{inbound}:worker-lock",)
+                if _correr("docker", "exec", REDIS, "redis-cli", "exists", c,
+                           verificar=False).strip() not in ("0", "")
+            ]
+            negocio = _correr("docker", "exec", REDIS, "redis-cli", "--scan",
+                              "--pattern", "plus-agent:business-lock:*",
+                              verificar=False).split()
+            puestos += negocio
+            if not puestos:
                 if i:
-                    print(f"  ·· el candado del worker caducó ({i}s)", flush=True)
+                    print(f"  ·· los candados caducaron ({i}s)", flush=True)
                 return
             if i == 0:
-                print("  ·· esperando que caduque el candado del worker que "
-                      "dejó el contenedor anterior (TTL 90 s)", flush=True)
+                print(f"  ·· esperando que caduquen {len(puestos)} candado(s) "
+                      f"que dejó el contenedor anterior", flush=True)
             time.sleep(1)
         raise RuntimeError(
-            f"{clave} sigue puesto: el agente nuevo no va a poder drenar la cola"
+            f"siguen puestos candados de una corrida anterior tras {limite}s: "
+            "el agente nuevo no va a poder trabajar"
         )
 
     def reiniciar_agente(self) -> None:
