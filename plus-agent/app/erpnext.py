@@ -129,6 +129,7 @@ def _list(
     parent: str | None,
     order_by: str | None = None,
     start: int = 0,
+    timeout: float | None = None,
 ) -> list[dict]:
     params: dict[str, Any] = {"limit_page_length": limit}
     if start:
@@ -152,6 +153,9 @@ def _list(
         _resource_path(doctype),
         operation=f"la consulta de {doctype}",
         params=params,
+        # A status probe needs an answer in seconds, not the 30 a real read may
+        # take. Absent, the client's own timeout applies exactly as before.
+        **({"timeout": timeout} if timeout else {}),
     )
     data = body.get("data")
     # An answer with no list in it is NOT "zero rows". This used to coalesce
@@ -343,6 +347,7 @@ def policy_get_list(
     parent: str | None = None,
     order_by: str | None = None,
     start: int = 0,
+    timeout: float | None = None,
 ) -> list[dict]:
     """List documents with the policy identity, for policy checks only.
 
@@ -350,7 +355,9 @@ def policy_get_list(
     customers' orders. app/policy.py needs exactly that to know how much stock
     is already promised, so the read runs under the non-LLM policy identity.
     """
-    return _list(_policy(), doctype, filters, fields, limit, parent, order_by, start)
+    return _list(
+        _policy(), doctype, filters, fields, limit, parent, order_by, start, timeout
+    )
 
 
 def policy_update_status(doctype: str, name: str, status: str) -> dict:

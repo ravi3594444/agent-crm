@@ -95,46 +95,108 @@ def _http_real(url: str, headers: dict | None = None, params: dict | None = None
 
 
 def chequear_modelos(env: Mapping[str, str], reporte: Reporte) -> None:
-    clave = _valor(env, "DASHSCOPE_API_KEY")
-    if not clave:
-        reporte.falta("DASHSCOPE_API_KEY", "vacía: los dos agentes usan Qwen y no hay proveedor de respaldo")
-    elif len(clave) < 20:
-        reporte.error("DASHSCOPE_API_KEY", f"presente pero sospechosamente corta ({len(clave)} caracteres)")
-    else:
-        reporte.ok("DASHSCOPE_API_KEY", f"presente ({len(clave)} caracteres; no se muestra)")
+    """El proveedor elegido, su clave, su endpoint y los dos modelos.
 
-    base_url = _valor(env, "DASHSCOPE_BASE_URL") or modelos.BASE_URL_DEFAULT
+    Nunca muestra la clave: sólo qué variable la trajo y cuántos caracteres
+    tiene. Y nombra SIEMPRE las variables del proveedor activo, porque decirle
+    a alguien que le falta DASHSCOPE_API_KEY cuando eligió Gemini lo manda a
+    cargar la credencial equivocada.
+    """
+    try:
+        prov = modelos.proveedor(env)
+    except modelos.ConfiguracionModeloError as exc:
+        reporte.error(modelos.VAR_PROVEEDOR, str(exc))
+        return
+    origen_prov = "explícito" if _valor(env, modelos.VAR_PROVEEDOR) else "default"
+    reporte.ok(modelos.VAR_PROVEEDOR, f"{prov.nombre} — {prov.etiqueta} ({origen_prov})")
+
+    variable_clave, clave = modelos.clave_api(prov, env)
+    if not clave:
+        reporte.falta(
+            prov.clave_principal,
+            f"vacía: con {modelos.VAR_PROVEEDOR}={prov.nombre} los dos agentes usan "
+            f"{prov.etiqueta} y no hay proveedor de respaldo",
+        )
+    elif len(clave) < 20:
+        reporte.error(
+            variable_clave, f"presente pero sospechosamente corta ({len(clave)} caracteres)"
+        )
+    else:
+        alias = "" if variable_clave == prov.clave_principal else f" vía {variable_clave}"
+        reporte.ok(
+            prov.clave_principal,
+            f"presente{alias} ({len(clave)} caracteres; no se muestra)",
+        )
+
+    # La clave del OTRO proveedor no habilita nada, y tenerla cargada mientras
+    # se usa este es exactamente lo que un "fallback" silencioso aprovecharía.
+    for otro in modelos.PROVEEDORES.values():
+        if otro.nombre == prov.nombre:
+            continue
+        variable_otra, _ = modelos.clave_api(otro, env)
+        if variable_otra:
+            reporte.aviso(
+                variable_otra,
+                f"cargada pero sin uso: el proveedor activo es {prov.nombre} y no hay "
+                "respaldo automático entre proveedores",
+            )
+
+    base_url = _valor(env, prov.var_base_url) or prov.base_url_default
     region = modelos.region(base_url)
     if not base_url.startswith("https://"):
-        reporte.error("DASHSCOPE_BASE_URL", "tiene que empezar con https://")
+        reporte.error(prov.var_base_url, "tiene que empezar con https://")
     elif region == "desconocida":
-        reporte.aviso("DASHSCOPE_BASE_URL", "host que no es un endpoint conocido de DashScope; verificá la región")
+        reporte.aviso(
+            prov.var_base_url,
+            f"host que no es un endpoint conocido de {prov.nombre}; verificá la región",
+        )
     else:
-        origen = "configurada" if _valor(env, "DASHSCOPE_BASE_URL") else "default"
-        reporte.ok("DASHSCOPE_BASE_URL", f"región {region} ({origen})")
+        origen = "configurada" if _valor(env, prov.var_base_url) else "default"
+        reporte.ok(prov.var_base_url, f"región {region} ({origen})")
 
-    for rol, clave_env in (("clientes", "QWEN_SALES_MODEL"), ("gerencia", "QWEN_MANAGER_MODEL")):
-        variable, nombre = modelos.nombre_modelo(rol, env)
+    for rol in modelos.ROLES:
+        variable, nombre = modelos.nombre_modelo(rol, env, prov)
+        clave_env = prov.var_modelo[rol][0]
         origen = "default" if not _valor(env, variable) else variable
         nota = ""
-        if rol == "gerencia" and nombre != modelos.MODELO_GERENCIA_DEFAULT:
-            nota = " (distinto del documentado; confirmá el endpoint con `make verificar-qwen`)"
+        if (
+            prov.nombre == "qwen"
+            and rol == "gerencia"
+            and nombre != modelos.MODELO_GERENCIA_DEFAULT
+        ):
+            nota = " (distinto del documentado; confirmá el endpoint con `make verificar-modelos`)"
         if ":" in nombre:
-            reporte.error(clave_env, f"{nombre!r} lleva prefijo de proveedor; va sólo el nombre Qwen")
+            reporte.error(
+                clave_env, f"{nombre!r} lleva prefijo de proveedor; va sólo el nombre del modelo"
+            )
         else:
             reporte.ok(clave_env, f"{nombre} ({origen}){nota}")
+
+    thinking = [v for v in ("QWEN_THINKING_CLIENTES", "QWEN_THINKING_GERENCIA") if _valor(env, v)]
+    if thinking and not prov.razona:
+        reporte.aviso(
+            "QWEN_THINKING",
+            f"{', '.join(thinking)} configurada(s) pero {prov.nombre} no usa esos "
+            "controles: no se aplican",
+        )
     try:
         cfg_g = modelos.configuracion("gerencia", env)
         cfg_c = modelos.configuracion("clientes", env)
-        reporte.ok(
-            "QWEN_THINKING",
-            f"ventas {'con' if cfg_c['extra_body'].get('enable_thinking') else 'sin'} razonamiento, "
-            f"gerencia {'con' if cfg_g['extra_body'].get('enable_thinking') else 'sin'} razonamiento; "
-            f"timeout {cfg_g['timeout']:g}s",
-        )
+        if prov.razona:
+            reporte.ok(
+                "QWEN_THINKING",
+                f"ventas {'con' if cfg_c['extra_body'].get('enable_thinking') else 'sin'} razonamiento, "
+                f"gerencia {'con' if cfg_g['extra_body'].get('enable_thinking') else 'sin'} razonamiento; "
+                f"timeout {cfg_g['timeout']:g}s",
+            )
+        else:
+            reporte.ok("LLM_TIMEOUT_SECONDS", f"timeout {cfg_g['timeout']:g}s por llamada")
     except modelos.ConfiguracionModeloError as exc:
-        reporte.error("QWEN", str(exc))
-    reporte.aviso("Qwen", "la conexión real se prueba a mano con `make verificar-qwen` (no en CI)")
+        reporte.error(prov.nombre.upper(), modelos.enmascarar(exc, env))
+    reporte.aviso(
+        prov.nombre,
+        "la conexión real se prueba a mano con `make verificar-modelos` (no en CI)",
+    )
 
 
 # ------------------------------------------------------------- equipo/zonas

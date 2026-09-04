@@ -9,7 +9,7 @@ and Redis" in `plus-agent/README.md`):
 
 ```bash
 cd plus-agent
-REDIS_URL=redis://localhost:6379/0 .venv/bin/python -m pytest -q   # expect: 1143 passed, nothing skipped or xfailed
+REDIS_URL=redis://localhost:6379/0 .venv/bin/python -m pytest -q   # expect: 1238 passed, nothing skipped or xfailed
 .venv/bin/ruff check app tests     # expect: All checks passed!
 ```
 

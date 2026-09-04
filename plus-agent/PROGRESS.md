@@ -58,7 +58,7 @@ The gate commit (this one) tightens two things and adds the readiness tooling:
 - **Qwen**: sales stays `qwen3.7-plus-2026-05-26`; the management default is the
   documented `qwen3.8-max`, with `QWEN_MANAGER_MODEL` (and the older
   `LLM_MODEL_*` names) still overriding it — select `qwen3.8-max-0902` after
-  `make verificar-qwen` proves it on your endpoint. That script makes one
+  `make verificar-modelos` proves it on your endpoint. That script makes one
   tool-calling request per model, refuses to run in CI and never prints the key.
 - **Readiness** (`app/readiness.py`, `make check-env`): validates and reports,
   without exposing values, the DashScope key/endpoint/region/models, staff

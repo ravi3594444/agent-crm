@@ -30,6 +30,7 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `app/tools/catalogo.py` | Read tools — products, prices, stock levels, order status |
 | `app/tools/pedidos.py` | Write tools — **drafts only** — then hands the order to the policy |
 | `app/tools/gerencia.py` | Management read tools (owner assistant) |
+| `app/tools/operaciones.py` | Management read-only status: `estado_del_sistema`, `ver_avisos_fallidos` |
 | `app/tools/captura.py` | **Offline-sale capture** — the hard part |
 | `app/clientes.py` | Customer lookup by phone (`buscar_por_telefono`), against hand-entered data |
 | `app/policy.py` | **Auto-confirm engine** — deterministic, LLM-proof, fail-closed |
@@ -44,7 +45,7 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `docker-compose.yml` | Agent + Redis Stack (+ `briefing` on demand) |
 | `Dockerfile`, `Makefile`, `.env.example`, `pyproject.toml` | Build, shortcuts, configuration, lint config |
 | `.github/workflows/ci.yml` | Lint, tests, image build, container boot against a real Redis Stack |
-| `tests/` | 1143 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
+| `tests/` | 1238 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
 
 ## Two agents, one webhook
 
@@ -570,23 +571,78 @@ The startup log prints one `[config] WARN` line per missing template.
 
 ### Models
 
-Both agents run on Qwen through Alibaba Model Studio (DashScope) using its
-OpenAI-compatible endpoint, with ONE key (`DASHSCOPE_API_KEY`). Defaults, all
-overridable from the environment and nowhere else (`app/modelos.py`):
+Both agents run on **one provider, chosen explicitly** with `LLM_PROVIDER`,
+using **one key for both agents**. Both providers speak the OpenAI protocol, so
+the client is the same `ChatOpenAI` and only the key, the endpoint and the model
+names change (`app/modelos.py`).
 
-| | Sales agent | Management agent |
-|---|---|---|
-| model | `QWEN_SALES_MODEL` = `qwen3.7-plus-2026-05-26` | `QWEN_MANAGER_MODEL` = `qwen3.8-max` (documented name); set `qwen3.8-max-0902` once `make verificar-qwen` confirms it on your endpoint |
-| reasoning | `QWEN_THINKING_CLIENTES` = `false` | `QWEN_THINKING_GERENCIA` = `false`; set `true` only when analysis needs it (`QWEN_THINKING_BUDGET` caps it; DashScope requires streaming with thinking, which the code enables with it) |
-| endpoint / timeouts | `DASHSCOPE_BASE_URL`, `LLM_TIMEOUT_SECONDS`, `LLM_MAX_RETRIES` | same |
+| `LLM_PROVIDER` | key | endpoint | sales / management model |
+|---|---|---|---|
+| `qwen` (default) | `DASHSCOPE_API_KEY` | `DASHSCOPE_BASE_URL` = `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `QWEN_SALES_MODEL` = `qwen3.7-plus-2026-05-26` / `QWEN_MANAGER_MODEL` = `qwen3.8-max` |
+| `gemini` | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | `GEMINI_BASE_URL` = `https://generativelanguage.googleapis.com/v1beta/openai/` | `GEMINI_SALES_MODEL` / `GEMINI_MANAGER_MODEL` = `gemini-3.5-flash` |
 
-The models are built at import, so a missing key or a `provider:model`-style
-name stops the process with the variable named. There is deliberately no
-fallback provider and no Gemini/Anthropic package in `requirements.txt`. The
-model only converses and calls tools: stock, price, discount, credit, delivery,
-confirmation and dispatch decisions stay in Python (`policy.py`, `entrega.py`,
-`inventario.py`, `decisiones.py`). `tests/test_modelos.py` mocks the provider
-boundary, so CI never calls DashScope.
+Shared, either way: `LLM_TIMEOUT_SECONDS` (60), `LLM_MAX_RETRIES` (2),
+`LLM_TEMPERATURA_CLIENTES` (0.3), `LLM_TEMPERATURA_GERENCIA` (0.1). The legacy
+`LLM_MODEL_CLIENTES` / `LLM_MODEL_GERENCIA` names are still accepted under both
+providers, and the provider-specific variable wins.
+
+**Gemini's thought signature.** Gemini answers a tool call with a field of its
+own, `extra_content.google.thought_signature`, and the OpenAI client drops it
+because it is not part of the protocol — so the next turn replays the tool call
+without it and Gemini answers `400 Function call is missing a
+thought_signature`. Since both agents live on calling tools and reading the
+result, that is every tool turn, not an edge case. `modelos.ChatGemini` keeps
+the signature on the message (in `additional_kwargs`, which LangGraph's
+checkpointer serializes, so it survives the turn and a restart) and re-attaches
+it to the tool call on the way out. Verified against the live endpoint: without
+it 400, with it 200, and turning thinking off does not lift the requirement.
+Only the Gemini client does this; the Qwen path is the plain `ChatOpenAI`.
+
+Reasoning (`QWEN_THINKING_CLIENTES`, `QWEN_THINKING_GERENCIA`,
+`QWEN_THINKING_BUDGET`) is **Qwen only** — DashScope requires streaming with
+thinking and the code enables it alongside. Under `gemini` those variables are
+not sent at all, and `make check-env` says so rather than letting you believe
+they applied.
+
+**No automatic fallback, in either direction.** The models are built at import,
+so a missing key, an unknown provider name or a `provider:model`-style name
+stops the process with the variable named. One provider's key is never read for
+the other: choosing `gemini` with only `DASHSCOPE_API_KEY` loaded is an error,
+not a silent start on Qwen. `make check-env` also flags the other provider's key
+as loaded-but-unused, because it buys you nothing. Gemini needs no new
+dependency — it is Google's own OpenAI-compatible endpoint through the same
+client — so `requirements.txt` still carries exactly one chat client and no
+`langchain-google-genai` or `langchain-anthropic` to reach for by accident.
+
+The model only converses and calls tools: stock, price, discount, credit,
+delivery, confirmation and dispatch decisions stay in Python (`policy.py`,
+`entrega.py`, `inventario.py`, `decisiones.py`). `tests/test_modelos.py` mocks
+the provider boundary, so CI never calls a provider.
+
+### Asking the system how it is
+
+Two management-only tools, read-only by construction (`app/tools/operaciones.py`,
+registered in `TOOLS_GERENCIA` and never in `TOOLS_CLIENTES`, with
+`require_management` re-checked inside each one):
+
+- **`estado_del_sistema`** — Redis liveness, one bounded ERPNext read with a
+  4-second timeout, WhatsApp configuration presence plus failed/undelivered
+  counts, the selected provider and both model names, stuck drafts, and the
+  decision and customer-notice queues.
+- **`ver_avisos_fallidos`** — how many notices, customer replies and Meta
+  deliveries failed, plus the newest 10 parked notices (hard maximum 20) with
+  order id, purpose and headline.
+
+What they never print: a key, a token, a whole phone number, a raw Redis
+payload or anything a customer wrote. A credential is reported as present with
+its length; a recipient as a truncated hash; a failed notice as its first
+non-quoted line, because the staff notice body carries the customer's quoted
+words. A check that fails says `NO DISPONIBLE` or `DESCONOCIDO` — never `0` and
+never `OK`, since "I could not look" and "there is nothing" are different
+answers and only one means nobody has to act. They make no model request, hold
+no lock, and write nothing: no retry, no delete, no acknowledge. Retrying a
+parked notice is deliberately not one of them; the ERPNext ToDo each failure
+already opens is what gets a person to it.
 
 ### Redis Stack is required
 
@@ -623,22 +679,23 @@ Right after "Application startup complete" the agent prints its readiness:
 
 Conversation memory: the system prompt is rebuilt every turn and never stored
 in the Redis checkpoint, and the model only sees the last
-`CONVERSATION_MAX_MESSAGES` messages of a thread (default 40). The Gemini
-free tier used in staging allows only 20 requests per day per model; the
-production deployment uses a paid provider key configured through
-`QWEN_SALES_MODEL` / `QWEN_MANAGER_MODEL`.
+`CONVERSATION_MAX_MESSAGES` messages of a thread (default 40). Mind the quota
+of whichever provider you select: a Gemini free-tier key allows only a few
+requests per day per model, which is enough to try the loop end to end and not
+enough to run a pilot.
 
 ### Before a live test: readiness and provider checks
 
 ```bash
 make check-env          # validates .env, Meta token/templates, ERPNext permissions, Redis limits
 make check-env-offline  # same, without calling Meta or ERPNext
-make verificar-qwen     # one minimal tool-calling request to each Qwen model (manual, never in CI)
+make verificar-modelos  # one minimal tool-calling request to each model of the selected provider (manual, never in CI)
 ```
 
 `make check-env` (`app/readiness.py`) prints one OK / AVISO / FALTA / ERROR line
 per item and never shows a value: only presence, lengths, counts, regions and
-statuses. It checks the DashScope key and endpoint region, both model names,
+statuses. It checks which provider is selected, that provider's key and
+endpoint region, both model names,
 the staff phones and country code, the delivery-zone mode, whether the WhatsApp
 token is a permanent System User token with the right scopes, whether each
 configured template is APPROVED in Meta (needs `WHATSAPP_BUSINESS_ACCOUNT_ID` or
@@ -646,15 +703,24 @@ a token that reveals the account), that the three ERPNext credentials are
 distinct users where only the policy one can submit a Sales Order, that the
 warehouse belongs to the company, the stock-trust window, and every owner limit
 as stored in Redis. What it cannot verify it reports as unverified; it never
-fills in a value. `deploy/verificar_qwen.py` refuses to run when `CI` is set and
-sanitizes anything that looks like a key from its output.
+fills in a value.
+
+`make verificar-modelos` (`deploy/verificar_modelos.py`) is the only thing that
+calls a provider for real. It sends one synthetic message per role, whose only
+tool is a `ping`, and requires the model to actually CALL that tool and accept
+its result — function calling is the one thing the agents need. It imports
+nothing but the model factory, so it cannot reach ERPNext, WhatsApp or Redis;
+it reads no order and writes nothing anywhere. It refuses to run when `CI` is
+set, and everything it prints goes through `modelos.enmascarar`, which masks
+both providers' key values and anything shaped like a key (`sk-…`, `AIza…`).
 
 ### Tests and Redis
 
 The suite needs a **Redis Stack** — RedisJSON and RediSearch, not a plain
 `redis:7`. It reaches no other network service: `tests/conftest.py` fixes dummy
-credentials and in-memory doubles, so nothing touches ERPNext, Meta or
-DashScope.
+credentials and in-memory doubles, so nothing touches ERPNext, Meta or any
+model provider. `conftest.py` also pins `LLM_PROVIDER=qwen`, so a developer
+whose own `.env` selects Gemini still runs the suite the CI runs.
 
 Redis is not optional and never was. `app/graph.py` builds the LangGraph
 checkpointer and calls `setup()` **at import**, and that creates RediSearch
@@ -690,7 +756,7 @@ then commit.
 
 ```bash
 make install       # .venv with requirements-dev.txt
-make test          # 1143 passed, needs a Redis Stack on REDIS_URL
+make test          # 1238 passed, needs a Redis Stack on REDIS_URL
 make check         # what CI runs (ruff check + tests)
 make check-env     # is .env complete, are the three ERPNext keys distinct
 make up            # docker compose up, wait for :8081/health

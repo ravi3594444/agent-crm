@@ -47,6 +47,12 @@ _DUMMY = {
     # (see tests/test_frontera_decisiones.py) without credentials or network:
     # ChatOpenAI makes no request when constructed.
     "DASHSCOPE_API_KEY": "test-dashscope-key",
+    # WHICH provider, pinned. The developer's real .env may say
+    # LLM_PROVIDER=gemini, and then the suite would be exercising a different
+    # endpoint, model names and key than the one it asserts on — the exact leak
+    # this file's docstring exists to describe. Tests that care about the other
+    # provider set it themselves (see tests/test_modelos.py).
+    "LLM_PROVIDER": "qwen",
     # The developer's real .env may still carry the old "google_genai:…" names;
     # pin the Qwen defaults so the suite never depends on that file.
     "QWEN_SALES_MODEL": "qwen3.7-plus-2026-05-26",

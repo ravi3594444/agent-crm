@@ -279,7 +279,84 @@ def test_unparsable_staff_numbers_and_bad_country_code_are_errors() -> None:
 def test_the_manager_snapshot_override_is_noted_for_verification() -> None:
     texto = _correr({**BASE, "QWEN_MANAGER_MODEL": "qwen3.8-max-0902"}).texto()
     assert "qwen3.8-max-0902 (QWEN_MANAGER_MODEL) (distinto del documentado" in texto
-    assert "make verificar-qwen" in texto
+    assert "make verificar-modelos" in texto
+
+
+def test_the_report_names_the_chosen_provider_and_defaults_to_qwen() -> None:
+    """A .env that never heard of LLM_PROVIDER keeps reporting Qwen."""
+    texto = _correr(BASE).texto()
+    assert "LLM_PROVIDER: qwen" in texto and "(default)" in texto
+
+
+def test_with_gemini_the_report_names_the_gemini_variables_only() -> None:
+    """Telling somebody who chose Gemini that DASHSCOPE_API_KEY is missing sends
+    them to load the wrong credential."""
+    env = {k: v for k, v in BASE.items() if k not in ("DASHSCOPE_API_KEY", "DASHSCOPE_BASE_URL", "QWEN_SALES_MODEL")}
+    env = {**env, "LLM_PROVIDER": "gemini", "GEMINI_API_KEY": "AIza" + "z" * 30}
+
+    reporte = _correr(env)
+    texto = reporte.texto()
+
+    assert reporte.listo, texto
+    assert "LLM_PROVIDER: gemini" in texto and "(explícito)" in texto
+    assert "OK     GEMINI_API_KEY: presente (34 caracteres; no se muestra)" in texto
+    assert "región global (Google) (default)" in texto
+    assert "gemini-3.5-flash (default)" in texto
+    assert "DASHSCOPE" not in texto
+    assert "AIzazzz" not in texto  # never the value
+
+
+def test_with_gemini_a_missing_gemini_key_is_what_blocks() -> None:
+    env = {k: v for k, v in BASE.items() if k != "DASHSCOPE_API_KEY"}
+    reporte = _correr({**env, "LLM_PROVIDER": "gemini"})
+    texto = reporte.texto()
+
+    assert not reporte.listo
+    assert "FALTA  GEMINI_API_KEY" in texto
+    assert "no hay proveedor de respaldo" in texto
+    assert "FALTA  DASHSCOPE_API_KEY" not in texto
+
+
+def test_a_leftover_key_from_the_other_provider_is_flagged_as_unused() -> None:
+    """It is not an error, but he has to know it buys him nothing: there is no
+    automatic fallback, so the process runs on the chosen provider or not at all."""
+    env = {**BASE, "LLM_PROVIDER": "gemini", "GEMINI_API_KEY": "AIza" + "z" * 30}
+    texto = _correr(env).texto()
+
+    assert "AVISO  DASHSCOPE_API_KEY: cargada pero sin uso" in texto
+    assert "no hay respaldo automático entre proveedores" in texto
+
+
+def test_an_unknown_provider_blocks_the_report() -> None:
+    reporte = _correr({**BASE, "LLM_PROVIDER": "openai"})
+
+    assert not reporte.listo
+    assert "ERROR  LLM_PROVIDER" in reporte.texto()
+
+
+def test_the_qwen_thinking_switches_are_reported_as_inert_under_gemini() -> None:
+    env = {
+        **BASE,
+        "LLM_PROVIDER": "gemini",
+        "GEMINI_API_KEY": "AIza" + "z" * 30,
+        "QWEN_THINKING_GERENCIA": "true",
+    }
+    texto = _correr(env).texto()
+
+    assert "QWEN_THINKING_GERENCIA configurada(s) pero gemini no usa esos controles" in texto
+
+
+def test_a_provider_prefixed_model_name_is_an_error_under_gemini_too() -> None:
+    env = {
+        **BASE,
+        "LLM_PROVIDER": "gemini",
+        "GEMINI_API_KEY": "AIza" + "z" * 30,
+        "GEMINI_SALES_MODEL": "google_genai:gemini-3.5-flash",
+    }
+    reporte = _correr(env)
+
+    assert not reporte.listo
+    assert "ERROR  GEMINI_SALES_MODEL" in reporte.texto()
 
 
 def test_the_command_exits_nonzero_when_not_ready(monkeypatch, capsys) -> None:

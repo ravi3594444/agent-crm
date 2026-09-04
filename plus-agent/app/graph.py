@@ -47,6 +47,10 @@ from app.tools.gerencia import (
     stock_bajo,
     ventas_del_periodo,
 )
+from app.tools.operaciones import (
+    estado_del_sistema,
+    ver_avisos_fallidos,
+)
 from app.tools.pedidos import (
     crear_cliente,
     crear_lead,
@@ -83,6 +87,9 @@ TOOLS_GERENCIA = [
     # ...and his delivery rules, through the SAME propose/confirm pair. Reading
     # them is its own tool; changing one is proponer_limite like everything else.
     ver_reglas_de_entrega,
+    # read-only operational status. No writes, no retries, no secrets, and
+    # NEVER in TOOLS_CLIENTES: these count queues and name the provider.
+    estado_del_sistema, ver_avisos_fallidos,
 ]
 
 # from_conn_string() is a CONTEXT MANAGER, not a constructor — using it
@@ -105,8 +112,8 @@ _checkpointer = RedisSaver(
 _checkpointer.setup()
 
 # Cheap+fast for the high-volume customer bot; stronger model for analysis.
-# Both are Qwen on one DashScope key (app/modelos.py). Missing configuration
-# raises here, at import: there is deliberately no fallback provider.
+# One provider, chosen explicitly with LLM_PROVIDER (app/modelos.py). Missing
+# configuration raises here, at import: there is deliberately no fallback.
 _modelo_clientes = modelos.construir("clientes")
 _modelo_gerencia = modelos.construir("gerencia")
 
