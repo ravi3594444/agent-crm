@@ -5,6 +5,7 @@ service window is open.  Business-initiated staff alerts and delayed customer
 confirmations use pre-approved templates instead.
 """
 import os
+from collections.abc import Mapping
 
 import httpx
 
@@ -15,9 +16,35 @@ TOKEN = os.environ["WHATSAPP_TOKEN"]
 # Meta retires Graph API versions roughly two years after release. Keep the
 # version configurable so an upgrade never requires a code change.
 GRAPH_VERSION = os.getenv("META_GRAPH_API_VERSION", "v21.0").strip() or "v21.0"
+# El host de Graph, para poder apuntarlo a un doble local. El default es Meta,
+# así que un .env que no conoce la variable manda exactamente a donde mandaba.
+# Sólo existe para que un banco de pruebas (demo/) capture los envíos en vez de
+# mandarlos: en producción no se toca. Se exige https:// salvo loopback —
+# 127.0.0.1 nunca sale de la máquina— porque el token viaja en el header.
+GRAPH_HOST_DEFAULT = "https://graph.facebook.com"
+_LOOPBACK = ("http://127.0.0.1", "http://localhost", "http://[::1]")
+
+
+def base_de_graph(env: Mapping[str, str] | None = None) -> str:
+    """A qué host se manda. Vacío es Meta, que es lo que corresponde en producción."""
+    fuente = os.environ if env is None else env
+    base = str(fuente.get("META_GRAPH_BASE_URL", "") or "").strip().rstrip("/")
+    if not base:
+        return GRAPH_HOST_DEFAULT
+    if not base.startswith("https://") and not base.startswith(_LOOPBACK):
+        # Sin el esquema no se ve el host, que puede ser de quien lo puso.
+        esquema = base.split("://", 1)[0] if "://" in base else base
+        raise RuntimeError(
+            f"META_GRAPH_BASE_URL tiene que ser https:// (o http:// en loopback "
+            f"para una prueba local); vino {esquema}://…"
+        )
+    return base
+
+
+GRAPH_BASE_URL = base_de_graph()
 
 _client = httpx.Client(
-    base_url=f"https://graph.facebook.com/{GRAPH_VERSION}",
+    base_url=f"{GRAPH_BASE_URL}/{GRAPH_VERSION}",
     headers={"Authorization": f"Bearer {TOKEN}"},
     timeout=15.0,
 )

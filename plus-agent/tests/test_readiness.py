@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import limites, readiness
+from app import limites, readiness, whatsapp
 
 TOKEN = "EAAG" + "x" * 180
 KEY = "sk-" + "a" * 30
@@ -713,3 +713,41 @@ def test_ejecutar_without_the_network_still_reports_the_account_honestly(
     reporte = readiness.ejecutar(dict(CON_CARGO), con_red=False)
 
     assert _linea(reporte, "ENTREGA_CARGO_CUENTA")[0] == readiness.AVISO
+
+
+# ------------------------------------------------- a dónde van los envíos
+
+
+def _lineas(env: dict) -> list[tuple[str, str, str]]:
+    reporte = readiness.Reporte()
+    readiness.chequear_whatsapp(env, reporte, None)
+    return reporte.lineas
+
+
+def test_readiness_says_nothing_when_graph_points_at_meta() -> None:
+    """Sin la variable no hay nada que avisar: es el destino correcto."""
+    for env in (BASE, {**BASE, "META_GRAPH_BASE_URL": ""}):
+        assert not [ln for ln in _lineas(env) if ln[1] == "META_GRAPH_BASE_URL"]
+
+
+def test_readiness_blocks_when_the_graph_host_is_not_meta() -> None:
+    """Si los envíos no van a Meta, eso bloquea: ahí viaja el token."""
+    reporte = readiness.Reporte()
+    readiness.chequear_whatsapp({**BASE, "META_GRAPH_BASE_URL": "https://demo-servicios:8443"},
+                                reporte, None)
+    nivel, _, mensaje = next(ln for ln in reporte.lineas if ln[1] == "META_GRAPH_BASE_URL")
+    assert nivel == readiness.ERROR
+    assert "NO van a Meta" in mensaje
+    assert reporte.listo is False
+
+
+def test_the_default_graph_host_is_the_same_one_whatsapp_uses() -> None:
+    """Dos módulos, un solo destino: si uno cambia, este test lo caza."""
+    assert readiness.GRAPH_HOST_DEFAULT == whatsapp.GRAPH_HOST_DEFAULT
+
+
+def test_the_graph_url_that_readiness_probes_follows_the_configured_host() -> None:
+    assert readiness._graph(BASE) == "https://graph.facebook.com/v21.0"
+    assert readiness._graph({**BASE, "META_GRAPH_BASE_URL": "https://demo:8443/"}) == (
+        "https://demo:8443/v21.0"
+    )

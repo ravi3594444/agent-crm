@@ -38,6 +38,9 @@ PLANTILLAS = (
     "WHATSAPP_STAFF_ALERT_TEMPLATE",
 )
 ROLES_SUBMIT_PROHIBIDOS = ("agente", "gerencia")
+# El mismo default que app/whatsapp.py, repetido a propósito: readiness no
+# importa ese módulo, que exige el token y el phone id al importarse.
+GRAPH_HOST_DEFAULT = "https://graph.facebook.com"
 ALCANCES_META = ("whatsapp_business_messaging", "whatsapp_business_management")
 
 
@@ -250,11 +253,21 @@ def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
 
 def _graph(env: Mapping[str, str]) -> str:
     version = _valor(env, "META_GRAPH_API_VERSION") or "v21.0"
-    return f"https://graph.facebook.com/{version}"
+    base = (_valor(env, "META_GRAPH_BASE_URL") or GRAPH_HOST_DEFAULT).rstrip("/")
+    return f"{base}/{version}"
 
 
 def chequear_whatsapp(env: Mapping[str, str], reporte: Reporte, http: Http | None) -> str:
     """Devuelve el id de la WABA si se pudo deducir (para las plantillas)."""
+    # Si alguien apuntó Graph a otro lado, que se vea antes que cualquier otra
+    # cosa: ahí va el token en el header. Vacío es Meta y no se comenta.
+    destino = _valor(env, "META_GRAPH_BASE_URL").rstrip("/")
+    if destino and destino != GRAPH_HOST_DEFAULT:
+        reporte.error(
+            "META_GRAPH_BASE_URL",
+            f"los envíos NO van a Meta sino a {destino}: sirve para una prueba "
+            "local (demo/), pero en producción vaciá la variable",
+        )
     token = _valor(env, "WHATSAPP_TOKEN")
     phone_id = _valor(env, "WHATSAPP_PHONE_NUMBER_ID")
     for clave, valor in (

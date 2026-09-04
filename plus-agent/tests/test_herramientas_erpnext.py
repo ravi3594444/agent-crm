@@ -192,6 +192,45 @@ def test_graph_api_version_is_configurable() -> None:
     assert str(whatsapp._client.base_url).rstrip("/").endswith(whatsapp.GRAPH_VERSION)
 
 
+def test_an_empty_graph_base_url_is_meta() -> None:
+    """Lo que corre en producción: sin la variable, se manda a Meta."""
+    for env in ({}, {"META_GRAPH_BASE_URL": ""}, {"META_GRAPH_BASE_URL": "   "}):
+        assert whatsapp.base_de_graph(env) == "https://graph.facebook.com"
+
+
+def test_the_graph_host_can_be_pointed_at_a_local_double() -> None:
+    assert whatsapp.base_de_graph({"META_GRAPH_BASE_URL": "https://demo:8443"}) == (
+        "https://demo:8443"
+    )
+    # loopback en claro: nunca sale de la máquina, así que alcanza para un doble
+    assert whatsapp.base_de_graph({"META_GRAPH_BASE_URL": "http://127.0.0.1:8443"}) == (
+        "http://127.0.0.1:8443"
+    )
+    # la barra final no cambia a dónde va
+    assert whatsapp.base_de_graph({"META_GRAPH_BASE_URL": "https://demo:8443/"}) == (
+        "https://demo:8443"
+    )
+
+
+def test_a_plaintext_graph_host_that_is_not_loopback_is_refused() -> None:
+    """El token va en el header: en claro hacia afuera, no."""
+    for malo in (
+        "http://graph.facebook.com",
+        "http://192.168.0.10:8443",
+        "http://un-host-cualquiera",
+        "ftp://graph.facebook.com",
+    ):
+        with pytest.raises(RuntimeError, match="META_GRAPH_BASE_URL"):
+            whatsapp.base_de_graph({"META_GRAPH_BASE_URL": malo})
+
+
+def test_the_refusal_never_repeats_the_host_that_was_configured() -> None:
+    """El mensaje no puede filtrar a dónde alguien intentó mandar el token."""
+    with pytest.raises(RuntimeError) as exc:
+        whatsapp.base_de_graph({"META_GRAPH_BASE_URL": "http://sacame-el-token.example"})
+    assert "sacame-el-token.example" not in str(exc.value)
+
+
 def _meta_response(status: int, body=None, headers=None) -> Mock:
     response = Mock(status_code=status, headers=headers or {})
     response.json.return_value = body if body is not None else {}

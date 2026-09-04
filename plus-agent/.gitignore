@@ -15,3 +15,6 @@ frappe_docker/
 *.log
 # pid del supervisor que lanza start.sh
 agente.pid
+
+# resultados de una corrida del banco de pruebas (se regeneran)
+demo-resultados/
