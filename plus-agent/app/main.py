@@ -529,7 +529,9 @@ def _generate_response(item: dict) -> str:
             if ambiguo:
                 return ambiguo
             return _non_empty(
-                responder_gerencia(data, thread_id=thread_tag, usuario=thread_tag),
+                # El teléfono verificado, NO el thread_tag: el tag es un hash y
+                # con un hash ninguna herramienta de gerencia autoriza a nadie.
+                responder_gerencia(data, thread_id=thread_tag, telefono=telefono),
                 message_id,
             )
 

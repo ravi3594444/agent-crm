@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from conftest import entrega_autorizada, inventario_confiable
 
-from app import erpnext, inventario, policy
+from app import erpnext, inventario, policy, router
 from app.tools import catalogo, pedidos
 
 # Captured before any fixture stubs it: these two tests are about the real
@@ -216,14 +216,21 @@ def test_tool_schemas_hide_authenticated_identity_and_require_unit_and_date() ->
 def test_status_lookup_enforces_customer_ownership_but_management_can_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # El número del contexto de gerencia tiene que seguir estando en la lista
+    # del equipo: el alcance solo no eleva nada (app/runtime_context.py).
+    monkeypatch.setenv("TELEFONOS_EQUIPO", "5493519999999")
+    router.recargar()
     monkeypatch.setattr(erpnext, "get_doc", Mock(return_value=_order(customer="CUST-002")))
-
-    denied = catalogo.estado_pedido.invoke(
-        {"numero_pedido": "SO-0001"}, config=_customer_config("CUST-001")
-    )
-    allowed = catalogo.estado_pedido.invoke(
-        {"numero_pedido": "SO-0001"}, config=_management_config()
-    )
+    try:
+        denied = catalogo.estado_pedido.invoke(
+            {"numero_pedido": "SO-0001"}, config=_customer_config("CUST-001")
+        )
+        allowed = catalogo.estado_pedido.invoke(
+            {"numero_pedido": "SO-0001"}, config=_management_config()
+        )
+    finally:
+        monkeypatch.delenv("TELEFONOS_EQUIPO", raising=False)
+        router.recargar()
 
     assert denied == "No encontré el pedido SO-0001."
     assert "Pedido SO-0001" in allowed

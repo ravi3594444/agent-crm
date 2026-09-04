@@ -532,33 +532,44 @@ Details, including what each mode can and cannot prove, are in
 Three things, in order of how much they matter. None of them are the bench's
 own fault; that is the point of having one.
 
-**1. Every management-only tool is unreachable from WhatsApp.** `app/main.py`
-calls `responder_gerencia(data, thread_id=thread_tag, usuario=thread_tag)`, so
-`configurable["actor_phone"]` is `wa:<sha256 of the phone>` and never a phone.
-`runtime_context.require_management` then asks `router.es_equipo()` about that
-hash, which is always False. Seven tools answer "that number is not
-authorized" to the owner himself — every tool that calls `require_management`:
-`ver_limites`, `proponer_limite`, `historial_limites`, `ver_reglas_de_entrega`,
-`estado_del_sistema`, `ver_avisos_fallidos` and `contar_stock`.
-`app/briefing.py` passes a hash the same way.
+**1. Every management-only tool was unreachable from WhatsApp. FIXED.**
+`app/main.py` called `responder_gerencia(data, thread_id=thread_tag,
+usuario=thread_tag)`, so `configurable["actor_phone"]` was `wa:<sha256 of the
+phone>` and never a phone. `runtime_context.require_management` then asked
+`router.es_equipo()` about that hash, which is always False, and seven tools
+answered "that number is not authorized" to the owner himself. `app/briefing.py`
+passed a hash the same way. The owner could not change a limit at all, because
+`proponer_limite` is the only way in and it was one of the seven.
 
-The other management tools are unaffected because they do not gate on the
-actor at all: `pedidos_pendientes`, `ventas_del_periodo`, `stock_bajo`,
-`cobranzas_vencidas`, `ficha_cliente`, `ejecutar_reporte`,
-`registrar_venta_offline`, `confirmar_entrega` and `redactar_mensaje_cliente`
-answer normally. Worth knowing in both directions: the read-only reports still
-work, and the three capture tools that write to ERPNext are reachable by
-anyone the router lets through, with no second check.
+The other nine were reachable only because they did not gate on the actor at
+all — including `registrar_venta_offline`, `confirmar_entrega` and
+`redactar_mensaje_cliente`, which write to ERPNext or read a customer's phone.
 
-Everything deterministic is fine — `confirmar <SO>`, `rechazar`, `preparar`,
-`despachar`, `cancelar` and the four-digit limit code all run on the real phone
-through `manejar_boton`. It is only the management *agent* that is locked out.
-Consequence worth naming: the owner cannot change a limit at all, because
-`proponer_limite` is the only way in and it is one of the seven.
+What changed: the parameter is named `telefono` and carries the verified
+number; `app/runtime_context.py` normalizes it, so a hash fails closed instead
+of being compared as if it were a number; `tag` is the hash, for logs and
+metrics only; every one of the sixteen management-only tools now calls
+`require_management` itself; and `estado_pedido` elevates on
+`gerencia_verificada` (scope AND a phone still on the staff list) rather than
+on scope alone. `tests/test_autorizacion_gerencia.py` derives the tool list
+from `TOOLS_GERENCIA - TOOLS_CLIENTES`, so a new tool without its guard fails
+the suite, and exercises all sixteen against five identities — manager,
+customer, unknown, empty context and hashed phone — asserting no ERPNext or
+Redis call happens on a refusal.
 
-Scenario `gerencia_estado_del_sistema` pins the current behaviour, so it will
-fail the day someone fixes it. That is deliberate — it is the witness, not
-acceptance.
+Everything deterministic was always fine — `confirmar <SO>`, `rechazar`,
+`preparar`, `despachar`, `cancelar` and the four-digit limit code all run on
+the real phone through `manejar_boton`. One consequence of the old bug was
+invisible until now: `proponer_limite` keyed its pending proposal in Redis by
+the hash while `app/main.py` looked it up by the real phone, so the two halves
+of the confirmation could never have met. `limites._clave_propuesta` now
+normalizes for both.
+
+Scenario `gerencia_estado_del_sistema` is the witness, turned around: it now
+requires the tool to answer and forbids "no autorizado".
+`cliente_no_alcanza_gerencia` is new and covers the boundary a message can
+actually attack: a customer asking for a management write gets back no document
+and no management data.
 
 **2. `AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO` defaults to 0, and 0 blocks every
 auto-confirmation** (`policy.py`: "an unconfigured limit is not permission").

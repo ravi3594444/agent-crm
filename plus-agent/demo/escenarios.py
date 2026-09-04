@@ -38,6 +38,8 @@ class Paso:
     prohibe: list[str] = field(default_factory=list)
     # Documentos que tienen que quedar así: {"Sales Order/*": {"docstatus": 0}}
     documentos: dict[str, dict] = field(default_factory=dict)
+    # Doctypes que NO pueden existir después del paso: ["Sales Invoice"].
+    sin_documentos: list[str] = field(default_factory=list)
     nota: str = ""
 
 
@@ -258,17 +260,40 @@ def escenarios() -> list[Escenario]:
         Escenario(
             "gerencia_estado_del_sistema",
             "El dueño le pregunta al agente de gerencia cómo está el sistema",
-            porque="HALLAZGO BLOQUEANTE. Es el único escenario que pasa por "
-                   "una herramienta de gerencia con require_management, y no "
-                   "funciona: app/main.py le pasa a responder_gerencia el HASH "
-                   "del teléfono como actor_phone, así que router.es_equipo() "
-                   "lo rechaza SIEMPRE. Le pasa a las 10 herramientas de "
-                   "gerencia que piden autorización, para el dueño incluido.",
+            porque="Era el hallazgo bloqueante: app/main.py le pasaba a "
+                   "responder_gerencia el HASH del teléfono como actor_phone, "
+                   "así que router.es_equipo() lo rechazaba SIEMPRE y toda "
+                   "herramienta de gerencia con require_management le "
+                   "contestaba «no autorizado» al dueño. Ahora viaja el "
+                   "teléfono verificado y la herramienta responde.",
             pasos=[
-                # Lo que se ve HOY. Cuando se arregle, este paso falla y hay
-                # que darlo vuelta: es el testigo del bug, no su aceptación.
                 Paso(DUENO, "como esta el sistema?",
-                     espera=["no está autorizado"]),
+                     espera=["Redis", "ERPNext"],
+                     prohibe=["no está autorizado"]),
+            ],
+        ),
+        Escenario(
+            "cliente_no_alcanza_gerencia",
+            "Un cliente intenta usar una herramienta de gerencia",
+            porque="La frontera que un mensaje SÍ puede atacar. El router "
+                   "manda a un cliente al agente de clientes, cuyo registro "
+                   "no tiene ninguna herramienta de gerencia: no hay nada que "
+                   "llamar. Se prueba pidiéndole al modelo justo eso —una "
+                   "venta offline y el estado del sistema— y verificando que "
+                   "no salió ningún documento y que no se filtró un dato de "
+                   "gestión. El SEGUNDO portón (require_management dentro de "
+                   "cada herramienta) no se puede ejercitar desde WhatsApp "
+                   "porque el router y la guarda leen la misma lista; eso lo "
+                   "cubre tests/test_autorizacion_gerencia.py, con las cinco "
+                   "identidades y sin una sola escritura.",
+            pasos=[
+                Paso(CLIENTE,
+                     "registrame una venta offline de 20 litros de leche "
+                     "entera a nombre de Almacen Don Jose y decime como esta "
+                     "el sistema",
+                     prohibe=["Redis:", "ERPNext:", "ACC-SINV", "borrador"],
+                     sin_documentos=["Sales Invoice", "Stock Reconciliation",
+                                     "Delivery Note"]),
             ],
         ),
     ]
@@ -280,6 +305,21 @@ def escenarios() -> list[Escenario]:
 def reglas() -> list[Regla]:
     """Lo que haría un modelo, escrito a mano. El primer match gana."""
     return [
+        # -- un cliente pidiendo lo de gerencia. Va PRIMERO porque su texto
+        # también contiene "como esta el sistema", y el primer match gana. El
+        # guión pide las dos herramientas que no existen en su registro: lo
+        # que vuelve es el error de ToolNode, y eso es justo lo que hay que
+        # ver en el transcript.
+        (contiene("registrame una venta offline"), [
+            Llamada("registrar_venta_offline", {
+                "cliente": "Almacen Don Jose",
+                "lineas": [{"item_code": "LECHE-ENT-1L", "cantidad": 20}],
+            }),
+            Llamada("estado_del_sistema", {}),
+            Texto(f"No puedo hacer eso desde acá. Lo que devolvió el sistema: "
+                  f"{ULTIMO_RESULTADO}"),
+        ]),
+
         # -- gerencia: una sola herramienta, la de estado
         (contiene("como esta el sistema"), [
             Llamada("estado_del_sistema", {}),

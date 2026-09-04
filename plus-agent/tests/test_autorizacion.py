@@ -16,7 +16,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from app import erpnext
+from app import erpnext, router
 from app.runtime_context import (
     RuntimeContextError,
     actor_context,
@@ -215,15 +215,43 @@ def test_order_owner_check_is_exact_not_prefix_or_case_insensitive(
 def test_management_scope_can_read_any_customers_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("TELEFONOS_EQUIPO", "5493519999999")
+    router.recargar()
     monkeypatch.setattr(erpnext, "get_doc", Mock(return_value=dict(OTHER_CUSTOMER_ORDER)))
-
-    reply = catalogo.estado_pedido.invoke(
-        {"numero_pedido": "SO-0042"}, config=_management_config()
-    )
+    try:
+        reply = catalogo.estado_pedido.invoke(
+            {"numero_pedido": "SO-0042"}, config=_management_config()
+        )
+    finally:
+        monkeypatch.delenv("TELEFONOS_EQUIPO", raising=False)
+        router.recargar()
 
     assert "Pedido SO-0042" in reply
     assert "confirmado" in reply
     assert "53" in reply
+
+
+def test_management_scope_alone_does_not_elevate_without_a_staff_phone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El alcance lo pone el webhook; elevar lo habilita la lista del equipo.
+
+    Con `is_management` a secas, un contexto de gerencia cuyo teléfono no está
+    (o ya no está) en TELEFONOS_EQUIPO leía el pedido de cualquier cliente.
+    """
+    monkeypatch.setenv("TELEFONOS_EQUIPO", "5493511234567")  # otro número
+    router.recargar()
+    monkeypatch.setattr(erpnext, "get_doc", Mock(return_value=dict(OTHER_CUSTOMER_ORDER)))
+    try:
+        reply = catalogo.estado_pedido.invoke(
+            {"numero_pedido": "SO-0042"}, config=_management_config()
+        )
+    finally:
+        monkeypatch.delenv("TELEFONOS_EQUIPO", raising=False)
+        router.recargar()
+
+    # Byte por byte igual a un pedido que no existe: sin enumeración.
+    assert reply == "No encontré el pedido SO-0042."
 
 
 def test_status_lookup_without_authorization_context_fails_closed_before_erp(

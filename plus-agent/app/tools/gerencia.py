@@ -7,17 +7,29 @@ Instead it calls ERPNext's own Query Reports — the same numbers his
 accountant sees — and explains the result.
 
 Deterministic numbers. LLM explanation. Never the other way round.
+
+LA SEGUNDA REGLA: TODO ESTO SE AUTORIZA ACÁ TAMBIÉN.
+Estas seis herramientas leen lo que el dueño no quiere que lea nadie más —la
+lista de clientes con sus teléfonos, la facturación, los márgenes, la deuda de
+cada uno— y ninguna gateaba por sí misma: se confiaban del router. Un router
+es una sola puerta, y una sola puerta que se abre mal entrega el negocio
+entero. Cada una llama a ``require_management`` con el teléfono que firmó Meta
+(app/runtime_context.py), antes de tocar ERPNext.
 """
 from datetime import timedelta
 
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 from app import erpnext, policy
 from app.formato import pesos
+from app.runtime_context import SIN_PERMISO, RuntimeContextError, require_management
 
 
 @tool
-def ejecutar_reporte(nombre_reporte: str, filtros: dict | None = None) -> str:
+def ejecutar_reporte(
+    config: RunnableConfig, nombre_reporte: str, filtros: dict | None = None
+) -> str:
     """Ejecuta un reporte oficial de ERPNext y devuelve los datos reales.
 
     Reportes disponibles: 'Accounts Receivable', 'Stock Balance',
@@ -26,6 +38,10 @@ def ejecutar_reporte(nombre_reporte: str, filtros: dict | None = None) -> str:
 
     Usar SIEMPRE esta herramienta para cifras. Nunca calcular a mano.
     """
+    try:
+        require_management(config)
+    except RuntimeContextError:
+        return SIN_PERMISO
     data = erpnext.run_report(nombre_reporte, filtros or {})
     if not data:
         return f"El reporte '{nombre_reporte}' no devolvió filas."
@@ -36,9 +52,13 @@ def ejecutar_reporte(nombre_reporte: str, filtros: dict | None = None) -> str:
 
 
 @tool
-def pedidos_pendientes() -> str:
+def pedidos_pendientes(config: RunnableConfig) -> str:
     """Pedidos en borrador esperando confirmación del equipo.
     Esto es lo primero que debería revisar el dueño cada mañana."""
+    try:
+        require_management(config)
+    except RuntimeContextError:
+        return SIN_PERMISO
     sos = erpnext.get_list(
         "Sales Order",
         filters=[["docstatus", "=", 0]],
@@ -55,8 +75,12 @@ def pedidos_pendientes() -> str:
 
 
 @tool
-def ventas_del_periodo(dias: int = 7) -> str:
+def ventas_del_periodo(config: RunnableConfig, dias: int = 7) -> str:
     """Ventas confirmadas de los últimos N días."""
+    try:
+        require_management(config)
+    except RuntimeContextError:
+        return SIN_PERMISO
     desde = (policy._hoy_del_negocio() - timedelta(days=dias)).isoformat()
     sos = erpnext.get_list(
         "Sales Order",
@@ -74,8 +98,12 @@ def ventas_del_periodo(dias: int = 7) -> str:
 
 
 @tool
-def stock_bajo() -> str:
+def stock_bajo(config: RunnableConfig) -> str:
     """Productos por debajo del punto de reposición. Riesgo de quiebre de stock."""
+    try:
+        require_management(config)
+    except RuntimeContextError:
+        return SIN_PERMISO
     items = erpnext.get_list(
         "Item Reorder",
         fields=["parent", "warehouse", "warehouse_reorder_level"],
@@ -98,8 +126,12 @@ def stock_bajo() -> str:
 
 
 @tool
-def cobranzas_vencidas() -> str:
+def cobranzas_vencidas(config: RunnableConfig) -> str:
     """Facturas vencidas y no cobradas. Usa el reporte oficial de ERPNext."""
+    try:
+        require_management(config)
+    except RuntimeContextError:
+        return SIN_PERMISO
     data = erpnext.run_report("Accounts Receivable", {"company": erpnext.default_company()})
     vencidas = [r for r in data if isinstance(r, dict) and (r.get("outstanding_amount") or 0) > 0]
     if not vencidas:
@@ -114,8 +146,12 @@ def cobranzas_vencidas() -> str:
 
 
 @tool
-def ficha_cliente(nombre_o_codigo: str) -> str:
+def ficha_cliente(config: RunnableConfig, nombre_o_codigo: str) -> str:
     """Vista 360 de un cliente: datos, últimos pedidos y saldo."""
+    try:
+        require_management(config)
+    except RuntimeContextError:
+        return SIN_PERMISO
     clientes = erpnext.get_list(
         "Customer",
         filters=[["customer_name", "like", f"%{nombre_o_codigo}%"]],

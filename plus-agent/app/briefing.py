@@ -24,7 +24,9 @@ def enviar_briefing() -> None:
             texto = responder_gerencia(
                 PROMPT,
                 thread_id=f"briefing:{recipient_tag}",
-                usuario=f"staff:{recipient_tag}",
+                # STAFF ya viene normalizado por app/router.py. El tag hasheado
+                # es para el thread y para el log; autorizar necesita el número.
+                telefono=telefono,
             )
             enviar_mensaje(telefono, texto)
         except Exception as e:

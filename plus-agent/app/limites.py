@@ -24,6 +24,7 @@ SI NO SE PUEDE LEER
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -37,6 +38,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from redis.exceptions import RedisError
 
 from app import erpnext, locks
+from app import telefono as telefono_mod
 
 # Marca de los comentarios de auditoría en ERPNext. Redis no puede contestar
 # «¿me borraron?»: un almacén vacío es idéntico a uno recién instalado. La
@@ -957,6 +959,22 @@ def vigente(nombre: str) -> str:
         return crudo
 
 
+def _tag(telefono: str) -> str:
+    """Hash corto, para el log. El número entero no va a stdout."""
+    return hashlib.sha256(str(telefono or "").encode()).hexdigest()[:10]
+
+
+def _clave_propuesta(telefono: str) -> str:
+    """La clave de la propuesta, en forma canónica.
+
+    Proponer un cambio y confirmarlo con el código llegan por caminos
+    distintos: la herramienta de gerencia (con el teléfono del contexto) y el
+    router determinista de app/main.py (con el del webhook). Si cada uno
+    normaliza distinto, el código correcto no encuentra nada que aplicar.
+    """
+    return f"{CLAVE_PROPUESTA}:{telefono_mod.normalizar(telefono) or telefono}"
+
+
 def proponer(nombre_o_alias: str, valor_crudo: str, telefono: str) -> dict:
     """Valida un cambio y lo deja PENDIENTE de confirmación. No cambia nada.
 
@@ -980,7 +998,7 @@ def proponer(nombre_o_alias: str, valor_crudo: str, telefono: str) -> dict:
     }
     try:
         locks.conexion().setex(
-            f"{CLAVE_PROPUESTA}:{telefono}",
+            _clave_propuesta(telefono),
             PROPUESTA_TTL_SEGUNDOS,
             json.dumps(propuesta, ensure_ascii=False),
         )
@@ -1003,7 +1021,7 @@ def pendiente(telefono: str) -> dict | None:
     if not telefono:
         return None
     try:
-        crudo = locks.conexion().get(f"{CLAVE_PROPUESTA}:{telefono}")
+        crudo = locks.conexion().get(_clave_propuesta(telefono))
     except (locks.CoordinationError, RedisError):
         return None
     if not crudo:
@@ -1026,7 +1044,7 @@ def descartar(telefono: str) -> None:
     if not telefono:
         return
     try:
-        locks.conexion().delete(f"{CLAVE_PROPUESTA}:{telefono}")
+        locks.conexion().delete(_clave_propuesta(telefono))
     except (locks.CoordinationError, RedisError) as exc:
         print(f"[limites] no pude descartar la propuesta ({type(exc).__name__})")
 
@@ -1035,7 +1053,7 @@ def aplicar(codigo: str, telefono: str) -> dict:
     """Aplica el cambio pendiente de ESE teléfono si el código coincide."""
     if not telefono:
         raise LimiteError("no sé quién confirma el cambio")
-    clave = f"{CLAVE_PROPUESTA}:{telefono}"
+    clave = _clave_propuesta(telefono)
     try:
         crudo = locks.conexion().get(clave)
     except (locks.CoordinationError, RedisError) as exc:
@@ -1078,7 +1096,8 @@ def aplicar(codigo: str, telefono: str) -> dict:
     except (locks.CoordinationError, RedisError) as exc:
         raise LimiteError("no pude guardar el cambio") from exc
     print(
-        f"[limites] {nombre}: {anterior} -> {nuevo} por {telefono} ({entrada['ts']})"
+        f"[limites] {nombre}: {anterior} -> {nuevo} "
+        f"por {_tag(telefono)} ({entrada['ts']})"
     )
     return entrada
 

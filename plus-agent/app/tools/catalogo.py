@@ -192,7 +192,10 @@ def estado_pedido(numero_pedido: str, config: RunnableConfig) -> str:
         order = erpnext.get_doc("Sales Order", numero_pedido)
     except erpnext.ERPNextError:
         return f"No encontré el pedido {numero_pedido}."
-    if not actor.is_management and (
+    # `gerencia_verificada`, no `is_management`: el alcance lo pone el webhook,
+    # pero leer el pedido de CUALQUIER cliente lo habilita únicamente un
+    # teléfono que sigue estando en la lista del equipo.
+    if not actor.gerencia_verificada and (
         not actor.customer_code or order.get("customer") != actor.customer_code
     ):
         # Deliberately indistinguishable from a missing order to prevent ID

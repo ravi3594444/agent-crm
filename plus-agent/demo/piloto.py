@@ -400,6 +400,16 @@ class Piloto:
         for fragmento in paso.prohibe:
             if fragmento.lower() in todo:
                 problemas.append(f"la respuesta dice {fragmento!r} y no debería")
+        # Que un documento NO exista es una afirmación distinta de que exista
+        # con cierto estado, y es la única forma de probar que una escritura no
+        # autorizada no escribió: "no hay ninguna factura" no se puede decir
+        # con `documentos`, que exige al menos una.
+        for doctype in paso.sin_documentos:
+            aparecidos = [k for k in foto if k.startswith(doctype + "/")]
+            if aparecidos:
+                problemas.append(
+                    f"apareció un {doctype} y no debería: {aparecidos}"
+                )
         for patron, exigido in paso.documentos.items():
             doctype = patron.split("/", 1)[0]
             candidatos = {k: v for k, v in foto.items()

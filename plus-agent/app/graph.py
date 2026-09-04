@@ -186,10 +186,18 @@ def responder_cliente(
 def responder_gerencia(
     mensaje: str,
     thread_id: str,
-    usuario: str,
+    telefono: str,
     *,
     inbound_message_id: str = "",
 ) -> str:
+    """Run one management turn. ``telefono`` is the VERIFIED phone, never a hash.
+
+    It used to be called ``usuario`` and both callers passed the thread tag —
+    a sha256 — so ``require_management`` refused every management tool to the
+    owner himself. The parameter is named after what it must contain, and
+    app/runtime_context.py normalizes it, so a hash fails closed instead of
+    being compared as if it were a number.
+    """
     with erpnext.manager_scope():
         out = agente_gerencia.invoke(
             {"messages": [("user", mensaje)]},
@@ -197,7 +205,7 @@ def responder_gerencia(
                 "configurable": {
                     "thread_id": f"ger:{thread_id}",
                     "actor_scope": "management",
-                    "actor_phone": usuario,
+                    "actor_phone": telefono,
                     "inbound_message_id": inbound_message_id,
                 }
             },

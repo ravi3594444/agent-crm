@@ -58,6 +58,7 @@ def test_crear_lead_sends_notes_as_child_table_rows(monkeypatch: pytest.MonkeyPa
 
 
 def test_offline_sale_invoice_has_company_and_warehouses(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _gerente(monkeypatch)
     create = Mock(return_value={"name": "ACC-SINV-2026-00001"})
     monkeypatch.setattr(erpnext, "create_doc", create)
 
@@ -67,7 +68,8 @@ def test_offline_sale_invoice_has_company_and_warehouses(monkeypatch: pytest.Mon
             "lineas": [{"item_code": "LEC-ENT-1L", "cantidad": 20}, {"item_code": "QUE-CRE", "cantidad": 2.5, "precio_unitario": 9000}],
             "cobrado": False,
             "nota": "reparto",
-        }
+        },
+        config=config,
     )
 
     assert "ACC-SINV-2026-00001" in result
@@ -124,6 +126,7 @@ def test_stock_count_payload_has_company_and_business_date(monkeypatch: pytest.M
 
 
 def test_delivery_note_carries_company_and_item_warehouses(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _gerente(monkeypatch)
     so = {
         "name": "SAL-ORD-2026-00006",
         "docstatus": 1,
@@ -138,7 +141,9 @@ def test_delivery_note_carries_company_and_item_warehouses(monkeypatch: pytest.M
     create = Mock(return_value={"name": "MAT-DN-2026-00001"})
     monkeypatch.setattr(erpnext, "create_doc", create)
 
-    result = captura.confirmar_entrega.invoke({"numero_pedido": "SAL-ORD-2026-00006"})
+    result = captura.confirmar_entrega.invoke(
+        {"numero_pedido": "SAL-ORD-2026-00006"}, config=config
+    )
 
     assert "MAT-DN-2026-00001" in result
     doctype, payload = create.call_args.args
@@ -150,10 +155,13 @@ def test_delivery_note_carries_company_and_item_warehouses(monkeypatch: pytest.M
 
 
 def test_delivery_note_refuses_a_draft_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _gerente(monkeypatch)
     monkeypatch.setattr(erpnext, "get_doc", Mock(return_value={"docstatus": 0, "customer": "X", "items": []}))
     create = Mock()
     monkeypatch.setattr(erpnext, "create_doc", create)
-    assert "borrador" in captura.confirmar_entrega.invoke({"numero_pedido": "SAL-ORD-1"})
+    assert "borrador" in captura.confirmar_entrega.invoke(
+        {"numero_pedido": "SAL-ORD-1"}, config=config
+    )
     create.assert_not_called()
 
 

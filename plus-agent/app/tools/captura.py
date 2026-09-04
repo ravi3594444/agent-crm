@@ -13,13 +13,20 @@ already communicate: a WhatsApp message. These tools turn "vendí 20 litros
 a Don José" into a real ERPNext document — as a DRAFT, like everything else.
 
 Capture first. Accurate stock promises come only AFTER capture works.
+
+LAS TRES ESCRIBEN, ASÍ QUE LAS TRES AUTORIZAN.
+Estas herramientas crean documentos en ERPNext —una factura que mueve stock,
+un ajuste de inventario, un remito— y `redactar_mensaje_cliente` devuelve el
+teléfono de un cliente. Dos de ellas no chequeaban nada: alcanzaba con que el
+router dejara pasar el mensaje. Ahora las tres llaman a ``require_management``
+antes de leer o escribir cualquier cosa (app/runtime_context.py).
 """
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from app import erpnext, notificar, policy
-from app.runtime_context import RuntimeContextError, require_management
+from app.runtime_context import SIN_PERMISO, RuntimeContextError, require_management
 
 
 def _hoy() -> str:
@@ -35,6 +42,7 @@ class LineaVenta(BaseModel):
 
 @tool
 def registrar_venta_offline(
+    config: RunnableConfig,
     cliente: str,
     lineas: list[LineaVenta],
     cobrado: bool = True,
@@ -48,6 +56,10 @@ def registrar_venta_offline(
 
     Crea una factura en BORRADOR. El dueño la confirma y recién ahí baja stock.
     """
+    try:
+        require_management(config)
+    except RuntimeContextError:
+        return SIN_PERMISO
     if not lineas:
         return "Necesito saber qué productos se vendieron."
 
@@ -164,9 +176,15 @@ def contar_stock(
 
 
 @tool
-def confirmar_entrega(numero_pedido: str, nota: str = "") -> str:
+def confirmar_entrega(
+    config: RunnableConfig, numero_pedido: str, nota: str = ""
+) -> str:
     """Marca un pedido como entregado por el reparto.
     Usar cuando el repartidor avisa que dejó la mercadería."""
+    try:
+        require_management(config)
+    except RuntimeContextError:
+        return SIN_PERMISO
     try:
         so = erpnext.get_doc("Sales Order", numero_pedido)
     except erpnext.ERPNextError:
@@ -201,12 +219,18 @@ def confirmar_entrega(numero_pedido: str, nota: str = "") -> str:
 
 
 @tool
-def redactar_mensaje_cliente(cliente: str, intencion: str) -> str:
+def redactar_mensaje_cliente(
+    config: RunnableConfig, cliente: str, intencion: str
+) -> str:
     """Redacta un mensaje de WhatsApp para enviarle a un cliente.
     NO lo envía — devuelve el texto para que una persona lo revise y mande.
 
     Ejemplo: "avisale a Don José que ya llegó el queso cremoso".
     """
+    try:
+        require_management(config)
+    except RuntimeContextError:
+        return SIN_PERMISO
     fichas = erpnext.get_list(
         "Customer",
         filters=[["customer_name", "like", f"%{cliente}%"]],
