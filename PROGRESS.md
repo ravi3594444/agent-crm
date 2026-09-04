@@ -3,12 +3,13 @@
 Working branch: **`feat/experiencia`** (based on `main`). Do **not** merge to `main`
 or delete any branch yet.
 
-Run everything from `plus-agent/`. Tests need no credentials, no Redis, no
-ERPNext, no network:
+Run everything from `plus-agent/`. Tests need no credentials, no ERPNext and no
+network — but they DO need a Redis Stack on `REDIS_URL`, database 0 (see "Tests
+and Redis" in `plus-agent/README.md`):
 
 ```bash
 cd plus-agent
-.venv/bin/python -m pytest -q      # expect: 277 passed, 1 xfailed
+REDIS_URL=redis://localhost:6379/0 .venv/bin/python -m pytest -q   # expect: 1124 passed
 .venv/bin/ruff check app tests     # expect: All checks passed!
 ```
 

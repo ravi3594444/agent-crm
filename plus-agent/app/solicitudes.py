@@ -848,14 +848,45 @@ def _indice_vacio() -> bool:
         return True
 
 
-# monotonic() deadline after which an incomplete rebuild is worth retrying.
+def _reloj() -> float:
+    """monotonic(), behind a seam so a test can drive the cooldown."""
+    return time.monotonic()
+
+
+# Two facts, and the old single variable conflated them: it was NAMED like a
+# retry deadline and READ like "still incomplete", so it answered True for the
+# whole 600 s — and every 60 s tick inside that window rebuilt again and re-armed
+# it, which meant 25 ERPNext page reads a minute, for ever, on any history
+# bigger than the page budget. The log said "retry in 10 min" while the retry
+# was one minute away.
+#
 # In-process on purpose: a restart rebuilds anyway, because the index is empty.
-_reconstruccion_incompleta_hasta: float = 0.0
+#
+# Whether the last rebuild ran out of pages. The index is missing deadlines it
+# never reached, so it is owed another rebuild.
+_reconstruccion_truncada: bool = False
+# _reloj() BEFORE which asking again is pointless: the same pages would answer
+# the same truncation. Named for what it gates.
+_reconstruccion_reintento_desde: float = 0.0
 
 
 def reconstruccion_incompleta() -> bool:
     """Whether the last rebuild ran out of pages and is still owed a retry."""
-    return time.monotonic() < _reconstruccion_incompleta_hasta
+    return _reconstruccion_truncada
+
+
+def _toca_reconstruir() -> bool:
+    """Whether this tick should rebuild the index.
+
+    The debt does not expire — only the WAIT does. An empty index is gated by
+    the same cooldown, because a truncated rebuild that recovered no deadline at
+    all leaves the index empty and would otherwise hammer ERPNext just the same.
+    Costs at most one cooldown of delayed expiry, and a late deadline never
+    oversells: an order with no deadline reads as still holding its stock.
+    """
+    if _reloj() < _reconstruccion_reintento_desde:
+        return False
+    return _indice_vacio() or _reconstruccion_truncada
 
 
 def reconstruir_indice() -> int:
@@ -885,7 +916,7 @@ def reconstruir_indice() -> int:
     incomplete and ``tick`` comes back for it — a partial index that looks
     finished is the same permanent hold with an extra step.
     """
-    global _reconstruccion_incompleta_hasta
+    global _reconstruccion_truncada, _reconstruccion_reintento_desde
     ultimas: dict[str, Solicitud] = {}
     truncada = False
     for pagina in range(MAX_PAGINAS_RECONSTRUCCION):
@@ -929,19 +960,22 @@ def reconstruir_indice() -> int:
         if candidata.con_plazo:
             recuperadas += 1
     if truncada:
-        _reconstruccion_incompleta_hasta = (
-            time.monotonic() + REINTENTO_RECONSTRUCCION_SEGUNDOS
+        _reconstruccion_truncada = True
+        _reconstruccion_reintento_desde = (
+            _reloj() + REINTENTO_RECONSTRUCCION_SEGUNDOS
         )
         print(
             f"[solicitudes] reconstrucción INCOMPLETA: leí "
             f"{MAX_PAGINAS_RECONSTRUCCION * MAX_RECONSTRUCCION} eventos y hay "
             f"más. {recuperadas} plazo(s) recuperado(s) de "
             f"{len(ultimas)} pedido(s); reintento en "
-            f"{REINTENTO_RECONSTRUCCION_SEGUNDOS / 60:g} min. Los pedidos que "
+            f"{REINTENTO_RECONSTRUCCION_SEGUNDOS / 60:g} min, y hasta entonces "
+            f"no le vuelvo a preguntar. Los pedidos que "
             f"no alcancé siguen reservando stock sin plazo."
         )
     else:
-        _reconstruccion_incompleta_hasta = 0.0
+        _reconstruccion_truncada = False
+        _reconstruccion_reintento_desde = 0.0
     return recuperadas
 
 
@@ -954,8 +988,9 @@ def tick(ahora: float | None = None) -> int:
     momento = ahora or _ahora()
     # An index that is merely NON-EMPTY is not proof the rebuild finished: a
     # truncated one leaves the orders it never reached with no deadline, and
-    # they would wait for the next restart to get one.
-    if _indice_vacio() or reconstruccion_incompleta():
+    # they would wait for the next restart to get one. Rate-limited, though —
+    # see _toca_reconstruir.
+    if _toca_reconstruir():
         reconstruir_indice()
     cerradas = 0
     for pedido in _indice_pendientes(momento)[:50]:

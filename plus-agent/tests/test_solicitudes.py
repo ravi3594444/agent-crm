@@ -2532,31 +2532,95 @@ def test_a_rebuild_pages_backwards_until_the_history_runs_out(mundo, monkeypatch
     assert solicitudes.vencimientos([SO]) == {SO: solicitud.vence_en}
 
 
-def test_a_rebuild_that_ran_out_of_pages_says_so_and_is_retried(
+def test_a_rebuild_that_ran_out_of_pages_is_retried_once_per_cooldown(
     mundo, monkeypatch
 ) -> None:
     """A non-empty index is not proof the rebuild finished. Believing it was
     would leave the orders it never reached with no deadline until the next
-    restart — the permanent hold, one step removed."""
+    restart — the permanent hold, one step removed.
+
+    But the retry has to be RATE-LIMITED. The debt was read as "still
+    incomplete" for the whole 600 s, and each 60 s tick inside that window
+    rebuilt and re-armed it: 25 ERPNext page reads a minute, for ever, on any
+    history bigger than the page budget — while the log said "retry in 10 min".
+    The same pages answer the same truncation, so asking again inside the
+    cooldown buys nothing and costs the load.
+    """
     monkeypatch.setattr(solicitudes, "MAX_RECONSTRUCCION", 100)
     monkeypatch.setattr(solicitudes, "MAX_PAGINAS_RECONSTRUCCION", 1)
     _abrir(mundo)
     _historia(mundo, 250, viva=True)
     _sin_redis()
 
-    solicitudes.reconstruir_indice()
+    reloj = [1_000.0]
+    monkeypatch.setattr(solicitudes, "_reloj", lambda: reloj[0])
+    espera = solicitudes.REINTENTO_RECONSTRUCCION_SEGUNDOS
 
-    assert solicitudes.reconstruccion_incompleta() is True
-    # tick rebuilds again even though the index it just built is NOT empty.
+    def paginas_leidas() -> list[int]:
+        """The rebuild's own pages: MAX_EVENTOS-sized reads are other things."""
+        return [
+            c["start"]
+            for c in mundo["consultas"]
+            if c["doctype"] == "Comment" and c["limit"] == 100
+        ]
+
+    # 1. the first incomplete rebuild happens IMMEDIATELY.
     mundo["consultas"].clear()
-    assert solicitudes._indice_vacio() is False
     solicitudes.tick(ahora=time.time())
-    assert [c["start"] for c in mundo["consultas"] if c["doctype"] == "Comment"] == [0]
+    assert paginas_leidas() == [0]
+    assert solicitudes.reconstruccion_incompleta() is True
+    # And it is not the empty-index path doing it: the index has entries.
+    assert solicitudes._indice_vacio() is False
 
-    # A complete rebuild clears the debt.
+    # 2. every tick inside the cooldown asks ERPNext NOTHING.
+    for minuto in range(1, 10):
+        reloj[0] = 1_000.0 + minuto * 60.0
+        mundo["consultas"].clear()
+        solicitudes.tick(ahora=time.time())
+        assert paginas_leidas() == [], f"volvió a consultar en el minuto {minuto}"
+    assert solicitudes.reconstruccion_incompleta() is True
+
+    # 3. once the cooldown is over it tries again.
+    reloj[0] = 1_000.0 + espera
+    mundo["consultas"].clear()
+    solicitudes.tick(ahora=time.time())
+    assert paginas_leidas() == [0]
+
+    # 4. still incomplete -> the cooldown is re-armed, not ignored.
+    reloj[0] += 60.0
+    mundo["consultas"].clear()
+    solicitudes.tick(ahora=time.time())
+    assert paginas_leidas() == []
+
+    # 5. a complete rebuild clears the debt, and then nothing is owed at all.
     monkeypatch.setattr(solicitudes, "MAX_PAGINAS_RECONSTRUCCION", 25)
+    reloj[0] += espera
     solicitudes.reconstruir_indice()
     assert solicitudes.reconstruccion_incompleta() is False
+
+    reloj[0] += 60.0
+    mundo["consultas"].clear()
+    solicitudes.tick(ahora=time.time())
+    assert paginas_leidas() == []
+
+
+def test_an_empty_index_still_rebuilds_immediately_on_a_restart(
+    mundo, monkeypatch
+) -> None:
+    """The cooldown must not delay the case it exists to serve.
+
+    A restart or a flush leaves an empty index with no debt on record, and that
+    has to be rebuilt on the first tick — no waiting.
+    """
+    solicitud = _abrir(mundo)
+    _sin_redis()
+    monkeypatch.setattr(solicitudes, "_reloj", lambda: 5_000.0)
+    mundo["consultas"].clear()
+
+    assert solicitudes._indice_vacio() is True
+    solicitudes.tick(ahora=time.time())
+
+    assert solicitudes.vencimientos([SO]) == {SO: solicitud.vence_en}
 
 
 def test_an_erpnext_failure_midway_through_a_rebuild_is_not_a_finished_rebuild(

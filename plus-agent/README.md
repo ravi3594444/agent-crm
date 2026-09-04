@@ -5,7 +5,8 @@ same server as ERPNext, talking to it over the internal Docker network.
 
 **Before you deploy anything, read [PRUEBAS.md](PRUEBAS.md).** It is a
 staged verification guide — nothing advances until the current stage passes.
-Start with `make test` (about a second, no credentials, no Redis, no network).
+Start with `make test` (a few seconds, no credentials and no network — but it
+does need a **Redis Stack** running; see [Tests and Redis](#tests-and-redis)).
 
 ## Architecture
 
@@ -43,7 +44,7 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `docker-compose.yml` | Agent + Redis Stack (+ `briefing` on demand) |
 | `Dockerfile`, `Makefile`, `.env.example`, `pyproject.toml` | Build, shortcuts, configuration, lint config |
 | `.github/workflows/ci.yml` | Lint, tests, image build, container boot against a real Redis Stack |
-| `tests/` | 260 tests + 3 strict xfails that document known gaps. No ERPNext, no Redis, no LLM, ~1 second. |
+| `tests/` | 1124 tests. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
 
 ## Two agents, one webhook
 
@@ -648,6 +649,38 @@ as stored in Redis. What it cannot verify it reports as unverified; it never
 fills in a value. `deploy/verificar_qwen.py` refuses to run when `CI` is set and
 sanitizes anything that looks like a key from its output.
 
+### Tests and Redis
+
+The suite needs a **Redis Stack** — RedisJSON and RediSearch, not a plain
+`redis:7`. It reaches no other network service: `tests/conftest.py` fixes dummy
+credentials and in-memory doubles, so nothing touches ERPNext, Meta or
+DashScope.
+
+Redis is not optional and never was. `app/graph.py` builds the LangGraph
+checkpointer and calls `setup()` **at import**, and that creates RediSearch
+indices against a real server — so `tests/test_frontera_decisiones.py` and
+`tests/test_limites.py` cannot even be COLLECTED without one, and pytest aborts
+the whole run with `Interrupted: 2 errors during collection`. This file used to
+say the tests needed no Redis; that claim cost CI every assertion it was
+supposed to be running.
+
+**Database 0, and not by preference.** RediSearch refuses `FT.CREATE` on any
+other database (`Cannot create index on db != 0`). A `REDIS_URL` ending in `/15`
+looks like isolation and works only on a machine that already has those indices
+left over from before — and fails at collection on every clean server, which is
+every CI run and every new checkout. Isolation comes from the server being a
+**disposable container that dies with the job**, not from the database number.
+One test asserts `REDIS_URL` names database 0, so this cannot regress quietly.
+
+```bash
+docker run -d --name redis-test -p 6379:6379 redis/redis-stack-server:7.4.0-v1
+REDIS_URL=redis://localhost:6379/0 make test
+```
+
+Set `REDIS_OBLIGATORIO=1` — as CI does — to turn "no Redis" into a failure
+instead of a skip for the one test that talks to a real server. A suite that
+quietly shrinks by a skipped test is the failure this is guarding against.
+
 ### Install, test, and start
 
 Dependencies are **pinned** in `requirements.txt` to the exact versions the
@@ -657,7 +690,7 @@ then commit.
 
 ```bash
 make install       # .venv with requirements-dev.txt
-make test          # 260 tests + 3 xfails, ~1s, no credentials needed
+make test          # 1124 tests, needs a Redis Stack on REDIS_URL (see below)
 make check         # what CI runs (ruff check + tests)
 make check-env     # is .env complete, are the three ERPNext keys distinct
 make up            # docker compose up, wait for :8081/health
