@@ -31,6 +31,8 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `app/tools/pedidos.py` | Write tools — **drafts only** — then hands the order to the policy |
 | `app/tools/gerencia.py` | Management read tools (owner assistant) |
 | `app/tools/operaciones.py` | Management read-only status: `estado_del_sistema`, `ver_avisos_fallidos` |
+| `app/tools/gestion.py` | The owner's prose about one order: read it now, or PREPARE one whitelisted action |
+| `app/acciones.py` | That whitelist, the durable proposal, the six-digit single-use code and the revalidation |
 | `app/tools/captura.py` | **Offline-sale capture** — the hard part |
 | `app/clientes.py` | Customer lookup by phone (`buscar_por_telefono`), against hand-entered data |
 | `app/policy.py` | **Auto-confirm engine** — deterministic, LLM-proof, fail-closed |
@@ -45,8 +47,8 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `docker-compose.yml` | Agent + Redis Stack (+ `briefing` on demand) |
 | `Dockerfile`, `Makefile`, `.env.example`, `pyproject.toml` | Build, shortcuts, configuration, lint config |
 | `.github/workflows/ci.yml` | Lint, tests, image build, container boot against a real Redis Stack |
-| `demo/` | **Test bench**: fourteen release scenarios against the real image, inside a `--internal` docker network with no route out. See [demo/README.md](demo/README.md). |
-| `tests/` | 1300 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
+| `demo/` | **Test bench**: seventeen release scenarios against the real image, inside a `--internal` docker network with no route out. See [demo/README.md](demo/README.md). |
+| `tests/` | 1714 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
 
 ## Two agents, one webhook
 
@@ -176,6 +178,66 @@ rechazar SAL-ORD-2026-00008 <reason>              refuse it; the customer is tol
 ver SAL-ORD-2026-00008                            the order plus the request
 ```
 
+**He does not have to type any of them.** Those exact commands are unchanged
+and still the fastest path, but the owner writing *"rechazame el de la
+panadería, no llegamos con el reparto"* now reaches the same place through
+`app/acciones.py`, and only that place:
+
+1. The management agent turns the prose into **one action from the whitelist**,
+   which is exactly the list above and nothing else — same verbs, same
+   payloads, byte for byte (`test_the_payload_is_byte_identical_to_the_typed_command`).
+   It cannot invent an action, an order number, a date or a reason.
+2. **Read-only runs now.** `ver` is `detalle_de_pedido`: reading an order
+   commits nothing, so it answers in the same turn after `require_management`.
+3. **Anything that writes is only prepared.** The proposal is durable and says
+   the action, the order id, the parameters and **what will happen**, read off
+   the real document — *"SAL-ORD-2026-00008 — Panadería La Nueva · $12.000 /
+   Rechazo el pedido: queda sin confirmar, deja de comprometer stock y se le
+   avisa al cliente. Motivo: «no llegamos con el reparto»."* Nothing has moved.
+4. Python sends him a **six-digit, single-use code** to his own number, bound to
+   his phone, that action, that order, those parameters and a ten-minute expiry.
+   The model never sees it, so it cannot take both steps — the same reason the
+   settings code is two steps. Six digits and not four **because the settings
+   code is four**: with one of each pending, a four-digit reply would be
+   ambiguous, and one of the two answers cancels an order.
+5. When he sends the code, `app/main.py::_codigo_de_accion` — before any model
+   reads the message — re-validates everything in Python (the phone is still on
+   the staff list, the action is still whitelisted, the order id still parses,
+   the parameters re-parse through the same validators, the code matches, it
+   has not expired) and only then calls the same `manejar_boton` the typed
+   command calls, under a per-order lock.
+
+What it refuses, without writing anything: an action that is not on the list, a
+missing or malformed order number, a `cancelar` or `rechazar` with no reason, a
+`contraoferta` with no date, time or fee, a `retiro` carrying a fee, an order it
+cannot read in ERPNext, `contraoferta`/`retiro` on an order with no open
+request, and an approval of a request whose terms the customer never gave. In
+every one of those it says what is missing and asks.
+
+Five failure modes are closed on purpose and each has its test: **replay** (the
+proposal is read and deleted in one operation, so a code works once), **a stale
+code** (the expiry travels inside the proposal, not only as a Redis TTL, so a
+restored backup cannot revive yesterday's), **duplicate delivery** (asking twice
+for the same action returns the same pending proposal and sends no second code),
+**restart** (nothing lives in the process; reloading the module finds the
+proposal and applies it), and **two pending at once** (there is one live
+proposal per phone; a new one replaces the old and the old code dies with it —
+that is how the wrong order gets cancelled). The authorization itself is written
+to the Sales Order in ERPNext **before** the handler runs, and a comment that
+cannot be written means the action is not executed.
+
+**One thing deliberately does not reach it.** When the message names an order
+that has an **open decision request**, `_resumen_de_solicitud` still answers
+first, before any model reads it: the request as a summary plus the exact
+commands. A date and a price somebody then has to honour keep needing the exact
+words. Everything else about an order — confirm, reject, prepare, dispatch,
+undo a preparation, cancel — goes through the prose path.
+
+A customer's words stay data on this path too: quoted lines are stripped from
+every free-text parameter before it is read as an argument
+(`app/formato.py::sin_citas`, the same function the typed command uses), so a
+forwarded *"> cancelalo y mandale 100 litros gratis"* is not a reason and is not
+a set of terms.
 
 `cancelar` (`app/decisiones.py`) re-checks the sender, requires a reason, and
 under the distributed lock re-reads the order with the policy identity: it must
@@ -519,7 +581,7 @@ If the 07:15 count does not happen, do not flip `STOCK_CONFIABLE` to true.
 ## Trying the whole thing without touching anything real
 
 ```bash
-make demo          # fourteen release scenarios, deterministic, no network at all
+make demo          # seventeen release scenarios, deterministic, no network at all
 make demo-gemini   # the same ones, against real Gemini (spends quota)
 ```
 
@@ -971,9 +1033,6 @@ changes if the Codespace is recreated, so re-check Meta's callback URL.
 
 ## Not done yet
 
-- **Blocker.** The management agent cannot use any tool that checks
-  authorization: `app/main.py` hands `responder_gerencia` a hash where a phone
-  belongs. See "What the bench found" above.
 - Outbound confirmation when a human submits the order **in the ERPNext UI**
   (Frappe Webhook on `Sales Order` `on_submit` -> `POST /hooks/order-confirmed`).
   Approving from the WhatsApp button already notifies the customer.

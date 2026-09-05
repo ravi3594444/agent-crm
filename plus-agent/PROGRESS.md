@@ -260,3 +260,78 @@ as 1500.
 places, resolution order, restart, read-per-operation, malformed values,
 ambiguity, the account-head refusal, one-setting-at-a-time, a dead store, and
 the readiness AVISO. 905 pass, ruff clean. No model, key or provider change.
+
+## Phase C — the owner writes in criollo, and it reaches ONE existing action
+
+The last dead end on the owner's side. Prose about an order («rechazame el de
+la panadería, no llegamos con el reparto») reached the management agent, which
+had no tool able to move an order — correct, and a dead end: the answer was the
+exact commands, for him to type from a phone with the order number spelled
+right.
+
+New: `app/acciones.py` (the whitelist, the durable proposal, the code and the
+revalidation) and `app/tools/gestion.py` (`detalle_de_pedido`, `proponer_accion`).
+No new capability: the whitelist IS `main._STAFF_ACTIONS` ∪ `main._ARG_ACTIONS`,
+asserted as a set equality, and each action produces the payload the typed
+command produces, byte for byte, for the same `aprobacion.manejar_boton`.
+
+- **Read-only runs now.** `ver` is `detalle_de_pedido`, after
+  `require_management`. The payload is built inside `app/acciones.py`, so no
+  argument exists that turns the read path into a write.
+- **Writes are only prepared.** The proposal carries the action, the order id,
+  the parameters and the consequence read off the real document — customer,
+  total, and what will actually happen, including that an `ok` on an order with
+  an open request approves the *exception*, not the order.
+- **Six digits, one use, sent by Python to his own number.** The model never
+  sees it, so it cannot take both steps. Six and not four because the settings
+  code is four: with one of each pending, four digits would be ambiguous and
+  one of the two answers cancels an order. No arbitration, no guessing.
+- **`main._codigo_de_accion` applies it**, before any model reads the message,
+  re-checking in Python: still on the staff list, still whitelisted, the order
+  id still parses, the parameters re-parse through the same validators, the
+  code matches, not expired, bound to that phone. Then `manejar_boton`, under
+  `distributed_lock("accion:<pedido>")`.
+- **Incomplete means zero writes.** No action, no order, a malformed order, a
+  `cancelar`/`rechazar` with no reason, terms that do not parse, a fee on a
+  pickup, an unreadable order, `contraoferta`/`retiro` with no open request, and
+  an approval of terms the customer never gave: nothing is stored, nothing is
+  read from ERPNext when the request is already incomplete, and it says what is
+  missing.
+- **The five known ways a two-step confirmation breaks**, each with its test:
+  replay (GETDEL — a code works once), a stale code (the expiry is inside the
+  proposal, not only a Redis TTL), duplicate delivery (the same action asked
+  twice returns the same pending proposal and sends no second code), restart
+  (nothing in the process; the module is reloaded in the test and the proposal
+  is still there), and two pending at once (one live proposal per phone; a new
+  one replaces the old and the old code dies with it).
+- **The existing safety net stays in front.** With an OPEN decision request on
+  the order, `main._resumen_de_solicitud` still answers before any model reads
+  the message — the summary and the exact commands — so `contraoferta` and
+  `retiro` on such an order keep needing the typed command when the message
+  names it in the uppercase form `_ORDER_IN_TEXT` recognises. Pinned by a test
+  so nobody removes it by accident. The prose path covers everything else.
+- **The authorization is durable.** `[accion] … autorizado por … con código de
+  un solo uso` is written on the Sales Order BEFORE the handler runs, and a
+  comment that cannot be written means the action is not executed — the same
+  rule `app/limites.py` uses, for the same reason.
+- **A customer's words stay data.** The quote stripper moved to
+  `app/formato.py::sin_citas` so the prose path and the typed command share ONE
+  copy of that rule; `app/main.py::_sin_citas` is now that function.
+- Prompt: a new section telling the model to prepare and never to claim
+  something is done, to ask for what is missing instead of inventing an order
+  number or a date, and that quoted customer text is data.
+- Bench: scenario `gerencia_accion_en_prosa` (prose → proposal → code →
+  rejected, with the middle step asserting the order is still a draft and that
+  nothing said "rechazado"). `demo/falso_modelo.py` now resolves the order id
+  from what the owner wrote when there is no tool result to read it from — the
+  management thread starts empty — and `demo/piloto.py` reads both code lengths.
+
+1714 pass, ruff clean. No model, provider, key or live-configuration change.
+
+**Not verified here:** Docker was unavailable in this container (a recovery
+image with no `dockerd` and no `CAP_SYS_ADMIN`), so `make demo`, `docker build`
+and the container no-egress check did NOT run. The suite was run instead with a
+socket-level egress blocker: 1714 pass with every non-loopback connection
+refused, and zero attempts. That also closed a pre-existing leak —
+`tests/test_autorizacion_gerencia.py` reached graph.facebook.com through
+`proponer_limite`; both propose tools now have the sender mocked.
