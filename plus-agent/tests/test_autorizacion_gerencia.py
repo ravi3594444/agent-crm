@@ -22,6 +22,7 @@ sin que nadie se acuerde de venir a agregarla.
 from __future__ import annotations
 
 import hashlib
+import time
 from unittest.mock import Mock
 
 import pytest
@@ -339,6 +340,18 @@ class _RedisFalso:
     def get(self, clave):
         return self.propuesta
 
+    def getdel(self, clave):
+        """Leer y borrar en una sola operación, como el GETDEL de Redis.
+
+        Es como app/limites.py reclama la propuesta: el mismo código contestado
+        dos veces encuentra una vez el cambio y la otra nada.
+        """
+        propuesta, self.propuesta = self.propuesta, None
+        return propuesta
+
+    def delete(self, clave):
+        self.propuesta = None
+
     def hgetall(self, clave):
         return dict(self.valores)
 
@@ -374,6 +387,10 @@ def test_applying_a_limit_logs_a_tag_and_never_the_phone(
                 "codigo": "1234",
                 "telefono": GERENTE,
                 "nuevo": "50000",
+                # El vencimiento viaja ADENTRO de la propuesta, así que una
+                # escrita a mano sin él ya está vencida — que es justo lo que
+                # se quiere de un código sin fecha.
+                "expira": time.time() + 600,
             }
         )
     )

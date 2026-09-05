@@ -17,6 +17,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import date
 from pathlib import Path
 from unittest.mock import Mock
@@ -1745,6 +1746,215 @@ def test_a_change_whose_code_could_not_be_sent_is_dropped(
     assert limites.pendiente(EQUIPO) is None
     assert _confirmar() == ""
     assert limites.configuracion().tope == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Pedir dos veces el MISMO cambio es un pedido, no dos.
+#
+# Cada llamada sorteaba un código nuevo y pisaba el anterior. Si el turno se
+# reintentaba —el resultado no se pudo cachear, el modelo llamó dos veces, Meta
+# reentregó el mensaje— al dueño le llegaban DOS mensajes con DOS códigos y
+# sólo el último servía. Contestar el primero, que es el que estaba mirando, no
+# aplicaba nada y no decía por qué.
+# ---------------------------------------------------------------------------
+
+
+def _codigos_distintos(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Un código distinto por sorteo, para que «el mismo» signifique algo."""
+    sorteos = iter([f"{n:04d}" for n in range(1000, 1100)])
+    monkeypatch.setattr(limites, "_codigo", lambda: next(sorteos))
+
+
+def _codigos_enviados(almacen: FakeRedis, telefono: str = EQUIPO) -> list[str]:
+    return [
+        m.group(1)
+        for tel, texto in almacen.enviados
+        if tel == telefono
+        for m in [re.search(r"\*(\d{4})\*", texto)]
+        if m
+    ]
+
+
+def test_asking_for_the_same_change_twice_reuses_the_code(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mismo dueño, mismo ajuste, mismo valor: UNA propuesta y UN código."""
+    _codigos_distintos(monkeypatch)
+
+    primera = _proponer("monto máximo", "30000")
+    segunda = _proponer("monto máximo", "30000")
+
+    assert _codigos_enviados(almacen) == ["1000", "1000"]
+    assert "Cambio preparado" in primera
+    assert "el mismo cambio que ya estaba esperando" in segunda
+    # Y el código que él tiene sigue aplicando.
+    assert "0 a 30000" in _confirmar("1000")
+    assert limites.configuracion().tope == 30_000.0
+
+
+def test_the_repeat_is_decided_on_the_CANONICAL_value(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«30000» y « 30.000 » son el mismo cambio recién después de validar()."""
+    _codigos_distintos(monkeypatch)
+
+    _proponer("monto máximo", "30000")
+    _proponer("monto máximo", "  30.000  ")
+
+    assert _codigos_enviados(almacen) == ["1000", "1000"]
+    assert limites.pendiente(EQUIPO)["nuevo"] == "30000"
+
+
+def test_a_different_value_is_a_different_change_and_gets_its_own_code(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El contraste: cambiar de opinión SÍ reemplaza, y el viejo deja de servir."""
+    _codigos_distintos(monkeypatch)
+
+    _proponer("monto máximo", "30000")
+    _proponer("monto máximo", "50000")
+
+    assert _codigos_enviados(almacen) == ["1000", "1001"]
+    # El viejo ya no abre nada, y lo dice en vez de callarse.
+    assert "no es el del cambio pendiente" in _confirmar("1000")
+    assert "0 a 50000" in _confirmar("1001")
+
+
+def test_a_repeat_whose_resend_fails_leaves_nothing_pending(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Si el reenvío no sale, no queda un cambio esperando un código invisible."""
+    _codigos_distintos(monkeypatch)
+    _proponer("monto máximo", "30000")
+    monkeypatch.setattr(
+        whatsapp, "enviar_mensaje", Mock(side_effect=RuntimeError("Meta caído"))
+    )
+
+    respuesta = _proponer("monto máximo", "30000")
+
+    assert "NO pude mandarte el código" in respuesta
+    assert limites.pendiente(EQUIPO) is None
+    assert _confirmar("1000") == ""
+    assert limites.configuracion().tope == 0.0
+
+
+def test_the_same_code_answered_twice_changes_one_thing_once(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repetición: Meta reentrega el mensaje y la auditoría cuenta UN cambio.
+
+    Antes la propuesta se borraba al FINAL, después de escribir la auditoría y
+    el comentario durable, así que dos entregas del mismo código dejaban dos
+    registros de un cambio que el dueño hizo una vez.
+    """
+    _codigos_distintos(monkeypatch)
+    _proponer("monto máximo", "30000")
+
+    primera = _confirmar("1000")
+    segunda = _confirmar("1000")
+
+    assert "0 a 30000" in primera
+    assert segunda == ""
+    assert limites.configuracion().tope == 30_000.0
+    assert len(limites.auditoria(50)) == 1
+
+
+def test_two_workers_with_the_same_code_apply_it_once(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrencia: el reclamo es un GETDEL, así que uno gana y el otro no.
+
+    Se llama a aplicar() dos veces sin que la primera haya terminado de
+    escribir: lo que decide no es el orden sino que sólo uno se lleva la
+    propuesta.
+    """
+    _codigos_distintos(monkeypatch)
+    _proponer("monto máximo", "30000")
+
+    reclamos: list[str] = []
+
+    def _segundo_reclamo(entrada: dict) -> None:
+        # Adentro del primer aplicar(), ANTES de que escriba nada: es el
+        # momento exacto en que el segundo worker entraría.
+        if not reclamos:
+            reclamos.append("segundo")
+            with pytest.raises(
+                limites.LimiteError, match=r"ya se confirmó|no hay ningún"
+            ):
+                limites.aplicar("1000", EQUIPO)
+
+    monkeypatch.setattr(limites, "_auditar_en_erpnext", _segundo_reclamo)
+
+    entrada = limites.aplicar("1000", EQUIPO)
+
+    assert reclamos == ["segundo"]
+    assert entrada["nuevo"] == "30000"
+    assert len(limites.auditoria(50)) == 1
+
+
+def test_a_wrong_code_does_not_consume_the_pending_change(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirar no borra: el código bueno sigue sirviendo después de un error."""
+    _codigos_distintos(monkeypatch)
+    _proponer("monto máximo", "30000")
+
+    with pytest.raises(limites.LimiteError, match="no es el del cambio"):
+        limites.aplicar("9999", EQUIPO)
+
+    assert limites.pendiente(EQUIPO) is not None
+    assert "0 a 30000" in _confirmar("1000")
+
+
+def test_an_expired_change_is_refused_even_if_the_store_still_has_it(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El vencimiento va ADENTRO: un TTL que no corrió no revive un código."""
+    _codigos_distintos(monkeypatch)
+    _proponer("monto máximo", "30000")
+    clave = limites._clave_propuesta(EQUIPO)
+    guardada = json.loads(almacen.strings[clave])
+    guardada["expira"] = time.time() - 1
+    almacen.strings[clave] = json.dumps(guardada)
+
+    assert limites.pendiente(EQUIPO) is None
+    with pytest.raises(limites.LimiteError, match="venció"):
+        limites.aplicar("1000", EQUIPO)
+    assert limites.configuracion().tope == 0.0
+
+
+def test_the_code_of_one_manager_does_not_work_from_another_phone(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Atado al actor, aunque los dos estén en la lista del equipo."""
+    _codigos_distintos(monkeypatch)
+    _proponer("monto máximo", "30000")
+
+    with pytest.raises(limites.LimiteError, match="no hay ningún cambio"):
+        limites.aplicar("1000", OTRO_DEL_EQUIPO)
+
+    assert limites.pendiente(EQUIPO) is not None
+    assert limites.configuracion().tope == 0.0
+
+
+def test_the_pending_change_survives_a_restart(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reinicio: nada de esto vive en la memoria del proceso."""
+    import importlib
+
+    _codigos_distintos(monkeypatch)
+    _proponer("monto máximo", "30000")
+
+    recargado = importlib.reload(limites)
+    try:
+        monkeypatch.setattr(recargado.locks, "conexion", lambda: almacen)
+        monkeypatch.setattr(recargado, "_hubo_cambios_durables", lambda: False)
+        monkeypatch.setattr(recargado, "_auditar_en_erpnext", lambda entrada: None)
+        assert recargado.pendiente(EQUIPO)["nuevo"] == "30000"
+        assert recargado.aplicar("1000", EQUIPO)["nuevo"] == "30000"
+    finally:
+        importlib.reload(limites)
 
 
 def test_what_is_left_pending_never_includes_the_code(almacen: FakeRedis) -> None:

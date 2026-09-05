@@ -1127,26 +1127,89 @@ def _clave_propuesta(telefono: str) -> str:
     return f"{CLAVE_PROPUESTA}:{telefono_mod.normalizar(telefono) or telefono}"
 
 
+def _huella_propuesta(telefono: str, limite: str, nuevo: str) -> str:
+    """Identidad del cambio: quién, qué ajuste y qué valor YA normalizado.
+
+    El valor entra normalizado a propósito: «20», « 20 » y «20%» son el MISMO
+    cambio, y lo son recién después de validar(). Comparar lo tecleado haría
+    que tres maneras de escribir lo mismo fueran tres cambios distintos, que es
+    justo lo que esto existe para que no pase.
+    """
+    crudo = json.dumps(
+        [telefono_mod.normalizar(telefono) or telefono, limite, nuevo],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(crudo.encode()).hexdigest()[:16]
+
+
+def _vencida(propuesta: dict, ahora: float | None = None) -> bool:
+    """El vencimiento va ADENTRO, no sólo en el TTL.
+
+    Un TTL que no corrió —un Redis restaurado de un backup, un reloj movido— no
+    puede revivir un código de ayer.
+    """
+    try:
+        expira = float(propuesta.get("expira") or 0)
+    except (TypeError, ValueError):
+        return True
+    return expira <= (time.time() if ahora is None else ahora)
+
+
+def _propuesta_viva(telefono: str) -> dict | None:
+    """El cambio que ese teléfono dejó esperando, con código y todo."""
+    try:
+        crudo = locks.conexion().get(_clave_propuesta(telefono))
+    except (locks.CoordinationError, RedisError):
+        return None
+    if not crudo:
+        return None
+    try:
+        propuesta = json.loads(_texto(crudo))
+    except ValueError:
+        return None
+    if not isinstance(propuesta, dict) or _vencida(propuesta):
+        return None
+    return propuesta
+
+
 def proponer(nombre_o_alias: str, valor_crudo: str, telefono: str) -> dict:
     """Valida un cambio y lo deja PENDIENTE de confirmación. No cambia nada.
 
     El código vuelve al dueño y tiene que volver escrito por él: así ningún
     malentendido del LLM mueve un límite por su cuenta.
+
+    PEDIR DOS VECES LO MISMO ES UN PEDIDO, NO DOS. Si ya hay un cambio idéntico
+    esperando —mismo teléfono, mismo ajuste, mismo valor normalizado— se
+    devuelve ESE, con SU código, y `repetida` en True. Antes cada llamada
+    sorteaba un código nuevo y pisaba el anterior: si el turno se reintentaba
+    —porque el resultado no se pudo cachear, porque Meta reentregó el
+    mensaje— al dueño le llegaban dos mensajes con dos códigos y sólo el
+    último servía. Contestar el primero, que es el que estaba mirando, no
+    aplicaba nada.
     """
     if not telefono:
         raise LimiteError("no sé quién pide el cambio")
     defi = definicion(nombre_o_alias)
     nuevo = validar(defi.nombre, valor_crudo)
     anterior = vigente(defi.nombre)
-    codigo = _codigo()
+    huella = _huella_propuesta(telefono, defi.nombre, nuevo)
+
+    esperando = _propuesta_viva(telefono)
+    if esperando and esperando.get("id") == huella:
+        # El MISMO código, a propósito: el que él tiene en el teléfono.
+        return {**esperando, "repetida": True}
+
     propuesta = {
-        "codigo": codigo,
+        "id": huella,
+        "codigo": _codigo(),
         "limite": defi.nombre,
         "alias": defi.alias[0],
         "anterior": anterior,
         "nuevo": nuevo,
         "telefono": telefono,
         "ts": _ahora(),
+        "expira": time.time() + PROPUESTA_TTL_SEGUNDOS,
     }
     try:
         locks.conexion().setex(
@@ -1156,7 +1219,7 @@ def proponer(nombre_o_alias: str, valor_crudo: str, telefono: str) -> dict:
         )
     except (locks.CoordinationError, RedisError) as exc:
         raise LimiteError("no pude registrar el cambio para confirmarlo") from exc
-    return propuesta
+    return {**propuesta, "repetida": False}
 
 
 def pendiente(telefono: str) -> dict | None:
@@ -1169,20 +1232,12 @@ def pendiente(telefono: str) -> dict | None:
     contestar al agente, el segundo es algo que el dueño tiene que saber.
 
     NUNCA devuelve el código. Falla cerrada: si no se puede leer, no hay nada.
+    Un cambio vencido no está pendiente, aunque el TTL no haya corrido.
     """
     if not telefono:
         return None
-    try:
-        crudo = locks.conexion().get(_clave_propuesta(telefono))
-    except (locks.CoordinationError, RedisError):
-        return None
-    if not crudo:
-        return None
-    try:
-        propuesta = json.loads(_texto(crudo))
-    except ValueError:
-        return None
-    if not isinstance(propuesta, dict):
+    propuesta = _propuesta_viva(telefono)
+    if propuesta is None:
         return None
     return {k: v for k, v in propuesta.items() if k != "codigo"}
 
@@ -1202,9 +1257,18 @@ def descartar(telefono: str) -> None:
 
 
 def aplicar(codigo: str, telefono: str) -> dict:
-    """Aplica el cambio pendiente de ESE teléfono si el código coincide."""
+    """Aplica el cambio pendiente de ESE teléfono si el código coincide.
+
+    Se mira primero y se RECLAMA después. Un código equivocado no consume nada
+    —mirar no borra—, y el que sí coincide se lleva la propuesta con un GETDEL,
+    que es una sola operación: dos entregas del mismo mensaje, o dos workers a
+    la vez, encuentran uno el cambio y el otro nada. Sin eso, el mismo código
+    contestado dos veces escribía dos veces la auditoría y dos comentarios en
+    ERPNext, y el historial contaba dos cambios donde el dueño hizo uno.
+    """
     if not telefono:
         raise LimiteError("no sé quién confirma el cambio")
+    limpio = str(codigo or "").strip()
     clave = _clave_propuesta(telefono)
     try:
         crudo = locks.conexion().get(clave)
@@ -1217,7 +1281,33 @@ def aplicar(codigo: str, telefono: str) -> dict:
     except ValueError as exc:
         raise LimiteError("el cambio pendiente quedó ilegible") from exc
 
-    if str(propuesta.get("codigo")) != str(codigo or "").strip():
+    if str(propuesta.get("codigo")) != limpio:
+        raise LimiteError("ese código no es el del cambio pendiente")
+    if _vencida(propuesta):
+        raise LimiteError(
+            "ese código ya venció. No cambié nada: pedime el cambio de nuevo"
+        )
+    # Atado al teléfono: el código que le llegó a uno no lo aplica otro, aunque
+    # los dos estén en la lista del equipo.
+    if telefono_mod.normalizar(propuesta.get("telefono")) != telefono_mod.normalizar(
+        telefono
+    ):
+        raise LimiteError("ese código no es de este número")
+
+    # El reclamo. A partir de acá la propuesta es de este turno y de nadie más.
+    try:
+        reclamado = locks.conexion().getdel(clave)
+    except (locks.CoordinationError, RedisError) as exc:
+        raise LimiteError("no pude leer el cambio pendiente") from exc
+    if not reclamado:
+        raise LimiteError("ese cambio ya se confirmó")
+    try:
+        propuesta = json.loads(_texto(reclamado))
+    except ValueError as exc:
+        raise LimiteError("el cambio pendiente quedó ilegible") from exc
+    # Entre el vistazo y el reclamo pudo entrar otra propuesta: la que se
+    # aplica es la que el código nombra, nunca la que quedó en su lugar.
+    if str(propuesta.get("codigo")) != limpio:
         raise LimiteError("ese código no es el del cambio pendiente")
 
     nombre = str(propuesta.get("limite") or "")
@@ -1244,7 +1334,6 @@ def aplicar(codigo: str, telefono: str) -> dict:
         cliente.hset(CLAVE_VALORES, nombre, nuevo)
         cliente.rpush(CLAVE_AUDITORIA, json.dumps(entrada, ensure_ascii=False))
         cliente.ltrim(CLAVE_AUDITORIA, -AUDITORIA_MAXIMA, -1)
-        cliente.delete(clave)
     except (locks.CoordinationError, RedisError) as exc:
         raise LimiteError("no pude guardar el cambio") from exc
     print(

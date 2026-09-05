@@ -165,6 +165,14 @@ def proponer_limite(limite: str, valor: str, config: RunnableConfig) -> str:
     # Deterministic, and to HIS number. This send is the reason the two steps
     # are two: the code never enters the model's context, so nothing the model
     # does — or is talked into doing — can supply it.
+    #
+    # It is sent again on a repeat, WITH THE SAME CODE. A retried turn is the
+    # normal case here — the model called the tool twice, the turn re-ran
+    # because its result could not be cached, Meta redelivered the message — and
+    # the failure that matters is the send that never arrived. Re-sending the
+    # same digits is safe: it is one pending change and one code, so the worst
+    # case is that he reads the same message twice. Minting a new one instead
+    # was the defect: two messages, two codes, and only the newest one worked.
     entregado = notificar.pedir_codigo_de_ajuste(
         actor.actor_phone,
         f"Código para confirmar el cambio de ajuste:\n{cambio}\n\n"
@@ -178,6 +186,12 @@ def proponer_limite(limite: str, valor: str, config: RunnableConfig) -> str:
         return (
             f"Preparé el cambio ({cambio}) pero NO pude mandarte el código de "
             "confirmación, así que lo descarté. No cambié nada. Probá de nuevo."
+        )
+    if propuesta.get("repetida"):
+        return (
+            f"Es el mismo cambio que ya estaba esperando:\n{cambio}\n\n"
+            "Te reenvié el MISMO código, así que el que ya tenías sigue "
+            "sirviendo. No preparé nada nuevo ni cambié nada."
         )
     return (
         f"Cambio preparado, todavía sin aplicar:\n{cambio}\n\n"
