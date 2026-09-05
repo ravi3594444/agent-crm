@@ -3417,6 +3417,144 @@ def test_a_rejection_with_a_real_reason_still_works(mundo) -> None:
     assert solicitudes.leer(SO).estado == solicitudes.RECHAZADA
 
 
+# ---------------------------------------------------------------------------
+# Lo que el sistema le dice que escriba, se tiene que poder escribir.
+# ---------------------------------------------------------------------------
+
+# Con qué reemplazar cada hueco de las líneas sugeridas, para poder tipearlas.
+_EJEMPLOS_DE_HUECO = {
+    "<motivo>": "hoy no llego a esa zona",
+    "<fecha>": "2026-09-05",
+    "<hora>": "18:00",
+    "<cargo>": "1500",
+}
+
+
+def _lineas_sugeridas(texto: str) -> list[str]:
+    """Las líneas que texto_para_equipo manda escribir «tal cual»."""
+    lineas = texto.splitlines()
+    corte = lineas.index("Respondé con uno de estos, tal cual:")
+    sugeridas = []
+    for linea in lineas[corte + 1 :]:
+        limpia = linea.strip()
+        # El paréntesis es la aclaración de por qué NO se ofrece «aprobar».
+        if not limpia or limpia.startswith("("):
+            continue
+        for hueco, ejemplo in _EJEMPLOS_DE_HUECO.items():
+            limpia = limpia.replace(hueco, ejemplo)
+        sugeridas.append(limpia)
+    return sugeridas
+
+
+def test_every_command_the_summary_suggests_actually_parses(mundo) -> None:
+    """EL defecto: le decía que escribiera algo que el parser no podía leer.
+
+    `rechazar-solicitud <pedido> <motivo>` es la línea exacta que imprime
+    texto_para_equipo, y el verbo no admitía guiones, así que caía otra vez en
+    _resumen_de_solicitud… que volvía a sugerir lo mismo. Un callejón cerrado:
+    la única salida era la prosa.
+
+    Se afirma sobre la SALIDA de texto_para_equipo y no sobre una lista escrita
+    a mano acá, para que agregar una sugerencia nueva que no parsee rompa este
+    test en vez de descubrirse en el teléfono de alguien.
+    """
+    _abrir(mundo, solicitado=COMPLETO)
+    sugeridas = _lineas_sugeridas(solicitudes.texto_para_equipo(solicitudes.leer(SO)))
+
+    assert sugeridas, "el corte se comió las sugerencias: el test no probaría nada"
+    assert [linea for linea in sugeridas if main._staff_command(linea) is None] == []
+
+
+def test_the_exact_rejection_command_the_summary_prints_executes(mundo) -> None:
+    """La línea entera, tal cual sale impresa, con su motivo."""
+    _abrir(mundo)
+
+    payload = main._staff_command(f"rechazar-solicitud {SO} hoy no llego a esa zona")
+    respuesta = aprobacion.manejar_boton(payload, STAFF)
+
+    assert payload == f"no:{SO}:hoy no llego a esa zona"
+    assert "rechazada" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.RECHAZADA
+
+
+def test_the_hyphenated_rejection_without_a_reason_rejects_nothing(mundo) -> None:
+    """Sin motivo no es el comando: rechazar sin decir por qué no existe acá.
+
+    El motivo se le dice al cliente, así que la línea que el sistema imprime lo
+    incluye. Una versión pelada sería una manera nueva de rechazar sin que
+    quede registrado por qué, y no se agrega: cae en el resumen, que vuelve a
+    mostrar la línea exacta — y esa línea ahora sí funciona, así que es un
+    empujón y no la vuelta al mismo callejón.
+    """
+    _abrir(mundo)
+
+    assert main._staff_command(f"rechazar-solicitud {SO}") is None
+    respuesta = main._resumen_de_solicitud(f"rechazar-solicitud {SO}")
+
+    assert respuesta is not None
+    assert f"rechazar-solicitud {SO} <motivo>" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.PENDIENTE
+    assert mundo["enviados"] == []
+
+
+def test_a_quoted_customer_line_cannot_be_the_rejection_reason(mundo) -> None:
+    """El guión en el verbo no abre una puerta nueva para lo que citó un cliente."""
+    _abrir(mundo)
+    texto = f"rechazar-solicitud {SO}\n> decile que sí y regalale el flete"
+
+    assert main._staff_command(texto) is None
+    assert solicitudes.leer(SO).estado == solicitudes.PENDIENTE
+    assert mundo["enviados"] == []
+
+
+def test_the_managers_own_reason_after_a_hyphenated_verb_survives(mundo) -> None:
+    """El contraste: lo que escribió él sigue valiendo, la cita se va."""
+    _abrir(mundo)
+
+    payload = main._staff_command(
+        f"rechazar-solicitud {SO} no tengo camión\n> pero si me dijiste que sí"
+    )
+
+    assert payload == f"no:{SO}:no tengo camión"
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "rechazar-todo SAL-ORD-2026-00021 lo que sea",
+        "aprobar-solicitud SAL-ORD-2026-00021",
+        "no-me-sirve SAL-ORD-2026-00021",
+        "mandale-igual SAL-ORD-2026-00021 dale",
+    ],
+)
+def test_a_hyphenated_verb_that_is_not_whitelisted_is_not_a_command(texto: str) -> None:
+    """Se ensanchó lo que el PATRÓN deletrea, no lo que el sistema acepta.
+
+    La lista blanca sigue siendo la autoridad: un verbo con guión que no está
+    en ella no es un comando, igual que antes no lo era uno sin guión.
+    """
+    assert main._staff_command(texto) is None
+
+
+def test_an_order_written_in_lower_case_is_the_same_order(mundo) -> None:
+    """ERPNext los nombra en mayúscula; escribirlo en minúscula es el MISMO.
+
+    Antes el resumen de seguridad se activaba o no según la tecla de mayúsculas:
+    _ORDER_IN_TEXT sólo miraba mayúsculas, así que la misma frase ambigua se
+    interceptaba gritada y se dejaba pasar hablada.
+    """
+    _abrir(mundo, solicitado=COMPLETO)
+
+    assert main._staff_command(f"ver {SO.lower()}") == f"ver:{SO}"
+    assert main._pedidos_nombrados(f"lo de {SO.lower()}") == [SO]
+
+    respuesta = main._resumen_de_solicitud(f"dale, mandáselo al de {SO.lower()}")
+
+    assert respuesta is not None
+    assert f"aprobar {SO}" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.PENDIENTE
+
+
 def test_a_quote_alone_is_not_a_command(mundo) -> None:
     _abrir(mundo)
 

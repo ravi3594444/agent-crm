@@ -253,8 +253,20 @@ def _sin_tildes(text: str) -> str:
 # They reuse the same authorized button handler, so the manager can approve an
 # order even when no WhatsApp template is approved yet or the LLM is down.
 _ORDER_REF = r"(?P<order>[A-Za-z]{1,6}(?:-[A-Za-z]{1,6})?-\d[\w-]*)"
+# A verb may carry an internal hyphen, because one of the commands the system
+# itself tells the manager to type does: app/solicitudes.py::texto_para_equipo
+# prints "rechazar-solicitud <pedido> <motivo>". With a verb class of
+# [^\W\d_]+ that exact line could not match, so it fell through to the request
+# summary — which printed the same suggestion again. The manager was being told
+# to type something the parser could not read.
+#
+# This widens what the REGEX accepts, never what the system does: the verb is
+# then looked up in the whitelists below, so a hyphenated word that is not one
+# of them is still not a command. The lists are the authority; the pattern only
+# has to be able to spell them.
+_VERB = r"(?P<verb>[^\W\d_]+(?:-[^\W\d_]+)*)"
 _STAFF_COMMAND_RE = re.compile(
-    r"^\s*(?P<verb>[^\W\d_]+)\s+" + _ORDER_REF + r"\s*[.!]*\s*$"
+    r"^\s*" + _VERB + r"\s+" + _ORDER_REF + r"\s*[.!]*\s*$"
 )
 _STAFF_ACTIONS = {
     "ok": "ok",
@@ -285,15 +297,39 @@ _STAFF_ACTIONS = {
     "despreparar": "despreparar",
     "desprepara": "despreparar",
     "desprepare": "despreparar",
+    # "rechazar-solicitud" is deliberately NOT here. It lives only in
+    # _ARG_ACTIONS, where the reason is required: the line the system prints is
+    # "rechazar-solicitud <pedido> <motivo>", and a bare one would be a new way
+    # to reject a customer's request with no reason recorded anywhere. Without
+    # the reason it falls to _resumen_de_solicitud, which prints the exact line
+    # again — and now that line works, so it is a nudge and not a loop.
 }
-_ORDER_IN_TEXT = re.compile(r"\b[A-Z]{2,6}(?:-[A-Z]{2,6})?-\d{2,}[0-9-]*\b")
+# Case-insensitive, and canonicalised to upper case at every point of use.
+# ERPNext names are upper case, so an order written in lower case is the SAME
+# order; matching only upper case meant prose about an open request was
+# intercepted when he happened to shout the number and not when he did not —
+# the safety net was on or off depending on the shift key.
+_ORDER_IN_TEXT = re.compile(
+    r"\b[A-Za-z]{2,6}(?:-[A-Za-z]{2,6})?-\d{2,}[0-9-]*\b"
+)
+
+
+def _pedidos_nombrados(texto: object) -> list[str]:
+    """Los pedidos que ese texto nombra, en forma canónica y sin repetir.
+
+    Canonizar acá y no en cada lugar es lo que hace que buscar "sal-ord-…"
+    encuentre lo mismo que buscar "SAL-ORD-…". Lo que salga de acá y no exista
+    simplemente no se encuentra: los dos usos verifican contra ERPNext antes de
+    hacer nada.
+    """
+    return sorted({m.upper() for m in _ORDER_IN_TEXT.findall(str(texto or ""))})
 # Commands that carry something after the order number: a reason, or the terms
 # of a counter-offer. "cancelar SAL-ORD-2026-00009 el cliente se arrepintió",
 # "contraoferta SAL-ORD-2026-00009 mañana 18:00 1500". The rest of the line
 # travels in the payload after a second colon and is parsed deterministically
 # by app/solicitudes.py — never by a model.
 _ARG_RE = re.compile(
-    r"^\s*(?P<verb>[^\W\d_]+)\s+" + _ORDER_REF + r"(?:\s+(?P<resto>.*))?\s*$", re.DOTALL
+    r"^\s*" + _VERB + r"\s+" + _ORDER_REF + r"(?:\s+(?P<resto>.*))?\s*$", re.DOTALL
 )
 # verb -> (action, does the payload keep an empty argument?)
 _ARG_ACTIONS = {
@@ -308,6 +344,8 @@ _ARG_ACTIONS = {
     "rechazar": ("no", False),
     "rechaza": ("no", False),
     "rechazo": ("no", False),
+    # Exactly what app/solicitudes.py::texto_para_equipo tells him to type.
+    "rechazar-solicitud": ("no", False),
     "contraoferta": ("contraoferta", True),
     "contraofertar": ("contraoferta", True),
     "contraoferto": ("contraoferta", True),
@@ -505,7 +543,7 @@ def _resumen_de_solicitud(text: str) -> str | None:
     """
     from app import solicitudes
 
-    for referencia in sorted(set(_ORDER_IN_TEXT.findall(str(text or "")))):
+    for referencia in _pedidos_nombrados(text):
         try:
             solicitud = solicitudes.leer(referencia)
         except Exception as error:
@@ -951,7 +989,7 @@ def _note_send_failure(message_id: str) -> int:
 
 def _audit_undelivered(response: str, reason: str) -> None:
     """If the undeliverable reply named an ERPNext order, leave a trace on it."""
-    for name in sorted(set(_ORDER_IN_TEXT.findall(response or ""))):
+    for name in _pedidos_nombrados(response):
         try:
             erpnext.add_comment(
                 "Sales Order",

@@ -149,8 +149,13 @@ ACCIONES: tuple[Accion, ...] = (
         "Confirmo el pedido en ERPNext y el cliente recibe su confirmación.",
     ),
     Accion(
+        # «rechazar-solicitud» es la palabra EXACTA que app/solicitudes.py le
+        # imprime al encargado. Está acá para que las dos puertas —el comando
+        # tipeado y la prosa— sigan resolviendo a la misma acción: un test
+        # compara las dos listas, y la que se quede corta es una puerta que
+        # acepta algo que la otra no.
         "rechazar", "no", True, MOTIVO,
-        ("rechaza", "rechazo", "no"),
+        ("rechaza", "rechazo", "no", "rechazar-solicitud"),
         "Rechazo el pedido: queda sin confirmar y se le avisa al cliente.",
     ),
     Accion(
