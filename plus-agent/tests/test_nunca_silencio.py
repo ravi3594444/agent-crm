@@ -83,7 +83,7 @@ def test_non_text_message_always_gets_a_reply_instead_of_silence(
     assert outcome == "worked"
     replies = [text for recipient, text in outbox if recipient == CUSTOMER]
     assert len(replies) >= 1, "zero outbound messages: the customer was left in silence"
-    assert replies == [webhook.TEXT_REQUIRED]
+    assert replies == [webhook.texto_solo_texto("es")]
     # Media never reaches the LLM (nothing to transcribe/see) and the queue drains.
     assert agent == []
     assert not webhook.r.lists[webhook._PROCESSING_KEY]
@@ -96,7 +96,7 @@ def test_text_message_with_empty_body_still_gets_a_reply(webhook, outbox, monkey
     _post(webhook, _payload("wamid.empty", "text", text={"body": ""}))
     webhook._worker_cycle()
 
-    assert [t for r, t in outbox if r == CUSTOMER] == [webhook.TEXT_REQUIRED]
+    assert [t for r, t in outbox if r == CUSTOMER] == [webhook.texto_solo_texto("es")]
 
 
 def test_non_text_from_a_staff_phone_also_gets_a_reply(webhook, outbox, monkeypatch) -> None:
@@ -108,7 +108,7 @@ def test_non_text_from_a_staff_phone_also_gets_a_reply(webhook, outbox, monkeypa
     _post(webhook, _payload("wamid.staff-audio", "audio", phone=STAFF, audio={"id": "m"}))
     webhook._worker_cycle()
 
-    assert [t for r, t in outbox if r == STAFF] == [webhook.TEXT_REQUIRED]
+    assert [t for r, t in outbox if r == STAFF] == [webhook.texto_solo_texto("es")]
 
 
 # --------------------------------------------------------------------------
@@ -130,7 +130,7 @@ def test_agent_crash_still_sends_the_customer_an_apology(
 
     assert outcome == "worked"
     replies = [t for r, t in outbox if r == CUSTOMER]
-    assert replies == [webhook.ACK_TEXT, webhook.TECHNICAL_ERROR]
+    assert replies == [webhook.texto_ack("es"), webhook.texto_error_tecnico("es")]
     # The exception body never reaches the customer or the logs.
     assert "secret stack trace" not in " ".join(replies)
     assert "secret stack trace" not in capsys.readouterr().out
@@ -151,7 +151,7 @@ def test_erpnext_outage_during_customer_lookup_still_sends_a_reply(
     _post(webhook, _message_payload("wamid.erp-down", "hola"))
     webhook._worker_cycle()
 
-    assert [t for r, t in outbox if r == CUSTOMER] == [webhook.ACK_TEXT, webhook.TECHNICAL_ERROR]
+    assert [t for r, t in outbox if r == CUSTOMER] == [webhook.texto_ack("es"), webhook.texto_error_tecnico("es")]
 
 
 def test_agent_crash_does_not_wedge_the_fifo_for_the_next_customer(
@@ -173,7 +173,7 @@ def test_agent_crash_does_not_wedge_the_fifo_for_the_next_customer(
     assert webhook._worker_cycle() == "worked"
 
     assert calls == ["explota", "hola"]
-    assert [t for r, t in outbox if r == other] == [webhook.ACK_TEXT, "final:hola"]
+    assert [t for r, t in outbox if r == other] == [webhook.texto_ack("es"), "final:hola"]
     assert not webhook.r.lists[webhook._PROCESSING_KEY]
 
 
@@ -199,7 +199,7 @@ def test_empty_agent_reply_is_replaced_by_a_fallback_not_sent_as_empty(
     _post(webhook, _message_payload("wamid.empty-reply", "hola"))
     webhook._worker_cycle()
 
-    finals = [t for r, t in outbox if r == CUSTOMER and t != webhook.ACK_TEXT]
+    finals = [t for r, t in outbox if r == CUSTOMER and t != webhook.texto_ack("es")]
     assert finals, "no final message at all"
     assert all(t.strip() for t in finals), "an empty body was handed to Meta"
 
@@ -225,7 +225,7 @@ def test_meta_retry_of_the_same_message_id_is_processed_once(
 
     assert first.status_code == second.status_code == third.status_code == 200
     assert calls == ["quiero leche"]
-    finals = [t for r, t in outbox if r == CUSTOMER and t != webhook.ACK_TEXT]
+    finals = [t for r, t in outbox if r == CUSTOMER and t != webhook.texto_ack("es")]
     assert finals == ["final"]
     assert len(webhook.r.lists[webhook._QUEUE_KEY]) == 0
 
@@ -258,8 +258,8 @@ def test_ack_is_sent_once_even_when_webhook_and_worker_both_try(
     _post(webhook, _message_payload("wamid.ack-once", "hola"))
     webhook._worker_cycle()
 
-    acks = [t for r, t in outbox if t == webhook.ACK_TEXT]
-    assert acks == [webhook.ACK_TEXT]
+    acks = [t for r, t in outbox if t == webhook.texto_ack("es")]
+    assert acks == [webhook.texto_ack("es")]
 
 
 def test_status_only_payload_returns_200_without_queueing_or_replying(

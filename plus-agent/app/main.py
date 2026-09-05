@@ -37,26 +37,33 @@ from app.whatsapp import enviar_mensaje
 APP_SECRET = os.environ["META_APP_SECRET"]
 VERIFY_TOKEN = os.environ["META_VERIFY_TOKEN"]
 
-ACK_TEXT = "Recibido, dame un momento mientras lo verifico. / Got it, give me a moment to check."
-TEXT_REQUIRED = (
-    "Por ahora necesito que me escribas el pedido en texto para poder ayudarte."
-)
-# Two variants so the customer is never told the team was alerted unless an
-# ERPNext task actually exists.
-TECHNICAL_ERROR = (
-    "Perdón, tuve un problema técnico y no pude procesar tu mensaje. "
-    "Probá de nuevo en unos minutos."
-)
-TECHNICAL_ERROR_ALERTED = (
-    "Perdón, tuve un problema técnico. Ya avisé al equipo y te responden en un rato."
-)
-# A model turn can end with no text at all (a provider may return a content
-# list whose only blocks are non-text). Meta rejects an empty body, so the item
-# would retry forever and the customer would hear nothing.
-EMPTY_REPLY_FALLBACK = (
-    "Perdón, no pude armar la respuesta. ¿Me lo escribís de nuevo? "
-    "/ Sorry, I could not put together a reply. Could you send that again?"
-)
+# Estos cinco textos los escribe Python y salen tal cual: no pasan por el
+# modelo, así que son los que hay que traducir a mano. Antes iban en los DOS
+# idiomas pegados con una barra, que era la forma de no tener que elegir; ahora
+# se elige, y quien lee recibe uno solo.
+def texto_ack(lengua: str | None = None) -> str:
+    return idioma.t("ack.recibido", lengua)
+
+
+def texto_solo_texto(lengua: str | None = None) -> str:
+    return idioma.t("ack.solo_texto", lengua)
+
+
+# Dos variantes para que al cliente nunca se le diga que se avisó al equipo si
+# no existe de verdad una tarea en ERPNext.
+def texto_error_tecnico(lengua: str | None = None) -> str:
+    return idioma.t("fallback.problema_tecnico", lengua)
+
+
+def texto_error_tecnico_avisado(lengua: str | None = None) -> str:
+    return idioma.t("fallback.problema_tecnico_avisado", lengua)
+
+
+# Un turno del modelo puede terminar sin texto (un proveedor puede devolver una
+# lista de bloques sin ninguno de texto). Meta rechaza un cuerpo vacío, así que
+# el ítem reintentaría para siempre y el cliente no escucharía nada.
+def texto_respuesta_vacia(lengua: str | None = None) -> str:
+    return idioma.t("fallback.respuesta_vacia", lengua)
 
 MAX_WEBHOOK_BYTES = max(1_024, int(os.getenv("WHATSAPP_WEBHOOK_MAX_BYTES", "1048576")))
 _STATE_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -232,13 +239,13 @@ def _contexto(telefono: str) -> tuple[str, str]:
     )
 
 
-def _non_empty(respuesta: object, message_id: str) -> str:
+def _non_empty(respuesta: object, message_id: str, lengua: str | None = None) -> str:
     """Never hand Meta an empty body: it 400s and the item retries forever."""
     texto = str(respuesta or "")
     if texto.strip():
         return texto
     print(f"[agent] respuesta vacía msg={_correlation(message_id)}")
-    return EMPTY_REPLY_FALLBACK
+    return texto_respuesta_vacia(lengua)
 
 
 def _sin_tildes(text: str) -> str:
@@ -624,12 +631,16 @@ def _generate_response(item: dict) -> str:
     kind = item["kind"]
     data = item.get("data", "")
     thread_tag = _thread_tag(telefono)
+    # En qué idioma le habla Python a ESTE número. Se resuelve una vez por
+    # turno y no se vuelve a preguntar: si un aviso saliera en un idioma y el
+    # de al lado en otro, el que lee pensaría que le escriben dos sistemas.
+    lengua = idioma.para_destinatario(telefono, data if kind == "text" else "")
 
     try:
         if kind in {"interactive", "button"}:
             return str(manejar_boton(data, telefono))
         if kind != "text":
-            return TEXT_REQUIRED
+            return texto_solo_texto(lengua)
         if es_equipo(telefono):
             ajuste = _codigo_de_ajuste(data, telefono)
             if ajuste:
@@ -648,6 +659,7 @@ def _generate_response(item: dict) -> str:
                 # con un hash ninguna herramienta de gerencia autoriza a nadie.
                 responder_gerencia(data, thread_id=thread_tag, telefono=telefono),
                 message_id,
+                lengua,
             )
 
         # Si el cliente PIDIÓ un idioma, queda guardado antes de armar el
@@ -673,17 +685,18 @@ def _generate_response(item: dict) -> str:
                 actor_phone=telefono,
             ),
             message_id,
+            lengua,
         )
     except Exception as error:
         print(
             f"[agent] error msg={_correlation(message_id)} "
             f"phone={_correlation(telefono)} type={_error_name(error)}"
         )
-        # TECHNICAL_ERROR_ALERTED promises the customer that the team was told.
+        # texto_error_tecnico_avisado promises the customer that the team was told.
         # Only say so when a ToDo or a WhatsApp alert really exists.
         if _alert_technical_failure(error, telefono, data):
-            return TECHNICAL_ERROR_ALERTED
-        return TECHNICAL_ERROR
+            return texto_error_tecnico_avisado(lengua)
+        return texto_error_tecnico(lengua)
 
 
 def _acknowledge_once(telefono: str, message_id: str) -> None:
@@ -716,7 +729,7 @@ def _acknowledge_once(telefono: str, message_id: str) -> None:
         return
 
     try:
-        enviar_mensaje(telefono, ACK_TEXT)
+        enviar_mensaje(telefono, texto_ack(idioma.para_destinatario(telefono)))
     except Exception as error:
         print(
             f"[whatsapp] ack failed phone={_correlation(telefono)} "

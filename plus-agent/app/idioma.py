@@ -94,12 +94,41 @@ def valido(crudo: object) -> str:
 CATALOGO: dict[str, dict[str, str]] = {
     # ---------------------------------------------------------------- acuse
     "ack.recibido": {
-        ES: "Recibí tu mensaje, dame un momento.",
-        EN: "Got your message, one moment.",
+        ES: "Recibido, dame un momento mientras lo verifico.",
+        EN: "Got it, give me a moment to check.",
     },
-    "ack.procesando": {
-        ES: "Estoy procesando tu pedido.",
-        EN: "I'm processing your order.",
+    "ack.solo_texto": {
+        ES: (
+            "Por ahora necesito que me escribas el pedido en texto para poder "
+            "ayudarte."
+        ),
+        EN: (
+            "For now I need you to write the order as text so I can help you."
+        ),
+    },
+    "fallback.respuesta_vacia": {
+        ES: "Perdón, no pude armar la respuesta. ¿Me lo escribís de nuevo?",
+        EN: "Sorry, I couldn't put together a reply. Could you send that again?",
+    },
+    "fallback.problema_tecnico": {
+        ES: (
+            "Perdón, tuve un problema técnico y no pude procesar tu mensaje. "
+            "Probá de nuevo en unos minutos."
+        ),
+        EN: (
+            "Sorry, I hit a technical problem and couldn't process your message. "
+            "Try again in a few minutes."
+        ),
+    },
+    "fallback.problema_tecnico_avisado": {
+        ES: (
+            "Perdón, tuve un problema técnico. Ya avisé al equipo y te responden "
+            "en un rato."
+        ),
+        EN: (
+            "Sorry, I hit a technical problem. I've told the team and they'll get "
+            "back to you shortly."
+        ),
     },
     # ------------------------------------------------------ estado de pedido
     "pedido.pendiente": {
@@ -495,7 +524,9 @@ def pedido_explicito(texto: object) -> str | None:
     return None
 
 
-def para_cliente(numero: object, texto_entrante: object = "") -> str:
+def para_cliente(
+    numero: object, texto_entrante: object = "", *, recordar: bool = True
+) -> str:
     """En qué idioma contestarle a ESTE cliente, ahora.
 
     El orden no es casual:
@@ -504,15 +535,38 @@ def para_cliente(numero: object, texto_entrante: object = "") -> str:
       3. Nada guardado: se espeja el idioma del mensaje — el mismo
          comportamiento que ya tenía el sistema.
       4. Si no se puede decidir con seguridad, el idioma por defecto.
+
+    ``recordar=False`` sólo resuelve, sin escribir nada. Es lo que usa todo el
+    que necesita saber en qué idioma redactar un aviso: preguntar no puede
+    tener el efecto de fijarle el idioma a alguien.
     """
     pedido = pedido_explicito(texto_entrante)
     if pedido:
-        recordar_cliente(numero, pedido)
+        if recordar:
+            recordar_cliente(numero, pedido)
         return pedido
     guardado = cliente_guardado(numero)
     if guardado:
         return guardado
     return espejo(texto_entrante)
+
+
+def para_destinatario(numero: object, texto_entrante: object = "") -> str:
+    """En qué idioma escribirle a quien tiene ESE número. Sin efectos.
+
+    UN solo lugar decide esto, y por eso está acá: si el número es del equipo
+    rige el idioma que fijó el dueño, y si no, el de ese cliente. Repartir esa
+    decisión por el código es cómo un aviso termina saliendo en un idioma y el
+    siguiente en otro.
+    """
+    try:
+        from app.router import es_equipo
+
+        if es_equipo(numero):
+            return gerencia()
+    except Exception as exc:  # router sin cargar, número raro: no es fatal
+        print(f"[idioma] no pude clasificar el destinatario ({type(exc).__name__})")
+    return para_cliente(numero, texto_entrante, recordar=False)
 
 
 # Palabras cortas y frecuentes que sólo existen en uno de los dos idiomas. No
