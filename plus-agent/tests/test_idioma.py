@@ -255,10 +255,10 @@ PEDIDO = "SAL-ORD-2026-00042"
         ("pedido.pendiente", {"pedido": PEDIDO, "horas": "6"}),
         ("pedido.confirmado_cliente", {"pedido": PEDIDO, "renglones": "5 x LEC-ENT-1L",
                                        "total": "$ 6.000", "entrega": "2026-09-06"}),
-        ("gerencia.pedido_pendiente", {"pedido": PEDIDO, "cliente": "Panaderia",
-                                       "detalle": "5 x LEC-ENT-1L",
-                                       "total": "$ 6.000,00",
-                                       "entrega": "2026-09-06"}),
+        ("gerencia.cuerpo_pedido", {"pedido": PEDIDO, "cliente": "Demo Bakery",
+                                    "detalle": "5 x MILK-1L",
+                                    "total": "$ 6.000,00",
+                                    "entrega": "2026-09-06"}),
     ],
 )
 def test_los_datos_son_identicos_en_los_dos_idiomas(clave, params):

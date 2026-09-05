@@ -186,28 +186,67 @@ CATALOGO: dict[str, dict[str, str]] = {
         EN: "Your order {pedido} is still unconfirmed.",
     },
     # ------------------------------------------------- avisos a la gerencia
-    "gerencia.pedido_pendiente": {
+    # El encabezado y el cuerpo del aviso de pedido. Los COMANDOS que van
+    # adentro ('confirmar X', 'ver X', 'cancelar X') se dejan en español a
+    # propósito incluso en el texto en inglés: son el payload que parsea el
+    # router y cambiarlos rompería lo que la gente ya escribe. El equivalente
+    # en inglés también parsea, así que quien prefiera inglés puede usarlo.
+    "gerencia.encabezado_pendiente": {
+        ES: "🟡 Pedido pendiente de revisión",
+        EN: "🟡 Order pending review",
+    },
+    "gerencia.encabezado_confirmado": {
+        ES: "✅ Pedido confirmado automáticamente",
+        EN: "✅ Order automatically confirmed",
+    },
+    "gerencia.cuerpo_pedido": {
         ES: (
-            "Pedido {pedido}\nCliente: {cliente}\n{detalle}\n"
+            "Pedido: {pedido}\nCliente: {cliente}\nItems: {detalle}\n"
             "Total: {total}\nEntrega: {entrega}"
         ),
         EN: (
-            "Order {pedido}\nCustomer: {cliente}\n{detalle}\n"
+            "Order: {pedido}\nCustomer: {cliente}\nItems: {detalle}\n"
             "Total: {total}\nDelivery: {entrega}"
         ),
     },
-    "gerencia.pedido_confirmado": {
-        ES: "Pedido {pedido} confirmado ({fuente}).",
-        EN: "Order {pedido} confirmed ({fuente}).",
+    "gerencia.sin_observaciones": {ES: "Sin observaciones", EN: "No remarks"},
+    "gerencia.sin_fecha": {ES: "Sin fecha", EN: "No date"},
+    "gerencia.a_coordinar": {ES: "a coordinar", EN: "to be arranged"},
+    "gerencia.no_registrado": {ES: "no registrado", EN: "not registered"},
+    "gerencia.sin_dato": {ES: "n/d", EN: "n/a"},
+    "gerencia.motivo": {
+        ES: "Motivo: {motivo}",
+        EN: "Reason: {motivo}",
     },
     "gerencia.responder_para_decidir": {
         ES: "Respondé 'confirmar {pedido}' o 'ver {pedido}'.",
         EN: "Reply 'confirmar {pedido}' or 'ver {pedido}'.",
     },
-    "gerencia.motivo": {
-        ES: "Motivo: {motivo}",
-        EN: "Reason: {motivo}",
+    "gerencia.confirmado_detalle": {
+        ES: (
+            "✅ Pedido {pedido} confirmado\nCliente: {cliente}\nItems: {detalle}\n"
+            "Total: {total}\nEntrega: {entrega}\nOrigen: {fuente}\n"
+            "Confirmado: {momento}\n"
+            "Informativo: no hace falta responder, el pedido queda confirmado.\n"
+            "Para anularlo dentro de las {horas} h: cancelar {pedido} <motivo>"
+        ),
+        EN: (
+            "✅ Order {pedido} confirmed\nCustomer: {cliente}\nItems: {detalle}\n"
+            "Total: {total}\nDelivery: {entrega}\nSource: {fuente}\n"
+            "Confirmed: {momento}\n"
+            "For your information: no reply needed, the order is confirmed.\n"
+            "To void it within {horas} h: cancelar {pedido} <reason>"
+        ),
     },
+    "gerencia.escalamiento_asunto": {
+        ES: "🙋 Un cliente necesita una persona",
+        EN: "🙋 A customer needs a person",
+    },
+    "gerencia.escalamiento_cuerpo": {
+        ES: "Cliente: {cliente}\nTel: {telefono}\nMotivo: {motivo}",
+        EN: "Customer: {cliente}\nPhone: {telefono}\nReason: {motivo}",
+    },
+    "gerencia.escalamiento_tarea": {ES: "Tarea: {tarea}", EN: "Task: {tarea}"},
     "gerencia.cliente_no_avisado": {
         ES: "OJO: no pude avisarle al cliente.",
         EN: "HEADS UP: I couldn't notify the customer.",

@@ -265,16 +265,15 @@ def test_perder_el_idioma_no_arma_el_fusible_de_los_limites(almacen):
 
 
 def test_los_mensajes_del_equipo_salen_en_los_dos_idiomas(almacen):
-    es = idioma.t("gerencia.pedido_pendiente", idioma.ES, pedido="SAL-ORD-1",
-                  cliente="Panaderia", detalle="5 x LEC", total="$ 6.000",
-                  entrega="2026-09-06")
-    en = idioma.t("gerencia.pedido_pendiente", idioma.EN, pedido="SAL-ORD-1",
-                  cliente="Panaderia", detalle="5 x LEC", total="$ 6.000",
-                  entrega="2026-09-06")
+    campos = {"pedido": "SAL-ORD-1", "cliente": "Demo Bakery",
+              "detalle": "5 x MILK", "total": "$ 6.000",
+              "entrega": "2026-09-06"}
+    es = idioma.t("gerencia.cuerpo_pedido", idioma.ES, **campos)
+    en = idioma.t("gerencia.cuerpo_pedido", idioma.EN, **campos)
     assert es != en
     assert "Pedido" in es and "Order" in en
     # Y los datos, idénticos.
-    for dato in ("SAL-ORD-1", "Panaderia", "5 x LEC", "$ 6.000", "2026-09-06"):
+    for dato in campos.values():
         assert dato in es and dato in en
 
 

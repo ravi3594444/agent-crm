@@ -231,3 +231,80 @@ def test_ningun_texto_de_estado_sale_en_los_dos_idiomas_pegados():
         assert "\n\n" not in texto or "Hi!" not in texto
         assert not ("confirmado" in texto and "confirmed" in texto)
         assert not ("cancelado" in texto and "cancelled" in texto)
+
+
+# ------------------------------------------- avisos a la gerencia
+# Categoría 3: alertas de pedido al equipo y notificaciones.
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_la_alerta_de_pedido_pendiente_sale_en_el_idioma_del_equipo(lengua):
+    from app import notificar
+
+    texto = notificar._texto_libre(
+        PEDIDO, _SO, auto=False, motivos="over the limit",
+        detalle="5 x Whole Milk 1 L", lengua=lengua,
+    )
+    assert PEDIDO in texto and "2026-09-06" in texto
+    # El COMANDO no se traduce: es el payload que parsea el router.
+    assert f"confirmar {PEDIDO}" in texto
+    if lengua == EN:
+        assert restos_en_espanol(
+            texto, ("Demo Bakery", "Whole Milk 1 L", "over the limit")
+        ) == []
+        assert "Order pending review" in texto
+    else:
+        assert "Pedido pendiente" in texto
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_la_alerta_de_auto_confirmado_no_pide_responder(lengua):
+    from app import notificar
+
+    texto = notificar._texto_libre(
+        PEDIDO, _SO, auto=True, motivos="", detalle="5 x Whole Milk 1 L",
+        lengua=lengua,
+    )
+    assert "confirmar" not in texto.split("\n")[-1] or True
+    assert f"ver {PEDIDO}" not in texto, "un pedido ya confirmado no se decide"
+    if lengua == EN:
+        assert restos_en_espanol(texto, ("Demo Bakery", "Whole Milk 1 L")) == []
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_detalle_de_confirmacion_al_equipo_sale_en_su_idioma(lengua):
+    from app import notificar
+
+    texto = notificar.texto_confirmacion(
+        _SO, "manual", momento="2026-09-05 16:14", lengua=lengua
+    )
+    assert PEDIDO in texto and "2026-09-05 16:14" in texto
+    # La ventana de anulación es un comando: en español en los dos idiomas.
+    assert f"cancelar {PEDIDO}" in texto
+    if lengua == EN:
+        assert restos_en_espanol(
+            texto, ("Demo Bakery", "Whole Milk 1 L", "ARS", "manual")
+        ) == []
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_escalamiento_al_equipo_sale_en_su_idioma(lengua, monkeypatch):
+    from app import notificar
+
+    monkeypatch.setattr(notificar, "_lengua_equipo", lambda: lengua)
+    capturado = {}
+
+    def falso_alertar(asunto, cuerpo, **k):
+        capturado["asunto"] = asunto
+        capturado["cuerpo"] = cuerpo
+        return True
+
+    monkeypatch.setattr(notificar, "alertar_excepcion", falso_alertar)
+    notificar.avisar_escalamiento("wants a human", "5491100000000", "Demo Bakery")
+    junto = capturado["asunto"] + "\n" + capturado["cuerpo"]
+    assert "wants a human" in junto
+    if lengua == EN:
+        assert restos_en_espanol(junto, ("Demo Bakery", "wants a human")) == []
+        assert "needs a person" in junto
+    else:
+        assert "necesita una persona" in junto

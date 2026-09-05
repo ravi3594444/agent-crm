@@ -29,20 +29,46 @@ from app.router import STAFF
 from app.whatsapp import enviar_botones, enviar_mensaje, enviar_plantilla
 
 
-def _texto_libre(nombre: str, so: dict, auto: bool, motivos: str, detalle: str) -> str:
-    estado = "confirmado automáticamente" if auto else "pendiente de revisión"
-    icono = "✅" if auto else "🟡"
+def _lengua_equipo() -> str:
+    """El idioma en que lee el equipo. Nunca levanta."""
+    from app import idioma as idioma_mod
+
+    return idioma_mod.gerencia()
+
+
+def _texto_libre(
+    nombre: str, so: dict, auto: bool, motivos: str, detalle: str,
+    lengua: str | None = None,
+) -> str:
+    from app import idioma as idioma_mod
+
+    encabezado = idioma_mod.t(
+        "gerencia.encabezado_confirmado" if auto else "gerencia.encabezado_pendiente",
+        lengua,
+    )
     lineas = [
-        f"{icono} Pedido {estado}",
-        f"Pedido: {nombre}",
-        f"Cliente: {so.get('customer_name') or so.get('customer') or 'Cliente'}",
-        f"Items: {detalle}",
-        f"Total: {float(so.get('grand_total') or 0):,.2f}",
-        f"Entrega: {so.get('delivery_date') or 'Sin fecha'}",
+        encabezado,
+        idioma_mod.t(
+            "gerencia.cuerpo_pedido",
+            lengua,
+            pedido=nombre,
+            cliente=so.get("customer_name") or so.get("customer") or "Cliente",
+            detalle=detalle,
+            total=f"{float(so.get('grand_total') or 0):,.2f}",
+            entrega=so.get("delivery_date")
+            or idioma_mod.t("gerencia.sin_fecha", lengua),
+        ),
     ]
     if not auto:
-        lineas.append(f"Motivo: {(motivos or 'Sin observaciones')[:300]}")
-        lineas.append(f"Respondé 'confirmar {nombre}' o 'ver {nombre}'.")
+        sin_obs = idioma_mod.t("gerencia.sin_observaciones", lengua)
+        lineas.append(
+            idioma_mod.t(
+                "gerencia.motivo", lengua, motivo=(motivos or sin_obs)[:300]
+            )
+        )
+        lineas.append(
+            idioma_mod.t("gerencia.responder_para_decidir", lengua, pedido=nombre)
+        )
     # Interactive bodies are capped at 1024 characters by Meta.
     return "\n".join(lineas)[:1024]
 
@@ -61,7 +87,7 @@ def notificar_equipo(
         else "WHATSAPP_STAFF_PENDING_TEMPLATE"
     )
     plantilla = os.getenv(variable, "").strip()
-    idioma = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"
+    locale_plantilla = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"
 
     if not STAFF:
         print(f"[staff-notify] {nombre}: TELEFONOS_EQUIPO vacío")
@@ -84,7 +110,7 @@ def notificar_equipo(
     # A generic ERPNext Sales Order has no durable "rejected draft" state.
     # Offer only actions whose state transition we can enforce truthfully.
     acciones = None if auto else [f"ok:{nombre}", f"ver:{nombre}"]
-    texto = _texto_libre(nombre, so, auto, motivos, detalle)
+    texto = _texto_libre(nombre, so, auto, motivos, detalle, _lengua_equipo())
     botones = (
         None
         if auto
@@ -112,7 +138,7 @@ def notificar_equipo(
                 result = enviar_plantilla(
                     telefono,
                     plantilla,
-                    idioma,
+                    locale_plantilla,
                     parametros,
                     acciones,
                 )
@@ -237,26 +263,30 @@ def direccion_de_entrega(so: dict) -> str:
     return _direccion_de_entrega(so)
 
 
-def texto_confirmacion(so: dict, fuente: str, momento: str | None = None) -> str:
+def texto_confirmacion(
+    so: dict, fuente: str, momento: str | None = None, lengua: str | None = None
+) -> str:
     """What the manager reads: every field the client asked for, in order."""
     direccion = _direccion_de_entrega(so)
     entrega_txt = " — ".join(
         parte for parte in (direccion, str(so.get("delivery_date") or "")) if parte
-    ) or "a coordinar"
+    ) or __import__("app.idioma", fromlist=["t"]).t(
+        "gerencia.a_coordinar", lengua if lengua is not None else _lengua_equipo()
+    )
     total = f"{pesos(so.get('grand_total'), 2)} {so.get('currency') or ''}".strip()
-    return "\n".join(
-        [
-            f"✅ Pedido {so.get('name')} confirmado",
-            f"Cliente: {so.get('customer_name') or so.get('customer') or 'Cliente'}",
-            f"Items: {_renglones(so)}",
-            f"Total: {total}",
-            f"Entrega: {entrega_txt}",
-            f"Origen: {fuente}",
-            f"Confirmado: {momento or _momento_negocio()}",
-            "Informativo: no hace falta responder, el pedido queda confirmado.",
-            f"Para anularlo dentro de las {os.getenv('CANCELACION_HORAS', '24')} h: "
-            f"cancelar {so.get('name')} <motivo>",
-        ]
+    from app import idioma as idioma_mod
+
+    return idioma_mod.t(
+        "gerencia.confirmado_detalle",
+        lengua if lengua is not None else _lengua_equipo(),
+        pedido=so.get("name"),
+        cliente=so.get("customer_name") or so.get("customer") or "Cliente",
+        detalle=_renglones(so),
+        total=total,
+        entrega=entrega_txt,
+        fuente=fuente,
+        momento=momento or _momento_negocio(),
+        horas=os.getenv("CANCELACION_HORAS", "24"),
     )[:3500]
 
 
@@ -280,7 +310,7 @@ def notificar_confirmacion(so: dict, fuente: str) -> bool:
     momento = _momento_negocio()
     texto = texto_confirmacion(so, fuente, momento)
     plantilla = os.getenv("WHATSAPP_STAFF_CONFIRMED_TEMPLATE", "").strip()
-    idioma = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"
+    locale_plantilla = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"
     parametros = [
         nombre,
         "Confirmado",
@@ -315,7 +345,7 @@ def notificar_confirmacion(so: dict, fuente: str) -> bool:
                 enviados += 1
                 continue
             if plantilla:
-                result = enviar_plantilla(telefono, plantilla, idioma, parametros)
+                result = enviar_plantilla(telefono, plantilla, locale_plantilla, parametros)
             elif window_open(telefono):
                 result = enviar_mensaje(telefono, texto)
             else:
@@ -394,7 +424,7 @@ def alertar_excepcion(
         return False
 
     texto = f"{asunto}\n{cuerpo}".strip()[:3500]
-    idioma = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"
+    locale_plantilla = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"
     plantilla = os.getenv(plantilla_env, "").strip() if plantilla_env else ""
 
     enviados = 0
@@ -409,7 +439,7 @@ def alertar_excepcion(
             continue
         try:
             whatsapp.enviar_plantilla(
-                numero, plantilla, idioma, parametros or [asunto, cuerpo[:512]]
+                numero, plantilla, locale_plantilla, parametros or [asunto, cuerpo[:512]]
             )
             enviados += 1
         except Exception as exc:
@@ -499,15 +529,20 @@ def avisar_escalamiento(
 ) -> bool:
     """An ERPNext ToDo is invisible until someone opens the system; a complaint
     would wait until morning. This makes the phone ring instead."""
-    cuerpo = (
-        f"Cliente: {cliente or 'no registrado'}\n"
-        f"Tel: {telefono or 'n/d'}\n"
-        f"Motivo: {str(motivo)[:300]}"
+    from app import idioma as idioma_mod
+
+    lengua = _lengua_equipo()
+    cuerpo = idioma_mod.t(
+        "gerencia.escalamiento_cuerpo",
+        lengua,
+        cliente=cliente or idioma_mod.t("gerencia.no_registrado", lengua),
+        telefono=telefono or idioma_mod.t("gerencia.sin_dato", lengua),
+        motivo=str(motivo)[:300],
     )
     if tarea:
-        cuerpo += f"\nTarea: {tarea}"
+        cuerpo += "\n" + idioma_mod.t("gerencia.escalamiento_tarea", lengua, tarea=tarea)
     return alertar_excepcion(
-        "🙋 Un cliente necesita una persona",
+        idioma_mod.t("gerencia.escalamiento_asunto", lengua),
         cuerpo,
         urgencia=URGENCIA_ALTA,
         plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE",
