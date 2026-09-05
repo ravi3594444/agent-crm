@@ -270,6 +270,95 @@ CATALOGO: dict[str, dict[str, str]] = {
             "alternative. A person will look at it."
         ),
     },
+    "entrega.oferta": {
+        ES: (
+            "Sobre tu pedido {pedido}: el encargado te ofrece {terminos}.\n"
+            "¿Lo tomás? Respondé con el botón, o escribí 'acepto {pedido}' o "
+            "'no acepto {pedido}'. Sin tu respuesta no cierro nada."
+        ),
+        EN: (
+            "About your order {pedido}: the manager offers {terminos}.\n"
+            "Do you take it? Reply with the button, or write 'accept {pedido}' "
+            "or 'reject {pedido}'. Nothing is closed without your reply."
+        ),
+    },
+    "entrega.solicitud_rechazada": {
+        ES: (
+            "Sobre tu pedido {pedido}: no vamos a poder hacer lo que pediste"
+            "{motivo}. Si querés, lo dejamos para un día de reparto normal."
+        ),
+        EN: (
+            "About your order {pedido}: we cannot do what you asked{motivo}. "
+            "We can schedule it for a normal delivery day instead."
+        ),
+    },
+    "entrega.vencida": {
+        ES: (
+            "Sobre tu pedido {pedido}: no llegué a tener una respuesta del "
+            "encargado, así que por ahora no queda confirmado. Escribime y lo "
+            "volvemos a ver con el stock del momento."
+        ),
+        EN: (
+            "About your order {pedido}: I did not get an answer in time, so it "
+            "is not confirmed. Message me and we will look at it again with "
+            "current stock."
+        ),
+    },
+    "entrega.respaldo_retiro": {
+        ES: "podés pasar a buscarlo por el local",
+        EN: "you can pick it up at the shop",
+    },
+    "entrega.respaldo_reparto": {
+        ES: "te lo puedo llevar en el próximo reparto normal",
+        EN: "I can bring it on the next normal delivery round",
+    },
+    "entrega.respaldo": {
+        ES: (
+            "Sobre tu pedido {pedido}: no llegué a tener la respuesta del "
+            "encargado sobre lo que pediste, así que eso queda sin efecto. "
+            "Perdón por la espera.\n"
+            "Lo que sí {puede}: {terminos}.\n"
+            "¿Lo tomás? Respondé 'acepto {pedido}' o 'no acepto {pedido}'. Sin "
+            "tu respuesta no cierro nada, y cuando aceptes vuelvo a chequear el "
+            "stock antes de confirmarlo."
+        ),
+        EN: (
+            "About your order {pedido}: I did not get the manager's answer about "
+            "what you asked for, so that is off. Sorry for the wait.\n"
+            "What I can do: {puede} — {terminos}.\n"
+            "Do you take it? Reply 'accept {pedido}' or 'reject {pedido}'. "
+            "Nothing is closed without your reply, and I re-check stock before "
+            "confirming."
+        ),
+    },
+    "entrega.revision_vencida": {
+        ES: (
+            "Sobre tu pedido {pedido}: te había dicho que lo revisaba una "
+            "persona y no llegamos a hacerlo, así que no lo dejo agendado y no "
+            "queda nada a tu nombre. Perdón. Cuando quieras lo armamos de nuevo "
+            "con el stock del momento."
+        ),
+        EN: (
+            "About your order {pedido}: I said a person would review it and we "
+            "did not get to it, so it is not scheduled and nothing is charged. "
+            "Sorry. Message me and we will put it together again with current "
+            "stock."
+        ),
+    },
+    "entrega.respaldo_vencido": {
+        ES: (
+            "Sobre tu pedido {pedido}: se venció el plazo de esa opción "
+            "({terminos}), así que no queda agendada y no hay nada confirmado a "
+            "tu nombre. Cuando quieras, escribime y lo armamos con el stock del "
+            "momento."
+        ),
+        EN: (
+            "About your order {pedido}: that option has run out, so it is not "
+            "scheduled and nothing is confirmed in your name ({terminos}). "
+            "Message me whenever you like and we will put it together with "
+            "current stock."
+        ),
+    },
     "entrega.aprobacion_vencida": {
         ES: "Venció el plazo para decidir el pedido {pedido}.",
         EN: "The deadline to decide order {pedido} has passed.",

@@ -501,13 +501,21 @@ def _codigo_de_accion(text: str, telefono: str) -> str | None:
 # A customer accepting or refusing an offer is a DECISION about money and a
 # delivery date. It is matched here, before any model sees the message, so the
 # answer cannot depend on a paraphrase.
+# Las dos formas, en los dos idiomas. Las palabras EN ESPAÑOL no se tocan: son
+# las que la gente ya usa y las que dicen los mensajes que ya salieron. Las
+# inglesas se AGREGAN, para que un cliente al que se le contesta en inglés pueda
+# contestar en inglés. El número de pedido se parsea igual en los dos.
 _ACEPTA_RE = re.compile(
-    r"^\s*(?P<no>no\s+)?(?:acepto|acepta|aceptar|de\s*acuerdo|dale)\b"
+    r"^\s*(?P<no>no\s+)?"
+    r"(?:acepto|acepta|aceptar|de\s*acuerdo|dale"
+    r"|i\s+accept|accept|agreed|agree|deal|yes)\b"
     r"(?:[^A-Za-z0-9]*(?P<order>[A-Za-z]{1,6}(?:-[A-Za-z]{1,6})?-\d[\w-]*))?",
     re.IGNORECASE,
 )
 _RECHAZA_RE = re.compile(
-    r"^\s*(?:no\s+(?:acepto|acepta|aceptar|gracias)|rechazo|no\s+me\s+sirve)\b"
+    r"^\s*(?:i\s+)?(?:no\s+(?:acepto|acepta|aceptar|gracias)|rechazo|no\s+me\s+sirve"
+    r"|no\s+thanks|no\s+thank\s+you|do\s*n[o']?t\s+accept|do\s+not\s+accept"
+    r"|decline|reject|not\s+interested)\b"
     r"(?:[^A-Za-z0-9]*(?P<order>[A-Za-z]{1,6}(?:-[A-Za-z]{1,6})?-\d[\w-]*))?",
     re.IGNORECASE,
 )

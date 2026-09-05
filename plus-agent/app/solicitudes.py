@@ -1175,7 +1175,7 @@ def _vencer_revision(solicitud: Solicitud, ahora: float) -> bool:
     if cerrada is None:
         return False
     _encolar_cliente(
-        cerrada, "revision_vencida", texto_revision_vencida_cliente(cerrada)
+        cerrada, "revision_vencida", lambda i: texto_revision_vencida_cliente(cerrada, i)
     )
     _avisar_equipo(
         cerrada,
@@ -1667,133 +1667,75 @@ def texto_pendiente_cliente(solicitud: Solicitud, lengua: str | None = None) -> 
     )
 
 
-def texto_oferta_cliente(solicitud: Solicitud) -> str:
+def texto_oferta_cliente(solicitud: Solicitud, lengua: str | None = None) -> str:
     """The offer, and the explicit yes/no the customer has to give."""
-    terminos = terminos_texto(solicitud.ofrecido, solicitud.moneda)
-    return (
-        f"Sobre tu pedido {solicitud.pedido}: el encargado te ofrece "
-        f"{terminos}.\n"
-        f"¿Lo tomás? Respondé con el botón, o escribí "
-        f"'acepto {solicitud.pedido}' o 'no acepto {solicitud.pedido}'. "
-        f"Sin tu respuesta no cierro nada.\n\n"
-        f"About your order {solicitud.pedido}: the manager offers {terminos}. "
-        f"Reply with the button, or write 'acepto {solicitud.pedido}' / "
-        f"'no acepto {solicitud.pedido}'. Nothing is closed without your reply."
+    from app import idioma
+
+    return idioma.t(
+        "entrega.oferta",
+        lengua,
+        pedido=solicitud.pedido,
+        terminos=terminos_texto(solicitud.ofrecido, solicitud.moneda),
     )
 
+def texto_rechazo_cliente(solicitud: Solicitud, lengua: str | None = None) -> str:
+    from app import idioma
 
-def texto_rechazo_cliente(solicitud: Solicitud) -> str:
-    motivo = f" ({solicitud.motivo})" if solicitud.motivo else ""
-    return (
-        f"Sobre tu pedido {solicitud.pedido}: no vamos a poder hacer lo que "
-        f"pediste{motivo}. Si querés, lo dejamos para un día de reparto normal."
-        f"\n\nAbout your order {solicitud.pedido}: we cannot do what you asked"
-        f"{motivo}. We can schedule it for a normal delivery day instead."
+    return idioma.t(
+        "entrega.solicitud_rechazada",
+        lengua,
+        pedido=solicitud.pedido,
+        motivo=f" ({solicitud.motivo})" if solicitud.motivo else "",
     )
 
+def texto_vencida_cliente(solicitud: Solicitud, lengua: str | None = None) -> str:
+    """Last resort: nobody answered AND nothing could be offered instead."""
+    from app import idioma
 
-def texto_vencida_cliente(solicitud: Solicitud) -> str:
-    """Last resort: nobody answered AND nothing could be offered instead.
+    return idioma.t("entrega.vencida", lengua, pedido=solicitud.pedido)
 
-    Reached only when ``_respaldar`` could compute no safe alternative — no
-    configured round, no pickup, an order that is no longer a draft. Asking
-    them to write again is not a good answer, and it is the only honest one
-    left: inventing a date here is exactly what this module exists to prevent.
-    """
-    return (
-        f"Sobre tu pedido {solicitud.pedido}: no llegué a tener una respuesta "
-        f"del encargado, así que por ahora no queda confirmado. Escribime y lo "
-        f"volvemos a ver con el stock del momento.\n\n"
-        f"About your order {solicitud.pedido}: I did not get an answer in time, "
-        f"so it is not confirmed. Message me and we will look at it again with "
-        f"current stock."
-    )
+def texto_respaldo_cliente(solicitud: Solicitud, lengua: str | None = None) -> str:
+    """Nobody answered, so here is what we CAN do — a date, and a yes/no."""
+    from app import idioma
 
-
-def texto_respaldo_cliente(solicitud: Solicitud) -> str:
-    """Nobody answered, so here is what we CAN do — a date, and a yes/no.
-
-    The waiting was our failure, so the customer is not sent away to write
-    again: they get the alternative the owner already authorized, in the same
-    message, with the same explicit acceptance every other offer needs.
-    """
-    terminos = terminos_texto(solicitud.ofrecido, solicitud.moneda)
     retiro = str(solicitud.ofrecido.get("metodo") or "entrega") == "retiro"
-    puede = (
-        "podés pasar a buscarlo por el local"
-        if retiro
-        else "te lo puedo llevar en el próximo reparto normal"
-    )
-    puede_en = (
-        "you can pick it up at the shop"
-        if retiro
-        else "I can bring it on the next normal delivery round"
-    )
-    return (
-        f"Sobre tu pedido {solicitud.pedido}: no llegué a tener la respuesta "
-        f"del encargado sobre lo que pediste, así que eso queda sin efecto. "
-        f"Perdón por la espera.\n"
-        f"Lo que sí {puede}: {terminos}.\n"
-        f"¿Lo tomás? Respondé 'acepto {solicitud.pedido}' o "
-        f"'no acepto {solicitud.pedido}'. Sin tu respuesta no cierro nada, y "
-        f"cuando aceptes vuelvo a chequear el stock antes de confirmarlo.\n\n"
-        f"About your order {solicitud.pedido}: I did not get the manager's "
-        f"answer about what you asked for, so that is off. Sorry for the wait. "
-        f"What I can do: {puede_en} — {terminos}. Reply "
-        f"'acepto {solicitud.pedido}' or 'no acepto {solicitud.pedido}'. "
-        f"Nothing is closed without your reply, and I re-check stock before "
-        f"confirming."
+    return idioma.t(
+        "entrega.respaldo",
+        lengua,
+        pedido=solicitud.pedido,
+        puede=idioma.t(
+            "entrega.respaldo_retiro" if retiro else "entrega.respaldo_reparto",
+            lengua,
+        ),
+        terminos=terminos_texto(solicitud.ofrecido, solicitud.moneda),
     )
 
+def texto_revision_vencida_cliente(
+    solicitud: Solicitud, lengua: str | None = None
+) -> str:
+    """We said a person would look at it, and nobody did."""
+    from app import idioma
 
-def texto_revision_vencida_cliente(solicitud: Solicitud) -> str:
-    """We said a person would look at it, and nobody did.
+    return idioma.t("entrega.revision_vencida", lengua, pedido=solicitud.pedido)
 
-    The customer accepted in good faith and was told to wait for us. Leaving
-    them with silence would be the worst of the endings, so they are told
-    plainly that it is not going ahead — and nothing was charged, because
-    nothing was ever confirmed.
-    """
-    return (
-        f"Sobre tu pedido {solicitud.pedido}: te había dicho que lo revisaba "
-        f"una persona y no llegamos a hacerlo, así que no lo dejo agendado y no "
-        f"queda nada a tu nombre. Perdón. Cuando quieras lo armamos de nuevo "
-        f"con el stock del momento.\n\n"
-        f"About your order {solicitud.pedido}: I said a person would review it "
-        f"and we did not get to it, so it is not scheduled and nothing is "
-        f"charged. Sorry. Message me and we will put it together again with "
-        f"current stock."
-    )
-
-
-def texto_respaldo_vencido_cliente(solicitud: Solicitud) -> str:
+def texto_respaldo_vencido_cliente(
+    solicitud: Solicitud, lengua: str | None = None
+) -> str:
     """The fallback offer ran out. Says the offer lapsed, NOT who was silent.
 
-    It is tempting to write "I did not get your reply" — usually true, and it
-    reads better than the passive. But it is not knowable here: a review that
-    could not be recorded (``_revision_sin_registro``) leaves the record at
-    ESPERANDO_CLIENTE precisely because the write that would have said
-    otherwise failed, and this sweep then closes it as unanswered. A customer
-    who DID accept would be told they had not, which is the one thing this
-    module never does. Whose silence it was stays in the team notice, where a
-    person can reconcile it against the order.
+    It is tempting to write "I did not get your reply" — usually true. But it is
+    not knowable here: a review that could not be recorded leaves the record at
+    ESPERANDO_CLIENTE precisely because the write that would have said otherwise
+    failed. Whose silence it was stays in the team notice.
     """
-    return (
-        f"Sobre tu pedido {solicitud.pedido}: se venció el plazo de esa opción "
-        f"({terminos_texto(solicitud.ofrecido, solicitud.moneda)}), así que no "
-        f"queda agendada y no hay nada confirmado a tu nombre. Cuando quieras, "
-        f"escribime y lo armamos con el stock del momento.\n\n"
-        f"About your order {solicitud.pedido}: that option has run out, so it is "
-        f"not scheduled and nothing is confirmed in your name. Message me "
-        f"whenever you like and we will put it together with current stock."
+    from app import idioma
+
+    return idioma.t(
+        "entrega.respaldo_vencido",
+        lengua,
+        pedido=solicitud.pedido,
+        terminos=terminos_texto(solicitud.ofrecido, solicitud.moneda),
     )
-
-
-# ---------------------------------------------------------------------------
-# Notices. Always through the durable queue (app/avisos.py), never inline:
-# a decision must not wait on Meta, and a notice must not be lost.
-# ---------------------------------------------------------------------------
-
 
 def _telefono_cliente(pedido: str) -> str:
     from app import telefono as telefonos
@@ -1807,7 +1749,13 @@ def _telefono_cliente(pedido: str) -> str:
     return telefonos.normalizar(cliente.get("mobile_no")) or ""
 
 
-def _encolar_cliente(solicitud: Solicitud, evento: str, texto: str) -> bool:
+def _encolar_cliente(solicitud: Solicitud, evento: str, texto) -> bool:
+    """`texto` puede ser el texto ya armado o una función que toma el idioma.
+
+    Pasar la función es lo correcto: el teléfono —y por lo tanto el idioma— se
+    resuelve ACÁ, así que el llamador no tiene que adivinarlo ni repetir la
+    búsqueda.
+    """
     from app import avisos
 
     tel = _telefono_cliente(solicitud.pedido)
@@ -1822,6 +1770,10 @@ def _encolar_cliente(solicitud: Solicitud, evento: str, texto: str) -> bool:
         except Exception:
             pass
         return False
+    if callable(texto):
+        from app import idioma
+
+        texto = texto(idioma.para_destinatario(tel))
     try:
         return avisos.encolar(f"{evento}:{solicitud.id}", solicitud.pedido, tel, texto)
     except Exception as exc:
@@ -1831,18 +1783,20 @@ def _encolar_cliente(solicitud: Solicitud, evento: str, texto: str) -> bool:
 
 def _avisar_cliente_vencida(solicitud: Solicitud, liberado: bool) -> bool:
     del liberado  # the customer is told the same either way: nothing is promised
-    texto = (
-        texto_respaldo_vencido_cliente(solicitud)
+    constructor = (
+        texto_respaldo_vencido_cliente
         if solicitud.es_respaldo
-        else texto_vencida_cliente(solicitud)
+        else texto_vencida_cliente
     )
-    return _encolar_cliente(solicitud, "solicitud_vencida", texto)
+    return _encolar_cliente(
+        solicitud, "solicitud_vencida", lambda i: constructor(solicitud, i)
+    )
 
 
 def _avisar_cliente_respaldo(solicitud: Solicitud) -> bool:
     """The concrete second offer. Keyed on the NEW id, so it is sent once."""
     return _encolar_cliente(
-        solicitud, "solicitud_respaldo", texto_respaldo_cliente(solicitud)
+        solicitud, "solicitud_respaldo", lambda i: texto_respaldo_cliente(solicitud, i)
     )
 
 
@@ -2040,13 +1994,13 @@ def notificar_equipo_nueva(solicitud: Solicitud) -> bool:
 def ofrecer_al_cliente(solicitud: Solicitud) -> bool:
     """Queue the offer the customer has to accept in so many words."""
     return _encolar_cliente(
-        solicitud, "solicitud_oferta", texto_oferta_cliente(solicitud)
+        solicitud, "solicitud_oferta", lambda i: texto_oferta_cliente(solicitud, i)
     )
 
 
 def avisar_rechazo(solicitud: Solicitud) -> bool:
     return _encolar_cliente(
-        solicitud, "solicitud_rechazo", texto_rechazo_cliente(solicitud)
+        solicitud, "solicitud_rechazo", lambda i: texto_rechazo_cliente(solicitud, i)
     )
 
 

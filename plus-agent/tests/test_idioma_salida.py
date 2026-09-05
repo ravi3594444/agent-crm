@@ -308,3 +308,109 @@ def test_el_escalamiento_al_equipo_sale_en_su_idioma(lengua, monkeypatch):
         assert "needs a person" in junto
     else:
         assert "necesita una persona" in junto
+
+
+# --------------------------------- excepciones de entrega y vencimientos
+# Categoría 4: solicitudes, ofertas, respaldos, vencimientos y plazos.
+
+
+def _solicitud(**extra):
+    from app import solicitudes
+
+    campos = {
+        "id": "SOL-1", "pedido": PEDIDO, "tipo": solicitudes.TIPO_ENTREGA,
+        "estado": solicitudes.PENDIENTE, "cliente": "CUST-1",
+        "cliente_nombre": "Demo Bakery", "resumen_items": "5 x Whole Milk 1 L",
+        "total": 6000.0, "moneda": "ARS", "creada_en": 0.0,
+        "vence_en": 6 * 3600.0, "sello": 0.0,
+    }
+    campos.update(extra)
+    return solicitudes.Solicitud(**campos)
+
+
+_TEXTOS_ENTREGA = (
+    "texto_oferta_cliente",
+    "texto_rechazo_cliente",
+    "texto_vencida_cliente",
+    "texto_respaldo_cliente",
+    "texto_revision_vencida_cliente",
+    "texto_respaldo_vencido_cliente",
+)
+
+
+@pytest.mark.parametrize("nombre", _TEXTOS_ENTREGA)
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_los_textos_de_entrega_salen_en_un_solo_idioma(nombre, lengua):
+    from app import solicitudes
+
+    sol = _solicitud(ofrecido={"metodo": "entrega"}, motivo="no round that day")
+    texto = getattr(solicitudes, nombre)(sol, lengua)
+    assert PEDIDO in texto, "el número de pedido es un dato y siempre está"
+    if lengua == EN:
+        assert restos_en_espanol(
+            texto, ("Demo Bakery", "no round that day", "ARS", "acepto", "no acepto")
+        ) == [], f"{nombre} dejó español en la versión inglesa"
+
+
+@pytest.mark.parametrize("nombre", _TEXTOS_ENTREGA)
+def test_ningun_texto_de_entrega_manda_los_dos_idiomas(nombre):
+    from app import solicitudes
+
+    sol = _solicitud(ofrecido={"metodo": "entrega"}, motivo="x")
+    es = getattr(solicitudes, nombre)(sol, ES)
+    en = getattr(solicitudes, nombre)(sol, EN)
+    assert es != en, f"{nombre} no está traducido"
+    # El texto español no puede llevar adentro el inglés, ni al revés.
+    assert "About your order" not in es
+    assert "Sobre tu pedido" not in en
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_respaldo_ofrece_retiro_o_reparto_en_el_idioma(lengua):
+    from app import solicitudes
+
+    retiro = solicitudes.texto_respaldo_cliente(
+        _solicitud(ofrecido={"metodo": "retiro"}), lengua
+    )
+    reparto = solicitudes.texto_respaldo_cliente(
+        _solicitud(ofrecido={"metodo": "entrega"}), lengua
+    )
+    assert retiro != reparto
+    if lengua == EN:
+        assert "pick it up" in retiro and "delivery round" in reparto
+    else:
+        assert "buscarlo por el local" in retiro and "reparto normal" in reparto
+
+
+# ------------------------------------------- los comandos de aceptación
+# Los de siempre siguen funcionando; los ingleses también parsean.
+
+
+@pytest.mark.parametrize(
+    "dicho",
+    ["acepto", "acepto " + PEDIDO, "dale", "de acuerdo",
+     "I accept", "accept " + PEDIDO, "yes", "agreed", "deal"],
+)
+def test_aceptar_parsea_en_los_dos_idiomas(dicho):
+    rechaza = webhook._RECHAZA_RE.match(dicho)
+    acepta = None if rechaza else webhook._ACEPTA_RE.match(dicho)
+    assert acepta is not None and not acepta.group("no"), f"{dicho!r} no parseó"
+
+
+@pytest.mark.parametrize(
+    "dicho",
+    ["no acepto", "no acepto " + PEDIDO, "rechazo", "no me sirve", "no gracias",
+     "no thanks", "decline", "reject " + PEDIDO, "I don't accept",
+     "not interested"],
+)
+def test_rechazar_parsea_en_los_dos_idiomas(dicho):
+    rechaza = webhook._RECHAZA_RE.match(dicho)
+    acepta = None if rechaza else webhook._ACEPTA_RE.match(dicho)
+    negativo = bool(rechaza) or bool(acepta and acepta.group("no"))
+    assert negativo, f"{dicho!r} no se leyó como rechazo"
+
+
+@pytest.mark.parametrize("dicho", ["acepto " + PEDIDO, "accept " + PEDIDO])
+def test_el_numero_de_pedido_se_parsea_igual_en_los_dos_idiomas(dicho):
+    m = webhook._ACEPTA_RE.match(dicho)
+    assert m.group("order").upper() == PEDIDO
