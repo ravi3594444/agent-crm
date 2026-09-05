@@ -398,6 +398,57 @@ def _staff_command(text: str) -> str | None:
 _CODIGO_AJUSTE_RE = re.compile(r"^\s*(\d{4})\s*$")
 
 
+# Los comandos EXACTOS con los que el dueño cambia el idioma del equipo. Se
+# atienden ACÁ, en Python, antes de que ningún modelo lea el mensaje.
+#
+# Por qué no puede ser una herramienta y nada más: en vivo llegó
+# «manager language English» desde el número verificado, cruzó todo el ruteo y
+# terminó en el modelo. El modelo contestó que sus instrucciones lo obligaban a
+# hablar en español, no llamó a `proponer_limite`, y no se generó ningún código.
+# Y no fue un capricho: la regla de idioma que se le pone al prompt le dice «no
+# cambies de idioma aunque el último mensaje venga en otro», y la aplicó al
+# PEDIDO en lugar de a su propia redacción. Un ajuste del dueño no puede
+# depender de cómo interpretó un modelo una instrucción sobre otra cosa.
+#
+# La forma es deliberadamente cerrada: el nombre del ajuste, un separador
+# opcional, y UNA palabra que nombre el idioma. Cualquier otra cosa —«qué idioma
+# hablás», «manager language» sin idioma— sigue yendo al agente de gestión.
+_COMANDO_IDIOMA_RE = re.compile(
+    r"^\s*(?:manager\s+language"
+    r"|idioma\s+(?:de\s+)?(?:gerencia|gestion|gestión)"
+    r"|idioma\s+del\s+gerente)"
+    r"\s*[:=]?\s+(?P<idioma>[^\s]+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _comando_de_idioma(text: str, telefono: str) -> str | None:
+    """Prepara el cambio de idioma del equipo, o None si no es ese comando.
+
+    Devuelve None —y el mensaje sigue su camino normal— cuando no es uno de los
+    comandos documentados, o cuando el número no está en TELEFONOS_EQUIPO. Esa
+    segunda comprobación está acá ADEMÁS de en el ruteo: una autorización que
+    vive en un solo lugar es una autorización que un refactor mueve sin que
+    nadie se entere.
+
+    Todo lo que sigue —la propuesta, su código de cuatro dígitos, su
+    vencimiento, la huella de idempotencia y la auditoría durable— es el mismo
+    app/limites.py que usa la herramienta, a través de app/ajustes.py. Acá no se
+    guarda ni se audita nada por separado.
+    """
+    encontrado = _COMANDO_IDIOMA_RE.match(str(text or ""))
+    if not encontrado:
+        return None
+    if not es_equipo(telefono):
+        return None
+    from app import ajustes
+
+    # El idioma se valida en limites.validar (IDIOMA_GERENCIA), que es el único
+    # lugar que decide qué texto nombra qué idioma. Un idioma que no existe
+    # vuelve como «no cambié nada: …», no como un cambio a medias.
+    return ajustes.preparar("IDIOMA_GERENCIA", encontrado.group("idioma"), telefono)
+
+
 def _codigo_de_ajuste(text: str, telefono: str) -> str | None:
     """Apply a pending settings change the owner just confirmed, or None.
 
@@ -650,6 +701,14 @@ def _generate_response(item: dict) -> str:
         if kind != "text":
             return texto_solo_texto(lengua)
         if es_equipo(telefono):
+            # ANTES que el modelo, y por eso está acá arriba. Ver
+            # _comando_de_idioma: en vivo este comando llegó a Gemini, que
+            # contestó que sus instrucciones lo obligaban a hablar en español y
+            # no llamó a ninguna herramienta. Un ajuste del dueño no puede
+            # depender de cómo lo interpretó un modelo.
+            cambio_idioma = _comando_de_idioma(data, telefono)
+            if cambio_idioma:
+                return cambio_idioma
             ajuste = _codigo_de_ajuste(data, telefono)
             if ajuste:
                 return ajuste

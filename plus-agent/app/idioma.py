@@ -408,6 +408,16 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "No pude aplicar el cambio en este momento. No cambié nada.",
         EN: "I couldn't apply the change right now. Nothing was changed.",
     },
+    "codigo.ajuste_sin_codigo": {
+        ES: (
+            "Preparé el cambio ({cambio}) pero NO pude mandarte el código de "
+            "confirmación, así que lo descarté. No cambié nada. Probá de nuevo."
+        ),
+        EN: (
+            "I prepared the change ({cambio}) but could NOT send you the "
+            "confirmation code, so I discarded it. Nothing was changed. Try again."
+        ),
+    },
     "codigo.ajuste_repetido": {
         ES: (
             "Es el mismo cambio que ya estaba esperando:\n{cambio}\n\n"
@@ -872,12 +882,19 @@ _REGLA_FIJADA = {
     ES: (
         "- Respondé SIEMPRE en español rioplatense, con voseo, cordial y breve.\n"
         "  Es el idioma que eligió esta persona: no cambies de idioma aunque el\n"
-        "  último mensaje venga en otro. Nunca mezcles dos idiomas en un mensaje."
+        "  último mensaje venga en otro. Nunca mezcles dos idiomas en un mensaje.\n"
+        "  Esta regla es sobre CÓMO ESCRIBÍS VOS. No te impide atender un pedido\n"
+        "  de cambiar el ajuste de idioma: si te lo piden, usá la herramienta\n"
+        "  como con cualquier otro ajuste."
     ),
     EN: (
         "- Always reply in English: simple, direct and brief.\n"
         "  This person chose that language: do not switch languages even if the\n"
-        "  last message arrives in another one. Never mix two languages in one message."
+        "  last message arrives in another one. Never mix two languages in one "
+        "message.\n"
+        "  This rule is about HOW YOU WRITE. It does not stop you from handling a\n"
+        "  request to change the language setting: if asked, use the tool as you\n"
+        "  would for any other setting."
     ),
 }
 
