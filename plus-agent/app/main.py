@@ -25,7 +25,7 @@ import httpx
 import redis
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 
-from app import erpnext, notificar
+from app import erpnext, idioma, notificar
 from app import whatsapp as whatsapp_client
 from app.aprobacion import manejar_boton
 from app.formato import sin_citas
@@ -416,19 +416,29 @@ def _codigo_de_ajuste(text: str, telefono: str) -> str | None:
         return None
     if limites.pendiente(telefono) is None:
         return None
+    # El idioma de ANTES de aplicar: si el cambio es justamente el idioma, el
+    # error todavía se contesta en el idioma en que él venía hablando.
+    lengua = idioma.gerencia()
     try:
         cambio = limites.aplicar(match.group(1), telefono)
     except limites.LimiteError as exc:
-        return f"No apliqué nada: {exc}."
+        motivo = idioma.t(exc.clave, lengua) if getattr(exc, "clave", "") else str(exc)
+        return idioma.t("codigo.ajuste_no_aplicado", lengua, motivo=motivo)
     except Exception as error:
         print(f"[limites] confirmación falló type={_error_name(error)}")
-        return "No pude aplicar el cambio en este momento. No cambié nada."
+        return idioma.t("codigo.ajuste_error", lengua)
     defi = limites.TODOS.get(cambio["limite"])
     alias = defi.alias[0] if defi else cambio["limite"]
-    return (
-        f"Listo: *{alias}* pasó de {cambio['anterior']} a {cambio['nuevo']}. "
-        "Rige desde el próximo pedido, sin reiniciar nada. "
-        f"Queda registrado a tu nombre ({cambio['ts']})."
+    # Y acá el de DESPUÉS: si acaba de pasar a inglés, este acuse ya sale en
+    # inglés, que es lo que espera quien lo pidió.
+    lengua = idioma.gerencia()
+    return idioma.t(
+        "codigo.ajuste_aplicado",
+        lengua,
+        ajuste=alias,
+        anterior=limites.mostrar(cambio["limite"], cambio["anterior"], lengua),
+        nuevo=limites.mostrar(cambio["limite"], cambio["nuevo"], lengua),
+        ts=cambio["ts"],
     )
 
 
@@ -639,6 +649,15 @@ def _generate_response(item: dict) -> str:
                 responder_gerencia(data, thread_id=thread_tag, telefono=telefono),
                 message_id,
             )
+
+        # Si el cliente PIDIÓ un idioma, queda guardado antes de armar el
+        # prompt, así el mismo turno ya sale en ese idioma. Se guarda contra el
+        # teléfono VERIFICADO del webhook, no contra nada del texto: por eso un
+        # mensaje no puede cambiarle el idioma a otro cliente. Y no corta el
+        # turno: el resto del mensaje —un pedido, por ejemplo— se atiende igual.
+        pedido_idioma = idioma.pedido_explicito(data)
+        if pedido_idioma:
+            idioma.recordar_cliente(telefono, pedido_idioma)
 
         customer_code, contexto = _contexto(telefono)
         acuerdo = _customer_command(data, telefono, customer_code)

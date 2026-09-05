@@ -986,12 +986,16 @@ def mandar_codigo(telefono: str, propuesta: dict) -> bool:
     minutos = PROPUESTA_TTL_SEGUNDOS // 60
     # El pedido va en el mensaje porque puede haber más de uno esperando: sin
     # él, dos códigos en el teléfono son dos números sin dueño.
+    from app import idioma
+
     return notificar.pedir_codigo_de_ajuste(
         telefono,
-        f"Código para confirmar esta acción sobre {propuesta['pedido']}:\n"
-        f"{propuesta['consecuencia']}\n\n"
-        f"Contestá *{codigo}* para que la haga. "
-        f"Si no contestás, en {minutos} minutos se descarta sola. "
-        "Este código confirma sólo esta acción y ninguna otra que tengas "
-        "esperando.",
+        idioma.t(
+            "accion.preparada",
+            idioma.gerencia(),
+            pedido=propuesta["pedido"],
+            consecuencia=propuesta["consecuencia"],
+            codigo=codigo,
+            minutos=minutos,
+        ),
     )

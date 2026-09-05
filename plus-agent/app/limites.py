@@ -55,6 +55,13 @@ MARCA_DURABLE = "[limite]"
 # las ventas por un cambio de horario. Son dos hechos distintos y se anotan
 # distinto.
 MARCA_DURABLE_ENTREGA = "[entrega]"
+# Y una TERCERA marca para el idioma, por la misma razón que la de entrega es
+# distinta de la de límites: son hechos distintos y se anotan distinto. Un
+# cambio de idioma no puede armar el fusible que frena las ventas, y un flush
+# de Redis no puede dejar al sistema mudo esperando que alguien reconfigure un
+# idioma. Perder el idioma cuesta una respuesta en el otro idioma; perder un
+# límite cuesta un pedido que se confirma solo. No se comparte la marca.
+MARCA_DURABLE_IDIOMA = "[idioma]"
 DURABLE_CACHE_SEGUNDOS = 60.0
 
 CLAVE_VALORES = "plus-agent:limites"
@@ -68,7 +75,17 @@ AUDITORIA_MAXIMA = 500
 
 
 class LimiteError(RuntimeError):
-    """Un límite falta, no se puede leer, o no es un número creíble."""
+    """Un límite falta, no se puede leer, o no es un número creíble.
+
+    ``clave`` es opcional y nombra una entrada del catálogo de app/idioma.py.
+    Los errores que ve una persona —un código que no es, uno vencido, uno ya
+    usado— la traen para poder mostrarse en su idioma; el resto sigue viajando
+    sólo con su texto en español, que es lo que ya hacían.
+    """
+
+    def __init__(self, mensaje: object = "", clave: str = "") -> None:
+        super().__init__(mensaje)
+        self.clave = clave
 
 
 # What KIND of value a setting holds. Each kind has exactly one validator and
@@ -82,6 +99,9 @@ HORA = "hora"
 # datos permitidos, y con una sola manda esa sobre su dato.
 LOCALIDADES = "localidades"
 CODIGOS_POSTALES = "codigos_postales"
+# Un idioma. Sólo dos valores posibles y los valida app/idioma.py, que es el
+# único lugar donde se decide qué texto significa qué idioma.
+IDIOMA = "idioma"
 
 # The normal form for "nothing configured". An EMPTY string cannot mean that:
 # _resolver treats "" in the store as "unset" and falls through to the
@@ -425,9 +445,32 @@ ENTREGA: dict[str, Definicion] = {
     ),
 }
 
+# El idioma del agente de gestión. Grupo aparte de LIMITES y de ENTREGA, con
+# su propia marca durable: no alimenta configuracion() —no decide si un pedido
+# se confirma solo— y su pérdida no puede frenar nada.
+IDIOMAS: dict[str, Definicion] = {
+    "IDIOMA_GERENCIA": Definicion(
+        nombre="IDIOMA_GERENCIA",
+        alias=(
+            "idioma de gerencia",
+            "idioma gerencia",
+            "manager language",
+            "idioma del gerente",
+            "idioma de gestion",
+            "idioma de gestión",
+            "language",
+            "idioma",
+        ),
+        significado="En qué idioma le contesta el sistema al equipo",
+        unidad="idioma",
+        default="es",
+        tipo=IDIOMA,
+    ),
+}
+
 # Everything the owner can set, in one mapping. LIMITES stays separate above
 # because only it feeds configuracion().
-TODOS: dict[str, Definicion] = {**LIMITES, **ENTREGA}
+TODOS: dict[str, Definicion] = {**LIMITES, **ENTREGA, **IDIOMAS}
 
 # La cuenta contable NO se toca por WhatsApp. Es un account head real de
 # ERPNext: escribir el nombre equivocado no rompe el bot, desbalancea la
@@ -488,6 +531,7 @@ def _texto(valor: object) -> str:
 
 _durable_cache: tuple[float, bool] | None = None
 _durable_cache_entrega: tuple[float, bool] | None = None
+_durable_cache_idioma: tuple[float, bool] | None = None
 
 
 def _consultar_marca(marca: str, queja: str) -> bool:
@@ -575,6 +619,60 @@ def _reglas_de_entrega_perdidas(almacen: dict[str, str]) -> bool:
     """
     sin_reglas_del_dueno = not any(almacen.get(nombre, "").strip() for nombre in ENTREGA)
     return sin_reglas_del_dueno and _hubo_cambios_durables_entrega()
+
+
+def _hubo_cambios_durables_idioma() -> bool:
+    """Si ERPNext recuerda que alguna vez se fijó un idioma. NUNCA levanta.
+
+    A diferencia de entrega, «no pude averiguarlo» devuelve False. No hay tal
+    cosa como «ningún idioma en vigencia»: algo hay que escribir. Ante la duda
+    se contesta en el idioma por defecto, que es exactamente lo que hacía el
+    sistema antes de que este ajuste existiera.
+    """
+    global _durable_cache_idioma
+    ahora = time.monotonic()
+    if _durable_cache_idioma and _durable_cache_idioma[0] > ahora:
+        return _durable_cache_idioma[1]
+    try:
+        hubo = _consultar_marca(MARCA_DURABLE_IDIOMA, "idioma no verificable")
+    except LimiteError:
+        print(
+            "[limites] no pude verificar en ERPNext si el idioma se fijó antes; "
+            "sigo con el idioma por defecto"
+        )
+        return False
+    _durable_cache_idioma = (ahora + DURABLE_CACHE_SEGUNDOS, hubo)
+    return hubo
+
+
+def idioma_gerencia() -> str:
+    """El idioma del agente de gestión. NUNCA levanta y nunca frena nada.
+
+    Lee el almacén DIRECTO y no por _almacen(): ese fusible existe para que un
+    límite perdido no deje que algo se confirme solo, y un idioma no autoriza
+    nada. Si se aplicara acá, perder el almacén de límites dejaría al sistema
+    sin poder contestarle al dueño — que es peor que contestarle en español.
+
+    El orden es el mismo de _resolver: lo que fijó el dueño, después el
+    entorno de arranque, después el default.
+    """
+    from app import idioma as idioma_mod
+
+    try:
+        crudo = locks.conexion().hgetall(CLAVE_VALORES)
+    except (locks.CoordinationError, RedisError) as exc:
+        print(f"[limites] no pude leer el idioma de gerencia ({type(exc).__name__})")
+        return idioma_mod.por_defecto()
+    valores = {_texto(k): _texto(v) for k, v in (crudo or {}).items()}
+    fijado = valores.get("IDIOMA_GERENCIA", "").strip()
+    if fijado:
+        elegido = idioma_mod.normalizar(fijado)
+        if elegido:
+            return elegido
+    del_entorno = idioma_mod.normalizar(os.getenv("IDIOMA_GERENCIA", ""))
+    if del_entorno:
+        return del_entorno
+    return idioma_mod.por_defecto()
 
 
 def _almacen() -> dict[str, str]:
@@ -774,6 +872,42 @@ def _hora(defi: Definicion, crudo: str) -> str:
     return f"{int(encontrado.group(1)):02d}:{encontrado.group(2)}"
 
 
+def _idioma(defi: Definicion, crudo: str) -> str:
+    """«inglés», «english», «español»… -> "en" | "es", o LimiteError.
+
+    Quién decide qué texto nombra qué idioma es app/idioma.py y nadie más: acá
+    sólo se traduce el pedido del dueño a la forma normal que se guarda, se le
+    muestra de vuelta y se escribe en la auditoría.
+    """
+    from app import idioma as idioma_mod
+
+    elegido = idioma_mod.normalizar(crudo)
+    if elegido is None:
+        raise LimiteError(
+            f"«{defi.alias[0]}» sólo puede ser español o inglés, no {crudo!r}"
+        )
+    return elegido
+
+
+def mostrar(nombre: str, valor: object, en_idioma: str | None = None) -> str:
+    """Cómo se le MUESTRA al dueño el valor de un ajuste, en su idioma.
+
+    Sólo la prosa cambia de idioma. Un tope en pesos, una hora y una lista de
+    localidades se muestran igual en los dos: son datos, no texto. El único
+    que se traduce es un idioma, porque "en" no es una respuesta que alguien
+    quiera leer.
+    """
+    crudo = str(valor if valor is not None else "").strip()
+    defi = TODOS.get(nombre)
+    if defi is not None and defi.tipo == IDIOMA and crudo and crudo != NINGUNO:
+        from app import idioma as idioma_mod
+
+        elegido = idioma_mod.normalizar(crudo)
+        if elegido:
+            return idioma_mod.nombre(elegido, en_idioma)
+    return crudo
+
+
 def validar(nombre: str, crudo: str, *, tecleado: bool = True) -> str:
     """Normaliza un valor para ese ajuste, o levanta LimiteError.
 
@@ -799,6 +933,8 @@ def validar(nombre: str, crudo: str, *, tecleado: bool = True) -> str:
         return _localidades(defi, crudo)
     if defi.tipo == CODIGOS_POSTALES:
         return _codigos_postales(defi, crudo)
+    if defi.tipo == IDIOMA:
+        return _idioma(defi, crudo)
     # 12 significant digits, not the default 6: at :g an owner who sets a
     # 1234567 ceiling gets "1.23457e+06" stored, shown back to him and audited,
     # and reads back as 1234570. Every money limit here reaches seven digits.
@@ -1275,24 +1411,33 @@ def aplicar(codigo: str, telefono: str) -> dict:
     except (locks.CoordinationError, RedisError) as exc:
         raise LimiteError("no pude leer el cambio pendiente") from exc
     if not crudo:
-        raise LimiteError("no hay ningún cambio esperando confirmación")
+        raise LimiteError(
+            "no hay ningún cambio esperando confirmación",
+            clave="codigo.sin_pendiente",
+        )
     try:
         propuesta = json.loads(_texto(crudo))
     except ValueError as exc:
         raise LimiteError("el cambio pendiente quedó ilegible") from exc
 
     if str(propuesta.get("codigo")) != limpio:
-        raise LimiteError("ese código no es el del cambio pendiente")
+        raise LimiteError(
+            "ese código no es el del cambio pendiente",
+            clave="codigo.invalido",
+        )
     if _vencida(propuesta):
         raise LimiteError(
-            "ese código ya venció. No cambié nada: pedime el cambio de nuevo"
+            "ese código ya venció. No cambié nada: pedime el cambio de nuevo",
+            clave="codigo.vencido",
         )
     # Atado al teléfono: el código que le llegó a uno no lo aplica otro, aunque
     # los dos estén en la lista del equipo.
     if telefono_mod.normalizar(propuesta.get("telefono")) != telefono_mod.normalizar(
         telefono
     ):
-        raise LimiteError("ese código no es de este número")
+        raise LimiteError(
+            "ese código no es de este número", clave="codigo.otro_numero"
+        )
 
     # El reclamo. A partir de acá la propuesta es de este turno y de nadie más.
     try:
@@ -1351,9 +1496,15 @@ def _auditar_en_erpnext(entrada: dict) -> None:
     configuró» de «se perdió el almacén». Si no se puede escribir, el cambio
     NO se aplica: prefiero no mover el límite antes que moverlo sin registro.
     """
-    global _durable_cache, _durable_cache_entrega
+    global _durable_cache, _durable_cache_entrega, _durable_cache_idioma
     entrega_cambio = entrada["limite"] in ENTREGA
-    marca = MARCA_DURABLE_ENTREGA if entrega_cambio else MARCA_DURABLE
+    idioma_cambio = entrada["limite"] in IDIOMAS
+    if idioma_cambio:
+        marca = MARCA_DURABLE_IDIOMA
+    elif entrega_cambio:
+        marca = MARCA_DURABLE_ENTREGA
+    else:
+        marca = MARCA_DURABLE
     texto = (
         f"{marca} {entrada['limite']}: {entrada['anterior']} -> "
         f"{entrada['nuevo']} · lo cambió {entrada['telefono']} "
@@ -1367,7 +1518,9 @@ def _auditar_en_erpnext(entrada: dict) -> None:
         raise LimiteError(
             "no pude registrar el cambio en ERPNext, así que no lo apliqué"
         ) from exc
-    if entrega_cambio:
+    if idioma_cambio:
+        _durable_cache_idioma = None
+    elif entrega_cambio:
         _durable_cache_entrega = None
     else:
         _durable_cache = None

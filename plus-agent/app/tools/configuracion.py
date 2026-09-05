@@ -41,7 +41,7 @@ from __future__ import annotations
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from app import limites, notificar, policy
+from app import idioma, limites, notificar, policy
 from app.formato import pesos
 from app.runtime_context import RuntimeContextError, require_management
 
@@ -161,7 +161,14 @@ def proponer_limite(limite: str, valor: str, config: RunnableConfig) -> str:
     except limites.LimiteError as exc:
         return f"No cambié nada: {exc}."
 
-    cambio = f"*{propuesta['alias']}*: {propuesta['anterior']} → {propuesta['nuevo']}"
+    # El idioma en que se le habla al equipo AHORA — no el propuesto. Si está
+    # pasando de español a inglés, el pedido de confirmación llega todavía en
+    # español: recién cuando confirma cambia el idioma.
+    lengua = idioma.gerencia()
+    nombre_ajuste = propuesta.get("limite") or propuesta.get("nombre") or ""
+    anterior = limites.mostrar(nombre_ajuste, propuesta["anterior"], lengua)
+    nuevo = limites.mostrar(nombre_ajuste, propuesta["nuevo"], lengua)
+    cambio = f"*{propuesta['alias']}*: {anterior} → {nuevo}"
     # Deterministic, and to HIS number. This send is the reason the two steps
     # are two: the code never enters the model's context, so nothing the model
     # does — or is talked into doing — can supply it.
@@ -175,9 +182,13 @@ def proponer_limite(limite: str, valor: str, config: RunnableConfig) -> str:
     # was the defect: two messages, two codes, and only the newest one worked.
     entregado = notificar.pedir_codigo_de_ajuste(
         actor.actor_phone,
-        f"Código para confirmar el cambio de ajuste:\n{cambio}\n\n"
-        f"Contestá *{propuesta['codigo']}* para aplicarlo. "
-        "Si no contestás, en 10 minutos se descarta solo.",
+        idioma.t(
+            "codigo.ajuste_pedido",
+            lengua,
+            cambio=cambio,
+            codigo=propuesta["codigo"],
+            minutos=int(limites.PROPUESTA_TTL_SEGUNDOS // 60),
+        ),
     )
     if not entregado:
         # A change waiting on a code he never saw cannot be confirmed, and can
@@ -188,17 +199,8 @@ def proponer_limite(limite: str, valor: str, config: RunnableConfig) -> str:
             "confirmación, así que lo descarté. No cambié nada. Probá de nuevo."
         )
     if propuesta.get("repetida"):
-        return (
-            f"Es el mismo cambio que ya estaba esperando:\n{cambio}\n\n"
-            "Te reenvié el MISMO código, así que el que ya tenías sigue "
-            "sirviendo. No preparé nada nuevo ni cambié nada."
-        )
-    return (
-        f"Cambio preparado, todavía sin aplicar:\n{cambio}\n\n"
-        "Te mandé el código de confirmación por separado: contestá con esos "
-        "cuatro dígitos y lo aplico. Yo no lo veo y no lo puedo aplicar por vos. "
-        "Si no contestás, en 10 minutos se descarta solo."
-    )
+        return idioma.t("codigo.ajuste_repetido", lengua, cambio=cambio)
+    return idioma.t("codigo.ajuste_preparado", lengua, cambio=cambio)
 
 
 @tool

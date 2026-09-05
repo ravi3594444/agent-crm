@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from langchain_core.messages import BaseMessage, SystemMessage, trim_messages
 from langchain_core.runnables import RunnableConfig
 
+from app import idioma
 from app.prompts import SYSTEM_ES_AR
 from app.prompts_gerencia import SYSTEM_GERENCIA
 
@@ -79,21 +80,29 @@ def prompt_clientes(state, config: RunnableConfig) -> list[BaseMessage]:
             "registrá primero un contacto y derivá el alta comercial."
         )
     )
+    # Sólo lo que el cliente PIDIÓ explícitamente fija su idioma. Sin nada
+    # guardado, la regla es la de espejo de siempre: el modelo sigue el idioma
+    # del último mensaje, que es el comportamiento anterior palabra por palabra.
+    guardado = idioma.cliente_guardado(_configurable(config).get("actor_phone"))
     system = SYSTEM_ES_AR.format(
         NEGOCIO=os.getenv("NOMBRE_NEGOCIO", "la empresa"),
         CONTEXTO_CLIENTE=contexto,
         HORARIO=os.getenv("HORARIO_ATENCION", "lunes a viernes de 8 a 17"),
         HOY=business_today(),
+        IDIOMA_REGLA=idioma.regla_prompt(guardado),
     )
     return [SystemMessage(content=system), *_mensajes(state)]
 
 
 def prompt_gerencia(state, config: RunnableConfig) -> list[BaseMessage]:
     del config
+    # El equipo NO espeja: contesta en el idioma que fijó el dueño, y mientras
+    # nadie lo fije, en el de por defecto.
     system = SYSTEM_GERENCIA.format(
         NEGOCIO=os.getenv("NOMBRE_NEGOCIO", "la empresa"),
         USUARIO="miembro autorizado del equipo",
         HOY=business_today(),
+        IDIOMA_REGLA=idioma.regla_prompt(idioma.gerencia()),
     )
     return [SystemMessage(content=system), *_mensajes(state)]
 
