@@ -139,6 +139,49 @@ def _post(url: str, cuerpo: dict | None = None, timeout: float = 30) -> dict:
 # ------------------------------------------------------------------ entorno
 
 
+# El guión de demo/escenarios.py está escrito en español. Los fragmentos que
+# nombran un mensaje DETERMINISTA cambian con el idioma, así que acá está su
+# equivalente: el escenario pasa si aparece cualquiera de los dos. Los que
+# nombran un DATO —«SAL-ORD», «LECHE-ENT-1L», «Rio Ceballos»— no están porque
+# no cambian de idioma, que es justamente lo que el guard exige.
+_EQUIVALENTES = {
+    "código para confirmar": "code to confirm",
+    "no cambié nada": "i applied nothing",
+    "no cancelo": "i am not cancelling",
+    "rechazado": "rejected",
+    "registré": "registered",
+    "qué día": "which day",
+    "contraoferta": "counter-offer",
+}
+
+
+def _dice(todo: str, fragmento: str) -> bool:
+    """¿El texto dice eso, en el idioma que sea?"""
+    corto = fragmento.lower()
+    if corto in todo:
+        return True
+    equivalente = _EQUIVALENTES.get(corto)
+    return bool(equivalente and equivalente in todo)
+
+
+def _acuses() -> tuple[str, ...]:
+    """El acuse de recibo en TODOS los idiomas, tal como lo manda el agente."""
+    from app import idioma
+
+    return tuple(idioma.t("ack.recibido", i).lower() for i in idioma.IDIOMAS)
+
+
+def _es_acuse(texto: str) -> bool:
+    limpio = str(texto or "").strip().lower()
+    return any(limpio.startswith(a[:20]) for a in _acuses())
+
+
+def _idioma_demo() -> str:
+    """El idioma del banco de pruebas: IDIOMA_DEMO del entorno, o español."""
+    crudo = str(os.environ.get("IDIOMA_DEMO", "es") or "es").strip().lower()
+    return crudo if crudo in ("es", "en") else "es"
+
+
 def entorno_del_agente(modo: str = "offline", modelo_llm: str = "") -> dict[str, str]:
     """El .env del banco de pruebas. Ninguna credencial de acá sirve para nada."""
     modelo = RELEVO if modo == "gemini" else SERVICIOS
@@ -168,6 +211,12 @@ def entorno_del_agente(modo: str = "offline", modelo_llm: str = "") -> dict[str,
         "ZONAS_ENTREGA_CP": "5000,5001,5105",
         "ZONAS_ENTREGA_LOCALIDADES": "Cordoba,Villa Allende",
         "BUSINESS_TIMEZONE": "America/Argentina/Buenos_Aires",
+        # El idioma del banco de pruebas. Por defecto español, que es en el que
+        # está escrito el guión de demo/escenarios.py. Con IDIOMA_DEMO=en se
+        # corre el mismo guión con los mensajes deterministas en inglés, que es
+        # lo que verifica que la migración no rompió el flujo.
+        "IDIOMA_DEFAULT": _idioma_demo(),
+        "IDIOMA_GERENCIA": _idioma_demo(),
         # --- límites: nada se auto-confirma salvo en su propio escenario
         "STOCK_CONFIABLE": "true",
         "STOCK_CONFIABLE_HORAS": "24",
@@ -316,6 +365,11 @@ class Piloto:
 
         Todo turno de texto manda DOS cosas: el acuse ("Recibido, dame un
         momento…") y después la respuesta. Se espera la segunda.
+
+        El acuse se reconoce contra el CATÁLOGO, en los dos idiomas, y no
+        contra un fragmento en español escrito acá: con el idioma en inglés ese
+        fragmento no aparecía, el acuse se leía como si fuera la respuesta, y
+        el turno se daba por contestado antes de que llegara nada.
         """
         inicio = time.monotonic()
         mientras = ESPERA_TURNO
@@ -324,7 +378,7 @@ class Piloto:
             envios = self._control("/buzon")["envios"]
             nuevos = [e for e in envios if e["n"] > desde and e["a"] == telefono]
             vistos = [e["texto"] for e in nuevos]
-            sustanciales = [t for t in vistos if "dame un momento" not in t.lower()]
+            sustanciales = [t for t in vistos if not _es_acuse(t)]
             if sustanciales:
                 return vistos, time.monotonic() - inicio
             time.sleep(0.5)
@@ -392,8 +446,7 @@ class Piloto:
         if paso.espera_respuesta and not turno.respuestas:
             problemas.append(
                 f"no llegó ninguna respuesta en {ESPERA_TURNO:.0f}s")
-        sustanciales = [t for t in turno.respuestas
-                        if "dame un momento" not in t.lower()]
+        sustanciales = [t for t in turno.respuestas if not _es_acuse(t)]
         if paso.espera_respuesta and not sustanciales:
             problemas.append("sólo llegó el acuse, nunca la respuesta")
         # Un fallo técnico es SIEMPRE un fallo del escenario, diga lo que diga
@@ -413,7 +466,7 @@ class Piloto:
         # es el estado de los documentos y una disculpa técnica: eso no
         # depende de cómo el modelo eligió redactar.
         for fragmento in paso.espera:
-            if fragmento.lower() not in todo:
+            if not _dice(todo, fragmento):
                 queja = f"la respuesta no dice {fragmento!r}"
                 if self.modo == "gemini":
                     turno.avisos.append(queja + " (redacción del modelo)")

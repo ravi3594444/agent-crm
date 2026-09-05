@@ -1014,6 +1014,68 @@ System User access token and establish a rotation/revocation procedure; Meta's
 describes the supported token types. Never paste a live token into source,
 logs, issues, or a pull request.
 
+## Español o inglés, y quién lo decide
+
+Hay DOS idiomas y son independientes: el del equipo y el de cada cliente.
+
+**El del equipo** es un ajuste del dueño y se cambia por el mismo camino de dos
+pasos que un límite — el agente prepara, y el código de cuatro dígitos que llega
+al teléfono lo confirma:
+
+```
+manager language English      idioma de gerencia inglés
+manager language Spanish      idioma de gerencia español
+```
+
+Sólo un número de `TELEFONOS_EQUIPO` llega a ese camino. Un cliente que mande
+los cuatro dígitos correctos no aplica nada: `es_equipo()` corta antes.
+
+**El de cada cliente** va por teléfono, y ningún cliente puede tocarle el idioma
+a otro ni al equipo — la preferencia se guarda contra el número verificado del
+webhook, no contra nada que venga escrito en el mensaje. Un cliente lo pide
+diciéndolo:
+
+```
+reply in English / in English please / speak English
+respondé en español / contestame en español
+```
+
+Sin preferencia guardada rige lo de siempre: se contesta en el idioma del
+mensaje. Si no se puede decidir, el de `IDIOMA_DEFAULT` (español).
+
+### Qué se traduce y qué no
+
+Se traduce **lo que lee una persona en WhatsApp**. `app/idioma.py` tiene UN
+catálogo con las dos versiones escritas a mano; no hay ningún `if idioma ==`
+repartido por el código, y ningún modelo traduce nada — un mensaje de
+autorización traducido por una máquina es un mensaje que alguien puede empujar a
+decir otra cosa.
+
+NO se traduce nada que sea un valor. Los logs, los estados canónicos de ERPNext
+(`To Deliver and Bill`), las marcas de auditoría (`[limite]`, `[entrega]`,
+`[idioma]`), los comentarios que se escriben sobre un documento de ERPNext, y el
+texto del cliente citado. La lista completa, con el motivo de cada grupo, está
+en `tests/idioma_allowlist.py`.
+
+**Los comandos siguen en español** incluso dentro de un mensaje en inglés:
+`confirmar SAL-ORD-…`, `ver …`, `cancelar … <motivo>`, `acepto` / `no acepto`
+son el payload que parsea el router, y son lo que la gente ya escribe. Los
+equivalentes en inglés se AGREGARON al parser — `accept`, `reject`, `decline`,
+`yes`, `agreed`, `no thanks`, `not interested` — sin sacar ninguno de los de
+siempre.
+
+Los DATOS son idénticos byte a byte en los dos idiomas: el código de
+confirmación, el número de pedido, la cantidad, el importe, la moneda y la
+fecha. Hay tests que lo exigen; si un dato cambiara al traducir, la traducción
+habría dejado de ser prosa y sería parte de la autorización.
+
+### Si falta una traducción
+
+Se cae al idioma por defecto y sigue. Nunca levanta y nunca manda un texto
+vacío: un mensaje que no sale es un cliente sin respuesta, y eso es peor que un
+mensaje en el otro idioma. `tests/test_idioma_cobertura.py` corre TODOS los
+constructores en inglés y falla si queda una palabra en español sin justificar.
+
 ## Deploying client #2
 
 Create a fresh secret configuration from `.env.example`, use that client's
