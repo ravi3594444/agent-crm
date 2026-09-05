@@ -61,6 +61,17 @@ _DUMMY = {
     "BUSINESS_TIMEZONE": "America/Argentina/Buenos_Aires",
     "ERPNEXT_COMPANY": "Lacteos Test SA",
     "ERPNEXT_WAREHOUSE": "Principal - LT",
+    # LAS DOS QUE DECIDEN QUIÉN ES QUIÉN, y las dos que un .env real cambia.
+    # app/telefono.py lee PAIS_TELEFONO AL IMPORTAR y app/router.py arma STAFF
+    # igual, así que un .env con otro país o con el número real del dueño no
+    # "configura" la suite: la hace probar otra cosa. Con un .env de un piloto
+    # en +91 se caen veinticuatro tests de identidad que no tienen nada que ver
+    # con el país, y con un TELEFONOS_EQUIPO cargado, un test que dice "nadie
+    # autoriza" prueba lo contrario de lo que dice. Vacío es lo que hay en un
+    # checkout limpio, y los tests que necesitan un equipo lo fijan ellos con
+    # router.recargar().
+    "PAIS_TELEFONO": "54",
+    "TELEFONOS_EQUIPO": "",
 }
 for _k, _v in _DUMMY.items():
     os.environ.setdefault(_k, _v)

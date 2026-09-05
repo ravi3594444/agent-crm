@@ -78,6 +78,27 @@ NEGATIVAS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def sin_whatsapp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ninguna prueba manda un WhatsApp de verdad.
+
+    `proponer_limite` termina en app/notificar.py::pedir_codigo_de_ajuste, que
+    abre una conexión a graph.facebook.com y la cierra con un error. Nunca
+    cambió un resultado —trata «no se lo pude mandar» como el caso normal— pero
+    la casa dice que los tests no salen a la red, y salían.
+    """
+    from app import whatsapp
+
+    monkeypatch.setattr(
+        whatsapp, "enviar_mensaje",
+        Mock(side_effect=AssertionError("ningún test manda un WhatsApp real")),
+    )
+    monkeypatch.setattr(
+        whatsapp, "enviar_botones",
+        Mock(side_effect=AssertionError("ningún test manda un WhatsApp real")),
+    )
+
+
 def _config(scope: str, phone: str) -> dict:
     return {
         "configurable": {
