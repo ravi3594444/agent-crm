@@ -222,7 +222,9 @@ def _diferencia(antes: dict, despues: dict) -> dict[str, dict]:
 _RE_PEDIDO = re.compile(r"\b[A-Z]{2,6}(?:-[A-Z]{2,6})?-\d{2,}[0-9-]*\b")
 # El código de confirmación de un ajuste, como lo recibe el dueño:
 # app/notificar.py::pedir_codigo_de_ajuste lo manda entre asteriscos.
-_RE_CODIGO = re.compile(r"\*(\d{4})\*")
+# Cuatro dígitos para un cambio de ajuste (app/limites.py), seis para una
+# acción sobre un pedido (app/acciones.py). Los dos llegan en negrita.
+_RE_CODIGO = re.compile(r"\*(\d{4,6})\*")
 
 
 class Piloto:

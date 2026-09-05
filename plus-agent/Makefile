@@ -63,7 +63,7 @@ decisiones: ## Ver qué hizo la política y los avisos en cada pedido
 briefing: ## Mandar el briefing ahora (sin esperar al cron)
 	docker compose run --rm briefing
 
-demo: install ## Banco de pruebas: los 14 escenarios, determinístico y sin red (ver demo/README.md)
+demo: install ## Banco de pruebas: los 17 escenarios, determinístico y sin red (ver demo/README.md)
 	$(PY) -m demo.piloto --modo offline
 
 demo-gemini: install ## Lo mismo pero con Gemini de verdad, por un relevo aislado (consume cuota)

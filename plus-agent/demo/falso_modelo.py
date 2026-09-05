@@ -112,6 +112,13 @@ def _resolver(argumentos: dict, mensajes: list[dict]) -> dict:
         encontrados = _RE_PEDIDO.findall(contenido)
         if encontrados:
             pedido = encontrados[-1]
+    if not pedido:
+        # El dueño escribiéndole al agente de gerencia nombra el pedido ÉL: su
+        # hilo empieza de cero y no tiene ningún resultado de herramienta de
+        # donde sacarlo. Un modelo lo lee de lo que le escribieron, así que el
+        # guión también. El resultado de herramienta sigue teniendo prioridad:
+        # los escenarios de clientes no cambian en nada.
+        pedido = ((_RE_PEDIDO.findall(_ultimo_humano(mensajes)[0]) or [""])[-1])
     crudo = crudo.replace(ULTIMO_PEDIDO, pedido)
     crudo = crudo.replace(
         ULTIMO_RESULTADO, json.dumps(resultado, ensure_ascii=False)[1:-1])

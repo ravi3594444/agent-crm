@@ -685,6 +685,8 @@ def test_every_release_scenario_the_task_asked_for_exists() -> None:
         "ok_sin_terminos",
         # Las zonas de reparto, que dejaron de ser sólo del entorno.
         "gerencia_cambia_zona",
+        # Y la prosa del dueño sobre un pedido, con su código de seis dígitos.
+        "gerencia_accion_en_prosa",
     }
     assert esperados <= claves, esperados - claves
 
@@ -741,6 +743,77 @@ def test_every_customer_message_in_a_scenario_has_a_rule_in_the_script() -> None
             if not any(matchea(texto, rol) for matchea, _pasos in reglas):
                 sin_regla.append(f"{e.clave}: {texto!r}")
     assert not sin_regla, sin_regla
+
+
+def test_the_management_prose_has_a_rule_and_names_one_real_action() -> None:
+    """El guión de gerencia también tiene que existir.
+
+    test_every_customer_message_in_a_scenario_has_a_rule_in_the_script saltea
+    los mensajes del equipo porque casi todos son comandos que resuelve
+    app/main.py sin modelo. Los que NO son comandos —la prosa— sí necesitan
+    regla, y sin ella el escenario falla por el banco de pruebas.
+    """
+    from app import acciones
+
+    reglas = escenarios.reglas()
+    sin_regla, herramientas = [], []
+    for e in escenarios.escenarios():
+        for paso in e.pasos:
+            if paso.quien not in {datos.TELEFONO_DUENO, datos.TELEFONO_EQUIPO}:
+                continue
+            texto = paso.texto.replace(escenarios.ULTIMO_PEDIDO, "SAL-ORD-2026-00001")
+            if texto == escenarios.ULTIMO_CODIGO or md._normalizar(texto).isdigit():
+                continue
+            from app import main
+            if main._staff_command(texto):
+                continue
+            pasos = next(
+                (p for matchea, p in reglas if matchea(texto, "gerencia")), None)
+            if pasos is None:
+                sin_regla.append(f"{e.clave}: {texto!r}")
+                continue
+            herramientas += [
+                paso_g for paso_g in pasos if isinstance(paso_g, md.Llamada)]
+
+    assert not sin_regla, sin_regla
+    # Y lo que el guión pide sobre un pedido es una acción de la lista blanca.
+    for llamada in herramientas:
+        if llamada.herramienta != "proponer_accion":
+            continue
+        assert llamada.argumentos["accion"] in acciones.TODAS
+        assert acciones.TODAS[llamada.argumentos["accion"]].escritura
+
+
+def test_the_owner_can_name_the_order_himself_in_the_prose() -> None:
+    """El hilo de gerencia arranca de cero: no hay resultado de herramienta.
+
+    Un modelo lee el número de lo que le escribieron. El guión hace lo mismo, y
+    el resultado de herramienta sigue teniendo prioridad cuando lo hay.
+    """
+    reglas = [(md.contiene("rechazame el"),
+               [md.Llamada("proponer_accion",
+                           {"accion": "rechazar", "pedido": md.ULTIMO_PEDIDO,
+                            "detalle": "no llegamos"})])]
+    respuesta = md.responder(reglas, _payload([
+        {"role": "system", "content": "Asistente de GERENCIA del negocio"},
+        {"role": "user", "content": "rechazame el SAL-ORD-2026-00042 que no llegamos"}]))
+    argumentos = json.loads(
+        respuesta["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+
+    assert argumentos["pedido"] == "SAL-ORD-2026-00042"
+
+
+def test_the_pilot_reads_both_confirmation_code_lengths() -> None:
+    """Cuatro dígitos para un ajuste, seis para una acción sobre un pedido."""
+    from app import acciones, limites
+
+    cuatro = piloto._RE_CODIGO.search("Contestá *1234* para aplicarlo")
+    seis = piloto._RE_CODIGO.search("Contestá *123456* para que la haga")
+
+    assert cuatro and cuatro.group(1) == "1234"
+    assert seis and seis.group(1) == "123456"
+    assert len(limites._codigo()) == 4
+    assert len(acciones._codigo()) == 6
 
 
 def test_the_fake_phones_are_obviously_invented() -> None:

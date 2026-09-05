@@ -319,6 +319,36 @@ def escenarios() -> list[Escenario]:
             ],
         ),
         Escenario(
+            "gerencia_accion_en_prosa",
+            "El dueño pide en criollo que se rechace un pedido, y lo confirma",
+            porque="Era el último callejón del lado del dueño: escribir en "
+                   "criollo llegaba al agente de gerencia, que no tenía "
+                   "ninguna herramienta capaz de mover un pedido, así que la "
+                   "respuesta era la lista de comandos exactos para que los "
+                   "tipeara él. Ahora esa prosa se convierte en UNA acción de "
+                   "las que ya existían —el mismo payload que arma el comando "
+                   "escrito a mano— y no se ejecuta: queda propuesta, con la "
+                   "consecuencia escrita, hasta que él contesta el código de "
+                   "seis dígitos que Python le manda aparte y que el modelo no "
+                   "ve. El paso del medio es el que importa: el pedido sigue "
+                   "en borrador y nadie dijo que se rechazó.",
+            pasos=[
+                Paso(CLIENTE, "dame 10 unidades de manteca para mañana",
+                     espera=["SAL-ORD"]),
+                # Prosa, no un comando: ningún verbo exacto, y el motivo va
+                # adentro de la frase. Prepara y NO ejecuta.
+                Paso(DUENO, "rechazame el " + ULTIMO_PEDIDO +
+                     " que no llegamos con el reparto",
+                     espera=["Código para confirmar", "Rechazo el pedido"],
+                     prohibe=["rechazado"],
+                     documentos={"Sales Order/*": {"docstatus": 0}}),
+                # Los seis dígitos que le llegaron por separado.
+                Paso(DUENO, ULTIMO_CODIGO,
+                     espera=["rechazado"],
+                     documentos={"Sales Order/*": {"docstatus": 0}}),
+            ],
+        ),
+        Escenario(
             "cliente_no_alcanza_gerencia",
             "Un cliente intenta usar una herramienta de gerencia",
             porque="La frontera que un mensaje SÍ puede atacar. El router "
@@ -359,6 +389,17 @@ def reglas() -> list[Regla]:
             Llamada("proponer_limite", {
                 "limite": "localidades de reparto",
                 "valor": "Cordoba, Villa Allende, Rio Ceballos",
+            }),
+            Texto(ULTIMO_RESULTADO),
+        ]),
+        # -- la prosa del dueño sobre UN pedido. El número lo nombra él, que es
+        # de donde lo lee un modelo cuando el hilo de gerencia recién empieza.
+        # El motivo va tal como lo dijo: Python no lo interpreta, sólo lo pasa.
+        (contiene("rechazame el"), [
+            Llamada("proponer_accion", {
+                "accion": "rechazar",
+                "pedido": ULTIMO_PEDIDO,
+                "detalle": "no llegamos con el reparto",
             }),
             Texto(ULTIMO_RESULTADO),
         ]),

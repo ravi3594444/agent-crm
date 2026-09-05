@@ -4,7 +4,7 @@ Corre los escenarios de release contra **la imagen real del agente**, sin
 tocar ERPNext, ni Meta, ni WhatsApp, ni el Redis de staging.
 
 ```bash
-make demo          # 16 escenarios, determinístico, sin ninguna red
+make demo          # 17 escenarios, determinístico, sin ninguna red
 make demo-gemini   # los mismos, con Gemini de verdad (consume cuota)
 ```
 
@@ -161,7 +161,7 @@ autorizada no escribió.
 
 - **El modo gemini no cabe en el tier gratuito.** Son 20 pedidos por día y por
   modelo (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), y un turno de
-  cliente gasta dos o más. Los 16 escenarios necesitan ~90. Con `--modelo` se
+  cliente gasta dos o más. Los 17 escenarios necesitan ~95. Con `--modelo` se
   puede usar otro modelo de Gemini, que tiene su propia cuota diaria, para
   probar un subconjunto.
 - El reloj no se controla: los escenarios que dependen de un vencimiento
