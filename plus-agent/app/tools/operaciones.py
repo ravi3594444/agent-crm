@@ -33,7 +33,7 @@ import json
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from app import avisos, erpnext, modelos, outbound_status, solicitudes
+from app import avisos, erpnext, idioma, modelos, outbound_status, solicitudes
 from app.runtime_context import RuntimeContextError, require_management
 
 _SIN_PERMISO = (
@@ -69,12 +69,16 @@ def _cuenta(valor: object) -> str:
     return DESCONOCIDO if numero < 0 else str(numero)
 
 
-def _presencia(nombre: str) -> str:
+def _presencia(nombre: str, lengua: str) -> str:
     """Si una variable está cargada y cuánto mide. NUNCA su valor."""
     import os
 
     valor = str(os.getenv(nombre, "") or "").strip()
-    return f"cargada ({len(valor)} caracteres)" if valor else "VACÍA"
+    return (
+        idioma.t("sistema.cargada", lengua, n=len(valor))
+        if valor
+        else idioma.t("sistema.vacia", lengua)
+    )
 
 
 def _titular(texto: object, tope: int = 100) -> str:
@@ -92,72 +96,101 @@ def _titular(texto: object, tope: int = 100) -> str:
     return ""
 
 
-def _bloque_redis() -> str:
+def _bloque_redis(lengua: str) -> str:
     try:
         outbound_status.cliente().ping()
     except Exception as exc:
-        return f"· Redis: {NO_DISPONIBLE} ({type(exc).__name__})"
-    return "· Redis: responde"
+        return idioma.t(
+            "sistema.componente_caido", lengua, componente="Redis",
+            estado=idioma.t("sistema.no_disponible", lengua),
+            error=type(exc).__name__,
+        )
+    return idioma.t(
+        "sistema.componente_ok", lengua, componente="Redis",
+        estado=idioma.t("sistema.responde", lengua),
+    )
 
 
-def _bloque_erpnext() -> str:
+def _bloque_erpnext(lengua: str) -> str:
     """Una lectura mínima con la identidad de política: existe y contesta."""
     try:
         erpnext.policy_get_list(
             "Company", fields=["name"], limit=1, timeout=TIMEOUT_ERPNEXT
         )
     except Exception as exc:
-        return f"· ERPNext: {NO_DISPONIBLE} ({type(exc).__name__})"
-    return "· ERPNext: responde"
+        return idioma.t(
+            "sistema.componente_caido", lengua, componente="ERPNext",
+            estado=idioma.t("sistema.no_disponible", lengua),
+            error=type(exc).__name__,
+        )
+    return idioma.t(
+        "sistema.componente_ok", lengua, componente="ERPNext",
+        estado=idioma.t("sistema.responde", lengua),
+    )
 
 
-def _bloque_modelos() -> str:
+def _bloque_modelos(lengua: str) -> str:
     try:
         prov = modelos.proveedor()
         _, ventas = modelos.nombre_modelo("clientes", prov=prov)
         _, gerencia = modelos.nombre_modelo("gerencia", prov=prov)
         variable, clave = modelos.clave_api(prov)
     except Exception as exc:
-        return f"· Modelos: {DESCONOCIDO} ({type(exc).__name__})"
-    estado = f"{variable} cargada ({len(clave)} caracteres)" if clave else "clave VACÍA"
-    return (
-        f"· Modelos: proveedor {prov.nombre} — ventas {ventas}, gerencia {gerencia}; "
-        f"{estado}"
+        return idioma.t(
+            "sistema.componente_caido", lengua, componente="Modelos",
+            estado=idioma.t("sistema.desconocido", lengua),
+            error=type(exc).__name__,
+        )
+    estado = (
+        f"{variable} " + idioma.t("sistema.cargada", lengua, n=len(clave))
+        if clave
+        else idioma.t("sistema.clave_vacia", lengua)
+    )
+    return idioma.t(
+        "sistema.modelos", lengua, proveedor=prov.nombre, ventas=ventas,
+        gerencia=gerencia, estado=estado,
     )
 
 
-def _bloque_whatsapp(cuentas: dict) -> str:
-    return (
-        f"· WhatsApp: número {_presencia('WHATSAPP_PHONE_NUMBER_ID')}, "
-        f"token {_presencia('WHATSAPP_TOKEN')}; "
-        f"{_cuenta(cuentas.get('entregas_fallidas'))} entrega(s) que Meta rechazó, "
-        f"{_cuenta(cuentas.get('respuestas_en_dead_letter'))} respuesta(s) a clientes "
-        "sin entregar"
+def _bloque_whatsapp(cuentas: dict, lengua: str) -> str:
+    return idioma.t(
+        "sistema.whatsapp", lengua,
+        numero=_presencia("WHATSAPP_PHONE_NUMBER_ID", lengua),
+        token=_presencia("WHATSAPP_TOKEN", lengua),
+        rechazadas=_cuenta(cuentas.get("entregas_fallidas")),
+        sin_entregar=_cuenta(cuentas.get("respuestas_en_dead_letter")),
     )
 
 
-def _bloque_colas(cuentas: dict) -> str:
-    return (
-        f"· Cola de avisos al cliente: {_cuenta(avisos.pendientes())} en espera, "
-        f"{_cuenta(cuentas.get('avisos_en_dead_letter'))} caído(s)"
+def _bloque_colas(cuentas: dict, lengua: str) -> str:
+    return idioma.t(
+        "sistema.colas", lengua, espera=_cuenta(avisos.pendientes()),
+        caidos=_cuenta(cuentas.get("avisos_en_dead_letter")),
     )
 
 
-def _bloque_decisiones() -> str:
+def _bloque_decisiones(lengua: str) -> str:
     trabadas = solicitudes.trabadas()
     try:
         incompleta = solicitudes.reconstruccion_incompleta()
-        indice = "reconstrucción PENDIENTE" if incompleta else "índice completo"
-    except Exception as exc:
-        indice = f"índice {DESCONOCIDO} ({type(exc).__name__})"
-    return (
-        f"· Decisiones: {indice}; borradores trabados "
-        f"{_cuenta(trabadas)}"
-        + (
-            " (siguen reservando stock; hay un ToDo por cada uno)"
-            if isinstance(trabadas, int) and trabadas > 0
-            else ""
+        indice = idioma.t(
+            "sistema.indice_pendiente" if incompleta else "sistema.indice_completo",
+            lengua,
         )
+    except Exception as exc:
+        indice = idioma.t(
+            "sistema.indice_desconocido", lengua,
+            estado=idioma.t("sistema.desconocido", lengua),
+            error=type(exc).__name__,
+        )
+    reservan = (
+        idioma.t("sistema.decisiones_reservan", lengua)
+        if isinstance(trabadas, int) and trabadas > 0
+        else ""
+    )
+    return idioma.t(
+        "sistema.decisiones", lengua, indice=indice,
+        trabadas=_cuenta(trabadas), extra=reservan,
     )
 
 
@@ -181,15 +214,16 @@ def estado_del_sistema(config: RunnableConfig) -> str:
     except Exception as exc:
         print(f"[operaciones] contadores no disponibles ({type(exc).__name__})")
         cuentas = {}
+    lengua = idioma.gerencia()
     lineas = [
-        _bloque_redis(),
-        _bloque_erpnext(),
-        _bloque_whatsapp(cuentas),
-        _bloque_modelos(),
-        _bloque_colas(cuentas),
-        _bloque_decisiones(),
+        _bloque_redis(lengua),
+        _bloque_erpnext(lengua),
+        _bloque_whatsapp(cuentas, lengua),
+        _bloque_modelos(lengua),
+        _bloque_colas(cuentas, lengua),
+        _bloque_decisiones(lengua),
     ]
-    return "Estado del sistema:\n" + "\n".join(lineas)
+    return idioma.t("sistema.titulo", lengua) + "\n" + "\n".join(lineas)
 
 
 def _entradas_de_avisos_caidos(maximo: int) -> tuple[list[str], str]:
@@ -203,7 +237,12 @@ def _entradas_de_avisos_caidos(maximo: int) -> tuple[list[str], str]:
             outbound_status.DEAD_NOTIFY_KEY, -maximo, -1
         )
     except Exception as exc:
-        return [], f"la lista de avisos caídos está {NO_DISPONIBLE} ({type(exc).__name__})"
+        return [], idioma.t(
+            "sistema.lista_no_disponible",
+            idioma.gerencia(),
+            estado=idioma.t("sistema.no_disponible", idioma.gerencia()),
+            error=type(exc).__name__,
+        )
 
     lineas: list[str] = []
     ilegibles = 0
@@ -227,7 +266,11 @@ def _entradas_de_avisos_caidos(maximo: int) -> tuple[list[str], str]:
         if resumen:
             linea += f"\n    {resumen}"
         lineas.append(linea)
-    problema = f"{ilegibles} entrada(s) ilegible(s) omitida(s)" if ilegibles else ""
+    problema = (
+        idioma.t("sistema.ilegibles", idioma.gerencia(), n=ilegibles)
+        if ilegibles
+        else ""
+    )
     return lineas, problema
 
 
@@ -254,24 +297,29 @@ def ver_avisos_fallidos(config: RunnableConfig, cuantos: int = REGISTROS_DEFAULT
         print(f"[operaciones] contadores no disponibles ({type(exc).__name__})")
         cuentas = {}
 
+    lengua = idioma.gerencia()
     lineas = [
-        "Comunicación que no llegó:",
-        f"· Avisos sin entregar: {_cuenta(cuentas.get('avisos_en_dead_letter'))}",
-        f"· Respuestas a clientes sin entregar: "
-        f"{_cuenta(cuentas.get('respuestas_en_dead_letter'))} "
-        "(no se listan: cada una lleva el mensaje del cliente)",
-        f"· Entregas que Meta rechazó: {_cuenta(cuentas.get('entregas_fallidas'))}",
+        idioma.t("sistema.fallidos_titulo", lengua),
+        idioma.t(
+            "sistema.fallidos_avisos", lengua,
+            n=_cuenta(cuentas.get("avisos_en_dead_letter")),
+        ),
+        idioma.t(
+            "sistema.fallidos_respuestas", lengua,
+            n=_cuenta(cuentas.get("respuestas_en_dead_letter")),
+        ),
+        idioma.t(
+            "sistema.fallidos_rechazadas", lengua,
+            n=_cuenta(cuentas.get("entregas_fallidas")),
+        ),
     ]
     registros, problema = _entradas_de_avisos_caidos(maximo)
     if problema:
         lineas.append(f"⚠️ {problema}")
     if registros:
-        lineas.append(f"\nÚltimos {len(registros)} aviso(s) caído(s), del más nuevo:")
+        lineas.append(idioma.t("sistema.fallidos_ultimos", lengua, n=len(registros)))
         lineas.extend(registros)
     elif not problema:
-        lineas.append("\nNo hay avisos caídos registrados.")
-    lineas.append(
-        "\nCada uno tiene una tarea en ERPNext para contactarlo a mano. Desde acá "
-        "no se reintenta nada."
-    )
+        lineas.append(idioma.t("sistema.fallidos_ninguno", lengua))
+    lineas.append(idioma.t("sistema.fallidos_pie", lengua))
     return "\n".join(lineas)

@@ -414,3 +414,67 @@ def test_rechazar_parsea_en_los_dos_idiomas(dicho):
 def test_el_numero_de_pedido_se_parsea_igual_en_los_dos_idiomas(dicho):
     m = webhook._ACEPTA_RE.match(dicho)
     assert m.group("order").upper() == PEDIDO
+
+
+# ----------------------------- estado del sistema y avisos fallidos
+# Categoría 5: informes operativos, stock y precio.
+
+
+def _config_gerencia():
+    return {"configurable": {"actor_scope": "management",
+                             "actor_phone": "5493519999999",
+                             "thread_id": "ger:t"}}
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_estado_del_sistema_sale_en_el_idioma_del_equipo(lengua, monkeypatch):
+    from app.tools import operaciones
+
+    monkeypatch.setattr(idioma, "gerencia", lambda: lengua)
+    monkeypatch.setattr(operaciones, "require_management", lambda c: None)
+    texto = operaciones.estado_del_sistema.func(_config_gerencia())
+    # Los NOMBRES de los componentes son propios y no se traducen.
+    assert "Redis" in texto and "ERPNext" in texto and "WhatsApp" in texto
+    if lengua == EN:
+        assert "System status:" in texto
+        assert restos_en_espanol(texto, ("Redis", "ERPNext", "WhatsApp")) == []
+    else:
+        assert "Estado del sistema:" in texto
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_los_avisos_fallidos_salen_en_el_idioma_del_equipo(lengua, monkeypatch):
+    from app.tools import operaciones
+
+    monkeypatch.setattr(idioma, "gerencia", lambda: lengua)
+    monkeypatch.setattr(operaciones, "require_management", lambda c: None)
+    monkeypatch.setattr(
+        operaciones.outbound_status, "contar_pendientes",
+        lambda: {"avisos_en_dead_letter": 0, "respuestas_en_dead_letter": 0,
+                 "entregas_fallidas": 0},
+    )
+    monkeypatch.setattr(operaciones, "_entradas_de_avisos_caidos", lambda m: ([], ""))
+    texto = operaciones.ver_avisos_fallidos.func(_config_gerencia())
+    if lengua == EN:
+        assert "Communication that did not arrive:" in texto
+        assert restos_en_espanol(texto, ("Meta", "ERPNext")) == []
+    else:
+        assert "Comunicación que no llegó:" in texto
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_precio_a_confirmar_sale_en_el_idioma(lengua):
+    texto = idioma.t("precio.a_confirmar", lengua)
+    assert texto.strip()
+    if lengua == EN:
+        assert restos_en_espanol(texto) == []
+        assert "confirm" in texto.lower()
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_los_avisos_de_stock_salen_en_el_idioma(lengua):
+    for clave in ("stock.no_confiable", "stock.insuficiente"):
+        texto = idioma.t(clave, lengua, producto="Whole Milk 1 L")
+        assert "Whole Milk 1 L" in texto, "el producto es un dato, no se traduce"
+        if lengua == EN:
+            assert restos_en_espanol(texto, ("Whole Milk 1 L",)) == []

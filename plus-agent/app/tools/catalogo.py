@@ -5,7 +5,7 @@ from datetime import date
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from app import erpnext, inventario, policy
+from app import erpnext, idioma, inventario, policy
 from app.formato import pesos
 from app.runtime_context import RuntimeContextError, actor_context, require_customer
 
@@ -71,7 +71,7 @@ def buscar_producto(consulta: str) -> str:
         price_text = (
             f"{matching['currency']} {matching['price_list_rate']}"
             if matching
-            else "precio a confirmar"
+            else idioma.t("precio.a_confirmar")
         )
         out.append(
             f"- {item['item_name']} ({item['item_code']}) — {price_text} "

@@ -463,25 +463,119 @@ CATALOGO: dict[str, dict[str, str]] = {
         EN: "That code doesn't unlock anything.",
     },
     # ------------------------------------------------ estado del sistema
-    "sistema.ok": {
-        ES: "· {componente}: responde",
-        EN: "· {componente}: responding",
+    # El informe de estado. Los NOMBRES de los componentes (Redis, ERPNext,
+    # WhatsApp) son propios y no se traducen; sí la prosa alrededor.
+    "sistema.titulo": {ES: "Estado del sistema:", EN: "System status:"},
+    "sistema.responde": {ES: "responde", EN: "responding"},
+    "sistema.no_disponible": {ES: "NO DISPONIBLE", EN: "UNAVAILABLE"},
+    "sistema.desconocido": {ES: "DESCONOCIDO", EN: "UNKNOWN"},
+    "sistema.componente_ok": {
+        ES: "· {componente}: {estado}",
+        EN: "· {componente}: {estado}",
     },
-    "sistema.caido": {
-        ES: "· {componente}: {detalle}",
-        EN: "· {componente}: {detalle}",
+    "sistema.componente_caido": {
+        ES: "· {componente}: {estado} ({error})",
+        EN: "· {componente}: {estado} ({error})",
     },
-    "sistema.no_disponible": {
-        ES: "no disponible",
-        EN: "unavailable",
+    "sistema.cargada": {ES: "cargada ({n} caracteres)", EN: "loaded ({n} characters)"},
+    "sistema.vacia": {ES: "VACÍA", EN: "EMPTY"},
+    "sistema.clave_vacia": {ES: "clave VACÍA", EN: "key EMPTY"},
+    "sistema.modelos": {
+        ES: (
+            "· Modelos: proveedor {proveedor} — ventas {ventas}, gerencia "
+            "{gerencia}; {estado}"
+        ),
+        EN: (
+            "· Models: provider {proveedor} — sales {ventas}, management "
+            "{gerencia}; {estado}"
+        ),
     },
-    "sistema.avisos_fallidos": {
-        ES: "{cuantos} aviso(s) que no salieron.",
-        EN: "{cuantos} notification(s) that didn't go out.",
+    "sistema.whatsapp": {
+        ES: (
+            "· WhatsApp: número {numero}, token {token}; {rechazadas} entrega(s) "
+            "que Meta rechazó, {sin_entregar} respuesta(s) a clientes sin entregar"
+        ),
+        EN: (
+            "· WhatsApp: number {numero}, token {token}; {rechazadas} delivery(ies) "
+            "Meta rejected, {sin_entregar} customer reply(ies) undelivered"
+        ),
+    },
+    "sistema.colas": {
+        ES: "· Cola de avisos al cliente: {espera} en espera, {caidos} caído(s)",
+        EN: "· Customer notice queue: {espera} waiting, {caidos} failed",
+    },
+    "sistema.avisos_fallidos_lista": {
+        ES: "Avisos que no salieron ({cuantos}):",
+        EN: "Notifications that did not go out ({cuantos}):",
     },
     "sistema.sin_avisos_fallidos": {
         ES: "No hay avisos fallidos.",
-        EN: "No failed notifications.",
+        EN: "There are no failed notifications.",
+    },
+    "sistema.indice_pendiente": {
+        ES: "reconstrucción PENDIENTE",
+        EN: "rebuild PENDING",
+    },
+    "sistema.indice_completo": {ES: "índice completo", EN: "index complete"},
+    "sistema.indice_desconocido": {
+        ES: "índice {estado} ({error})",
+        EN: "index {estado} ({error})",
+    },
+    "sistema.decisiones": {
+        ES: "· Decisiones: {indice}; borradores trabados {trabadas}{extra}",
+        EN: "· Decisions: {indice}; stuck drafts {trabadas}{extra}",
+    },
+    "sistema.decisiones_reservan": {
+        ES: " (siguen reservando stock; hay un ToDo por cada uno)",
+        EN: " (they still reserve stock; there is a ToDo for each)",
+    },
+    "sistema.fallidos_titulo": {
+        ES: "Comunicación que no llegó:",
+        EN: "Communication that did not arrive:",
+    },
+    "sistema.fallidos_avisos": {
+        ES: "· Avisos sin entregar: {n}",
+        EN: "· Undelivered notifications: {n}",
+    },
+    "sistema.fallidos_respuestas": {
+        ES: (
+            "· Respuestas a clientes sin entregar: {n} (no se listan: cada una "
+            "lleva el mensaje del cliente)"
+        ),
+        EN: (
+            "· Undelivered customer replies: {n} (not listed: each one carries "
+            "the customer's own message)"
+        ),
+    },
+    "sistema.fallidos_rechazadas": {
+        ES: "· Entregas que Meta rechazó: {n}",
+        EN: "· Deliveries Meta rejected: {n}",
+    },
+    "sistema.fallidos_ultimos": {
+        ES: "\nÚltimos {n} aviso(s) caído(s), del más nuevo:",
+        EN: "\nLast {n} failed notification(s), newest first:",
+    },
+    "sistema.fallidos_ninguno": {
+        ES: "\nNo hay avisos caídos registrados.",
+        EN: "\nThere are no failed notifications on record.",
+    },
+    "sistema.fallidos_pie": {
+        ES: (
+            "\nCada uno tiene una tarea en ERPNext para contactarlo a mano. "
+            "Desde acá no se reintenta nada."
+        ),
+        EN: (
+            "\nEach one has an ERPNext task to contact them by hand. Nothing is "
+            "retried from here."
+        ),
+    },
+    "sistema.ilegibles": {
+        ES: "{n} entrada(s) ilegible(s) omitida(s)",
+        EN: "{n} unreadable entry(ies) skipped",
+    },
+    "sistema.lista_no_disponible": {
+        ES: "la lista de avisos caídos está {estado} ({error})",
+        EN: "the failed-notification list is {estado} ({error})",
     },
     # ---------------------------------------- stock / precio / entrega
     "stock.no_confiable": {
