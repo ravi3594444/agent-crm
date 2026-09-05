@@ -89,15 +89,21 @@ def _en_cola(canal) -> list[dict]:
 # ---------------------------------------------------------------- the content
 
 
-def test_the_confirmation_carries_order_items_total_and_fulfilment(canal) -> None:
-    texto = avisos.texto_confirmacion_cliente(PEDIDO)
+@pytest.mark.parametrize("lengua, palabra", [("es", "confirmado"), ("en", "confirmed")])
+def test_the_confirmation_carries_order_items_total_and_fulfilment(
+    canal, lengua, palabra
+) -> None:
+    texto = avisos.texto_confirmacion_cliente(PEDIDO, lengua)
 
+    # Los DATOS son los mismos en los dos idiomas: sólo cambia la prosa.
     assert SO in texto
     assert "5 Litro" in texto and "Leche entera 1 L" in texto
     assert "4.800,00 ARS" in texto
     assert "Av. Colón 1234" in texto and "2026-09-05" in texto
-    # Bilingual, because outside a model turn the customer's language is unknown.
-    assert "confirmado" in texto and "confirmed" in texto
+    assert palabra in texto
+    # Ya no salen los dos idiomas pegados: el cliente recibe UNO.
+    otra = "confirmed" if lengua == "es" else "confirmado"
+    assert otra not in texto
 
 
 def test_the_text_does_not_depend_on_any_model_output(canal) -> None:

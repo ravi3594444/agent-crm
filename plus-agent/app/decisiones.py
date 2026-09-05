@@ -30,7 +30,7 @@ from __future__ import annotations
 import os
 import time
 
-from app import confirmacion, erpnext, solicitudes, telefono
+from app import confirmacion, erpnext, idioma, solicitudes, telefono
 from app.locks import CoordinationError, distributed_lock
 from app.outbound_status import (
     has_accepted,
@@ -260,15 +260,12 @@ def _comentar(nombre: str, texto: str) -> None:
         print(f"[decisiones] {nombre}: comentario falló ({type(exc).__name__})")
 
 
-def _texto_rechazo(nombre: str, razon: str) -> str:
-    """Bilingual: outside a model turn the customer's language is unknown."""
-    detalle_es = f" ({razon})" if razon else ""
-    detalle_en = f" ({razon})" if razon else ""
-    return (
-        f"Hola! Sobre tu pedido {nombre}: no vamos a poder cumplirlo"
-        f"{detalle_es}. En breve te escribe alguien del equipo. Perdón por la molestia."
-        f"\n\nHi! About your order {nombre}: we won't be able to fulfil it"
-        f"{detalle_en}. Someone from our team will message you shortly. Sorry about that."
+def _texto_rechazo(nombre: str, razon: str, lengua: str | None = None) -> str:
+    """En el idioma del cliente. Antes salía en los dos porque no se sabía cuál."""
+    from app import idioma
+
+    return idioma.t(
+        "pedido.rechazado", lengua, pedido=nombre, motivo=f" ({razon})" if razon else ""
     )
 
 
@@ -288,7 +285,9 @@ def _avisar_cliente_rechazo(nombre: str, tel: str, razon: str) -> bool:
 
     wamid = ""
     try:
-        result = whatsapp.enviar_mensaje(tel, _texto_rechazo(nombre, razon))
+        result = whatsapp.enviar_mensaje(
+            tel, _texto_rechazo(nombre, razon, idioma.para_destinatario(tel))
+        )
         wamid = _wamid(result)
     except Exception as exc:
         print(f"[decisiones] {nombre}: texto de rechazo falló ({type(exc).__name__})")
@@ -829,13 +828,10 @@ def cancelar(nombre: str, por: str, motivo: str) -> dict:
     )
 
 
-def _texto_cancelacion(nombre: str, razon: str) -> str:
-    return (
-        f"Hola! Tu pedido {nombre} quedó cancelado ({razon}). Si fue un error, escribinos "
-        "y lo revisamos.\n\n"
-        f"Hi! Your order {nombre} has been cancelled ({razon}). If this is a mistake, "
-        "message us and we will sort it out."
-    )
+def _texto_cancelacion(nombre: str, razon: str, lengua: str | None = None) -> str:
+    from app import idioma
+
+    return idioma.t("pedido.cancelado", lengua, pedido=nombre, motivo=razon)
 
 
 def _avisar_cliente_cancelacion(nombre: str, tel: str, razon: str) -> bool:
@@ -849,7 +845,7 @@ def _avisar_cliente_cancelacion(nombre: str, tel: str, razon: str) -> bool:
     except Exception as exc:
         print(f"[decisiones] {nombre}: has_accepted falló ({type(exc).__name__})")
 
-    texto = _texto_cancelacion(nombre, razon)
+    texto = _texto_cancelacion(nombre, razon, idioma.para_destinatario(tel))
     wamid = ""
     try:
         if window_open(tel):

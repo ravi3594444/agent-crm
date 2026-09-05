@@ -131,3 +131,103 @@ def test_preguntar_por_el_idioma_de_alguien_no_se_lo_fija(monkeypatch):
     monkeypatch.setattr(router, "es_equipo", lambda t: False)
     idioma.para_destinatario("5491112345678", "reply in English")
     assert guardados == [], "resolver no puede escribir la preferencia de nadie"
+
+
+# ------------------------------------------------- estado del pedido
+# Categoría 2: creación, pendiente, confirmado, rechazado y cancelado.
+
+PEDIDO = "SAL-ORD-2026-00042"
+MOTIVO = "no stock"
+
+_SO = {
+    "name": PEDIDO,
+    "customer_name": "Demo Bakery",
+    "grand_total": 6000,
+    "currency": "ARS",
+    "delivery_date": "2026-09-06",
+    "items": [{"item_code": "MILK-1L", "item_name": "Whole Milk 1 L", "qty": 5,
+               "uom": "Unit"}],
+}
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_la_confirmacion_al_cliente_sale_en_un_solo_idioma(lengua):
+    from app import avisos
+
+    texto = avisos.texto_confirmacion_cliente(_SO, lengua)
+    # El dato no se traduce nunca.
+    assert PEDIDO in texto
+    assert "2026-09-06" in texto
+    if lengua == EN:
+        assert restos_en_espanol(texto, ("Demo Bakery", "Whole Milk 1 L", "ARS")) == []
+        assert "confirmado" not in texto
+    else:
+        assert "confirmado" in texto and "confirmed" not in texto
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_rechazo_al_cliente_sale_en_un_solo_idioma(lengua):
+    from app import decisiones
+
+    texto = decisiones._texto_rechazo(PEDIDO, MOTIVO, lengua)
+    assert PEDIDO in texto and MOTIVO in texto
+    if lengua == EN:
+        assert restos_en_espanol(texto, (MOTIVO,)) == []
+        assert "Hola" not in texto
+    else:
+        assert "Hola" in texto and "Hi!" not in texto
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_la_cancelacion_al_cliente_sale_en_un_solo_idioma(lengua):
+    from app import decisiones
+
+    texto = decisiones._texto_cancelacion(PEDIDO, MOTIVO, lengua)
+    assert PEDIDO in texto and MOTIVO in texto
+    if lengua == EN:
+        assert restos_en_espanol(texto, (MOTIVO,)) == []
+        assert "cancelado" not in texto
+    else:
+        assert "cancelado" in texto and "cancelled" not in texto
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_pendiente_al_cliente_sale_en_un_solo_idioma(lengua):
+    from app import solicitudes
+
+    sol = solicitudes.Solicitud(
+        id="SOL-1",
+        pedido=PEDIDO,
+        tipo=solicitudes.TIPO_ENTREGA,
+        estado=solicitudes.PENDIENTE,
+        cliente="CUST-1",
+        cliente_nombre="Demo Bakery",
+        resumen_items="5 x Whole Milk 1 L",
+        total=6000.0,
+        moneda="ARS",
+        creada_en=0.0,
+        vence_en=6 * 3600.0,
+        sello=0.0,
+    )
+    texto = solicitudes.texto_pendiente_cliente(sol, lengua)
+    assert PEDIDO in texto
+    assert "6 h" in texto, "las horas son un dato y no cambian de idioma"
+    if lengua == EN:
+        assert restos_en_espanol(texto, ("Demo Bakery",)) == []
+
+
+def test_ningun_texto_de_estado_sale_en_los_dos_idiomas_pegados():
+    """La concatenación bilingüe era el parche; ya no debe quedar ninguno."""
+    from app import avisos, decisiones
+
+    for texto in (
+        avisos.texto_confirmacion_cliente(_SO, ES),
+        avisos.texto_confirmacion_cliente(_SO, EN),
+        decisiones._texto_rechazo(PEDIDO, MOTIVO, ES),
+        decisiones._texto_rechazo(PEDIDO, MOTIVO, EN),
+        decisiones._texto_cancelacion(PEDIDO, MOTIVO, ES),
+        decisiones._texto_cancelacion(PEDIDO, MOTIVO, EN),
+    ):
+        assert "\n\n" not in texto or "Hi!" not in texto
+        assert not ("confirmado" in texto and "confirmed" in texto)
+        assert not ("cancelado" in texto and "cancelled" in texto)

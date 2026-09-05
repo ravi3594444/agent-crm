@@ -131,27 +131,55 @@ CATALOGO: dict[str, dict[str, str]] = {
         ),
     },
     # ------------------------------------------------------ estado de pedido
+    # Todos estos los recibe el CLIENTE. Antes iban en los dos idiomas pegados
+    # —«outside a model turn the customer's language is unknown», decía el
+    # docstring— y justamente eso es lo que dejó de ser cierto.
     "pedido.pendiente": {
         ES: (
-            "Tomé tu pedido {pedido}: {detalle}. Entrega: {entrega}. "
-            "Queda pendiente de revisión y te aviso cuando lo confirmen."
+            "Tu pedido {pedido} quedó registrado y le pregunté al encargado por "
+            "lo que pediste. Te contesto en cuanto responda (dentro de {horas} h). "
+            "Todavía no está confirmado: cuando tenga la respuesta vuelvo a "
+            "chequear el stock antes de cerrarlo."
         ),
         EN: (
-            "I took your order {pedido}: {detalle}. Delivery: {entrega}. "
-            "It's pending review and I'll let you know once it's confirmed."
+            "Your order {pedido} is registered and I have asked the manager about "
+            "your request. I will reply as soon as they answer (within {horas} h). "
+            "It is not confirmed yet, and I will re-check stock before closing it."
         ),
     },
-    "pedido.confirmado": {
-        ES: "Confirmamos tu pedido {pedido}: {detalle}. Entrega: {entrega}.",
-        EN: "Your order {pedido} is confirmed: {detalle}. Delivery: {entrega}.",
+    "pedido.confirmado_cliente": {
+        ES: (
+            "✅ Pedido {pedido} confirmado\n"
+            "Items: {renglones}\nTotal: {total}\nEntrega: {entrega}"
+        ),
+        EN: (
+            "✅ Order {pedido} confirmed\n"
+            "Items: {renglones}\nTotal: {total}\nDelivery: {entrega}"
+        ),
+    },
+    "pedido.entrega_a_coordinar": {
+        ES: "a coordinar",
+        EN: "to be arranged",
     },
     "pedido.rechazado": {
-        ES: "No pudimos tomar tu pedido {pedido}. Motivo: {motivo}.",
-        EN: "We couldn't take your order {pedido}. Reason: {motivo}.",
+        ES: (
+            "Hola! Sobre tu pedido {pedido}: no vamos a poder cumplirlo{motivo}. "
+            "En breve te escribe alguien del equipo. Perdón por la molestia."
+        ),
+        EN: (
+            "Hi! About your order {pedido}: we won't be able to fulfil it{motivo}. "
+            "Someone from our team will message you shortly. Sorry about that."
+        ),
     },
     "pedido.cancelado": {
-        ES: "Cancelamos tu pedido {pedido}. Motivo: {motivo}.",
-        EN: "Your order {pedido} was cancelled. Reason: {motivo}.",
+        ES: (
+            "Hola! Tu pedido {pedido} quedó cancelado ({motivo}). Si fue un error, "
+            "escribinos y lo revisamos."
+        ),
+        EN: (
+            "Hi! Your order {pedido} has been cancelled ({motivo}). If this is a "
+            "mistake, message us and we will sort it out."
+        ),
     },
     "pedido.sin_confirmar": {
         ES: "Tu pedido {pedido} sigue sin confirmar.",

@@ -65,7 +65,7 @@ def test_un_idioma_desconocido_cae_al_por_defecto():
 
 def test_un_parametro_que_falta_devuelve_el_texto_sin_interpolar():
     # Nunca una excepción: el mensaje sale igual.
-    salida = idioma.t("pedido.confirmado", idioma.EN, pedido="SAL-ORD-1")
+    salida = idioma.t("pedido.confirmado_cliente", idioma.EN, pedido="SAL-ORD-1")
     assert "SAL-ORD-1" not in salida or salida
     assert isinstance(salida, str) and salida
 
@@ -252,10 +252,9 @@ PEDIDO = "SAL-ORD-2026-00042"
         ("codigo.ajuste_pedido", {"cambio": "x", "codigo": "4821", "minutos": 10}),
         ("accion.preparada", {"pedido": PEDIDO, "consecuencia": "y", "codigo": CODIGO,
                              "minutos": 10}),
-        ("pedido.pendiente", {"pedido": PEDIDO, "detalle": "5 x LEC-ENT-1L",
-                              "entrega": "2026-09-06"}),
-        ("pedido.confirmado", {"pedido": PEDIDO, "detalle": "5 x LEC-ENT-1L",
-                               "entrega": "2026-09-06"}),
+        ("pedido.pendiente", {"pedido": PEDIDO, "horas": "6"}),
+        ("pedido.confirmado_cliente", {"pedido": PEDIDO, "renglones": "5 x LEC-ENT-1L",
+                                       "total": "$ 6.000", "entrega": "2026-09-06"}),
         ("gerencia.pedido_pendiente", {"pedido": PEDIDO, "cliente": "Panaderia",
                                        "detalle": "5 x LEC-ENT-1L",
                                        "total": "$ 6.000,00",

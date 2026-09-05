@@ -360,7 +360,9 @@ def test_the_customer_is_told_once_in_free_text_inside_their_window(mundo) -> No
     _cancelar()
     ((tel, texto),) = mundo["enviados"]
     assert tel == CUSTOMER_PHONE
-    assert SO in texto and "el cliente se arrepintió" in texto and "cancelled" in texto
+    # Idioma por defecto (español): el cliente recibe UN idioma, no los dos.
+    assert SO in texto and "el cliente se arrepintió" in texto
+    assert "cancelado" in texto and "cancelled" not in texto
 
 
 def test_outside_the_customer_window_a_configured_template_is_used(mundo, monkeypatch) -> None:

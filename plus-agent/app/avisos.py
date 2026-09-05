@@ -35,7 +35,7 @@ import os
 import threading
 import time
 
-from app import erpnext
+from app import erpnext, idioma
 from app.formato import pesos
 from app.outbound_status import (
     cliente as _redis,
@@ -399,8 +399,8 @@ def procesar(limite: int = 20) -> int:
 # ---------------------------------------------------------------------------
 
 
-def texto_confirmacion_cliente(so: dict) -> str:
-    """Order id, lines, total and how it is fulfilled — bilingual.
+def texto_confirmacion_cliente(so: dict, lengua: str | None = None) -> str:
+    """Order id, lines, total and how it is fulfilled, in the customer's language.
 
     Built here rather than by a model: this text IS the confirmation, and it
     has to say the same thing whatever the conversation looked like.
@@ -414,17 +414,14 @@ def texto_confirmacion_cliente(so: dict) -> str:
     fecha = str(so.get("delivery_date") or "").strip()
     entrega_txt = " — ".join(parte for parte in (direccion, fecha) if parte)
     if not entrega_txt:
-        entrega_txt = "a coordinar / to be arranged"
-    return "\n".join(
-        [
-            f"✅ Pedido {nombre} confirmado",
-            f"Items: {renglones}",
-            f"Total: {total}",
-            f"Entrega: {entrega_txt}",
-            "",
-            f"Order {nombre} is confirmed. Items: {renglones}. "
-            f"Total: {total}. Delivery: {entrega_txt}.",
-        ]
+        entrega_txt = idioma.t("pedido.entrega_a_coordinar", lengua)
+    return idioma.t(
+        "pedido.confirmado_cliente",
+        lengua,
+        pedido=nombre,
+        renglones=renglones,
+        total=total,
+        entrega=entrega_txt,
     )[:3500]
 
 
@@ -470,7 +467,7 @@ def confirmacion_cliente(so: dict, telefono_conocido: str = "") -> bool:
         EVENTO_CONFIRMACION,
         nombre,
         telefono,
-        texto_confirmacion_cliente(so),
+        texto_confirmacion_cliente(so, idioma.para_destinatario(telefono)),
         plantilla_env="WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE",
         parametros=[nombre, str(so.get("delivery_date") or "a coordinar")],
     )

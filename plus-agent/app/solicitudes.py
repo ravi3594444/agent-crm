@@ -1657,18 +1657,13 @@ def solicitado_o_vacio(solicitud: Solicitud) -> dict:
     return solicitud.solicitado or {}
 
 
-def texto_pendiente_cliente(solicitud: Solicitud) -> str:
+def texto_pendiente_cliente(solicitud: Solicitud, lengua: str | None = None) -> str:
     """Told immediately: a person was asked, and nothing is promised yet."""
+    from app import idioma
+
     horas = max(0.0, (solicitud.vence_en - solicitud.creada_en) / 3600.0)
-    return (
-        f"Tu pedido {solicitud.pedido} quedó registrado y le pregunté al "
-        f"encargado por lo que pediste. Te contesto en cuanto responda (dentro "
-        f"de {horas:g} h). Todavía no está confirmado: cuando tenga la "
-        f"respuesta vuelvo a chequear el stock antes de cerrarlo.\n\n"
-        f"Your order {solicitud.pedido} is registered and I have asked the "
-        f"manager about your request. I will reply as soon as they answer "
-        f"(within {horas:g} h). It is not confirmed yet, and I will re-check "
-        f"stock before closing it."
+    return idioma.t(
+        "pedido.pendiente", lengua, pedido=solicitud.pedido, horas=f"{horas:g}"
     )
 
 
