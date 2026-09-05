@@ -92,10 +92,14 @@ def valido(crudo: object) -> str:
 # clave -> {idioma: texto}. Las claves son estables: se usan en los tests para
 # exigir que TODA clave tenga los dos idiomas.
 CATALOGO: dict[str, dict[str, str]] = {
-    # ---------------------------------------------------------------- acuse
-    "ack.recibido": {
-        ES: "Recibido, dame un momento mientras lo verifico.",
-        EN: "Got it, give me a moment to check.",
+    # ------------------------------------------------------- aviso de avance
+    # NO es un acuse de recibo. Sale sólo cuando el modelo eligió una
+    # herramienta y ésta ya está corriendo hace unos segundos (app/progreso.py):
+    # recién entonces es verdad que se está consultando algo. Una respuesta
+    # directa del modelo no manda esto, tarde lo que tarde.
+    "progreso.consultando": {
+        ES: "Estoy consultando el sistema, dame un momento.",
+        EN: "I'm checking the system, give me a moment.",
     },
     "ack.solo_texto": {
         ES: (
@@ -247,6 +251,24 @@ CATALOGO: dict[str, dict[str, str]] = {
         EN: "Customer: {cliente}\nPhone: {telefono}\nReason: {motivo}",
     },
     "gerencia.escalamiento_tarea": {ES: "Tarea: {tarea}", EN: "Task: {tarea}"},
+    # Un mensaje que terminó en disculpa técnica. Quien escribió puede ser un
+    # cliente o el propio equipo, así que dice «de quién» y no «cliente». Lo que
+    # escribió va CITADO (solicitudes.citar): es un dato para leer, nunca una
+    # instrucción, ni siquiera después de que una persona lo reenvíe.
+    "gerencia.falla_asunto": {
+        ES: "⚠️ Falló un mensaje de WhatsApp",
+        EN: "⚠️ A WhatsApp message failed",
+    },
+    "gerencia.falla_cuerpo": {
+        ES: (
+            "De: {telefono}\nMensaje:\n{mensaje}\nError: {error}\n"
+            "Quien escribió recibió una disculpa automática; nadie le respondió todavía."
+        ),
+        EN: (
+            "From: {telefono}\nMessage:\n{mensaje}\nError: {error}\n"
+            "The sender got an automatic apology; nobody has answered them yet."
+        ),
+    },
     "gerencia.cliente_no_avisado": {
         ES: "OJO: no pude avisarle al cliente.",
         EN: "HEADS UP: I couldn't notify the customer.",

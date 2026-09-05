@@ -165,13 +165,20 @@ def _dice(todo: str, fragmento: str) -> bool:
 
 
 def _acuses() -> tuple[str, ...]:
-    """El acuse de recibo en TODOS los idiomas, tal como lo manda el agente."""
+    """El aviso de avance en TODOS los idiomas, tal como lo manda el agente.
+
+    Ya no hay acuse de recibo: el agente manda «estoy consultando…» sólo si una
+    herramienta lleva unos segundos corriendo (app/progreso.py). En modo offline
+    las herramientas contestan al instante y no aparece nunca; con Gemini de
+    verdad puede aparecer, y sigue sin ser la respuesta.
+    """
     from app import idioma
 
-    return tuple(idioma.t("ack.recibido", i).lower() for i in idioma.IDIOMAS)
+    return tuple(idioma.t("progreso.consultando", i).lower() for i in idioma.IDIOMAS)
 
 
 def _es_acuse(texto: str) -> bool:
+    """¿Es el aviso de avance, y no la respuesta?"""
     limpio = str(texto or "").strip().lower()
     return any(limpio.startswith(a[:20]) for a in _acuses())
 
@@ -361,14 +368,15 @@ class Piloto:
             r.read()
 
     def esperar_respuesta(self, telefono: str, desde: int) -> tuple[list[str], float]:
-        """Los textos nuevos para ese número, sin contar el acuse.
+        """Los textos nuevos para ese número, sin contar el aviso de avance.
 
-        Todo turno de texto manda DOS cosas: el acuse ("Recibido, dame un
-        momento…") y después la respuesta. Se espera la segunda.
+        Un turno de texto manda UNA respuesta. Si una herramienta tarda, antes
+        puede llegar el aviso de avance («Estoy consultando el sistema…»); no
+        es la respuesta y no se cuenta como tal. Se espera la respuesta.
 
-        El acuse se reconoce contra el CATÁLOGO, en los dos idiomas, y no
+        El aviso se reconoce contra el CATÁLOGO, en los dos idiomas, y no
         contra un fragmento en español escrito acá: con el idioma en inglés ese
-        fragmento no aparecía, el acuse se leía como si fuera la respuesta, y
+        fragmento no aparecía, el aviso se leía como si fuera la respuesta, y
         el turno se daba por contestado antes de que llegara nada.
         """
         inicio = time.monotonic()
@@ -448,7 +456,7 @@ class Piloto:
                 f"no llegó ninguna respuesta en {ESPERA_TURNO:.0f}s")
         sustanciales = [t for t in turno.respuestas if not _es_acuse(t)]
         if paso.espera_respuesta and not sustanciales:
-            problemas.append("sólo llegó el acuse, nunca la respuesta")
+            problemas.append("sólo llegó el aviso de avance, nunca la respuesta")
         # Un fallo técnico es SIEMPRE un fallo del escenario, diga lo que diga
         # el paso. app/main.py convierte cualquier excepción en una disculpa,
         # así que sin este chequeo un escenario cuyas condiciones son sólo

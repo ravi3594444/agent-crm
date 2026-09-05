@@ -68,8 +68,8 @@ def _todos_los_constructores(lengua):
 
     sol = _solicitud(motivo=MOTIVO)
     salida = [
-        # 1. acuse, fallbacks y errores
-        ("main.texto_ack", main.texto_ack(lengua)),
+        # 1. aviso de avance, fallbacks y errores
+        ("main.texto_progreso", main.texto_progreso(lengua)),
         ("main.texto_solo_texto", main.texto_solo_texto(lengua)),
         ("main.texto_error_tecnico", main.texto_error_tecnico(lengua)),
         ("main.texto_error_tecnico_avisado", main.texto_error_tecnico_avisado(lengua)),
@@ -90,6 +90,10 @@ def _todos_los_constructores(lengua):
          notificar._texto_libre(PEDIDO, _SO, True, "", "5 x Whole Milk 1 L", lengua)),
         ("notificar.texto_confirmacion",
          notificar.texto_confirmacion(_SO, "manual", "2026-09-05 16:14", lengua)),
+        ("notificar.texto_falla_tecnica",
+         "\n".join(notificar.texto_falla_tecnica(
+             "5491100000000", "hi, do you have whole milk?", "OpenAIRateLimitError",
+             lengua))),
         # 4. excepciones de entrega y vencimientos
         ("solicitudes.texto_oferta_cliente",
          solicitudes.texto_oferta_cliente(sol, lengua)),

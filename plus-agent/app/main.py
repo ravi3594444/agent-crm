@@ -5,6 +5,15 @@ A persistent worker owns one global Redis lock, moves (rather than removes)
 the FIFO head into a processing list, and removes it only after Meta accepts
 the final WhatsApp send. Generated responses are cached before outbound API
 calls, so a send retry never reruns the agent or its order tools.
+
+What the person sees is ONE reply per message. There is no blind "got it, let
+me check" any more: it used to go out for every text — from the webhook and
+again from the worker — before anybody had looked at the message, so a "hola"
+or a four-digit code produced two messages and the first one described work
+that never happened. Now a short progress notice exists only for turns in which
+the model actually started a tool, and only if that tool work is still running
+after a few seconds (app/progreso.py). A direct answer, however long the
+provider takes, is one message; the latency is measured and logged, not hidden.
 """
 
 from __future__ import annotations
@@ -23,7 +32,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 import redis
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 
 from app import erpnext, idioma, notificar
 from app import whatsapp as whatsapp_client
@@ -31,6 +40,7 @@ from app.aprobacion import manejar_boton
 from app.formato import sin_citas
 from app.graph import responder_cliente, responder_gerencia
 from app.outbound_status import record_inbound_window, record_outbound, update_status
+from app.progreso import Progreso
 from app.router import es_equipo
 from app.whatsapp import enviar_mensaje
 
@@ -41,8 +51,13 @@ VERIFY_TOKEN = os.environ["META_VERIFY_TOKEN"]
 # modelo, así que son los que hay que traducir a mano. Antes iban en los DOS
 # idiomas pegados con una barra, que era la forma de no tener que elegir; ahora
 # se elige, y quien lee recibe uno solo.
-def texto_ack(lengua: str | None = None) -> str:
-    return idioma.t("ack.recibido", lengua)
+#
+# El aviso de avance. NO es un acuse de recibo y no sale para todo mensaje:
+# sale sólo cuando el modelo eligió una herramienta, la herramienta ya está
+# corriendo y el turno sigue abierto pasados _PROGRESS_DELAY_SECONDS
+# (app/progreso.py). Recién entonces «estoy consultando» es verdad.
+def texto_progreso(lengua: str | None = None) -> str:
+    return idioma.t("progreso.consultando", lengua)
 
 
 def texto_solo_texto(lengua: str | None = None) -> str:
@@ -73,9 +88,16 @@ _WORKER_POLL_SECONDS = 1.0
 _AVISOS_POLL_SECONDS = 5.0
 _SOLICITUDES_TICK_SECONDS = 60.0
 _RETRY_SECONDS = 2.0
-_ACK_CLAIM_TTL_SECONDS = 30
-_ACK_WAIT_SECONDS = 16
 _TECH_ALERT_TTL_SECONDS = 60 * 60
+# Cuánto tiene que llevar corriendo la PRIMERA herramienta del turno para que
+# la persona reciba el aviso de avance. Corto a propósito: si la herramienta
+# contesta y el modelo cierra antes, no sale nada y la persona recibe UNA
+# respuesta. Negativo: el aviso no se manda nunca. La latencia del modelo solo
+# —una respuesta directa de 20 s— no lo dispara: no se está consultando nada.
+_PROGRESS_DELAY_SECONDS = float(os.getenv("WHATSAPP_PROGRESS_DELAY_SECONDS", "3"))
+# La reserva del aviso mientras está en vuelo; después queda el marcador de
+# aceptación con el TTL de estado, como todo lo demás que salió.
+_PROGRESS_CLAIM_TTL_SECONDS = 60
 # A final send Meta rejects must not block every other customer behind it.
 # Permanent rejections (expired token 190, recipient not allowed 131030, closed
 # 24-hour window 131047, template errors...) are parked in the dead-letter list
@@ -202,6 +224,10 @@ def _enqueue_message(telefono: str, message_id: str, kind: str, data: str) -> bo
             "telefono": telefono,
             "kind": kind,
             "data": data,
+            # Cuándo entró, para que el turno pueda decir cuánto esperó en la
+            # cola y cuánto tardó cada parte. Opcional al leer: un ítem viejo
+            # sin este campo se procesa igual.
+            "ts": round(time.time(), 3),
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -685,76 +711,34 @@ def _alert_technical_failure(error: Exception, telefono: str, data: object) -> b
 
 
 def _generate_response(item: dict) -> str:
+    """One turn: the deterministic paths first, then exactly one agent run.
+
+    The progress notice lives INSIDE this call. ``progreso`` observes the agent
+    run through the LangChain callback config (app/graph.py) and arms a single
+    timer the moment the first tool really starts; ``terminar()`` runs before
+    this function returns, so by the time the caller sends the final reply no
+    progress notice can still be on its way. The deterministic paths never
+    start a tool, so they never produce one.
+    """
     telefono = item["telefono"]
     message_id = item["message_id"]
     kind = item["kind"]
     data = item.get("data", "")
-    thread_tag = _thread_tag(telefono)
     # En qué idioma le habla Python a ESTE número. Se resuelve una vez por
     # turno y no se vuelve a preguntar: si un aviso saliera en un idioma y el
     # de al lado en otro, el que lee pensaría que le escriben dos sistemas.
     lengua = idioma.para_destinatario(telefono, data if kind == "text" else "")
-
+    inicio = time.monotonic()
+    progreso = Progreso(
+        enviar=lambda: _progress_once(telefono, message_id, lengua),
+        demora=_PROGRESS_DELAY_SECONDS,
+    )
     try:
-        if kind in {"interactive", "button"}:
-            return str(manejar_boton(data, telefono))
-        if kind != "text":
-            return texto_solo_texto(lengua)
-        if es_equipo(telefono):
-            # ANTES que el modelo, y por eso está acá arriba. Ver
-            # _comando_de_idioma: en vivo este comando llegó a Gemini, que
-            # contestó que sus instrucciones lo obligaban a hablar en español y
-            # no llamó a ninguna herramienta. Un ajuste del dueño no puede
-            # depender de cómo lo interpretó un modelo.
-            cambio_idioma = _comando_de_idioma(data, telefono)
-            if cambio_idioma:
-                return cambio_idioma
-            ajuste = _codigo_de_ajuste(data, telefono)
-            if ajuste:
-                return ajuste
-            accion = _codigo_de_accion(data, telefono)
-            if accion:
-                return accion
-            command = _staff_command(data)
-            if command:
-                return str(manejar_boton(command, telefono))
-            ambiguo = _resumen_de_solicitud(data)
-            if ambiguo:
-                return ambiguo
-            return _non_empty(
-                # El teléfono verificado, NO el thread_tag: el tag es un hash y
-                # con un hash ninguna herramienta de gerencia autoriza a nadie.
-                responder_gerencia(data, thread_id=thread_tag, telefono=telefono),
-                message_id,
-                lengua,
-            )
-
-        # Si el cliente PIDIÓ un idioma, queda guardado antes de armar el
-        # prompt, así el mismo turno ya sale en ese idioma. Se guarda contra el
-        # teléfono VERIFICADO del webhook, no contra nada del texto: por eso un
-        # mensaje no puede cambiarle el idioma a otro cliente. Y no corta el
-        # turno: el resto del mensaje —un pedido, por ejemplo— se atiende igual.
-        pedido_idioma = idioma.pedido_explicito(data)
-        if pedido_idioma:
-            idioma.recordar_cliente(telefono, pedido_idioma)
-
-        customer_code, contexto = _contexto(telefono)
-        acuerdo = _customer_command(data, telefono, customer_code)
-        if acuerdo:
-            return acuerdo
-        return _non_empty(
-            responder_cliente(
-                data,
-                thread_id=thread_tag,
-                contexto_cliente=contexto,
-                customer_code=customer_code,
-                inbound_message_id=message_id,
-                actor_phone=telefono,
-            ),
-            message_id,
-            lengua,
-        )
+        return _responder(item, lengua, progreso)
     except Exception as error:
+        # Antes de avisar a nadie y antes de armar la disculpa: un «estoy
+        # consultando» detrás de un «tuve un problema técnico» sería ruido.
+        progreso.terminar()
         print(
             f"[agent] error msg={_correlation(message_id)} "
             f"phone={_correlation(telefono)} type={_error_name(error)}"
@@ -764,57 +748,160 @@ def _generate_response(item: dict) -> str:
         if _alert_technical_failure(error, telefono, data):
             return texto_error_tecnico_avisado(lengua)
         return texto_error_tecnico(lengua)
+    finally:
+        progreso.terminar()
+        _log_turno(item, progreso, time.monotonic() - inicio)
 
 
-def _acknowledge_once(telefono: str, message_id: str) -> None:
-    """Best-effort normal WhatsApp acknowledgement, deduped across workers."""
-    key = _message_key("ack", message_id)
+def _log_turno(item: dict, progreso: Progreso, total: float) -> None:
+    """The latency, in parts, once per turn — the honest place for it.
+
+    ``cola`` is how long the message waited before a worker took it (from the
+    timestamp written at enqueue); ``modelo`` is the provider; ``herramientas``
+    is real tool work; ``progreso`` says whether the person got the notice. A
+    slow turn can be read here without guessing which part was slow and
+    without telling the person that something was being checked.
+    """
+    cola = ""
+    ts = item.get("ts")
+    if isinstance(ts, (int, float)):
+        # El turno empezó hace `total` segundos; antes de eso, esperó en la cola.
+        empezo = time.time() - total
+        cola = f" cola={max(0.0, empezo - float(ts)):.1f}s"
+    camino = "modelo" if progreso.llamadas_modelo else "determinista"
+    print(
+        f"[agent] turno msg={_correlation(item['message_id'])} "
+        f"phone={_correlation(item['telefono'])} camino={camino} "
+        f"{progreso.resumen()} total={total:.1f}s{cola}"
+    )
+
+
+def _responder(item: dict, lengua: str, progreso: Progreso) -> str:
+    telefono = item["telefono"]
+    message_id = item["message_id"]
+    kind = item["kind"]
+    data = item.get("data", "")
+    thread_tag = _thread_tag(telefono)
+
+    if kind in {"interactive", "button"}:
+        return str(manejar_boton(data, telefono))
+    if kind != "text":
+        return texto_solo_texto(lengua)
+    if es_equipo(telefono):
+        # ANTES que el modelo, y por eso está acá arriba. Ver
+        # _comando_de_idioma: en vivo este comando llegó a Gemini, que
+        # contestó que sus instrucciones lo obligaban a hablar en español y
+        # no llamó a ninguna herramienta. Un ajuste del dueño no puede
+        # depender de cómo lo interpretó un modelo.
+        cambio_idioma = _comando_de_idioma(data, telefono)
+        if cambio_idioma:
+            return cambio_idioma
+        ajuste = _codigo_de_ajuste(data, telefono)
+        if ajuste:
+            return ajuste
+        accion = _codigo_de_accion(data, telefono)
+        if accion:
+            return accion
+        command = _staff_command(data)
+        if command:
+            return str(manejar_boton(command, telefono))
+        ambiguo = _resumen_de_solicitud(data)
+        if ambiguo:
+            return ambiguo
+        return _non_empty(
+            # El teléfono verificado, NO el thread_tag: el tag es un hash y
+            # con un hash ninguna herramienta de gerencia autoriza a nadie.
+            responder_gerencia(
+                data,
+                thread_id=thread_tag,
+                telefono=telefono,
+                callbacks=[progreso],
+            ),
+            message_id,
+            lengua,
+        )
+
+    # Si el cliente PIDIÓ un idioma, queda guardado antes de armar el
+    # prompt, así el mismo turno ya sale en ese idioma. Se guarda contra el
+    # teléfono VERIFICADO del webhook, no contra nada del texto: por eso un
+    # mensaje no puede cambiarle el idioma a otro cliente. Y no corta el
+    # turno: el resto del mensaje —un pedido, por ejemplo— se atiende igual.
+    pedido_idioma = idioma.pedido_explicito(data)
+    if pedido_idioma:
+        idioma.recordar_cliente(telefono, pedido_idioma)
+
+    customer_code, contexto = _contexto(telefono)
+    acuerdo = _customer_command(data, telefono, customer_code)
+    if acuerdo:
+        return acuerdo
+    return _non_empty(
+        responder_cliente(
+            data,
+            thread_id=thread_tag,
+            contexto_cliente=contexto,
+            customer_code=customer_code,
+            inbound_message_id=message_id,
+            actor_phone=telefono,
+            callbacks=[progreso],
+        ),
+        message_id,
+        lengua,
+    )
+
+
+def _progress_once(telefono: str, message_id: str, lengua: str) -> bool:
+    """The progress notice, at most once per inbound message. Never raises.
+
+    Called by app/progreso.py from its timer thread, i.e. only while a tool is
+    really running and only once the configured delay has passed. The Redis
+    claim is the same idempotency shape every other outbound uses: a worker
+    that lost its lock mid-turn and a successor that re-runs the agent cannot
+    send it twice, and a duplicate webhook never gets this far (it is dropped
+    at enqueue). It is recorded as its own outbound purpose and deliberately
+    NOT as the inbound's accepted final: that marker is what tells the worker
+    the real reply went out, and this is not the real reply.
+
+    Returns True only if Meta accepted it. Any failure is logged and forgotten:
+    the reply that matters is the final one, and it does not depend on this.
+    """
+    key = _message_key("progress", message_id)
     claim = uuid.uuid4().hex
     try:
-        claimed = bool(r.set(key, claim, nx=True, ex=_ACK_CLAIM_TTL_SECONDS))
+        claimed = bool(r.set(key, claim, nx=True, ex=_PROGRESS_CLAIM_TTL_SECONDS))
     except Exception as error:
         print(
-            f"[queue] ack coordination phone={_correlation(telefono)} "
+            f"[queue] progress coordination phone={_correlation(telefono)} "
             f"type={_error_name(error)}"
         )
-        return
-
+        return False
     if not claimed:
-        # The webhook background task and durable worker may race. Ensure a
-        # fast agent cannot send its final before the in-flight ack finishes.
-        deadline = time.monotonic() + _ACK_WAIT_SECONDS
-        while time.monotonic() < deadline:
-            try:
-                state = _as_text(r.get(key))
-            except Exception:
-                return
-            if state == "accepted_by_meta":
-                return
-            if state is None:
-                return _acknowledge_once(telefono, message_id)
-            time.sleep(0.05)
-        return
+        return False
 
     try:
-        enviar_mensaje(telefono, texto_ack(idioma.para_destinatario(telefono)))
+        send_result = enviar_mensaje(telefono, texto_progreso(lengua))
     except Exception as error:
         print(
-            f"[whatsapp] ack failed phone={_correlation(telefono)} "
+            f"[whatsapp] progress failed phone={_correlation(telefono)} "
             f"type={_error_name(error)}"
         )
         try:
             r.eval(_DELETE_IF_VALUE_LUA, 1, key, claim)
         except Exception:
             pass
-        return
+        return False
 
     try:
         r.set(key, "accepted_by_meta", ex=_STATE_TTL_SECONDS)
+        outbound_id = _outbound_id(send_result)
+        if outbound_id:
+            record_outbound(outbound_id, "agent_progress")
     except Exception as error:
         print(
-            f"[queue] ack state phone={_correlation(telefono)} "
+            f"[queue] progress state phone={_correlation(telefono)} "
             f"type={_error_name(error)}"
         )
+    print(f"[agent] progress msg={_correlation(message_id)} phone={_correlation(telefono)}")
+    return True
 
 
 class _Ownership:
@@ -1208,8 +1295,6 @@ def _handle_pending(
             ownership.set_item_lease(None)
             return "lost"
 
-        if item["kind"] == "text":
-            _acknowledge_once(telefono, message_id)
         response = _generate_response(item)
 
         # Persist the final before any send. On a lock loss, its successor can
@@ -1242,8 +1327,6 @@ def _handle_pending(
         if not claimed:
             return "blocked"
         ownership.set_item_lease(lease_key)
-        if item["kind"] == "text":
-            _acknowledge_once(telefono, message_id)
 
     if stop.is_set() or not _owns_worker_lock(ownership):
         _release_owned(lease_key, ownership.token)
@@ -1546,7 +1629,7 @@ async def _limited_body(request: Request) -> bytes:
 
 
 @app.post("/webhook/whatsapp")
-async def inbound(request: Request, background: BackgroundTasks):
+async def inbound(request: Request):
     body = await _limited_body(request)
     if not _valid_signature(body, request.headers.get("X-Hub-Signature-256")):
         raise HTTPException(403, "bad signature")
@@ -1634,8 +1717,8 @@ async def inbound(request: Request, background: BackgroundTasks):
                     f"msg={_correlation(message_id)} "
                     f"phone={_correlation(telefono)}"
                 )
-                if kind == "text":
-                    background.add_task(_acknowledge_once, telefono, message_id)
+                # Nothing is sent from here. The worker owns the whole reply,
+                # including the optional progress notice (see _generate_response).
                 _worker_wake.set()
 
     return {"status": "ok"}

@@ -161,6 +161,14 @@ _texto = texto_plano
 _business_today = business_today
 
 
+def _config(configurable: dict, callbacks: list | None) -> dict:
+    """One run config: the server-side identity, plus this turn's observers."""
+    config: dict = {"configurable": configurable}
+    if callbacks:
+        config["callbacks"] = list(callbacks)
+    return config
+
+
 def responder_cliente(
     mensaje: str,
     thread_id: str,
@@ -169,6 +177,7 @@ def responder_cliente(
     customer_code: str = "",
     inbound_message_id: str = "",
     actor_phone: str = "",
+    callbacks: list | None = None,
 ) -> str:
     """Run one customer turn with server-authenticated values hidden from the LLM.
 
@@ -176,20 +185,25 @@ def responder_cliente(
     deliberately not interpolated: it previously contained phone, ERP customer
     code and group. Tools receive those values only through RunnableConfig,
     and the system prompt reads ``customer_code`` from the same config.
+
+    ``callbacks`` are LangChain callback handlers (app/progreso.py) and travel
+    in the run config, which is the documented way to observe a run: they see
+    every model call and every tool start of THIS turn, and nothing else.
     """
     del contexto_cliente
     with erpnext.customer_scope():
         out = agente_clientes.invoke(
             {"messages": [("user", mensaje)]},
-            config={
-                "configurable": {
+            config=_config(
+                {
                     "thread_id": f"cli:{thread_id}",
                     "actor_scope": "customer",
                     "customer_code": customer_code,
                     "actor_phone": actor_phone,
                     "inbound_message_id": inbound_message_id,
-                }
-            },
+                },
+                callbacks,
+            ),
         )
     return texto_plano(out["messages"][-1])
 
@@ -200,6 +214,7 @@ def responder_gerencia(
     telefono: str,
     *,
     inbound_message_id: str = "",
+    callbacks: list | None = None,
 ) -> str:
     """Run one management turn. ``telefono`` is the VERIFIED phone, never a hash.
 
@@ -212,13 +227,14 @@ def responder_gerencia(
     with erpnext.manager_scope():
         out = agente_gerencia.invoke(
             {"messages": [("user", mensaje)]},
-            config={
-                "configurable": {
+            config=_config(
+                {
                     "thread_id": f"ger:{thread_id}",
                     "actor_scope": "management",
                     "actor_phone": telefono,
                     "inbound_message_id": inbound_message_id,
-                }
-            },
+                },
+                callbacks,
+            ),
         )
     return texto_plano(out["messages"][-1])

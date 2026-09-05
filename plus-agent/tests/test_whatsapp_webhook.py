@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from fastapi import BackgroundTasks, HTTPException, Request
+from fastapi import HTTPException, Request
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -306,15 +306,14 @@ def _call_body(module, body, run_background=True):
         },
         receive,
     )
-    background = BackgroundTasks()
+    # `run_background` is kept for the callers' sake: the webhook used to hand
+    # a blind acknowledgement to a background task, and it no longer sends
+    # anything at all — the worker owns the whole reply.
+    del run_background
     try:
-        result = asyncio.run(module.inbound(request, background))
+        result = asyncio.run(module.inbound(request))
     except HTTPException as error:
         return SimpleNamespace(status_code=error.status_code, body=error.detail)
-
-    if run_background:
-        for task in background.tasks:
-            task.func(*task.args, **task.kwargs)
     return SimpleNamespace(status_code=200, body=result)
 
 
@@ -323,7 +322,7 @@ def _post(module, payload, run_background=True):
     return _call_body(module, body, run_background)
 
 
-def test_ack_fifo_and_server_bound_customer_identity(webhook, monkeypatch):
+def test_fifo_and_server_bound_customer_identity_with_no_blind_ack(webhook, monkeypatch):
     events = []
     agent_calls = []
     lookups = []
@@ -362,9 +361,10 @@ def test_ack_fifo_and_server_bound_customer_identity(webhook, monkeypatch):
     assert first.status_code == second.status_code == 200
     assert outcome == "worked"
     assert [call[0] for call in agent_calls] == ["Necesito 5 kg", "de leche"]
+    # ONE outbound per inbound, and it is the answer. Nothing goes out before
+    # the agent has looked at the message: a "got it, let me check" that
+    # described work nobody had started yet used to precede every reply.
     assert events == [
-        ("send", webhook.texto_ack("es")),
-        ("send", webhook.texto_ack("es")),
         ("agent", "Necesito 5 kg"),
         ("send", "final:Necesito 5 kg"),
         ("agent", "de leche"),
@@ -400,7 +400,7 @@ def test_ack_fifo_and_server_bound_customer_identity(webhook, monkeypatch):
     assert fake.expires[seen_key] - fake.now == webhook._STATE_TTL_SECONDS
 
     # A successful POST is recorded as API acceptance, never as delivery.
-    outbound_digest = hashlib.sha256(b"wamid.out.3").hexdigest()
+    outbound_digest = hashlib.sha256(b"wamid.out.2").hexdigest()
     assert fake.values[f"wa:{{inbound}}:status:{outbound_digest}"] == (
         "accepted_by_meta"
     )
@@ -417,8 +417,6 @@ def test_send_failure_retains_pending_and_reuses_cached_final(webhook, monkeypat
 
     def send(phone, text):
         nonlocal final_attempts
-        if text == webhook.texto_ack("es"):
-            return {"messages": [{"id": "wamid.ack"}]}
         final_attempts += 1
         if final_attempts == 1:
             raise RuntimeError("private Meta error body")
@@ -454,8 +452,7 @@ def test_completion_failure_does_not_resend_meta_accepted_message(webhook, monke
 
     def send(phone, text):
         nonlocal final_sends
-        if text != webhook.texto_ack("es"):
-            final_sends += 1
+        final_sends += 1
         return {"messages": [{"id": "wamid.accepted"}]}
 
     monkeypatch.setattr(webhook, "_contexto", lambda phone: ("C-1", "cliente"))
@@ -479,11 +476,7 @@ def test_startup_supervisor_recovers_crash_with_expired_leases(webhook, monkeypa
     monkeypatch.setattr(
         webhook,
         "enviar_mensaje",
-        lambda phone, text: (
-            final_sent.set() or {"messages": [{"id": "wamid.recovered"}]}
-            if text != webhook.texto_ack("es")
-            else {"messages": [{"id": "wamid.ack"}]}
-        ),
+        lambda phone, text: (final_sent.set() or {"messages": [{"id": "wamid.recovered"}]}),
     )
 
     assert webhook._enqueue_message("54911", "wamid.pending", "text", "pedido")
@@ -522,8 +515,7 @@ def test_lock_loss_caches_final_and_successor_sends_without_agent_rerun(
         return "final after lost lock"
 
     def send(phone, text):
-        if text != webhook.texto_ack("es"):
-            finals.append(text)
+        finals.append(text)
         return {"messages": [{"id": "wamid.lock-successor"}]}
 
     monkeypatch.setattr(webhook, "_contexto", lambda phone: ("C-1", "cliente"))
@@ -697,8 +689,6 @@ def test_permanent_send_failure_is_dead_lettered_on_first_attempt(webhook, monke
 
     def send(phone, text):
         sends.append((phone, text))
-        if text == webhook.texto_ack("es"):
-            return {"messages": [{"id": "wamid.ack"}]}
         if phone == "54911bad":
             raise _MetaRejection(status, code, permanent=True)
         return {"messages": [{"id": "wamid.ok"}]}
@@ -711,13 +701,13 @@ def test_permanent_send_failure_is_dead_lettered_on_first_attempt(webhook, monke
     # customer is served immediately, no 30-attempt loop.
     assert webhook._worker_cycle() == "worked"
 
-    finals_bad = [t for p, t in sends if p == "54911bad" and t != webhook.texto_ack("es")]
+    finals_bad = [t for p, t in sends if p == "54911bad"]
     assert len(finals_bad) == 1
     dead = [json.loads(raw)["message_id"] for raw in webhook.r.lists[webhook._DEAD_KEY]]
     assert dead == ["wamid.bad"]
     assert not webhook.r.lists[webhook._PROCESSING_KEY]
     assert not webhook.r.lists[webhook._QUEUE_KEY]
-    finals_good = [t for p, t in sends if p == "54911good" and t != webhook.texto_ack("es")]
+    finals_good = [t for p, t in sends if p == "54911good"]
     assert finals_good == ["PEDIDO_PENDIENTE. Número real: SAL-ORD-2026-00008. hola"]
     assert [(d, n) for d, n, _ in comments] == [("Sales Order", "SAL-ORD-2026-00008")]
     assert "NO recibió el número de pedido" in comments[0][2]
@@ -745,8 +735,6 @@ def test_transient_send_failure_backs_off_then_dead_letters(webhook, monkeypatch
     attempts = []
 
     def send(phone, text):
-        if text == webhook.texto_ack("es"):
-            return {"messages": [{"id": "wamid.ack"}]}
         attempts.append(text)
         raise _MetaRejection(503, 131016, permanent=False)
 
@@ -838,8 +826,6 @@ def test_redis_failure_never_counts_towards_dead_letter(webhook, monkeypatch):
     monkeypatch.setattr(webhook, "responder_cliente", lambda text, **kwargs: "final")
 
     def send(phone, text):
-        if text == webhook.texto_ack("es"):
-            return {"messages": [{"id": "wamid.ack"}]}
         raise RuntimeError("meta down")
 
     monkeypatch.setattr(webhook, "enviar_mensaje", send)

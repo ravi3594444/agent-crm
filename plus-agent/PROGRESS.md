@@ -335,3 +335,50 @@ socket-level egress blocker: 1714 pass with every non-loopback connection
 refused, and zero attempts. That also closed a pre-existing leak —
 `tests/test_autorizacion_gerencia.py` reached graph.facebook.com through
 `proponer_limite`; both propose tools now have the sender mocked.
+
+---
+
+## Adaptive response UX — DONE: one reply per message, a progress notice only when a tool is really running
+
+**The fault, seen live.** Every text got *"Recibido, dame un momento mientras lo
+verifico"* before anybody had read it — from the webhook's background task AND
+again from the worker (`_acknowledge_once`, deduplicated between the two with a
+16 s wait loop). A `hi` produced two messages; a four-digit code, answered by
+Python in a second, got the same fake preamble; and when Gemini failed with a
+rate limit the person had been told "I'm checking" about nothing. The durable
+checkpoints prove the `hi` turns never touched a tool or ERPNext: they were one
+Gemini call each (16.6 s, 15.2 s, 54 s with the client's own 429 retries, and one
+that failed after 29.5 s), with under a second of queue delay.
+
+**The fix is the turn lifecycle, not a keyword.** `app/progreso.py` is a
+LangChain `BaseCallbackHandler` passed in the run config from
+`graph.responder_*` — the documented observation hook, no monkey-patching. The
+MODEL decides whether it needs a tool; the handler only reacts: on the first
+real `on_tool_start` of the turn it arms ONE timer, and if the turn is still
+open after `WHATSAPP_PROGRESS_DELAY_SECONDS` (default 3) the person gets
+*"Estoy consultando el sistema, dame un momento."* in their language. A fast
+tool, several tools (serial or parallel), a direct answer of any length, a
+code, a button or a typed command never produce it. `_generate_response` calls
+`terminar()` before returning — it cancels the timer and takes the same lock an
+in-flight notice holds — so a notice after the final is impossible by
+construction. The notice is claimed once per inbound in Redis
+(`wa:{inbound}:progress:*`), recorded as `agent_progress` and never as the
+inbound's accepted final; any failure to send it is logged and ignored.
+
+**Latency is reported, not hidden.** One log line per turn:
+`[agent] turno … camino=modelo modelo=1x16.6s herramientas=0x0.0s progreso=no total=16.7s cola=0.9s`
+(the enqueue timestamp now travels in the queue item). A 20 s direct answer is
+one message and one honest log line.
+
+**Also:** the team's failure alert is now in the team's language and quotes the
+person's words as data (`notificar.texto_falla_tecnica`, `solicitudes.citar`),
+labelled "De:/From:" since the sender may be the manager themself.
+
+Tests: `tests/test_progreso.py` drives the real path — signed webhook → durable
+queue → worker → `_generate_response` → the real `graph.responder_*` on a
+compiled agent with a SCRIPTED model and the real ToolNode/callback plumbing —
+for the direct answer (every ERPNext/policy function wired to raise), fast and
+slow tools, both race orderings, serial and parallel tools, tool and model
+failures, duplicate deliveries, both languages for manager and customer
+independently, and the model-free paths. 1954 pass, none skipped, ruff clean,
+no non-loopback socket. No model, provider, key, prompt or business-rule change.

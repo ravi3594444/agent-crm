@@ -130,7 +130,7 @@ def test_agent_crash_still_sends_the_customer_an_apology(
 
     assert outcome == "worked"
     replies = [t for r, t in outbox if r == CUSTOMER]
-    assert replies == [webhook.texto_ack("es"), webhook.texto_error_tecnico("es")]
+    assert replies == [webhook.texto_error_tecnico("es")]
     # The exception body never reaches the customer or the logs.
     assert "secret stack trace" not in " ".join(replies)
     assert "secret stack trace" not in capsys.readouterr().out
@@ -151,7 +151,7 @@ def test_erpnext_outage_during_customer_lookup_still_sends_a_reply(
     _post(webhook, _message_payload("wamid.erp-down", "hola"))
     webhook._worker_cycle()
 
-    assert [t for r, t in outbox if r == CUSTOMER] == [webhook.texto_ack("es"), webhook.texto_error_tecnico("es")]
+    assert [t for r, t in outbox if r == CUSTOMER] == [webhook.texto_error_tecnico("es")]
 
 
 def test_agent_crash_does_not_wedge_the_fifo_for_the_next_customer(
@@ -173,7 +173,7 @@ def test_agent_crash_does_not_wedge_the_fifo_for_the_next_customer(
     assert webhook._worker_cycle() == "worked"
 
     assert calls == ["explota", "hola"]
-    assert [t for r, t in outbox if r == other] == [webhook.texto_ack("es"), "final:hola"]
+    assert [t for r, t in outbox if r == other] == ["final:hola"]
     assert not webhook.r.lists[webhook._PROCESSING_KEY]
 
 
@@ -199,7 +199,7 @@ def test_empty_agent_reply_is_replaced_by_a_fallback_not_sent_as_empty(
     _post(webhook, _message_payload("wamid.empty-reply", "hola"))
     webhook._worker_cycle()
 
-    finals = [t for r, t in outbox if r == CUSTOMER and t != webhook.texto_ack("es")]
+    finals = [t for r, t in outbox if r == CUSTOMER]
     assert finals, "no final message at all"
     assert all(t.strip() for t in finals), "an empty body was handed to Meta"
 
@@ -225,7 +225,7 @@ def test_meta_retry_of_the_same_message_id_is_processed_once(
 
     assert first.status_code == second.status_code == third.status_code == 200
     assert calls == ["quiero leche"]
-    finals = [t for r, t in outbox if r == CUSTOMER and t != webhook.texto_ack("es")]
+    finals = [t for r, t in outbox if r == CUSTOMER]
     assert finals == ["final"]
     assert len(webhook.r.lists[webhook._QUEUE_KEY]) == 0
 
@@ -250,16 +250,22 @@ def test_meta_retry_after_processing_finished_does_not_rerun_or_resend(
     assert outbox == before
 
 
-def test_ack_is_sent_once_even_when_webhook_and_worker_both_try(
+def test_nothing_is_sent_before_the_answer_and_the_answer_is_the_only_message(
     webhook, outbox, monkeypatch
 ) -> None:
+    """The blind acknowledgement is gone: a text gets its reply and nothing else.
+
+    It used to be sent twice over — from the webhook's background task and
+    again from the worker — before anyone had read the message. With no tool
+    running there is nothing being checked, so nothing claims to be.
+    """
     monkeypatch.setattr(webhook, "responder_cliente", lambda text, **kw: "final")
 
     _post(webhook, _message_payload("wamid.ack-once", "hola"))
     webhook._worker_cycle()
 
-    acks = [t for r, t in outbox if t == webhook.texto_ack("es")]
-    assert acks == [webhook.texto_ack("es")]
+    assert [t for r, t in outbox if r == CUSTOMER] == ["final"]
+    assert webhook.texto_progreso("es") not in [t for _, t in outbox]
 
 
 def test_status_only_payload_returns_200_without_queueing_or_replying(

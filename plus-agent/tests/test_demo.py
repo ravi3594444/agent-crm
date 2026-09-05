@@ -934,13 +934,14 @@ def test_the_exact_matcher_does_not_match_a_message_that_merely_contains_it() ->
 
 
 @pytest.mark.parametrize("modo", ["offline", "gemini"])
-def test_only_the_acknowledgement_is_never_a_pass(modo: str) -> None:
-    """Todo turno de texto manda el acuse; la respuesta es la segunda."""
+def test_only_the_progress_notice_is_never_a_pass(modo: str) -> None:
+    """El aviso de avance («estoy consultando…») no es la respuesta."""
+    from app import idioma
+
     paso = escenarios.Paso("549", "hola")
-    turno = _turno_con(modo, paso, [
-        "Recibido, dame un momento mientras lo verifico."])
+    turno = _turno_con(modo, paso, [idioma.t("progreso.consultando", "es")])
     assert not turno.ok
-    assert any("sólo llegó el acuse" in p for p in turno.problemas)
+    assert any("sólo llegó el aviso de avance" in p for p in turno.problemas)
 
 
 # ------------------------------------------------------------ URLs sin host

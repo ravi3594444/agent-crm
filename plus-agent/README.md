@@ -22,6 +22,7 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | File | What it is |
 |---|---|
 | `app/main.py` | Webhook: signature, size limit, idempotency, durable Redis queue, worker thread with lease/heartbeat, status webhooks |
+| `app/progreso.py` | Per-turn LangChain callback: the optional progress notice, armed only when a tool really starts; measures model and tool latency for the turn log |
 | `app/erpnext.py` | REST client with **three credential scopes** (customer / manager / policy) selected through a `contextvars` scope. The agent never touches MariaDB. |
 | `app/runtime_context.py` | Per-request identity (customer code, inbound message, actor phone) that tools read for authorization — the model cannot forge it |
 | `app/router.py` | Phone-based agent routing (`TELEFONOS_EQUIPO`) — a security boundary |
@@ -498,13 +499,19 @@ backoff from 2 s up to `WHATSAPP_RETRY_MAX_SECONDS`, at most
 `WHATSAPP_SEND_MAX_ATTEMPTS` times, and then parked the same way. Redis
 failures never count towards that limit.
 
-**Plus: two visible replies, never silence.** As soon as a text request is
-accepted for processing, the customer gets a short acknowledgement such as
-*"Dame un momento mientras verifico disponibilidad."* The agent then sends a
-separate final result. A created draft must include its real ERPNext number —
-for example, *"pedido SO-0042 tomado; te confirmamos en unos minutos"* — while
-an auto-confirmed order must say explicitly that it is confirmed. The first
-message means only "we are checking"; the order number and status in the final
+**Plus: one reply, never silence — and a progress notice only when something
+is really being checked.** There is no blind acknowledgement. A text gets its
+answer; if the model started a tool (a stock lookup, an order) and that work is
+still running after `WHATSAPP_PROGRESS_DELAY_SECONDS` (default 3 s), the person
+gets one short *"Estoy consultando el sistema, dame un momento."* first, in
+their language, and then the answer. A fast tool, a direct answer from the
+model, a four-digit code or a button never produce that notice: they produce
+the answer and nothing else, however long the provider takes (the latency is
+logged per turn, in parts). See [WhatsApp response and delivery
+contract](#whatsapp-response-and-delivery-contract). A created draft must
+include its real ERPNext number — for example, *"pedido SO-0042 tomado; te
+confirmamos en unos minutos"* — while an auto-confirmed order must say
+explicitly that it is confirmed. The order number and status in the final
 message are the customer's proof that the request reached ERPNext.
 
 ## Inventory truth — read this before launch
@@ -981,13 +988,39 @@ reconciliation instead of creating duplicates.
 ## WhatsApp response and delivery contract
 
 The HTTP `200` returned to Meta acknowledges the webhook and is invisible to
-the customer. The visible acknowledgement and final result are two ordinary,
-discrete WhatsApp messages:
+the customer. What the person sees is **one** ordinary WhatsApp message per
+message they send, plus — only sometimes — one progress notice before it:
 
-1. *"Dame un momento mientras verifico…"* is sent immediately.
-2. The final message says either **confirmed**, or **taken and pending review**,
+1. Nothing is sent when the message is accepted. The old *"Recibido, dame un
+   momento mientras lo verifico"* went out for every text, twice over (webhook
+   and worker), before anybody had read it, so a "hola" or a four-digit code
+   produced two messages and the first one described work that never happened.
+2. The model reads the message and decides — not a keyword in Python — whether
+   it can answer directly or needs a tool. A direct answer is one message, even
+   if the provider takes 20 s; that time is measured and logged
+   (`[agent] turno … modelo=1x16.6s herramientas=0x0.0s progreso=no`), not
+   hidden behind a fake "checking".
+3. When a tool really starts, `app/progreso.py` (a LangChain callback handler
+   passed in the run config, i.e. the documented observation hook) arms **one**
+   timer. If the turn is still open after `WHATSAPP_PROGRESS_DELAY_SECONDS`
+   (default 3 s) the person gets *"Estoy consultando el sistema, dame un
+   momento."* / *"I'm checking the system, give me a moment."* in their own
+   language — the manager's setting for the team, the customer's preference or
+   mirrored language for customers. Several tools in one turn share that one
+   notice. A fast tool cancels it, so the person still gets one message.
+4. The worker closes the notice **before** sending the final reply, holding the
+   same lock the in-flight notice holds, so a progress message can never arrive
+   after the answer. The notice is claimed once per inbound message in Redis
+   (`wa:{inbound}:progress:*`), recorded as its own outbound purpose
+   (`agent_progress`) and never as the inbound's accepted final, and any failure
+   to send it is logged and ignored: it is optional UX and never replays or
+   fails the business operation.
+5. The final message says either **confirmed**, or **taken and pending review**,
    and includes the ERPNext Sales Order number. On failure it says that no
    order was created and escalates to a person; it must never invent a number.
+   A model or tool failure produces exactly one truthful apology in the
+   person's language, and the team's alert about it is in the team's language,
+   with the person's words quoted as data.
 
 Meta permits a free-form reply within 24 hours of the customer's last message.
 Outside that customer-service window, an approved Message Template is required,
@@ -1000,8 +1033,9 @@ Streaming is neither needed nor exposed as a customer-visible WhatsApp Cloud
 API capability. WhatsApp accepts complete message payloads through its
 [message endpoint](https://developers.facebook.com/docs/whatsapp/cloud-api/guides/send-messages)
 and reports lifecycle updates through webhooks; it does not render LLM tokens
-as they are generated. The acknowledgement followed by one complete final
-message is the appropriate UX. `sent`, `delivered`, and `read` status webhooks
+as they are generated. One complete final message — preceded by a progress
+notice only when tool work is really taking long — is the appropriate UX.
+`sent`, `delivered`, and `read` status webhooks
 are persisted by hashed outbound ID (`app/outbound_status.py`); terminal
 failures add an ERPNext follow-up comment when the message is correlated to an
 order. Only the ERPNext order number/status proves that the business request

@@ -27,18 +27,18 @@ ES, EN = idioma.ES, idioma.EN
 IDIOMAS = (ES, EN)
 
 
-# ------------------------------------------------------- acuse y fallbacks
-# Categoría 1: acuse inmediato, fallback y errores.
+# --------------------------------------------- aviso de avance y fallbacks
+# Categoría 1: aviso de avance, fallback y errores.
 
 
 @pytest.mark.parametrize("lengua", IDIOMAS)
-def test_el_acuse_inmediato_sale_en_el_idioma_del_destinatario(lengua):
-    texto = webhook.texto_ack(lengua)
+def test_el_aviso_de_avance_sale_en_el_idioma_del_destinatario(lengua):
+    texto = webhook.texto_progreso(lengua)
     assert texto.strip()
     if lengua == EN:
         assert restos_en_espanol(texto) == []
     else:
-        assert "Recibido" in texto
+        assert "consultando" in texto
 
 
 @pytest.mark.parametrize("lengua", IDIOMAS)
@@ -74,7 +74,7 @@ def test_los_textos_ya_no_van_en_los_dos_idiomas_pegados():
     """Antes se mandaban «español / English» juntos para no tener que elegir."""
     for lengua in IDIOMAS:
         for texto in (
-            webhook.texto_ack(lengua),
+            webhook.texto_progreso(lengua),
             webhook.texto_respuesta_vacia(lengua),
         ):
             assert " / " not in texto, f"quedó el texto bilingüe pegado: {texto!r}"
@@ -95,8 +95,8 @@ def test_una_respuesta_vacia_cae_al_fallback_de_ese_idioma(lengua):
 
 def test_un_idioma_desconocido_no_deja_al_cliente_sin_respuesta():
     """Fallar al idioma por defecto es la degradación correcta."""
-    texto = webhook.texto_ack("klingon")
-    assert texto == webhook.texto_ack(idioma.por_defecto())
+    texto = webhook.texto_progreso("klingon")
+    assert texto == webhook.texto_progreso(idioma.por_defecto())
 
 
 # --------------------------------------- a quién se le habla en qué idioma

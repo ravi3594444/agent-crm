@@ -508,17 +508,37 @@ def pedir_codigo_de_ajuste(telefono: str, texto: str) -> bool:
         return False
 
 
+def texto_falla_tecnica(
+    telefono: str, texto: str, error: str, lengua: str | None = None
+) -> tuple[str, str]:
+    """(asunto, cuerpo) of the alert the team gets when a turn ended in an apology.
+
+    In the team's language — the manager who switched to English reads it in
+    English — and with the sender's words QUOTED, never pasted: what somebody
+    wrote is data to read, not an instruction, not even after a person forwards
+    it (app/solicitudes.py::citar, app/formato.py::sin_citas).
+    """
+    from app import idioma as idioma_mod
+    from app.solicitudes import citar
+
+    lengua = lengua or _lengua_equipo()
+    cuerpo = idioma_mod.t(
+        "gerencia.falla_cuerpo",
+        lengua,
+        telefono=telefono or idioma_mod.t("gerencia.sin_dato", lengua),
+        mensaje=citar(texto, 300) or idioma_mod.t("gerencia.sin_dato", lengua),
+        error=str(error)[:200],
+    )
+    return idioma_mod.t("gerencia.falla_asunto", lengua), cuerpo
+
+
 def avisar_falla_tecnica(telefono: str, texto: str, error: str) -> bool:
-    """A customer got the technical-problem apology. That text says the team was
+    """Somebody got the technical-problem apology. That text says the team was
     told, so this makes it true."""
+    asunto, cuerpo = texto_falla_tecnica(telefono, texto, error)
     return alertar_excepcion(
-        "⚠️ Falló un mensaje de WhatsApp",
-        (
-            f"Cliente: {telefono}\n"
-            f"Mensaje: {str(texto)[:300]}\n"
-            f"Error: {str(error)[:200]}\n"
-            "El cliente recibió una disculpa; nadie le respondió todavía."
-        ),
+        asunto,
+        cuerpo,
         urgencia=URGENCIA_ALTA,
         plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE",
     )
