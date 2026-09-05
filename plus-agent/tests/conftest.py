@@ -91,10 +91,11 @@ class FakeRedis:
     real Redis happens to have left over, and no test should need one running.
     """
 
-    def __init__(self, hashes=None, strings=None, lists=None):
+    def __init__(self, hashes=None, strings=None, lists=None, zsets=None):
         self.hashes = {k: dict(v) for k, v in (hashes or {}).items()}
         self.strings = dict(strings or {})
         self.lists = {k: list(v) for k, v in (lists or {}).items()}
+        self.zsets = {k: dict(v) for k, v in (zsets or {}).items()}
         self.ttls: dict[str, int] = {}
         self.caido = False
 
@@ -118,6 +119,37 @@ class FakeRedis:
         self._vivo()
         self.strings[key] = value
         self.ttls[key] = ttl
+
+    def set(self, key, value, nx=False, ex=None):
+        """SET, con NX. app/acciones.py se apoya en que NX sea ATÓMICO.
+
+        Es como se reserva el código de seis dígitos: o la clave no existía y
+        queda escrita, o ya había una propuesta viva con ese código y no se
+        pisa nada. Un doble que ignorara `nx` dejaría pasar exactamente el bug
+        que ese SET existe para hacer imposible.
+        """
+        self._vivo()
+        if nx and key in self.strings:
+            return None
+        self.strings[key] = value
+        if ex is not None:
+            self.ttls[key] = ex
+        return True
+
+    def exists(self, key):
+        self._vivo()
+        return 1 if key in self.strings else 0
+
+    def expire(self, key, ttl):
+        self._vivo()
+        self.ttls[key] = ttl
+        return True
+
+    def incr(self, key):
+        self._vivo()
+        nuevo = int(self.strings.get(key) or 0) + 1
+        self.strings[key] = str(nuevo)
+        return nuevo
 
     def delete(self, key):
         self._vivo()
@@ -148,6 +180,52 @@ class FakeRedis:
     def ltrim(self, key, start, end):
         self._vivo()
         self.lists[key] = self.lrange(key, start, end)
+
+    # Los conjuntos ordenados. app/acciones.py guarda ahí los códigos vivos de
+    # un teléfono, con el vencimiento de puntaje, para contestar "¿hay algo
+    # esperando?" sin barrer el keyspace.
+    @staticmethod
+    def _limite(valor, por_defecto):
+        if valor in ("-inf", "+inf", "inf"):
+            return float("-inf") if valor == "-inf" else float("inf")
+        try:
+            return float(valor)
+        except (TypeError, ValueError):
+            return por_defecto
+
+    def zadd(self, key, mapping):
+        self._vivo()
+        self.zsets.setdefault(key, {}).update(
+            {str(m): float(p) for m, p in mapping.items()}
+        )
+        return len(mapping)
+
+    def zrem(self, key, *members):
+        self._vivo()
+        datos = self.zsets.get(key, {})
+        return sum(1 for m in members if datos.pop(str(m), None) is not None)
+
+    def zcard(self, key):
+        self._vivo()
+        return len(self.zsets.get(key, {}))
+
+    def zrangebyscore(self, key, minimo, maximo):
+        self._vivo()
+        desde = self._limite(minimo, float("-inf"))
+        hasta = self._limite(maximo, float("inf"))
+        return [
+            m
+            for m, p in sorted(self.zsets.get(key, {}).items(), key=lambda kv: kv[1])
+            if desde <= p <= hasta
+        ]
+
+    def zremrangebyscore(self, key, minimo, maximo):
+        self._vivo()
+        fuera = self.zrangebyscore(key, minimo, maximo)
+        datos = self.zsets.get(key, {})
+        for m in fuera:
+            datos.pop(m, None)
+        return len(fuera)
 
 
 def inventario_confiable(

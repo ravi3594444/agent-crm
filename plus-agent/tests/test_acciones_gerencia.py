@@ -30,6 +30,9 @@ GERENTE = "5493511234567"
 OTRO_DEL_EQUIPO = "5493517654321"
 CLIENTE = "5493510000000"
 PEDIDO = "SAL-ORD-2026-00008"
+# El segundo pedido. Existe porque el accidente que esta capa evita necesita
+# DOS: dos acciones preparadas y una respuesta que ejecuta la que no era.
+OTRO_PEDIDO = "SAL-ORD-2026-00009"
 
 
 @pytest.fixture(autouse=True)
@@ -92,9 +95,19 @@ def mensajes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     return enviados
 
 
-def _codigo_guardado(almacen) -> str:
-    crudo = almacen.strings[acciones._clave(GERENTE)]
-    return json.loads(crudo)["codigo"]
+def _codigo_guardado(almacen, pedido: str = PEDIDO, quien: str = GERENTE) -> str:
+    """El código que le llegó al dueño POR ESE PEDIDO, leído del almacén.
+
+    Va por el índice del pedido a propósito: ahora puede haber varias
+    propuestas vivas a la vez, y «el código guardado» sin decir de qué pedido
+    es exactamente la ambigüedad que esta capa dejó de tener.
+    """
+    return almacen.strings[acciones._clave_pedido(quien, pedido)]
+
+
+def _propuesta_guardada(almacen, pedido: str = PEDIDO, quien: str = GERENTE) -> dict:
+    codigo = _codigo_guardado(almacen, pedido, quien)
+    return json.loads(almacen.strings[acciones._clave(quien, codigo)])
 
 
 def _proponer(accion="cancelar", pedido=PEDIDO, detalle="se arrepintieron", quien=GERENTE):
@@ -287,7 +300,7 @@ def test_a_code_that_could_not_be_delivered_leaves_nothing_pending(
     )
 
     assert "descarté" in respuesta
-    assert acciones.pendiente(GERENTE) is None
+    assert acciones.pendientes(GERENTE) == []
 
 
 # ==========================================================================
@@ -397,21 +410,70 @@ def test_a_code_works_exactly_once(
     assert handler.call_count == 1
 
 
-def test_a_wrong_code_executes_nothing_and_leaves_nothing_pending(
+def test_a_wrong_code_executes_nothing_and_keeps_the_others_waiting(
     pedido_en_erpnext: Mock, sin_solicitud: None, handler: Mock, durable: Mock,
     limites_sin_redis,
 ) -> None:
-    """Un intento y nada más: sin segundo intento no hay nada que adivinar."""
+    """Un dígito mal tipeado no puede costarle una autorización a otro pedido.
+
+    Con UNA sola propuesta viva, equivocarse la descartaba en el acto y no
+    quedaban intentos. Con varias esperando esa regla castiga a los pedidos que
+    no tienen nada que ver, así que el error se cuenta y no se lleva nada
+    puesto — la racha sí (ver el test de más abajo).
+    """
     _proponer()
     codigo = _codigo_guardado(limites_sin_redis)
     equivocado = "000000" if codigo != "000000" else "111111"
 
-    with pytest.raises(acciones.AccionError, match="no es el de la acción"):
+    with pytest.raises(acciones.AccionError, match="no confirma ninguna acción"):
         acciones.aplicar(equivocado, GERENTE)
 
     handler.assert_not_called()
     durable.assert_not_called()
-    assert acciones.pendiente(GERENTE) is None
+    assert [p["pedido"] for p in acciones.pendientes(GERENTE)] == [PEDIDO]
+    # Y el bueno sigue sirviendo.
+    assert acciones.aplicar(codigo, GERENTE)["detalle"] == "✅ hecho"
+
+
+def test_a_streak_of_wrong_codes_throws_everything_away(
+    pedido_en_erpnext: Mock, sin_solicitud: None, handler: Mock, durable: Mock,
+    limites_sin_redis,
+) -> None:
+    """Lo que protegía «se descarta al primer error»: que no haya infinitos."""
+    _proponer()
+    codigo = _codigo_guardado(limites_sin_redis)
+    equivocado = "000000" if codigo != "000000" else "111111"
+
+    for _ in range(acciones.INTENTOS_MAXIMOS - 1):
+        with pytest.raises(acciones.AccionError, match="no confirma ninguna acción"):
+            acciones.aplicar(equivocado, GERENTE)
+    assert acciones.pendientes(GERENTE) != []
+
+    with pytest.raises(acciones.AccionError, match="descarté lo que quedaba"):
+        acciones.aplicar(equivocado, GERENTE)
+
+    assert acciones.pendientes(GERENTE) == []
+    handler.assert_not_called()
+
+
+def test_a_good_code_clears_the_streak(
+    pedido_en_erpnext: Mock, sin_solicitud: None, handler: Mock, durable: Mock,
+    limites_sin_redis,
+) -> None:
+    """La racha cuenta errores SEGUIDOS, no errores de toda la tarde."""
+    _proponer()
+    codigo = _codigo_guardado(limites_sin_redis)
+    equivocado = "000000" if codigo != "000000" else "111111"
+    for _ in range(acciones.INTENTOS_MAXIMOS - 1):
+        with pytest.raises(acciones.AccionError):
+            acciones.aplicar(equivocado, GERENTE)
+
+    acciones.aplicar(codigo, GERENTE)
+
+    _proponer(pedido=OTRO_PEDIDO, detalle="se arrepintieron")
+    with pytest.raises(acciones.AccionError, match="no confirma ninguna acción"):
+        acciones.aplicar(equivocado, GERENTE)
+    assert [p["pedido"] for p in acciones.pendientes(GERENTE)] == [OTRO_PEDIDO]
 
 
 def test_an_expired_proposal_is_refused_even_if_the_store_still_has_it(
@@ -424,14 +486,15 @@ def test_an_expired_proposal_is_refused_even_if_the_store_still_has_it(
     revive porque Redis volvió de un backup con la clave todavía viva.
     """
     _proponer()
-    clave = acciones._clave(GERENTE)
+    codigo = _codigo_guardado(limites_sin_redis)
+    clave = acciones._clave(GERENTE, codigo)
     guardada = json.loads(limites_sin_redis.strings[clave])
     guardada["expira"] = time.time() - 1
     limites_sin_redis.strings[clave] = json.dumps(guardada)
 
-    assert acciones.pendiente(GERENTE) is None
+    assert acciones.pendiente(GERENTE, codigo) is None
     with pytest.raises(acciones.AccionError, match="venció"):
-        acciones.aplicar(guardada["codigo"], GERENTE)
+        acciones.aplicar(codigo, GERENTE)
     handler.assert_not_called()
 
 
@@ -447,7 +510,7 @@ def test_the_code_of_one_manager_does_not_work_from_another_phone(
         acciones.aplicar(codigo, OTRO_DEL_EQUIPO)
 
     handler.assert_not_called()
-    assert acciones.pendiente(GERENTE) is not None
+    assert acciones.pendientes(GERENTE) != []
 
 
 def test_asking_twice_for_the_same_action_does_not_send_a_second_code(
@@ -470,25 +533,177 @@ def test_asking_twice_for_the_same_action_does_not_send_a_second_code(
     assert "Preparada" in primera
 
 
-def test_a_second_different_action_replaces_the_first_and_kills_its_code(
+def test_a_second_action_on_the_SAME_order_replaces_the_first_and_kills_its_code(
     pedido_en_erpnext: Mock, sin_solicitud: None, handler: Mock, durable: Mock,
     limites_sin_redis,
 ) -> None:
-    """Dos pedidos abiertos a la vez: el código viejo no ejecuta lo nuevo.
+    """Cambiar de opinión sobre UN pedido deja una sola propuesta sobre él.
 
-    Es la forma en que se cancela el pedido equivocado: dos confirmaciones
-    esperando y una respuesta ambigua. Acá hay UNA sola viva, y la anterior
-    muere en el mismo momento en que nace la siguiente.
+    Dos códigos vivos para el mismo pedido son dos respuestas correctas a la
+    misma pregunta y una sola manera de acordarse cuál era cuál.
     """
     _proponer(accion="cancelar", detalle="se arrepintieron")
     viejo = _codigo_guardado(limites_sin_redis)
-    _proponer(accion="preparar", pedido="SAL-ORD-2026-00009", detalle="")
+    _proponer(accion="preparar", detalle="")
     nuevo = _codigo_guardado(limites_sin_redis)
 
     assert viejo != nuevo
-    with pytest.raises(acciones.AccionError, match="no es el de la acción"):
+    assert len(acciones.pendientes(GERENTE)) == 1
+    with pytest.raises(acciones.AccionError, match="no confirma ninguna acción"):
         acciones.aplicar(viejo, GERENTE)
     handler.assert_not_called()
+    assert acciones.aplicar(nuevo, GERENTE)["accion"] == "preparar"
+
+
+def test_an_action_on_another_order_leaves_the_first_one_waiting(
+    pedido_en_erpnext: Mock, sin_solicitud: None, handler: Mock, durable: Mock,
+    limites_sin_redis,
+) -> None:
+    """EL defecto: preparar algo sobre otro pedido borraba lo del primero.
+
+    Al dueño le quedaban dos mensajes en el teléfono y un solo código vivo, así
+    que el que él leía como el del primer pedido ejecutaba el segundo. Cancelar
+    el pedido equivocado es exactamente lo que esta capa existe para no hacer.
+    """
+    _proponer(accion="cancelar", pedido=PEDIDO, detalle="se arrepintieron")
+    primero = _codigo_guardado(limites_sin_redis, PEDIDO)
+    _proponer(accion="preparar", pedido=OTRO_PEDIDO, detalle="")
+    segundo = _codigo_guardado(limites_sin_redis, OTRO_PEDIDO)
+
+    assert primero != segundo
+    assert {p["pedido"] for p in acciones.pendientes(GERENTE)} == {PEDIDO, OTRO_PEDIDO}
+    # Y cada código sigue siendo el de SU pedido.
+    assert acciones.pendiente(GERENTE, primero)["pedido"] == PEDIDO
+    assert acciones.pendiente(GERENTE, segundo)["pedido"] == OTRO_PEDIDO
+
+
+@pytest.mark.parametrize("orden", [("primero", "segundo"), ("segundo", "primero")])
+def test_two_orders_confirm_in_either_order_each_doing_its_own(
+    orden: tuple, pedido_en_erpnext: Mock, sin_solicitud: None, handler: Mock,
+    durable: Mock, limites_sin_redis,
+) -> None:
+    """Los dos códigos vivos, contestados en cualquier orden, hacen lo suyo."""
+    _proponer(accion="cancelar", pedido=PEDIDO, detalle="se arrepintieron")
+    _proponer(accion="preparar", pedido=OTRO_PEDIDO, detalle="")
+    codigos = {
+        "primero": _codigo_guardado(limites_sin_redis, PEDIDO),
+        "segundo": _codigo_guardado(limites_sin_redis, OTRO_PEDIDO),
+    }
+    esperado = {
+        "primero": (f"cancelar:{PEDIDO}:se arrepintieron", PEDIDO),
+        "segundo": (f"preparar:{OTRO_PEDIDO}", OTRO_PEDIDO),
+    }
+
+    for cual in orden:
+        resultado = acciones.aplicar(codigos[cual], GERENTE)
+        assert resultado["pedido"] == esperado[cual][1]
+
+    assert [c.args[0] for c in handler.call_args_list] == [
+        esperado[cual][0] for cual in orden
+    ]
+    assert acciones.pendientes(GERENTE) == []
+
+
+def test_one_order_expiring_does_not_expire_the_other(
+    pedido_en_erpnext: Mock, sin_solicitud: None, handler: Mock, durable: Mock,
+    limites_sin_redis,
+) -> None:
+    """Aislamiento de vencimiento: cada propuesta se muere sola."""
+    _proponer(accion="cancelar", pedido=PEDIDO, detalle="se arrepintieron")
+    vencido = _codigo_guardado(limites_sin_redis, PEDIDO)
+    _proponer(accion="preparar", pedido=OTRO_PEDIDO, detalle="")
+    vivo = _codigo_guardado(limites_sin_redis, OTRO_PEDIDO)
+
+    clave = acciones._clave(GERENTE, vencido)
+    guardada = json.loads(limites_sin_redis.strings[clave])
+    guardada["expira"] = time.time() - 1
+    limites_sin_redis.strings[clave] = json.dumps(guardada)
+
+    with pytest.raises(acciones.AccionError, match="venció"):
+        acciones.aplicar(vencido, GERENTE)
+    assert acciones.pendiente(GERENTE, vencido) is None
+
+    assert acciones.aplicar(vivo, GERENTE)["pedido"] == OTRO_PEDIDO
+    handler.assert_called_once_with(f"preparar:{OTRO_PEDIDO}", GERENTE)
+
+
+def test_replaying_one_code_does_not_touch_the_other_order(
+    pedido_en_erpnext: Mock, sin_solicitud: None, handler: Mock, durable: Mock,
+    limites_sin_redis,
+) -> None:
+    """Repetición: Meta reentrega el mensaje y el otro pedido no se entera."""
+    _proponer(accion="cancelar", pedido=PEDIDO, detalle="se arrepintieron")
+    uno = _codigo_guardado(limites_sin_redis, PEDIDO)
+    _proponer(accion="preparar", pedido=OTRO_PEDIDO, detalle="")
+    otro = _codigo_guardado(limites_sin_redis, OTRO_PEDIDO)
+
+    acciones.aplicar(uno, GERENTE)
+    with pytest.raises(acciones.AccionError, match="no confirma ninguna acción"):
+        acciones.aplicar(uno, GERENTE)
+
+    assert handler.call_count == 1
+    assert [p["pedido"] for p in acciones.pendientes(GERENTE)] == [OTRO_PEDIDO]
+    assert acciones.aplicar(otro, GERENTE)["pedido"] == OTRO_PEDIDO
+
+
+def test_both_orders_survive_a_restart(
+    pedido_en_erpnext: Mock, sin_solicitud: None, handler: Mock, durable: Mock,
+    limites_sin_redis,
+) -> None:
+    """Reinicio: dos propuestas vivas siguen siendo dos, cada una con su código."""
+    import importlib
+
+    _proponer(accion="cancelar", pedido=PEDIDO, detalle="se arrepintieron")
+    uno = _codigo_guardado(limites_sin_redis, PEDIDO)
+    _proponer(accion="preparar", pedido=OTRO_PEDIDO, detalle="")
+    otro = _codigo_guardado(limites_sin_redis, OTRO_PEDIDO)
+
+    recargado = importlib.reload(acciones)
+    try:
+        assert recargado.pendiente(GERENTE, uno)["pedido"] == PEDIDO
+        assert recargado.pendiente(GERENTE, otro)["pedido"] == OTRO_PEDIDO
+        assert recargado.aplicar(otro, GERENTE)["pedido"] == OTRO_PEDIDO
+        assert recargado.aplicar(uno, GERENTE)["pedido"] == PEDIDO
+    finally:
+        importlib.reload(acciones)
+
+
+def test_a_code_already_taken_is_never_handed_out_twice(
+    pedido_en_erpnext: Mock, sin_solicitud: None, handler: Mock, durable: Mock,
+    limites_sin_redis, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Colisión de códigos: el sorteo repite y la reserva es atómica.
+
+    Se fuerza el sorteo a devolver el MISMO número que ya está tomado antes de
+    ceder. Si la reserva no fuera un SET NX, la segunda propuesta pisaría a la
+    primera y un código abriría la acción de otro pedido.
+    """
+    _proponer(accion="cancelar", pedido=PEDIDO, detalle="se arrepintieron")
+    tomado = _codigo_guardado(limites_sin_redis, PEDIDO)
+
+    sorteos = iter([tomado, tomado, "654321"])
+    monkeypatch.setattr(acciones, "_codigo", lambda: next(sorteos))
+    _proponer(accion="preparar", pedido=OTRO_PEDIDO, detalle="")
+
+    assert _codigo_guardado(limites_sin_redis, OTRO_PEDIDO) == "654321"
+    assert acciones.pendiente(GERENTE, tomado)["pedido"] == PEDIDO
+    assert acciones.pendiente(GERENTE, "654321")["pedido"] == OTRO_PEDIDO
+
+
+def test_a_sorteo_that_never_finds_a_free_code_writes_nothing(
+    pedido_en_erpnext: Mock, sin_solicitud: None, handler: Mock, durable: Mock,
+    limites_sin_redis, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Si no hay código libre no se guarda una propuesta sin código."""
+    _proponer(accion="cancelar", pedido=PEDIDO, detalle="se arrepintieron")
+    tomado = _codigo_guardado(limites_sin_redis, PEDIDO)
+    monkeypatch.setattr(acciones, "_codigo", lambda: tomado)
+
+    with pytest.raises(acciones.AccionError, match="no pude registrar"):
+        _proponer(accion="preparar", pedido=OTRO_PEDIDO, detalle="")
+
+    assert [p["pedido"] for p in acciones.pendientes(GERENTE)] == [PEDIDO]
+    assert acciones.pendiente(GERENTE, tomado)["accion"] == "cancelar"
 
 
 def test_the_pending_action_survives_a_restart(
@@ -507,7 +722,7 @@ def test_the_pending_action_survives_a_restart(
 
     recargado = importlib.reload(acciones)
     try:
-        assert recargado.pendiente(GERENTE)["pedido"] == PEDIDO
+        assert recargado.pendiente(GERENTE, codigo)["pedido"] == PEDIDO
         assert recargado.aplicar(codigo, GERENTE)["detalle"] == "✅ hecho"
     finally:
         importlib.reload(acciones)
@@ -688,7 +903,7 @@ def test_four_digits_still_belong_to_the_settings_code(
     assert main._codigo_de_accion("1234", GERENTE) is None
     assert main._codigo_de_ajuste(_codigo_guardado(limites_sin_redis), GERENTE) is None
     handler.assert_not_called()
-    assert acciones.pendiente(GERENTE) is not None
+    assert acciones.pendientes(GERENTE) != []
 
 
 def test_prose_about_an_order_with_an_open_request_still_gets_the_summary(

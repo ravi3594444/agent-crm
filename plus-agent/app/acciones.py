@@ -29,6 +29,17 @@ armado el comando escrito a mano, y ahí adentro no cambió nada.
     revalida todo de nuevo en Python y recién entonces llama al handler de
     siempre.
 
+UNA POR PEDIDO, Y VARIAS A LA VEZ
+La propuesta vive bajo el teléfono del dueño Y el código con el que se
+confirma, así que puede haber varias esperando y cada código abre exactamente
+la suya. Antes había una sola por teléfono: preparar algo sobre un segundo
+pedido borraba lo del primero, y al dueño le quedaban dos mensajes en el
+teléfono con un solo código vivo. El que él leía como el del primer pedido
+ejecutaba el segundo — un pedido cancelado en lugar de otro, que es justo el
+accidente que esta capa existe para no tener. Reemplazar quedó donde tiene
+sentido: una propuesta nueva pisa a la del MISMO pedido, porque eso es cambiar
+de opinión sobre él, y nunca a la de otro.
+
 POR QUÉ SEIS DÍGITOS Y NO CUATRO
 Los cambios de ajustes (app/limites.py) ya usan cuatro. Si los dos códigos
 tuvieran el mismo largo, un mensaje de cuatro dígitos con las dos cosas
@@ -67,12 +78,30 @@ from app.formato import pesos, sin_citas
 from app.router import es_equipo
 
 CLAVE_PROPUESTA = "plus-agent:acciones:propuesta"
+# Qué código está esperando sobre CADA pedido. Es lo que hace que una propuesta
+# nueva reemplace sólo a la del mismo pedido y no a la de otro.
+CLAVE_INDICE = "plus-agent:acciones:pedido"
+# Los códigos vivos de un teléfono, ordenados por vencimiento. Contesta la
+# única pregunta del router: ¿este mensaje de seis dígitos PUEDE ser un código?
+CLAVE_VIVAS = "plus-agent:acciones:vivas"
+CLAVE_FALLOS = "plus-agent:acciones:fallos"
 CLAVE_AUDITORIA = "plus-agent:acciones:auditoria"
 
 # Diez minutos, como el código de ajustes. Es lo que tarda una persona en leer
 # un WhatsApp y contestarlo, y es poco para que algo cambie abajo.
 PROPUESTA_TTL_SEGUNDOS = 600
 AUDITORIA_MAXIMA = 500
+
+# Cuántos códigos equivocados seguidos antes de tirar TODO lo que ese teléfono
+# tenía esperando. Con una sola propuesta viva, equivocarse la descartaba en el
+# acto; con varias eso sería un typo cancelando autorizaciones que no tienen
+# nada que ver. Contarlos conserva lo que aquello protegía —que no haya
+# intentos infinitos— sin que el primero se lleve puestas las demás.
+INTENTOS_MAXIMOS = 5
+# Cuántas veces se sortea un código antes de rendirse. Con 900.000 posibles y
+# un puñado de propuestas vivas, chocar dos veces seguidas ya es improbable;
+# esto existe para que el lazo TERMINE, no porque se espere que itere.
+INTENTOS_DE_CODIGO = 8
 
 # La marca del comentario durable en ERPNext. Es el registro de que ALGUIEN
 # AUTORIZÓ esto: qué acción, sobre qué pedido, con qué parámetros y desde qué
@@ -228,6 +257,12 @@ def _ahora_texto() -> str:
         return datetime.now().isoformat(timespec="seconds")
 
 
+# Exactamente seis dígitos. Se valida ANTES de tocar Redis: el código llega de
+# un mensaje de WhatsApp y va adentro de una clave, así que lo que no tenga la
+# forma de un código no llega a construir ninguna.
+_CODIGO_RE = re.compile(r"^\d{6}$")
+
+
 def _codigo() -> str:
     """Seis dígitos, siempre seis: el primero nunca es cero."""
     return f"{secrets.randbelow(900000) + 100000}"
@@ -238,15 +273,47 @@ def _tag(telefono: object) -> str:
     return hashlib.sha256(str(telefono or "").encode()).hexdigest()[:10]
 
 
-def _clave(telefono: object) -> str:
-    """La clave de la propuesta, en forma canónica.
+def _quien(telefono: object) -> str:
+    """Quién propone, en forma canónica.
 
     Proponer y confirmar llegan por caminos distintos —la herramienta de
     gerencia con el teléfono del contexto, el router determinista con el del
     webhook—. Si cada uno normalizara distinto, el código correcto no
     encontraría nada que aplicar. Ya pasó una vez, con los límites.
     """
-    return f"{CLAVE_PROPUESTA}:{telefono_mod.normalizar(telefono) or telefono}"
+    return str(telefono_mod.normalizar(telefono) or telefono or "")
+
+
+def _clave(telefono: object, codigo: object) -> str:
+    """Dónde vive UNA propuesta: quién la pidió, y con qué código se confirma.
+
+    El código va en la clave a propósito. Antes había una sola propuesta por
+    teléfono y la clave era nada más que el número, así que preparar una acción
+    sobre un segundo pedido pisaba la del primero: al dueño le quedaban dos
+    mensajes en el teléfono y un solo código vivo, y el que él leía como el del
+    primer pedido ejecutaba el segundo. Ahora cada propuesta se busca por lo
+    único que él escribe, y buscarla no puede encontrar la de otro pedido.
+    """
+    return f"{CLAVE_PROPUESTA}:{_quien(telefono)}:{codigo}"
+
+
+def _clave_pedido(telefono: object, pedido: object) -> str:
+    """El índice por pedido: qué código está esperando sobre ESE pedido.
+
+    Es lo que permite que una propuesta nueva reemplace SÓLO a la del mismo
+    pedido. Sin él habría que recorrer las vivas para averiguarlo, y
+    «reemplazar la que había» volvería a querer decir «reemplazar cualquiera».
+    """
+    return f"{CLAVE_INDICE}:{_quien(telefono)}:{pedido}"
+
+
+def _clave_vivas(telefono: object) -> str:
+    """Los códigos vivos de ese teléfono, con su vencimiento por puntaje."""
+    return f"{CLAVE_VIVAS}:{_quien(telefono)}"
+
+
+def _clave_fallos(telefono: object) -> str:
+    return f"{CLAVE_FALLOS}:{_quien(telefono)}"
 
 
 def _texto(valor: object) -> str:
@@ -456,11 +523,7 @@ def ejecutar_lectura(nombre_o_alias: object, pedido_crudo: object, telefono: str
 # --------------------------------------------------------------- la propuesta
 
 
-def _leer(telefono: str) -> dict | None:
-    try:
-        crudo = locks.conexion().get(_clave(telefono))
-    except (locks.CoordinationError, RedisError):
-        return None
+def _descifrar(crudo: object) -> dict | None:
     if not crudo:
         return None
     try:
@@ -468,6 +531,67 @@ def _leer(telefono: str) -> dict | None:
     except ValueError:
         return None
     return propuesta if isinstance(propuesta, dict) else None
+
+
+def _leer_por_codigo(telefono: str, codigo: object) -> dict | None:
+    """La propuesta que se confirma con ESE código, sin consumirla."""
+    if not _CODIGO_RE.match(str(codigo or "").strip()):
+        return None
+    try:
+        crudo = locks.conexion().get(_clave(telefono, str(codigo).strip()))
+    except (locks.CoordinationError, RedisError):
+        return None
+    return _descifrar(crudo)
+
+
+def _leer_de_pedido(telefono: str, pedido: str) -> dict | None:
+    """La propuesta viva sobre ESE pedido, si hay una. Pasa por el índice."""
+    try:
+        codigo = locks.conexion().get(_clave_pedido(telefono, pedido))
+    except (locks.CoordinationError, RedisError):
+        return None
+    if not codigo:
+        return None
+    return _leer_por_codigo(telefono, _texto(codigo))
+
+
+def _vivas(telefono: str) -> list[str]:
+    """Los códigos que todavía no vencieron, del que vence primero al último.
+
+    Poda de paso lo vencido: el ZSET no tiene TTL por miembro, así que si nadie
+    limpiara, «¿hay algo esperando?» seguiría diciendo que sí con propuestas
+    que ya no existen — y un mensaje de seis dígitos cualquiera se leería como
+    un código equivocado en vez de llegarle al agente.
+    """
+    try:
+        cliente = locks.conexion()
+        clave = _clave_vivas(telefono)
+        cliente.zremrangebyscore(clave, "-inf", time.time())
+        return [_texto(c) for c in cliente.zrangebyscore(clave, time.time(), "+inf")]
+    except (locks.CoordinationError, RedisError):
+        return []
+
+
+def _indexar(telefono: str, pedido: str, codigo: str, expira: float) -> None:
+    """Deja la propuesta encontrable: por su pedido y entre las vivas."""
+    cliente = locks.conexion()
+    cliente.setex(_clave_pedido(telefono, pedido), PROPUESTA_TTL_SEGUNDOS, codigo)
+    cliente.zadd(_clave_vivas(telefono), {codigo: expira})
+    cliente.expire(_clave_vivas(telefono), PROPUESTA_TTL_SEGUNDOS)
+
+
+def _olvidar(telefono: str, codigo: object, pedido: object = None) -> None:
+    """Borra una propuesta y sus rastros. Nunca toca la de otro pedido."""
+    if not codigo:
+        return
+    try:
+        cliente = locks.conexion()
+        cliente.delete(_clave(telefono, codigo))
+        cliente.zrem(_clave_vivas(telefono), str(codigo))
+        if pedido:
+            cliente.delete(_clave_pedido(telefono, pedido))
+    except (locks.CoordinationError, RedisError) as exc:
+        print(f"[acciones] no pude limpiar la propuesta ({type(exc).__name__})")
 
 
 def _vencida(propuesta: dict, ahora: float | None = None) -> bool:
@@ -482,6 +606,11 @@ def proponer(
     nombre_o_alias: object, pedido_crudo: object, detalle: object, telefono: str
 ) -> dict:
     """Deja una acción PENDIENTE de confirmación. No cambia nada.
+
+    Pueden esperar VARIAS a la vez, una por pedido. Una propuesta nueva
+    reemplaza sólo a la del MISMO pedido —eso es cambiar de opinión sobre él— y
+    jamás a la de otro: el dueño que prepara algo sobre dos pedidos distintos
+    se queda con dos códigos vivos, y cada uno hace lo suyo.
 
     Devuelve la propuesta sin el código. `repetida` es True cuando ya había una
     idéntica esperando: en ese caso NO se genera otro código ni se manda otro
@@ -501,14 +630,16 @@ def proponer(
     consecuencia = _consecuencia(accion, pedido, parametros)
 
     huella = _huella(telefono, accion, pedido, parametros)
-    anterior = _leer(telefono)
+    # Se mira SÓLO lo que está esperando sobre ESTE pedido. Lo que haya
+    # pendiente sobre otro no se lee, no se compara y no se toca.
+    anterior = _leer_de_pedido(telefono, pedido)
     if anterior and anterior.get("id") == huella and not _vencida(anterior):
         return {**{k: v for k, v in anterior.items() if k != "codigo"}, "repetida": True}
 
     ahora = time.time()
     propuesta = {
         "id": huella,
-        "codigo": _codigo(),
+        "codigo": "",
         "accion": accion.nombre,
         "pedido": pedido,
         "parametros": parametros,
@@ -517,63 +648,171 @@ def proponer(
         "ts": _ahora_texto(),
         "expira": ahora + PROPUESTA_TTL_SEGUNDOS,
     }
-    # UNA sola propuesta viva por teléfono, y la nueva pisa a la anterior. El
-    # código de la anterior deja de existir en el mismo momento, así que no
-    # queda un código viejo capaz de ejecutar algo que ya no es lo último que
-    # se pidió — que es la manera en que dos pedidos abiertos a la vez se
-    # convierten en el pedido equivocado cancelado.
     try:
-        locks.conexion().setex(
-            _clave(telefono),
-            PROPUESTA_TTL_SEGUNDOS,
-            json.dumps(propuesta, ensure_ascii=False),
-        )
+        _reservar(telefono, propuesta)
+        # El código viejo de ESTE pedido muere recién acá, con el nuevo ya
+        # guardado: si algo se cayera en el medio, lo que queda es la propuesta
+        # anterior —que el dueño puede confirmar o dejar vencer— y no ninguna.
+        # Reemplazar es cambiar de opinión sobre un pedido, así que alcanza y
+        # sobra con el de ese pedido; el de otro ni se nombra acá.
+        if anterior:
+            _olvidar(telefono, anterior.get("codigo"))
+        _indexar(telefono, pedido, propuesta["codigo"], propuesta["expira"])
     except (locks.CoordinationError, RedisError) as exc:
         raise AccionError("no pude registrar la acción para confirmarla") from exc
     return {
         **{k: v for k, v in propuesta.items() if k != "codigo"},
         "repetida": False,
-        "reemplazo": bool(anterior and anterior.get("id") != huella and not _vencida(anterior)),
+        "reemplazo": bool(anterior and not _vencida(anterior)),
     }
 
 
-def codigo_de(telefono: str) -> str:
-    """El código de la propuesta pendiente. SÓLO para app/tools/gestion.py.
+def _reservar(telefono: str, propuesta: dict) -> None:
+    """Le da a la propuesta un código libre, y la guarda con él. Atómico.
+
+    SET NX es la operación entera: o la clave no existía y la propuesta queda
+    escrita, o ya había una viva con ese mismo código y no se pisa nada. Dos
+    turnos que sortean el mismo número no pueden quedárselo los dos, que es
+    como un código terminaría confirmando una acción que no es la suya.
+    """
+    cliente = locks.conexion()
+    for _ in range(INTENTOS_DE_CODIGO):
+        codigo = _codigo()
+        propuesta["codigo"] = codigo
+        if cliente.set(
+            _clave(telefono, codigo),
+            json.dumps(propuesta, ensure_ascii=False),
+            nx=True,
+            ex=PROPUESTA_TTL_SEGUNDOS,
+        ):
+            return
+    propuesta["codigo"] = ""
+    raise AccionError("no pude registrar la acción para confirmarla")
+
+
+def codigo_de(telefono: str, pedido: str) -> str:
+    """El código de la propuesta viva sobre ESE pedido. SÓLO para gestion.py.
 
     Existe para una cosa: dárselo a app/notificar.py, que lo manda al número
     del dueño. Nunca vuelve al modelo, nunca vuelve en el resultado de una
     herramienta y no se escribe en ningún log.
+
+    Lleva el pedido porque ahora puede haber varias esperando: sin él, «el
+    código pendiente» volvería a ser una adivinanza entre dos.
     """
-    propuesta = _leer(telefono)
+    propuesta = _leer_de_pedido(telefono, pedido)
     return str((propuesta or {}).get("codigo") or "")
 
 
-def pendiente(telefono: str) -> dict | None:
-    """La acción que ese teléfono dejó esperando confirmación, si hay una.
+def pendiente(telefono: str, codigo: object) -> dict | None:
+    """La acción que ESE código confirma, si sigue viva. Nunca otra.
 
-    La usa el router determinista de app/main.py para saber si un mensaje de
-    seis dígitos ES un código. NUNCA devuelve el código, y falla cerrada: si no
-    se puede leer, no hay nada pendiente y el mensaje sigue su camino normal.
+    NUNCA devuelve el código, y falla cerrada: si no se puede leer, no hay nada
+    pendiente y el mensaje sigue su camino normal.
     """
     if not telefono:
         return None
-    propuesta = _leer(telefono)
+    propuesta = _leer_por_codigo(telefono, codigo)
     if propuesta is None or _vencida(propuesta):
         return None
     return {k: v for k, v in propuesta.items() if k != "codigo"}
 
 
-def descartar(telefono: str) -> None:
-    """Tira la acción pendiente. Para cuando el código no llegó a destino."""
+def pendientes(telefono: str) -> list[dict]:
+    """Todo lo que ese teléfono dejó esperando, del que vence primero al último.
+
+    Nunca devuelve códigos. Es la lectura que usan los tests y el que audita;
+    el router usa hay_pendientes(), que es la misma pregunta sin los datos.
+    """
     if not telefono:
+        return []
+    vivas = []
+    for codigo in _vivas(telefono):
+        propuesta = _leer_por_codigo(telefono, codigo)
+        if propuesta is not None and not _vencida(propuesta):
+            vivas.append({k: v for k, v in propuesta.items() if k != "codigo"})
+    return vivas
+
+
+def hay_pendientes(telefono: str) -> bool:
+    """¿Este teléfono tiene alguna acción esperando un código?
+
+    La usa el router determinista de app/main.py para decidir si un mensaje de
+    seis dígitos puede ser una confirmación. Falla cerrada: si no se puede
+    leer, no hay nada y el mensaje sigue su camino normal hasta el agente.
+    """
+    return bool(telefono) and bool(_vivas(telefono))
+
+
+def descartar(telefono: str, pedido: str) -> None:
+    """Tira lo que estaba esperando sobre ESE pedido, y nada más.
+
+    Para cuando el código no llegó a destino. Lleva el pedido porque lo que
+    espera sobre otro no tiene nada que ver con que este mensaje no haya salido.
+    """
+    if not telefono or not pedido:
         return
-    try:
-        locks.conexion().delete(_clave(telefono))
-    except (locks.CoordinationError, RedisError) as exc:
-        print(f"[acciones] no pude descartar la propuesta ({type(exc).__name__})")
+    propuesta = _leer_de_pedido(telefono, pedido)
+    _olvidar(telefono, (propuesta or {}).get("codigo"), pedido=pedido)
+
+
+def descartar_todo(telefono: str) -> int:
+    """Tira TODO lo que ese teléfono tenía esperando. Devuelve cuántas eran."""
+    if not telefono:
+        return 0
+    codigos = _vivas(telefono)
+    for codigo in codigos:
+        propuesta = _leer_por_codigo(telefono, codigo)
+        _olvidar(telefono, codigo, pedido=(propuesta or {}).get("pedido"))
+    return len(codigos)
 
 
 # ---------------------------------------------------------------- aplicarla
+
+
+def _fallo(telefono: str) -> int:
+    """Cuenta un código que no abrió nada. Devuelve cuántos van seguidos."""
+    try:
+        cliente = locks.conexion()
+        clave = _clave_fallos(telefono)
+        cuantos = int(cliente.incr(clave) or 0)
+        cliente.expire(clave, PROPUESTA_TTL_SEGUNDOS)
+        return cuantos
+    except (locks.CoordinationError, RedisError, TypeError, ValueError):
+        return 0
+
+
+def _limpiar_fallos(telefono: str) -> None:
+    try:
+        locks.conexion().delete(_clave_fallos(telefono))
+    except (locks.CoordinationError, RedisError):
+        pass
+
+
+def _codigo_que_no_abre_nada(telefono: str) -> AccionError:
+    """Qué decir cuando el código no encuentra propuesta, sin romper las otras.
+
+    Con UNA sola propuesta viva, equivocarse la descartaba en el acto: no había
+    nada que elegir y así no quedaban intentos. Con varias esperando, esa misma
+    regla convierte un dígito mal tipeado en la cancelación de autorizaciones
+    que no tienen nada que ver con lo que el dueño estaba mirando. Se cuentan
+    entonces, y recién la racha se lleva todo: no hay intentos infinitos, y el
+    primer error no le cuesta a los otros pedidos.
+    """
+    if not hay_pendientes(telefono):
+        return AccionError("no hay ninguna acción esperando confirmación")
+    if _fallo(telefono) >= INTENTOS_MAXIMOS:
+        cuantas = descartar_todo(telefono)
+        return AccionError(
+            f"ese código no confirma nada, y van {INTENTOS_MAXIMOS} seguidos: "
+            f"descarté lo que quedaba esperando ({cuantas}). No cambié nada — "
+            "pedime de nuevo lo que querías"
+        )
+    return AccionError(
+        "ese código no confirma ninguna acción tuya. No cambié nada, y lo que "
+        "tenías esperando sigue esperando: fijate el mensaje del código y "
+        "contestá esos seis dígitos"
+    )
 
 
 def aplicar(codigo: object, telefono: str) -> dict:
@@ -595,25 +834,27 @@ def aplicar(codigo: object, telefono: str) -> dict:
     if not es_equipo(telefono):
         raise AccionError("ese número ya no está autorizado para esto")
 
-    clave = _clave(telefono)
+    limpio = str(codigo or "").strip()
+    if not _CODIGO_RE.match(limpio):
+        raise AccionError("eso no tiene forma de código de confirmación")
+    # El código ES la clave, así que buscar sólo puede encontrar SU propuesta.
+    # Antes se leía «la propuesta del teléfono» y después se comparaba el
+    # código: con dos pedidos preparados eso leía la que no era.
     try:
-        crudo = locks.conexion().getdel(clave)
+        crudo = locks.conexion().getdel(_clave(telefono, limpio))
     except (locks.CoordinationError, RedisError) as exc:
         raise AccionError("no pude leer la acción pendiente") from exc
     if not crudo:
-        raise AccionError("no hay ninguna acción esperando confirmación")
-    try:
-        propuesta = json.loads(_texto(crudo))
-    except ValueError as exc:
-        raise AccionError("la acción pendiente quedó ilegible") from exc
-    if not isinstance(propuesta, dict):
+        raise _codigo_que_no_abre_nada(telefono)
+    propuesta = _descifrar(crudo)
+    if propuesta is None:
         raise AccionError("la acción pendiente quedó ilegible")
-
-    if str(propuesta.get("codigo")) != str(codigo or "").strip():
-        raise AccionError(
-            "ese código no es el de la acción pendiente. La descarté: no cambié "
-            "nada y no queda nada esperando. Pedímela de nuevo si la querés"
-        )
+    # Los rastros salen con ella, y sólo los suyos: el índice de SU pedido y su
+    # lugar entre las vivas. Lo que espera sobre otro pedido no se toca.
+    _olvidar(telefono, limpio, pedido=propuesta.get("pedido"))
+    _limpiar_fallos(telefono)
+    if str(propuesta.get("codigo")) != limpio:
+        raise AccionError("la acción pendiente quedó ilegible")
     # El vencimiento va adentro de la propuesta y no sólo en el TTL: un TTL que
     # no corrió (un Redis restaurado desde un backup, un reloj movido) no puede
     # revivir un código de ayer.
@@ -734,14 +975,18 @@ def mandar_codigo(telefono: str, propuesta: dict) -> bool:
     resultado de la herramienta sería un código que el modelo leyó, y un modelo
     que lo leyó puede confirmar la acción él solo en el mismo turno.
     """
-    codigo = codigo_de(telefono)
+    codigo = codigo_de(telefono, str(propuesta.get("pedido") or ""))
     if not codigo:
         return False
     minutos = PROPUESTA_TTL_SEGUNDOS // 60
+    # El pedido va en el mensaje porque puede haber más de uno esperando: sin
+    # él, dos códigos en el teléfono son dos números sin dueño.
     return notificar.pedir_codigo_de_ajuste(
         telefono,
-        f"Código para confirmar esta acción:\n{propuesta['consecuencia']}\n\n"
+        f"Código para confirmar esta acción sobre {propuesta['pedido']}:\n"
+        f"{propuesta['consecuencia']}\n\n"
         f"Contestá *{codigo}* para que la haga. "
         f"Si no contestás, en {minutos} minutos se descarta sola. "
-        "Si te equivocás de código no la ejecuto y la descarto.",
+        "Este código confirma sólo esta acción y ninguna otra que tengas "
+        "esperando.",
     )

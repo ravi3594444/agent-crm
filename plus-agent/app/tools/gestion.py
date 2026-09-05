@@ -80,6 +80,10 @@ def proponer_accion(accion: str, pedido: str, config: RunnableConfig, detalle: s
     El código de confirmación se lo manda el sistema al dueño por separado. Vos
     no lo recibís y no lo podés aplicar: decile que conteste con esos seis
     dígitos. Hasta que lo haga, NO digas que la acción se hizo.
+
+    Puede haber varias esperando, una por pedido: preparar algo sobre un pedido
+    no toca lo que esté esperando sobre otro. Cada código confirma el suyo, así
+    que cuando le hables de una acción nombrá SIEMPRE el pedido.
     """
     try:
         actor = require_management(config)
@@ -105,7 +109,7 @@ def proponer_accion(accion: str, pedido: str, config: RunnableConfig, detalle: s
     if not entregado:
         # Una acción esperando un código que nadie vio no se puede confirmar, y
         # sí puede confundirlo diez minutos después. Mejor no dejarla.
-        acciones.descartar(actor.actor_phone)
+        acciones.descartar(actor.actor_phone, propuesta["pedido"])
         return (
             f"Preparé la acción ({propuesta['accion']} {propuesta['pedido']}) "
             "pero NO pude mandarte el código de confirmación, así que la "
@@ -113,7 +117,9 @@ def proponer_accion(accion: str, pedido: str, config: RunnableConfig, detalle: s
         )
 
     reemplazo = (
-        "Reemplacé la acción que tenías esperando: el código anterior ya no sirve.\n"
+        f"Reemplacé lo que tenías esperando sobre {propuesta['pedido']}: ese "
+        "código anterior ya no sirve. Lo que hayas preparado sobre otro pedido "
+        "sigue esperando igual.\n"
         if propuesta.get("reemplazo")
         else ""
     )

@@ -419,13 +419,19 @@ def _codigo_de_accion(text: str, telefono: str) -> str | None:
     None when the message is NOT a confirmation — no six digits, or nothing
     pending for that phone — so an ordinary message that happens to be a number
     still reaches the agent.
+
+    The question asked here is "does this phone have ANYTHING waiting", not
+    "which one": several orders can be waiting at once, and WHICH proposal a
+    code opens is decided inside aplicar() by the code itself. Asking for a
+    single pending proposal here is what used to make a code for one order
+    execute another.
     """
     from app import acciones
 
     match = _CODIGO_ACCION_RE.match(str(text or ""))
     if not match:
         return None
-    if acciones.pendiente(telefono) is None:
+    if not acciones.hay_pendientes(telefono):
         return None
     try:
         resultado = acciones.aplicar(match.group(1), telefono)
