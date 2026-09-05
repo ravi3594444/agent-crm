@@ -63,6 +63,8 @@ ARGUMENTOS: dict[str, dict] = {
     "ver_reglas_de_entrega": {},
     "estado_del_sistema": {},
     "ver_avisos_fallidos": {},
+    "detalle_de_pedido": {"pedido": "SAL-ORD-2026-00001"},
+    "proponer_accion": {"accion": "confirmar", "pedido": "SAL-ORD-2026-00001"},
 }
 
 # Cómo se niega cada una. Casi todas comparten SIN_PERMISO; las que ya tenían su
@@ -82,10 +84,11 @@ NEGATIVAS = {
 def sin_whatsapp(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ninguna prueba manda un WhatsApp de verdad.
 
-    `proponer_limite` termina en app/notificar.py::pedir_codigo_de_ajuste, que
-    abre una conexión a graph.facebook.com y la cierra con un error. Nunca
-    cambió un resultado —trata «no se lo pude mandar» como el caso normal— pero
-    la casa dice que los tests no salen a la red, y salían.
+    `proponer_limite` y `proponer_accion` terminan en
+    app/notificar.py::pedir_codigo_de_ajuste, que abre una conexión a
+    graph.facebook.com y la cierra con un error. Nunca cambió un resultado
+    —los dos tratan «no se lo pude mandar» como el caso normal— pero la casa
+    dice que los tests no salen a la red, y salían.
     """
     from app import whatsapp
 
@@ -184,8 +187,8 @@ def test_every_management_only_tool_is_covered_by_this_file() -> None:
         "una herramienta sólo-de-gerencia sin caso de prueba: agregala a "
         "ARGUMENTOS con sus argumentos mínimos"
     )
-    # 16 hoy. El número está acá para que un cambio de superficie se note.
-    assert len(SOLO_GERENCIA) == 16
+    # 18 hoy. El número está acá para que un cambio de superficie se note.
+    assert len(SOLO_GERENCIA) == 18
 
 
 def test_no_management_tool_accepts_a_phone_or_an_identity_argument() -> None:

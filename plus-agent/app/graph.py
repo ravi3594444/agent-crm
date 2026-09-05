@@ -47,6 +47,10 @@ from app.tools.gerencia import (
     stock_bajo,
     ventas_del_periodo,
 )
+from app.tools.gestion import (
+    detalle_de_pedido,
+    proponer_accion,
+)
 from app.tools.operaciones import (
     estado_del_sistema,
     ver_avisos_fallidos,
@@ -90,6 +94,13 @@ TOOLS_GERENCIA = [
     # read-only operational status. No writes, no retries, no secrets, and
     # NEVER in TOOLS_CLIENTES: these count queues and name the provider.
     estado_del_sistema, ver_avisos_fallidos,
+    # ...and the owner's prose about ONE order, turned into ONE action that
+    # already exists (app/acciones.py). Reading is done on the spot; anything
+    # that writes is only PREPARED here and confirmed by him with a six-digit
+    # code this agent never sees — the same shape as proponer_limite, and for
+    # the same reason. NEVER in TOOLS_CLIENTES: a customer near these is a
+    # customer deciding his own order.
+    detalle_de_pedido, proponer_accion,
 ]
 
 # from_conn_string() is a CONTEXT MANAGER, not a constructor — using it

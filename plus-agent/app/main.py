@@ -394,6 +394,49 @@ def _codigo_de_ajuste(text: str, telefono: str) -> str | None:
     )
 
 
+# The owner confirming an ACTION on one order. Exactly six digits and nothing
+# else — what app/acciones.py generates and what he is asked to send back.
+#
+# Six and not four ON PURPOSE. The settings code is four, and with both kinds
+# pending a four-digit message would be ambiguous: something would have to
+# guess which of the two he meant to confirm, and one of the two cancels an
+# order. Different lengths mean nothing has to guess.
+_CODIGO_ACCION_RE = re.compile(r"^\s*(\d{6})\s*$")
+
+
+def _codigo_de_accion(text: str, telefono: str) -> str | None:
+    """Execute the action the owner just confirmed with his code, or None.
+
+    Same shape as _codigo_de_ajuste, and for the same reason: the management
+    agent PREPARES the action and never sees the code — app/acciones.py sends
+    it straight to the owner's own number — so the only thing that can execute
+    one is an inbound message that arrived through the signed webhook from a
+    phone router.es_equipo authenticated, handled here before any model reads
+    it. An agent able to call both halves is not a two-step confirmation.
+
+    Everything is revalidated in Python inside app/acciones.py::aplicar, which
+    then calls the SAME deterministic handler the typed command calls. Returns
+    None when the message is NOT a confirmation — no six digits, or nothing
+    pending for that phone — so an ordinary message that happens to be a number
+    still reaches the agent.
+    """
+    from app import acciones
+
+    match = _CODIGO_ACCION_RE.match(str(text or ""))
+    if not match:
+        return None
+    if acciones.pendiente(telefono) is None:
+        return None
+    try:
+        resultado = acciones.aplicar(match.group(1), telefono)
+    except acciones.AccionError as exc:
+        return f"No hice nada: {exc}."
+    except Exception as error:
+        print(f"[acciones] confirmación falló type={_error_name(error)}")
+        return "No pude hacer esa acción en este momento. No cambié nada."
+    return str(resultado["detalle"])
+
+
 # A customer accepting or refusing an offer is a DECISION about money and a
 # delivery date. It is matched here, before any model sees the message, so the
 # answer cannot depend on a paraphrase.
@@ -537,6 +580,9 @@ def _generate_response(item: dict) -> str:
             ajuste = _codigo_de_ajuste(data, telefono)
             if ajuste:
                 return ajuste
+            accion = _codigo_de_accion(data, telefono)
+            if accion:
+                return accion
             command = _staff_command(data)
             if command:
                 return str(manejar_boton(command, telefono))

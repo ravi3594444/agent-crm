@@ -64,12 +64,11 @@ _DUMMY = {
     # LAS DOS QUE DECIDEN QUIÉN ES QUIÉN, y las dos que un .env real cambia.
     # app/telefono.py lee PAIS_TELEFONO AL IMPORTAR y app/router.py arma STAFF
     # igual, así que un .env con otro país o con el número real del dueño no
-    # "configura" la suite: la hace probar otra cosa. Con un .env de un piloto
-    # en +91 se caen veinticuatro tests de identidad que no tienen nada que ver
-    # con el país, y con un TELEFONOS_EQUIPO cargado, un test que dice "nadie
-    # autoriza" prueba lo contrario de lo que dice. Vacío es lo que hay en un
-    # checkout limpio, y los tests que necesitan un equipo lo fijan ellos con
-    # router.recargar().
+    # "configura" la suite: la hace probar otra cosa. Con PAIS_TELEFONO=91 se
+    # caen veinte tests de identidad que no tienen nada que ver con el país, y
+    # con un TELEFONOS_EQUIPO cargado, un test que dice "nadie autoriza" prueba
+    # lo contrario de lo que dice. Vacío es lo que hay en un checkout limpio,
+    # y los tests que necesitan un equipo lo fijan ellos con router.recargar().
     "PAIS_TELEFONO": "54",
     "TELEFONOS_EQUIPO": "",
 }
@@ -123,6 +122,16 @@ class FakeRedis:
     def delete(self, key):
         self._vivo()
         self.strings.pop(key, None)
+
+    def getdel(self, key):
+        """Leer y borrar en una sola operación, como el GETDEL de Redis.
+
+        app/acciones.py lo usa para que un código de confirmación sirva UNA
+        vez: dos workers con el mismo mensaje encuentran uno la propuesta y el
+        otro nada. Con get + delete por separado los dos la encontrarían.
+        """
+        self._vivo()
+        return self.strings.pop(key, None)
 
     def rpush(self, key, value):
         self._vivo()
