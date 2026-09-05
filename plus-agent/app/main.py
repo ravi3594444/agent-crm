@@ -28,6 +28,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from app import erpnext, notificar
 from app import whatsapp as whatsapp_client
 from app.aprobacion import manejar_boton
+from app.formato import sin_citas
 from app.graph import responder_cliente, responder_gerencia
 from app.outbound_status import record_inbound_window, record_outbound, update_status
 from app.router import es_equipo
@@ -322,11 +323,11 @@ _ARG_ACTIONS = {
 # counter-offer or the reason a customer is given. So the quote comes out
 # before anything is read as an argument: what a customer wrote is never an
 # instruction, not even after a person forwarded it.
-_CITA = re.compile(r"^\s*>.*$", re.MULTILINE)
-
-
-def _sin_citas(texto: str) -> str:
-    return " ".join(_CITA.sub(" ", str(texto or "")).split())
+#
+# The rule itself lives in app/formato.py because app/acciones.py needs the
+# SAME one: the prose path builds the same arguments from what the owner
+# dictated to the model, and two copies of a security rule are two rules.
+_sin_citas = sin_citas
 
 
 def _staff_command(text: str) -> str | None:
