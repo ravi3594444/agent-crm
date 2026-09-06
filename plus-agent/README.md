@@ -49,7 +49,7 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `Dockerfile`, `Makefile`, `.env.example`, `pyproject.toml` | Build, shortcuts, configuration, lint config |
 | `.github/workflows/ci.yml` | Lint, tests, image build, container boot against a real Redis Stack |
 | `demo/` | **Test bench**: seventeen release scenarios against the real image, inside a `--internal` docker network with no route out. See [demo/README.md](demo/README.md). |
-| `tests/` | 2003 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
+| `tests/` | The whole suite passes with none skipped and none xfailed (the count is in the pytest summary and in CI). No ERPNext, no Meta, no LLM, no network — but a real Redis Stack on database 0 is required. See [Tests and Redis](#tests-and-redis). |
 
 ## Two agents, one webhook
 
@@ -946,8 +946,10 @@ every CI run and every new checkout. Isolation comes from the server being a
 One test asserts `REDIS_URL` names database 0, so this cannot regress quietly.
 
 ```bash
-docker run -d --name redis-test -p 6379:6379 redis/redis-stack-server:7.4.0-v1
-REDIS_URL=redis://localhost:6379/0 make test
+# A disposable container on a loopback port that is NOT the live agent's 6379.
+docker run -d --name redis-test -p 127.0.0.1:6393:6379 redis/redis-stack-server:7.4.0-v1
+REDIS_URL=redis://127.0.0.1:6393/0 make test
+docker rm -f redis-test
 ```
 
 Set `REDIS_OBLIGATORIO=1` — as CI does — to turn "no Redis" into a failure
@@ -963,7 +965,7 @@ then commit.
 
 ```bash
 make install       # .venv with requirements-dev.txt
-make test          # 2003 passed, needs a Redis Stack on REDIS_URL (REDIS_OBLIGATORIO=1: no Redis is a failure)
+make test          # every test passes, none skipped; needs a Redis Stack on REDIS_URL, database 0 (REDIS_OBLIGATORIO=1: no Redis is a failure)
 make check         # what CI runs (ruff check + tests)
 make check-env     # is .env complete, are the three ERPNext keys distinct
 make up            # docker compose up, wait for :8081/health

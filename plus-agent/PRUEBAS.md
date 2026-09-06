@@ -24,23 +24,31 @@ system works for real customers at all — do not skip it.
 
 ## Stage 0 — The tests (do this first, always)
 
-No credentials, no network, no LLM tokens: `tests/conftest.py` sets dummy
-values for every variable the app requires at import, so a clean checkout
-passes with no `.env` at all.
+**Requires exactly one thing: a Redis Stack (RedisJSON + RediSearch) on
+database 0.** Nothing else: no credentials, no network, no LLM tokens.
+`tests/conftest.py` sets dummy values for every variable the app requires at
+import, so a clean checkout passes with no `.env` at all.
 
-It DOES need a Redis Stack. `app/graph.py` creates the checkpointer's
+Redis Stack is not optional: `app/graph.py` creates the checkpointer's
 RediSearch indices at import, so two test modules cannot even be collected
 without one and pytest aborts the whole run. Database 0 is not a preference —
 RediSearch refuses `FT.CREATE` anywhere else. See "Tests and Redis" in
 README.md.
 
+Use a **disposable** container on a loopback port that is not the live agent's
+6379, so a test run can never touch the Redis that holds the owner's limits:
+
 ```bash
 cd plus-agent
-docker run -d --name redis-test -p 6379:6379 redis/redis-stack-server:7.4.0-v1
-REDIS_URL=redis://localhost:6379/0 make test   # expect: 2003 passed
+docker run -d --name redis-test -p 127.0.0.1:6393:6379 redis/redis-stack-server:7.4.0-v1
+REDIS_URL=redis://127.0.0.1:6393/0 make test   # every test passes, none skipped
+docker rm -f redis-test
 ```
 
-**Expect:** every test passes — nothing skipped, nothing xfailed. A skip means Redis was not reachable; set `REDIS_OBLIGATORIO=1` (as CI does) to turn that into a failure.
+**Expect:** every test passes — nothing skipped, nothing xfailed (the exact
+count is in the pytest summary and in CI; it grows with every change, so it is
+not repeated here). `make test` sets `REDIS_OBLIGATORIO=1`, as CI does, so
+"Redis not reachable" is a failure, never a skip.
 
 Also run the full check that CI runs:
 

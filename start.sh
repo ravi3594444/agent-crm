@@ -68,44 +68,25 @@ if [ -n "${CODESPACE_NAME:-}" ] && command -v gh >/dev/null 2>&1; then
 fi
 
 PIDFILE=${AGENTE_PIDFILE:-$APP/agente.pid}
-# No alcanza con `kill -0`: tras un reboot (rutina en un Codespace) el pid del
-# archivo puede ser de un proceso cualquiera que el SO recicló, y entonces se
-# esperaba 30 s a un supervisor que no existía y el agente no arrancaba nunca.
-# Se exige que ese pid sea EL supervisor: su línea de comando lleva uvicorn.
-supervisor_vivo() {
-  local pid
-  [ -f "$PIDFILE" ] || return 1
-  pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
-    && tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q uvicorn
-}
+# Quién es el supervisor y cómo se lo reconoce vive en deploy/supervisor.sh,
+# para poder probarlo: un pid reciclado por el SO, o cualquier otro Uvicorn de
+# la máquina, no pueden pasar por el nuestro (la marca exacta en su línea de
+# comando es la que decide), y el pidfile se borra cuando el supervisor sale.
+# shellcheck source=plus-agent/deploy/supervisor.sh
+. "$APP/deploy/supervisor.sh"
 
 if curl -sf -m 3 "http://localhost:$PORT/health" >/dev/null 2>&1; then
   echo "[start] el agente ya está corriendo en :$PORT"
-elif supervisor_vivo; then
+elif supervisor_vivo "$PIDFILE"; then
   echo "[start] el supervisor del agente ya está vivo (pid $(cat "$PIDFILE")); espero que levante"
   for i in $(seq 1 30); do curl -sf -m 2 "http://localhost:$PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 else
   echo "[start] agente -> :$PORT  (log: $LOG)"
-  # setsid: sesión propia, sobrevive al shell que lo lanzó. Ruta absoluta al venv:
-  # `uvicorn` a secas asumía el venv activado, y en un arranque frío no lo está.
-  # Bucle de reinicio: si uvicorn muere (excepción, OOM, kill), vuelve solo en 3 s.
-  # --no-access-log: el access log imprimía el META_VERIFY_TOKEN de la query string.
-  # El pid lo escribe el propio bucle ($$): `$!` sería el de setsid, que muere
-  # enseguida al re-forkear, y supervisor_vivo() nunca lo encontraría.
-  setsid nohup bash -c '
-    cd "$1" || exit 1
-    echo $$ >"$3"
-    # Al terminar el bucle (kill, apagado) el pidfile se va con él.
-    trap '"'"'rm -f "$3"'"'"' EXIT
-    # PYTHONUNBUFFERED: los print() del agente van a un archivo; sin esto quedan
-    # en el buffer y el log parece vacío justo cuando hace falta leerlo.
-    export PYTHONUNBUFFERED=1
-    while true; do
-      "$1/.venv/bin/uvicorn" app.main:app --host 0.0.0.0 --port "$2" --no-access-log
-      echo "[start] el agente terminó (exit $?); reinicio en 3 s"
-      sleep 3
-    done' _ "$APP" "$PORT" "$PIDFILE" >"$LOG" 2>&1 </dev/null &
+  # Ruta absoluta al venv: `uvicorn` a secas asumía el venv activado, y en un
+  # arranque frío no lo está. Bucle de reinicio: si uvicorn muere (excepción,
+  # OOM, kill), vuelve solo en 3 s. --no-access-log: el access log imprimía el
+  # META_VERIFY_TOKEN de la query string. Todo eso está en supervisor_lanzar.
+  supervisor_lanzar "$APP" "$PORT" "$PIDFILE" "$LOG"
   for i in $(seq 1 30); do curl -sf -m 2 "http://localhost:$PORT/health" >/dev/null 2>&1 && break; sleep 1; done
 fi
 curl -sf -m 3 "http://localhost:$PORT/health" >/dev/null 2>&1 && echo "[start] LISTO" || { echo "[start] !! el agente no levantó; mirá $LOG"; tail -20 "$LOG"; exit 1; }
