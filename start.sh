@@ -34,8 +34,13 @@ if docker ps -a --format '{{.Names}}' | grep -qx agent-redis; then
   # código del dueño. `docker start` conserva el mapeo con que se creó, así que
   # un contenedor viejo hay que recrearlo: el script de migración lo hace en
   # loopback.
-  if docker inspect -f '{{json .HostConfig.PortBindings}}' agent-redis 2>/dev/null | grep -q '"HostIp":""\|"HostIp":"0.0.0.0"'; then
-    echo "[start] !! agent-redis está publicado en TODAS las interfaces (0.0.0.0:6379) y sin contraseña."
+  # Se miran TODOS los bindings y el modo de red: vale sólo 127.0.0.1 o ::1;
+  # vacío, 0.0.0.0, ::, una IP de la LAN o NetworkMode=host son «alcanzable».
+  redis_expuesto=$(docker inspect -f '{{.HostConfig.NetworkMode}} {{range $p, $bs := .HostConfig.PortBindings}}{{range $bs}}[{{.HostIp}}]{{end}}{{end}}' agent-redis 2>/dev/null \
+    | awk '{ if ($1 == "host") { print "host"; exit }
+             n = split($0, partes, "[][]"); for (i = 2; i <= n; i += 2) { ip = partes[i]; if (ip != "127.0.0.1" && ip != "::1") { print (ip == "" ? "0.0.0.0" : ip); exit } } }')
+  if [ -n "$redis_expuesto" ]; then
+    echo "[start] !! agent-redis está alcanzable desde fuera de esta máquina (${redis_expuesto}:6379) y sin contraseña."
     echo "[start]    Recrealo en loopback sin perder nada:  $APP/deploy/migrar_redis_a_volumen.sh"
   fi
 else

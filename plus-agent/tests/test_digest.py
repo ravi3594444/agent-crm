@@ -142,9 +142,25 @@ def test_a_failed_delivery_keeps_the_claim_so_the_day_is_not_retried(mundo, monk
     assert mundo["redis"].get(digest._clave(HOY)) is not None
 
 
-def test_a_section_whose_dependency_raises_still_lets_the_digest_go_out(mundo, monkeypatch):
+RESPALDO_TRABADAS = "🔒 Borradores trabados: no pude armar esta sección"
+RESPALDO_FALLOS = "⚠️ Comunicación: no pude armar esta sección"
+
+
+@pytest.mark.parametrize(
+    ("fallan", "esperados", "intactos"),
+    [
+        (("contar_pendientes",), [RESPALDO_FALLOS], [RESPALDO_TRABADAS]),
+        (("trabadas",), [RESPALDO_TRABADAS], [RESPALDO_FALLOS]),
+        (("contar_pendientes", "trabadas"), [RESPALDO_FALLOS, RESPALDO_TRABADAS], []),
+    ],
+    ids=["comunicacion", "trabadas", "ambas"],
+)
+def test_a_section_whose_dependency_raises_still_lets_the_digest_go_out(
+    mundo, monkeypatch, fallan, esperados, intactos
+):
     """The claim is taken before composing, so composition must never abort:
-    a section that blows up says so and the other sections still reach the owner."""
+    the section that blows up says so, and every other section still reaches
+    the owner. Each dependency alone, and both at once."""
     from app import outbound_status, solicitudes
 
     monkeypatch.setattr(digest, "resumen", _RESUMEN_REAL)
@@ -154,14 +170,19 @@ def test_a_section_whose_dependency_raises_still_lets_the_digest_go_out(mundo, m
     def explota(*a, **k):
         raise RuntimeError("Redis se fue")
 
-    monkeypatch.setattr(outbound_status, "contar_pendientes", explota)
-    monkeypatch.setattr(solicitudes, "trabadas", explota)
+    monkeypatch.setattr(
+        outbound_status, "contar_pendientes",
+        explota if "contar_pendientes" in fallan else lambda: {},
+    )
+    monkeypatch.setattr(solicitudes, "trabadas", explota if "trabadas" in fallan else lambda: 0)
 
     assert digest.enviar() is True
     texto = mundo["enviados"][0][1]
     assert "seccion_despacho: ok" in texto
-    assert "🔒 Borradores trabados: no pude armar esta sección" in texto
-    assert "⚠️ Comunicación: no pude armar esta sección" in texto
+    for respaldo in esperados:
+        assert respaldo in texto
+    for respaldo in intactos:
+        assert respaldo not in texto  # the healthy section is not replaced
     # Sent, so the day stays claimed like any delivered digest.
     assert digest.enviar() is False
 
