@@ -142,9 +142,17 @@ def test_a_failed_delivery_keeps_the_claim_so_the_day_is_not_retried(mundo, monk
     assert mundo["redis"].get(digest._clave(HOY)) is not None
 
 
-def test_a_section_whose_dependency_raises_still_lets_the_digest_go_out(mundo, monkeypatch):
-    """The claim is taken before composing, so composition must never abort:
-    a section that blows up says so and the other sections still reach the owner."""
+@pytest.mark.parametrize(
+    ("dependencia", "respaldo"),
+    [
+        ("contar_pendientes", "⚠️ Comunicación: no pude armar esta sección"),
+        ("trabadas", "🔒 Borradores trabados: no pude armar esta sección"),
+    ],
+)
+def test_a_section_dependency_failure_still_lets_the_digest_go_out(
+    mundo, monkeypatch, dependencia, respaldo
+):
+    """A dependency failure gets that section's fallback without aborting the digest."""
     from app import outbound_status, solicitudes
 
     monkeypatch.setattr(digest, "resumen", _RESUMEN_REAL)
@@ -154,14 +162,17 @@ def test_a_section_whose_dependency_raises_still_lets_the_digest_go_out(mundo, m
     def explota(*a, **k):
         raise RuntimeError("Redis se fue")
 
-    monkeypatch.setattr(outbound_status, "contar_pendientes", explota)
-    monkeypatch.setattr(solicitudes, "trabadas", explota)
+    if dependencia == "contar_pendientes":
+        monkeypatch.setattr(outbound_status, dependencia, explota)
+        monkeypatch.setattr(solicitudes, "trabadas", lambda: 0)
+    else:
+        monkeypatch.setattr(outbound_status, "contar_pendientes", lambda: {})
+        monkeypatch.setattr(solicitudes, dependencia, explota)
 
     assert digest.enviar() is True
     texto = mundo["enviados"][0][1]
     assert "seccion_despacho: ok" in texto
-    assert "🔒 Borradores trabados: no pude armar esta sección" in texto
-    assert "⚠️ Comunicación: no pude armar esta sección" in texto
+    assert respaldo in texto
     # Sent, so the day stays claimed like any delivered digest.
     assert digest.enviar() is False
 
