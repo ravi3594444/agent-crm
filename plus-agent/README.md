@@ -771,9 +771,14 @@ using **one key for both agents**. Both providers speak the OpenAI protocol, so
 the client is the same `ChatOpenAI` and only the key, the endpoint and the model
 names change (`app/modelos.py`).
 
+**This deployment runs on Gemini.** `.env.example` ships `LLM_PROVIDER=gemini`
+and the Gemini block first; `make check-env` reports `LLM_PROVIDER: gemini` and
+which variable supplied the key. `qwen` is only what the code assumes when the
+variable is *missing*, so keep `LLM_PROVIDER` written in every `.env`.
+
 | `LLM_PROVIDER` | key | endpoint | sales / management model |
 |---|---|---|---|
-| `qwen` (default) | `DASHSCOPE_API_KEY` | `DASHSCOPE_BASE_URL` = `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `QWEN_SALES_MODEL` = `qwen3.7-plus-2026-05-26` / `QWEN_MANAGER_MODEL` = `qwen3.8-max` |
+| `qwen` (code default when unset) | `DASHSCOPE_API_KEY` | `DASHSCOPE_BASE_URL` = `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `QWEN_SALES_MODEL` = `qwen3.7-plus-2026-05-26` / `QWEN_MANAGER_MODEL` = `qwen3.8-max` |
 | `gemini` | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | `GEMINI_BASE_URL` = `https://generativelanguage.googleapis.com/v1beta/openai/` | `GEMINI_SALES_MODEL` / `GEMINI_MANAGER_MODEL` = `gemini-3.5-flash` |
 
 Shared, either way: `LLM_TIMEOUT_SECONDS` (60), `LLM_MAX_RETRIES` (2),
