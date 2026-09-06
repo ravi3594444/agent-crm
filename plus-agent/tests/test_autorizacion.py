@@ -16,7 +16,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from app import erpnext
+from app import erpnext, router
 from app.runtime_context import (
     RuntimeContextError,
     actor_context,
@@ -93,6 +93,7 @@ def erp_denies_everything(monkeypatch: pytest.MonkeyPatch) -> dict[str, Mock]:
         (catalogo.estado_pedido, {"numero_pedido"}),
         (catalogo.pedido_habitual, set()),
         (pedidos.crear_lead, {"nombre", "nota"}),
+        (pedidos.crear_cliente, {"nombre", "direccion"}),
         (pedidos.escalar_a_humano, {"motivo"}),
     ],
     ids=lambda value: getattr(value, "name", None) or "args",
@@ -214,15 +215,48 @@ def test_order_owner_check_is_exact_not_prefix_or_case_insensitive(
 def test_management_scope_can_read_any_customers_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("TELEFONOS_EQUIPO", "5493519999999")
+    router.recargar()
     monkeypatch.setattr(erpnext, "get_doc", Mock(return_value=dict(OTHER_CUSTOMER_ORDER)))
-
-    reply = catalogo.estado_pedido.invoke(
-        {"numero_pedido": "SO-0042"}, config=_management_config()
-    )
+    try:
+        reply = catalogo.estado_pedido.invoke(
+            {"numero_pedido": "SO-0042"}, config=_management_config()
+        )
+    finally:
+        monkeypatch.delenv("TELEFONOS_EQUIPO", raising=False)
+        router.recargar()
 
     assert "Pedido SO-0042" in reply
     assert "confirmado" in reply
     assert "53" in reply
+
+
+def test_management_scope_alone_does_not_elevate_without_a_staff_phone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El alcance lo pone el webhook; elevar lo habilita la lista del equipo.
+
+    Con `is_management` a secas, un contexto de gerencia cuyo teléfono no está
+    (o ya no está) en TELEFONOS_EQUIPO leía el pedido de cualquier cliente.
+    """
+    import os
+
+    original = os.environ.get("TELEFONOS_EQUIPO", "")
+    monkeypatch.setenv("TELEFONOS_EQUIPO", "5493511234567")  # otro número
+    router.recargar()
+    monkeypatch.setattr(erpnext, "get_doc", Mock(return_value=dict(OTHER_CUSTOMER_ORDER)))
+    try:
+        reply = catalogo.estado_pedido.invoke(
+            {"numero_pedido": "SO-0042"}, config=_management_config()
+        )
+    finally:
+        # Back to what the suite started with, THEN reload: monkeypatch restores
+        # the variable at teardown but nobody reloads router after that.
+        monkeypatch.setenv("TELEFONOS_EQUIPO", original)
+        router.recargar()
+
+    # Byte por byte igual a un pedido que no existe: sin enumeración.
+    assert reply == "No encontré el pedido SO-0042."
 
 
 def test_status_lookup_without_authorization_context_fails_closed_before_erp(
@@ -288,13 +322,38 @@ _LINES = {
 }
 
 
-def test_unregistered_phone_cannot_create_an_order(erp_denies_everything) -> None:
+def test_unregistered_phone_cannot_create_an_order(
+    erp_denies_everything, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No account, no order. The system DOES look the sender up by their
+    verified phone first — somebody who registered a minute ago in this same
+    conversation has an account the webhook had not seen yet — but that is one
+    read of Customer, and nothing is written."""
+    busqueda = Mock(return_value=[])
+    monkeypatch.setattr(erpnext, "get_list", busqueda)
+
     reply = pedidos.crear_pedido.invoke(_LINES, config=_customer_config(customer=""))
 
     assert reply.startswith("PEDIDO_NO_CREADO")
-    assert "No hay una cuenta de cliente autenticada" in reply
+    assert "crear_cliente" in reply
     erp_denies_everything["create_doc"].assert_not_called()
-    erp_denies_everything["get_list"].assert_not_called()
+    assert busqueda.call_args.args[0] == "Customer"
+
+
+def test_a_customer_lookup_that_fails_creates_nothing(
+    erp_denies_everything, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ERPNext that cannot answer is not "this person has no account", and
+    the tool has to return text: raising would break the conversation thread
+    for that customer for good."""
+    monkeypatch.setattr(
+        erpnext, "get_list", Mock(side_effect=erpnext.ERPNextError("caído"))
+    )
+
+    reply = pedidos.crear_pedido.invoke(_LINES, config=_customer_config(customer=""))
+
+    assert reply.startswith("PEDIDO_NO_CREADO")
+    erp_denies_everything["create_doc"].assert_not_called()
 
 
 def test_management_scope_cannot_create_an_order_on_behalf_of_nobody(

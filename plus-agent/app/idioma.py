@@ -1,0 +1,1021 @@
+"""Un solo catálogo para TODO lo que escribe Python, en español e inglés.
+
+POR QUÉ ESTE MÓDULO EXISTE
+Los mensajes que decide el modelo ya salen en el idioma del cliente: se lo pide
+el prompt. Pero la mitad de lo que recibe una persona NO lo escribe el modelo —
+lo escribe Python: el aviso de pedido pendiente, el código de confirmación, el
+error de un código vencido, el estado del sistema. Esos textos son la parte que
+NO se puede traducir con un LLM, porque son justamente los que autorizan algo.
+
+LAS DOS REGLAS QUE NO SE NEGOCIAN
+
+1. Acá no se traduce nada en tiempo real. Cada texto tiene sus dos versiones
+   escritas a mano en CATALOGO. Un modelo nunca ve estos strings ni los reescribe:
+   un mensaje de autorización traducido por una máquina es un mensaje de
+   autorización que alguien puede empujar a decir otra cosa.
+
+2. Los datos NO se traducen. El código de seis dígitos, el nombre del pedido, la
+   cantidad, el precio, la fecha y el estado de ERPNext se interpolan tal cual,
+   iguales byte a byte en los dos idiomas. Sólo cambia la prosa alrededor.
+
+QUÉ PASA CUANDO FALTA UNA TRADUCCIÓN
+Se cae al idioma por defecto y sigue. Una clave sin texto en inglés manda el
+español y anota el problema en el log; NUNCA levanta una excepción ni devuelve
+un texto vacío, porque un mensaje que no sale es un cliente que se queda sin
+respuesta, y eso es peor que un mensaje en el otro idioma.
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+import re
+
+ES = "es"
+EN = "en"
+IDIOMAS = (ES, EN)
+
+# El idioma al que se cae todo lo que no se pudo resolver. Configurable, pero
+# nunca vacío: si alguien pone cualquier otra cosa, es español.
+def por_defecto() -> str:
+    crudo = str(os.getenv("IDIOMA_DEFAULT", ES) or "").strip().lower()
+    return crudo if crudo in IDIOMAS else ES
+
+
+# Cómo lo dice una persona. Se compara sin tildes y en minúsculas.
+_DICHO = {
+    ES: (
+        "espanol", "espaniol", "castellano", "spanish", "es", "esp",
+        "espanhol",
+    ),
+    EN: ("ingles", "english", "en", "eng", "ingl"),
+}
+
+
+def _sin_tildes(texto: object) -> str:
+    import unicodedata
+
+    crudo = str(texto or "").strip().lower()
+    return "".join(
+        c for c in unicodedata.normalize("NFD", crudo)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def normalizar(crudo: object) -> str | None:
+    """El idioma que nombra ese texto, o None si no nombra ninguno.
+
+    Deliberadamente estricto: sólo reconoce la PALABRA del idioma. No adivina
+    por el idioma en que está escrita la frase — para eso está `detectar`.
+    """
+    limpio = _sin_tildes(crudo)
+    if not limpio:
+        return None
+    for idioma, palabras in _DICHO.items():
+        if limpio in palabras:
+            return idioma
+    # «manager language english», «idioma de gerencia inglés»: la última
+    # palabra es la que manda.
+    fichas = [f for f in limpio.replace(",", " ").split() if f]
+    for ficha in reversed(fichas):
+        for idioma, palabras in _DICHO.items():
+            if ficha in palabras:
+                return idioma
+    return None
+
+
+def valido(crudo: object) -> str:
+    """El idioma, o el de por defecto. Nunca levanta."""
+    return normalizar(crudo) or por_defecto()
+
+
+# --------------------------------------------------------------- el catálogo
+
+# clave -> {idioma: texto}. Las claves son estables: se usan en los tests para
+# exigir que TODA clave tenga los dos idiomas.
+CATALOGO: dict[str, dict[str, str]] = {
+    # ------------------------------------------------------- aviso de avance
+    # NO es un acuse de recibo. Sale sólo cuando el modelo eligió una
+    # herramienta y ésta ya está corriendo hace unos segundos (app/progreso.py):
+    # recién entonces es verdad que se está consultando algo. Una respuesta
+    # directa del modelo no manda esto, tarde lo que tarde.
+    "progreso.consultando": {
+        ES: "Estoy consultando el sistema, dame un momento.",
+        EN: "I'm checking the system, give me a moment.",
+    },
+    "ack.solo_texto": {
+        ES: (
+            "Por ahora necesito que me escribas el pedido en texto para poder "
+            "ayudarte."
+        ),
+        EN: (
+            "For now I need you to write the order as text so I can help you."
+        ),
+    },
+    "fallback.respuesta_vacia": {
+        ES: "Perdón, no pude armar la respuesta. ¿Me lo escribís de nuevo?",
+        EN: "Sorry, I couldn't put together a reply. Could you send that again?",
+    },
+    "fallback.problema_tecnico": {
+        ES: (
+            "Perdón, tuve un problema técnico y no pude procesar tu mensaje. "
+            "Probá de nuevo en unos minutos."
+        ),
+        EN: (
+            "Sorry, I hit a technical problem and couldn't process your message. "
+            "Try again in a few minutes."
+        ),
+    },
+    "fallback.problema_tecnico_avisado": {
+        ES: (
+            "Perdón, tuve un problema técnico. Ya avisé al equipo y te responden "
+            "en un rato."
+        ),
+        EN: (
+            "Sorry, I hit a technical problem. I've told the team and they'll get "
+            "back to you shortly."
+        ),
+    },
+    # ------------------------------------------------------ estado de pedido
+    # Todos estos los recibe el CLIENTE. Antes iban en los dos idiomas pegados
+    # —«outside a model turn the customer's language is unknown», decía el
+    # docstring— y justamente eso es lo que dejó de ser cierto.
+    "pedido.pendiente": {
+        ES: (
+            "Tu pedido {pedido} quedó registrado y le pregunté al encargado por "
+            "lo que pediste. Te contesto en cuanto responda (dentro de {horas} h). "
+            "Todavía no está confirmado: cuando tenga la respuesta vuelvo a "
+            "chequear el stock antes de cerrarlo."
+        ),
+        EN: (
+            "Your order {pedido} is registered and I have asked the manager about "
+            "your request. I will reply as soon as they answer (within {horas} h). "
+            "It is not confirmed yet, and I will re-check stock before closing it."
+        ),
+    },
+    "pedido.confirmado_cliente": {
+        ES: (
+            "✅ Pedido {pedido} confirmado\n"
+            "Items: {renglones}\nTotal: {total}\nEntrega: {entrega}"
+        ),
+        EN: (
+            "✅ Order {pedido} confirmed\n"
+            "Items: {renglones}\nTotal: {total}\nDelivery: {entrega}"
+        ),
+    },
+    "pedido.entrega_a_coordinar": {
+        ES: "a coordinar",
+        EN: "to be arranged",
+    },
+    "pedido.rechazado": {
+        ES: (
+            "Hola! Sobre tu pedido {pedido}: no vamos a poder cumplirlo{motivo}. "
+            "En breve te escribe alguien del equipo. Perdón por la molestia."
+        ),
+        EN: (
+            "Hi! About your order {pedido}: we won't be able to fulfil it{motivo}. "
+            "Someone from our team will message you shortly. Sorry about that."
+        ),
+    },
+    "pedido.cancelado": {
+        ES: (
+            "Hola! Tu pedido {pedido} quedó cancelado ({motivo}). Si fue un error, "
+            "escribinos y lo revisamos."
+        ),
+        EN: (
+            "Hi! Your order {pedido} has been cancelled ({motivo}). If this is a "
+            "mistake, message us and we will sort it out."
+        ),
+    },
+    "pedido.sin_confirmar": {
+        ES: "Tu pedido {pedido} sigue sin confirmar.",
+        EN: "Your order {pedido} is still unconfirmed.",
+    },
+    # ------------------------------------------------- avisos a la gerencia
+    # El encabezado y el cuerpo del aviso de pedido. Los COMANDOS que van
+    # adentro ('confirmar X', 'ver X', 'cancelar X') se dejan en español a
+    # propósito incluso en el texto en inglés: son el payload que parsea el
+    # router y cambiarlos rompería lo que la gente ya escribe. El equivalente
+    # en inglés también parsea, así que quien prefiera inglés puede usarlo.
+    "gerencia.encabezado_pendiente": {
+        ES: "🟡 Pedido pendiente de revisión",
+        EN: "🟡 Order pending review",
+    },
+    "gerencia.encabezado_confirmado": {
+        ES: "✅ Pedido confirmado automáticamente",
+        EN: "✅ Order automatically confirmed",
+    },
+    "gerencia.cuerpo_pedido": {
+        ES: (
+            "Pedido: {pedido}\nCliente: {cliente}\nItems: {detalle}\n"
+            "Total: {total}\nEntrega: {entrega}"
+        ),
+        EN: (
+            "Order: {pedido}\nCustomer: {cliente}\nItems: {detalle}\n"
+            "Total: {total}\nDelivery: {entrega}"
+        ),
+    },
+    "gerencia.sin_observaciones": {ES: "Sin observaciones", EN: "No remarks"},
+    "gerencia.sin_fecha": {ES: "Sin fecha", EN: "No date"},
+    "gerencia.a_coordinar": {ES: "a coordinar", EN: "to be arranged"},
+    "gerencia.no_registrado": {ES: "no registrado", EN: "not registered"},
+    "gerencia.sin_dato": {ES: "n/d", EN: "n/a"},
+    "gerencia.motivo": {
+        ES: "Motivo: {motivo}",
+        EN: "Reason: {motivo}",
+    },
+    "gerencia.responder_para_decidir": {
+        ES: "Respondé 'confirmar {pedido}' o 'ver {pedido}'.",
+        EN: "Reply 'confirmar {pedido}' or 'ver {pedido}'.",
+    },
+    "gerencia.confirmado_detalle": {
+        ES: (
+            "✅ Pedido {pedido} confirmado\nCliente: {cliente}\nItems: {detalle}\n"
+            "Total: {total}\nEntrega: {entrega}\nOrigen: {fuente}\n"
+            "Confirmado: {momento}\n"
+            "Informativo: no hace falta responder, el pedido queda confirmado.\n"
+            "Para anularlo dentro de las {horas} h: cancelar {pedido} <motivo>"
+        ),
+        EN: (
+            "✅ Order {pedido} confirmed\nCustomer: {cliente}\nItems: {detalle}\n"
+            "Total: {total}\nDelivery: {entrega}\nSource: {fuente}\n"
+            "Confirmed: {momento}\n"
+            "For your information: no reply needed, the order is confirmed.\n"
+            "To void it within {horas} h: cancelar {pedido} <reason>"
+        ),
+    },
+    "gerencia.escalamiento_asunto": {
+        ES: "🙋 Un cliente necesita una persona",
+        EN: "🙋 A customer needs a person",
+    },
+    "gerencia.escalamiento_cuerpo": {
+        ES: "Cliente: {cliente}\nTel: {telefono}\nMotivo: {motivo}",
+        EN: "Customer: {cliente}\nPhone: {telefono}\nReason: {motivo}",
+    },
+    "gerencia.escalamiento_tarea": {ES: "Tarea: {tarea}", EN: "Task: {tarea}"},
+    # Un mensaje que terminó en disculpa técnica. Quien escribió puede ser un
+    # cliente o el propio equipo, así que dice «de quién» y no «cliente». Lo que
+    # escribió va CITADO (solicitudes.citar): es un dato para leer, nunca una
+    # instrucción, ni siquiera después de que una persona lo reenvíe.
+    "gerencia.falla_asunto": {
+        ES: "⚠️ Falló un mensaje de WhatsApp",
+        EN: "⚠️ A WhatsApp message failed",
+    },
+    "gerencia.falla_cuerpo": {
+        ES: (
+            "De: {telefono}\nMensaje:\n{mensaje}\nError: {error}\n"
+            "Quien escribió recibió una disculpa automática; nadie le respondió todavía."
+        ),
+        EN: (
+            "From: {telefono}\nMessage:\n{mensaje}\nError: {error}\n"
+            "The sender got an automatic apology; nobody has answered them yet."
+        ),
+    },
+    "gerencia.cliente_no_avisado": {
+        ES: "OJO: no pude avisarle al cliente.",
+        EN: "HEADS UP: I couldn't notify the customer.",
+    },
+    # --------------------------------------------------- entrega / vencimiento
+    "entrega.fuera_de_dia": {
+        ES: "Esa entrega queda fuera de los días de reparto. La decide una persona.",
+        EN: "That delivery falls outside the delivery days. A person decides it.",
+    },
+    "entrega.fuera_de_zona": {
+        ES: "No repartimos en esa zona por ahora.",
+        EN: "We don't deliver to that area right now.",
+    },
+    "entrega.solicitud_vencida": {
+        ES: (
+            "Se venció la espera por tu pedido {pedido} y no pude ofrecerte una "
+            "alternativa. Lo ve una persona."
+        ),
+        EN: (
+            "The wait on your order {pedido} expired and I couldn't offer an "
+            "alternative. A person will look at it."
+        ),
+    },
+    "entrega.oferta": {
+        ES: (
+            "Sobre tu pedido {pedido}: el encargado te ofrece {terminos}.\n"
+            "¿Lo tomás? Respondé con el botón, o escribí 'acepto {pedido}' o "
+            "'no acepto {pedido}'. Sin tu respuesta no cierro nada."
+        ),
+        EN: (
+            "About your order {pedido}: the manager offers {terminos}.\n"
+            "Do you take it? Reply with the button, or write 'accept {pedido}' "
+            "or 'reject {pedido}'. Nothing is closed without your reply."
+        ),
+    },
+    "entrega.solicitud_rechazada": {
+        ES: (
+            "Sobre tu pedido {pedido}: no vamos a poder hacer lo que pediste"
+            "{motivo}. Si querés, lo dejamos para un día de reparto normal."
+        ),
+        EN: (
+            "About your order {pedido}: we cannot do what you asked{motivo}. "
+            "We can schedule it for a normal delivery day instead."
+        ),
+    },
+    "entrega.vencida": {
+        ES: (
+            "Sobre tu pedido {pedido}: no llegué a tener una respuesta del "
+            "encargado, así que por ahora no queda confirmado. Escribime y lo "
+            "volvemos a ver con el stock del momento."
+        ),
+        EN: (
+            "About your order {pedido}: I did not get an answer in time, so it "
+            "is not confirmed. Message me and we will look at it again with "
+            "current stock."
+        ),
+    },
+    "entrega.respaldo_retiro": {
+        ES: "podés pasar a buscarlo por el local",
+        EN: "you can pick it up at the shop",
+    },
+    "entrega.respaldo_reparto": {
+        ES: "te lo puedo llevar en el próximo reparto normal",
+        EN: "I can bring it on the next normal delivery round",
+    },
+    "entrega.respaldo": {
+        ES: (
+            "Sobre tu pedido {pedido}: no llegué a tener la respuesta del "
+            "encargado sobre lo que pediste, así que eso queda sin efecto. "
+            "Perdón por la espera.\n"
+            "Lo que sí {puede}: {terminos}.\n"
+            "¿Lo tomás? Respondé 'acepto {pedido}' o 'no acepto {pedido}'. Sin "
+            "tu respuesta no cierro nada, y cuando aceptes vuelvo a chequear el "
+            "stock antes de confirmarlo."
+        ),
+        EN: (
+            "About your order {pedido}: I did not get the manager's answer about "
+            "what you asked for, so that is off. Sorry for the wait.\n"
+            "What I can do: {puede} — {terminos}.\n"
+            "Do you take it? Reply 'accept {pedido}' or 'reject {pedido}'. "
+            "Nothing is closed without your reply, and I re-check stock before "
+            "confirming."
+        ),
+    },
+    "entrega.revision_vencida": {
+        ES: (
+            "Sobre tu pedido {pedido}: te había dicho que lo revisaba una "
+            "persona y no llegamos a hacerlo, así que no lo dejo agendado y no "
+            "queda nada a tu nombre. Perdón. Cuando quieras lo armamos de nuevo "
+            "con el stock del momento."
+        ),
+        EN: (
+            "About your order {pedido}: I said a person would review it and we "
+            "did not get to it, so it is not scheduled and nothing is charged. "
+            "Sorry. Message me and we will put it together again with current "
+            "stock."
+        ),
+    },
+    "entrega.respaldo_vencido": {
+        ES: (
+            "Sobre tu pedido {pedido}: se venció el plazo de esa opción "
+            "({terminos}), así que no queda agendada y no hay nada confirmado a "
+            "tu nombre. Cuando quieras, escribime y lo armamos con el stock del "
+            "momento."
+        ),
+        EN: (
+            "About your order {pedido}: that option has run out, so it is not "
+            "scheduled and nothing is confirmed in your name ({terminos}). "
+            "Message me whenever you like and we will put it together with "
+            "current stock."
+        ),
+    },
+    "entrega.aprobacion_vencida": {
+        ES: "Venció el plazo para decidir el pedido {pedido}.",
+        EN: "The deadline to decide order {pedido} has passed.",
+    },
+    # -------------------------------------------- códigos de cuatro dígitos
+    "codigo.ajuste_pedido": {
+        ES: (
+            "Código para confirmar el cambio de ajuste:\n{cambio}\n\n"
+            "Contestá *{codigo}* para aplicarlo. "
+            "Si no contestás, en {minutos} minutos se descarta solo."
+        ),
+        EN: (
+            "Code to confirm the setting change:\n{cambio}\n\n"
+            "Reply *{codigo}* to apply it. "
+            "If you don't reply, it's discarded on its own in {minutos} minutes."
+        ),
+    },
+    "codigo.ajuste_preparado": {
+        ES: (
+            "Cambio preparado, todavía sin aplicar:\n{cambio}\n\n"
+            "Te mandé el código de confirmación por separado: contestá con esos "
+            "cuatro dígitos y lo aplico."
+        ),
+        EN: (
+            "Change prepared, not applied yet:\n{cambio}\n\n"
+            "I sent you the confirmation code separately: reply with those "
+            "four digits and I'll apply it."
+        ),
+    },
+    "codigo.ajuste_aplicado": {
+        ES: (
+            "Listo: *{ajuste}* pasó de {anterior} a {nuevo}. "
+            "Rige desde el próximo pedido, sin reiniciar nada. "
+            "Queda registrado a tu nombre ({ts})."
+        ),
+        EN: (
+            "Done: *{ajuste}* went from {anterior} to {nuevo}. "
+            "It applies from the next order on, with no restart. "
+            "It's on record under your name ({ts})."
+        ),
+    },
+    "codigo.ajuste_no_aplicado": {
+        ES: "No apliqué nada: {motivo}.",
+        EN: "I applied nothing: {motivo}.",
+    },
+    "codigo.ajuste_no_preparado": {
+        ES: "No cambié nada: {motivo}.",
+        EN: "I changed nothing: {motivo}.",
+    },
+    "codigo.ajuste_error": {
+        ES: "No pude aplicar el cambio en este momento. No cambié nada.",
+        EN: "I couldn't apply the change right now. Nothing was changed.",
+    },
+    "codigo.ajuste_sin_codigo": {
+        ES: (
+            "Preparé el cambio ({cambio}) pero NO pude mandarte el código de "
+            "confirmación, así que lo descarté. No cambié nada. Probá de nuevo."
+        ),
+        EN: (
+            "I prepared the change ({cambio}) but could NOT send you the "
+            "confirmation code, so I discarded it. Nothing was changed. Try again."
+        ),
+    },
+    "codigo.ajuste_repetido": {
+        ES: (
+            "Es el mismo cambio que ya estaba esperando:\n{cambio}\n\n"
+            "Te reenvié el MISMO código, así que el que ya tenías sigue sirviendo."
+        ),
+        EN: (
+            "That's the same change already waiting:\n{cambio}\n\n"
+            "I re-sent the SAME code, so the one you already had still works."
+        ),
+    },
+    # ------------------------------------------- códigos de seis dígitos
+    "accion.preparada": {
+        ES: (
+            "Código para confirmar esta acción sobre {pedido}:\n"
+            "{consecuencia}\n\n"
+            "Contestá *{codigo}* para que la haga. "
+            "Si no contestás, en {minutos} minutos se descarta sola. "
+            "Este código confirma sólo esta acción y ninguna otra que tengas "
+            "esperando."
+        ),
+        EN: (
+            "Code to confirm this action on {pedido}:\n"
+            "{consecuencia}\n\n"
+            "Reply *{codigo}* and I'll do it. "
+            "If you don't reply, it's discarded on its own in {minutos} minutes. "
+            "This code confirms only this action and no other one you may have "
+            "waiting."
+        ),
+    },
+    "accion.aplicada": {
+        ES: "Hecho: {consecuencia}",
+        EN: "Done: {consecuencia}",
+    },
+    # ------------------------------------------------- errores de código
+    "codigo.invalido": {
+        ES: "Ese código no es el del cambio pendiente.",
+        EN: "That code doesn't match the pending change.",
+    },
+    "codigo.vencido": {
+        ES: "Ese código ya venció. No cambié nada: pedime el cambio de nuevo.",
+        EN: "That code has expired. I changed nothing: ask me for the change again.",
+    },
+    "codigo.sin_pendiente": {
+        ES: "No hay ningún cambio esperando confirmación.",
+        EN: "There's no change waiting for confirmation.",
+    },
+    "codigo.otro_numero": {
+        ES: "Ese código no es de este número.",
+        EN: "That code doesn't belong to this number.",
+    },
+    "codigo.no_abre_nada": {
+        ES: "Ese código no abre nada.",
+        EN: "That code doesn't unlock anything.",
+    },
+    # ------------------------------------------------ estado del sistema
+    # El informe de estado. Los NOMBRES de los componentes (Redis, ERPNext,
+    # WhatsApp) son propios y no se traducen; sí la prosa alrededor.
+    "sistema.titulo": {ES: "Estado del sistema:", EN: "System status:"},
+    "sistema.responde": {ES: "responde", EN: "responding"},
+    "sistema.no_disponible": {ES: "NO DISPONIBLE", EN: "UNAVAILABLE"},
+    "sistema.desconocido": {ES: "DESCONOCIDO", EN: "UNKNOWN"},
+    "sistema.componente_ok": {
+        ES: "· {componente}: {estado}",
+        EN: "· {componente}: {estado}",
+    },
+    "sistema.componente_caido": {
+        ES: "· {componente}: {estado} ({error})",
+        EN: "· {componente}: {estado} ({error})",
+    },
+    "sistema.cargada": {ES: "cargada ({n} caracteres)", EN: "loaded ({n} characters)"},
+    "sistema.vacia": {ES: "VACÍA", EN: "EMPTY"},
+    "sistema.clave_vacia": {ES: "clave VACÍA", EN: "key EMPTY"},
+    "sistema.modelos": {
+        ES: (
+            "· Modelos: proveedor {proveedor} — ventas {ventas}, gerencia "
+            "{gerencia}; {estado}"
+        ),
+        EN: (
+            "· Models: provider {proveedor} — sales {ventas}, management "
+            "{gerencia}; {estado}"
+        ),
+    },
+    "sistema.whatsapp": {
+        ES: (
+            "· WhatsApp: número {numero}, token {token}; {rechazadas} entrega(s) "
+            "que Meta rechazó, {sin_entregar} respuesta(s) a clientes sin entregar"
+        ),
+        EN: (
+            "· WhatsApp: number {numero}, token {token}; {rechazadas} delivery(ies) "
+            "Meta rejected, {sin_entregar} customer reply(ies) undelivered"
+        ),
+    },
+    "sistema.colas": {
+        ES: "· Cola de avisos al cliente: {espera} en espera, {caidos} caído(s)",
+        EN: "· Customer notice queue: {espera} waiting, {caidos} failed",
+    },
+    "sistema.avisos_fallidos_lista": {
+        ES: "Avisos que no salieron ({cuantos}):",
+        EN: "Notifications that did not go out ({cuantos}):",
+    },
+    "sistema.sin_avisos_fallidos": {
+        ES: "No hay avisos fallidos.",
+        EN: "There are no failed notifications.",
+    },
+    "sistema.indice_pendiente": {
+        ES: "reconstrucción PENDIENTE",
+        EN: "rebuild PENDING",
+    },
+    "sistema.indice_completo": {ES: "índice completo", EN: "index complete"},
+    "sistema.indice_desconocido": {
+        ES: "índice {estado} ({error})",
+        EN: "index {estado} ({error})",
+    },
+    "sistema.decisiones": {
+        ES: "· Decisiones: {indice}; borradores trabados {trabadas}{extra}",
+        EN: "· Decisions: {indice}; stuck drafts {trabadas}{extra}",
+    },
+    "sistema.decisiones_reservan": {
+        ES: " (siguen reservando stock; hay un ToDo por cada uno)",
+        EN: " (they still reserve stock; there is a ToDo for each)",
+    },
+    "sistema.fallidos_titulo": {
+        ES: "Comunicación que no llegó:",
+        EN: "Communication that did not arrive:",
+    },
+    "sistema.fallidos_avisos": {
+        ES: "· Avisos sin entregar: {n}",
+        EN: "· Undelivered notifications: {n}",
+    },
+    "sistema.fallidos_respuestas": {
+        ES: (
+            "· Respuestas a clientes sin entregar: {n} (no se listan: cada una "
+            "lleva el mensaje del cliente)"
+        ),
+        EN: (
+            "· Undelivered customer replies: {n} (not listed: each one carries "
+            "the customer's own message)"
+        ),
+    },
+    "sistema.fallidos_rechazadas": {
+        ES: "· Entregas que Meta rechazó: {n}",
+        EN: "· Deliveries Meta rejected: {n}",
+    },
+    "sistema.fallidos_ultimos": {
+        ES: "\nÚltimos {n} aviso(s) caído(s), del más nuevo:",
+        EN: "\nLast {n} failed notification(s), newest first:",
+    },
+    "sistema.fallidos_ninguno": {
+        ES: "\nNo hay avisos caídos registrados.",
+        EN: "\nThere are no failed notifications on record.",
+    },
+    "sistema.fallidos_pie": {
+        ES: (
+            "\nCada uno tiene una tarea en ERPNext para contactarlo a mano. "
+            "Desde acá no se reintenta nada."
+        ),
+        EN: (
+            "\nEach one has an ERPNext task to contact them by hand. Nothing is "
+            "retried from here."
+        ),
+    },
+    "sistema.ilegibles": {
+        ES: "{n} entrada(s) ilegible(s) omitida(s)",
+        EN: "{n} unreadable entry(ies) skipped",
+    },
+    "sistema.lista_no_disponible": {
+        ES: "la lista de avisos caídos está {estado} ({error})",
+        EN: "the failed-notification list is {estado} ({error})",
+    },
+    # ---------------------------------------- stock / precio / entrega
+    "stock.no_confiable": {
+        ES: "No puedo prometer disponibilidad de {producto} ahora mismo.",
+        EN: "I can't promise availability of {producto} right now.",
+    },
+    "stock.insuficiente": {
+        ES: "No me alcanza el stock de {producto} para esa cantidad.",
+        EN: "I don't have enough stock of {producto} for that quantity.",
+    },
+    "precio.a_confirmar": {
+        ES: "precio a confirmar",
+        EN: "price to be confirmed",
+    },
+    # ------------------------------------------------ fallback / revisión
+    "fallback.error_tecnico": {
+        ES: (
+            "Tuve un problema técnico con eso. Ya avisé al equipo y te "
+            "responden a la brevedad."
+        ),
+        EN: (
+            "I hit a technical problem with that. I've told the team and "
+            "they'll get back to you shortly."
+        ),
+    },
+    "fallback.revisa_persona": {
+        ES: "Lo está viendo una persona del equipo.",
+        EN: "Someone from the team is looking at it.",
+    },
+    "fallback.sin_permiso": {
+        ES: "No tenés permiso para eso.",
+        EN: "You don't have permission for that.",
+    },
+    # ------------------------------------------------------- idioma mismo
+    "idioma.cambiado_cliente": {
+        ES: "Listo, te respondo en español de ahora en más.",
+        EN: "Done, I'll reply in English from now on.",
+    },
+    "idioma.gerencia_cambio": {
+        ES: "*Idioma de gerencia*: {anterior} → {nuevo}",
+        EN: "*Manager language*: {anterior} → {nuevo}",
+    },
+    "idioma.nombre.es": {ES: "español", EN: "Spanish"},
+    "idioma.nombre.en": {ES: "inglés", EN: "English"},
+}
+
+
+def nombre(idioma: str, en_idioma: str | None = None) -> str:
+    """Cómo se llama ese idioma, dicho en `en_idioma`."""
+    return t(f"idioma.nombre.{valido(idioma)}", en_idioma)
+
+
+def claves_incompletas() -> list[str]:
+    """Las claves del catálogo que no tienen los dos idiomas. Para los tests."""
+    faltan = []
+    for clave, textos in CATALOGO.items():
+        for idioma in IDIOMAS:
+            if not str(textos.get(idioma, "")).strip():
+                faltan.append(f"{clave}:{idioma}")
+    return faltan
+
+
+def t(clave: str, idioma: str | None = None, /, **params: object) -> str:
+    """El texto de esa clave en ese idioma. NUNCA levanta.
+
+    Los `params` se interpolan tal cual: un código, un número de pedido, una
+    cantidad o una fecha valen lo mismo en los dos idiomas y no se tocan.
+
+    Degradaciones, todas silenciosas menos el log:
+      * idioma desconocido      -> el de por defecto
+      * clave sin ese idioma    -> el de por defecto
+      * clave que no existe     -> la clave misma, para que se vea en un test
+      * falta un parámetro      -> el texto sin interpolar, nunca una excepción
+    """
+    destino = valido(idioma)
+    textos = CATALOGO.get(clave)
+    if textos is None:
+        print(f"[idioma] clave desconocida: {clave!r}")
+        return clave
+    crudo = str(textos.get(destino) or "").strip()
+    if not crudo:
+        respaldo = por_defecto()
+        crudo = str(textos.get(respaldo) or "").strip()
+        if not crudo:
+            crudo = str(textos.get(ES) or "").strip()
+        print(f"[idioma] falta {clave!r} en {destino!r}; uso {respaldo!r}")
+    if not crudo:
+        return clave
+    if not params:
+        return crudo
+    try:
+        return crudo.format(**params)
+    except (KeyError, IndexError, ValueError) as exc:
+        # Un texto sin interpolar sigue siendo un texto. Perder el mensaje no.
+        print(f"[idioma] no pude interpolar {clave!r} ({type(exc).__name__})")
+        return crudo
+
+
+# ------------------------------------------------ idioma de cada cliente
+
+_PREFIJO_CLIENTE = "plus-agent:idioma-cliente"
+# Un año. La preferencia del cliente no es un dato de turno: si pidió inglés en
+# marzo, sigue queriendo inglés en abril. Sobrevive a un reinicio de la app
+# porque vive en Redis con AOF; si se pierde el Redis se vuelve a espejar el
+# idioma del mensaje, que es la degradación correcta y no un error.
+TTL_CLIENTE_SEGUNDOS = 365 * 24 * 3600
+
+
+def _clave_cliente(canonico: str) -> str:
+    # Hasheada: el teléfono no aparece nunca en el nombre de una clave.
+    return f"{_PREFIJO_CLIENTE}:{hashlib.sha256(canonico.encode()).hexdigest()}"
+
+
+def recordar_cliente(numero: object, idioma: object) -> bool:
+    """Guarda la preferencia de ESE teléfono. Best effort: nunca levanta.
+
+    Devuelve True sólo si quedó guardada. Un teléfono no puede escribir la
+    preferencia de otro: la clave sale del número normalizado del webhook, que
+    ningún texto del mensaje puede cambiar.
+    """
+    from app import locks
+    from app import telefono as telefono_mod
+
+    canonico = telefono_mod.normalizar(numero)
+    elegido = normalizar(idioma)
+    if not canonico or not elegido:
+        return False
+    try:
+        locks.conexion().setex(
+            _clave_cliente(canonico), TTL_CLIENTE_SEGUNDOS, elegido
+        )
+        return True
+    except Exception as exc:
+        print(f"[idioma] no pude guardar el idioma del cliente ({type(exc).__name__})")
+        return False
+
+
+def cliente_guardado(numero: object) -> str | None:
+    """La preferencia guardada de ese teléfono, o None. Nunca levanta."""
+    from app import locks
+    from app import telefono as telefono_mod
+
+    canonico = telefono_mod.normalizar(numero)
+    if not canonico:
+        return None
+    try:
+        crudo = locks.conexion().get(_clave_cliente(canonico))
+    except Exception as exc:
+        print(f"[idioma] no pude leer el idioma del cliente ({type(exc).__name__})")
+        return None
+    if isinstance(crudo, bytes):
+        crudo = crudo.decode()
+    return normalizar(crudo)
+
+
+# Lo que un cliente dice para PEDIR un idioma. Tiene que ser explícito: que el
+# mensaje esté escrito en inglés no es lo mismo que pedir que le contesten en
+# inglés, y confundir las dos cosas le cambia el idioma a cualquiera que
+# escriba una palabra suelta en otro idioma.
+_PEDIDOS_EXPLICITOS = (
+    ("reply in english", EN),
+    ("answer in english", EN),
+    ("respond in english", EN),
+    ("in english please", EN),
+    ("speak english", EN),
+    ("hablame en ingles", EN),
+    ("contestame en ingles", EN),
+    ("responde en ingles", EN),
+    ("respondeme en ingles", EN),
+    ("en ingles por favor", EN),
+    ("respondé en español", ES),
+    ("responde en espanol", ES),
+    ("respondeme en espanol", ES),
+    ("contestame en espanol", ES),
+    ("hablame en espanol", ES),
+    ("reply in spanish", ES),
+    ("answer in spanish", ES),
+    ("in spanish please", ES),
+    ("speak spanish", ES),
+    ("en espanol por favor", ES),
+)
+
+
+# Lo que convierte una frase de pedido en NO-pedido cuando está justo antes,
+# en la misma cláusula: una negación («don't reply in english», «no, en inglés
+# por favor no»), o un verbo que la cita en vez de pedirla («you said 'reply in
+# english'», «el cartel decía respondé en español»). Palabras sueltas y
+# frecuentes, sin tildes, en los dos idiomas.
+_NEGACIONES = frozenset(
+    ["no", "not", "dont", "don't", "never", "nunca", "jamas", "tampoco", "ni", "sin"]
+)
+_CITAS = frozenset(
+    [
+        "said", "says", "saying", "wrote", "typed", "means", "mean", "meant",
+        "dijo", "dice", "decia", "escribio", "escribi", "significa", "puse", "leia",
+    ]
+)
+# Una frase entre comillas se está mostrando, no pidiendo.
+_COMILLAS = "\"'«»“”‘’`"
+# Lo que separa cláusulas: la negación tiene que estar en la MISMA que la
+# frase. «No entiendo, en inglés por favor» pide inglés; «no, en inglés por
+# favor no» no lo pide.
+_SEPARADORES = re.compile(r"[,.;:!?\n]")
+_PALABRA = re.compile(r"[a-z']+")
+_VENTANA = 3
+
+
+def _negada_o_citada(limpio: str, inicio: int, fin: int) -> bool:
+    """¿La aparición [inicio:fin) está negada, citada o entre comillas?"""
+    antes = limpio[:inicio]
+    despues = limpio[fin:]
+    # Comillas pegadas a la frase, de un lado o del otro. Se compara UN
+    # carácter y sólo si existe: la cadena vacía está «contenida» en cualquier
+    # cadena, y una frase al principio del mensaje no tiene nada antes.
+    abre = antes.rstrip()[-1:]
+    cierra = despues.lstrip()[:1]
+    if (abre and abre in _COMILLAS) or (cierra and cierra in _COMILLAS):
+        return True
+    # Negación o verbo de cita en las palabras inmediatamente anteriores, dentro
+    # de la misma cláusula.
+    palabras = _PALABRA.findall(_SEPARADORES.split(antes)[-1])[-_VENTANA:]
+    if any(p in _NEGACIONES or p in _CITAS for p in palabras):
+        return True
+    # Negación al final de la cláusula, como se niega en español: «en inglés
+    # por favor no». Sólo si la negación CIERRA la cláusula: «reply in english
+    # not spanish» sigue pidiendo inglés.
+    siguientes = _PALABRA.findall(_SEPARADORES.split(despues)[0])
+    return bool(siguientes) and len(siguientes) <= 2 and siguientes[-1] in _NEGACIONES
+
+
+def pedido_explicito(texto: object) -> str | None:
+    """El idioma que ese mensaje PIDE explícitamente, o None.
+
+    El texto del cliente se mira como DATO: se compara contra una lista fija de
+    frases y no se interpreta de ninguna otra forma. Pero coincidir no alcanza:
+    la frase tiene que estar PEDIDA. Negada («don't reply in english»), citada
+    («you said "reply in english"») o entre comillas, no cambia el idioma de
+    nadie — y esta decisión queda guardada un año (recordar_cliente), así que
+    un falso positivo no es un turno raro, es un cliente atendido en el idioma
+    equivocado hasta que pida el otro.
+
+    Sigue sirviendo dentro de un pedido: «quiero 5 kg de queso, reply in
+    English please» pide inglés. Y si un mensaje niega un idioma y pide el
+    otro, gana el que se pidió.
+    """
+    limpio = _sin_tildes(texto)
+    if not limpio:
+        return None
+    for frase, idioma in _PEDIDOS_EXPLICITOS:
+        buscada = _sin_tildes(frase)
+        inicio = limpio.find(buscada)
+        while inicio != -1:
+            fin = inicio + len(buscada)
+            if not _negada_o_citada(limpio, inicio, fin):
+                return idioma
+            inicio = limpio.find(buscada, fin)
+    return None
+
+
+def para_cliente(
+    numero: object, texto_entrante: object = "", *, recordar: bool = True
+) -> str:
+    """En qué idioma contestarle a ESTE cliente, ahora.
+
+    El orden no es casual:
+      1. Lo que pidió explícitamente en este mensaje (y queda guardado).
+      2. Lo que había pedido antes.
+      3. Nada guardado: se espeja el idioma del mensaje — el mismo
+         comportamiento que ya tenía el sistema.
+      4. Si no se puede decidir con seguridad, el idioma por defecto.
+
+    ``recordar=False`` sólo resuelve, sin escribir nada. Es lo que usa todo el
+    que necesita saber en qué idioma redactar un aviso: preguntar no puede
+    tener el efecto de fijarle el idioma a alguien.
+    """
+    pedido = pedido_explicito(texto_entrante)
+    if pedido:
+        if recordar:
+            recordar_cliente(numero, pedido)
+        return pedido
+    guardado = cliente_guardado(numero)
+    if guardado:
+        return guardado
+    return espejo(texto_entrante)
+
+
+def para_destinatario(numero: object, texto_entrante: object = "") -> str:
+    """En qué idioma escribirle a quien tiene ESE número. Sin efectos.
+
+    UN solo lugar decide esto, y por eso está acá: si el número es del equipo
+    rige el idioma que fijó el dueño, y si no, el de ese cliente. Repartir esa
+    decisión por el código es cómo un aviso termina saliendo en un idioma y el
+    siguiente en otro.
+    """
+    try:
+        from app.router import es_equipo
+
+        if es_equipo(numero):
+            return gerencia()
+    except Exception as exc:  # router sin cargar, número raro: no es fatal
+        print(f"[idioma] no pude clasificar el destinatario ({type(exc).__name__})")
+    return para_cliente(numero, texto_entrante, recordar=False)
+
+
+# Palabras cortas y frecuentes que sólo existen en uno de los dos idiomas. No
+# es un detector de idiomas de verdad y no pretende serlo: decide entre DOS
+# idiomas conocidos y, ante la duda, devuelve el de por defecto.
+_PISTAS = {
+    EN: (
+        "the", "and", "please", "hello", "hi", "order", "want", "need",
+        "delivery", "tomorrow", "thanks", "you", "can", "would", "i'd",
+        "how", "much", "price", "stock", "for", "with", "my",
+    ),
+    ES: (
+        "hola", "quiero", "necesito", "pedido", "gracias", "por", "favor",
+        "manana", "entrega", "precio", "unidades", "para", "con", "que",
+        "cuanto", "tenes", "tienen", "buenas", "dame", "mandame",
+    ),
+}
+
+
+def espejo(texto: object) -> str:
+    """El idioma en que parece estar escrito ese texto, o el de por defecto."""
+    limpio = _sin_tildes(texto)
+    if not limpio:
+        return por_defecto()
+    fichas = {f.strip(".,;:!¡?¿()\"'") for f in limpio.split()}
+    puntajes = {
+        idioma: len(fichas & set(pistas)) for idioma, pistas in _PISTAS.items()
+    }
+    mejor = max(puntajes, key=lambda k: puntajes[k])
+    otro = EN if mejor == ES else ES
+    # Empate o nada reconocido: no se adivina.
+    if puntajes[mejor] == 0 or puntajes[mejor] == puntajes[otro]:
+        return por_defecto()
+    return mejor
+
+
+# ------------------------------------------- la regla que ve el modelo
+
+# El texto EXACTO que tenía el prompt del cliente antes de que existiera este
+# módulo. Es el comportamiento por defecto y se conserva palabra por palabra:
+# sin preferencia guardada, el agente espeja el idioma del mensaje igual que
+# siempre.
+REGLA_ESPEJO_CLIENTE = (
+    "- Respondé SIEMPRE en el idioma en que te escribió el cliente en su último "
+    "mensaje.\n"
+    "  Si escribe en español: español rioplatense, con voseo, cordial y breve, como "
+    "habla\n"
+    "  la gente por WhatsApp. Si escribe en inglés: inglés simple, directo y breve.\n"
+    "  Si cambia de idioma, cambiá con él. Nunca mezcles los dos en un mismo mensaje."
+)
+
+_REGLA_FIJADA = {
+    ES: (
+        "- Respondé SIEMPRE en español rioplatense, con voseo, cordial y breve.\n"
+        "  Es el idioma que eligió esta persona: no cambies de idioma aunque el\n"
+        "  último mensaje venga en otro. Nunca mezcles dos idiomas en un mensaje.\n"
+        "  Esta regla es sobre CÓMO ESCRIBÍS VOS. No te impide atender un pedido\n"
+        "  de cambiar el ajuste de idioma: si te lo piden, usá la herramienta\n"
+        "  como con cualquier otro ajuste."
+    ),
+    EN: (
+        "- Always reply in English: simple, direct and brief.\n"
+        "  This person chose that language: do not switch languages even if the\n"
+        "  last message arrives in another one. Never mix two languages in one "
+        "message.\n"
+        "  This rule is about HOW YOU WRITE. It does not stop you from handling a\n"
+        "  request to change the language setting: if asked, use the tool as you\n"
+        "  would for any other setting."
+    ),
+}
+
+
+def regla_prompt(fijado: str | None, *, espejo_por_defecto: str | None = None) -> str:
+    """La instrucción de idioma que se le pone al prompt del sistema.
+
+    Con un idioma elegido, se fija. Sin nada elegido, se devuelve la regla de
+    espejo de siempre. El modelo NUNCA decide el idioma de un texto de Python:
+    esta regla sólo gobierna lo que redacta él.
+    """
+    elegido = normalizar(fijado) if fijado else None
+    if elegido:
+        return _REGLA_FIJADA[elegido]
+    if espejo_por_defecto is not None:
+        return espejo_por_defecto
+    return REGLA_ESPEJO_CLIENTE
+
+
+# ------------------------------------------------ idioma de la gerencia
+
+
+def gerencia() -> str:
+    """El idioma que fijó el dueño para el agente de gestión.
+
+    NUNCA levanta y NUNCA bloquea una venta: si el almacén no se puede leer o
+    se perdió, se contesta en el idioma por defecto. Un idioma no autoriza
+    nada, así que no tiene por qué fallar cerrado como un límite.
+    """
+    from app import limites
+
+    try:
+        return limites.idioma_gerencia()
+    except Exception as exc:
+        print(f"[idioma] no pude leer el idioma de gerencia ({type(exc).__name__})")
+        return por_defecto()

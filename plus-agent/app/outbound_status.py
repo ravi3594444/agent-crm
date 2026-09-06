@@ -99,6 +99,37 @@ def record_outbound(
         _audit_failed(client, outbound_digest, metadata)
 
 
+# Meta allows free-form messages only inside the 24-hour customer-service
+# window opened by the recipient's own last inbound message. The window is
+# tracked per hashed phone so alerts can legitimately fall back to free-form
+# text when a template is not yet approved.
+WINDOW_TTL_SECONDS = 23 * 60 * 60
+
+
+def _window_key(phone: str) -> str:
+    return f"wa:{{inbound}}:window:{_digest(phone.strip().lstrip('+'))}"
+
+
+def record_inbound_window(phone: str) -> None:
+    """Remember that ``phone`` messaged us; opens its free-form window."""
+    if not phone or not phone.strip():
+        return
+    _redis().set(_window_key(phone), "1", ex=WINDOW_TTL_SECONDS)
+
+
+def window_open(phone: str) -> bool:
+    """Whether ``phone`` wrote to us recently enough for a free-form reply.
+
+    Fails closed: any Redis problem reads as "window closed".
+    """
+    if not phone or not phone.strip():
+        return False
+    try:
+        return _redis().get(_window_key(phone)) is not None
+    except Exception:
+        return False
+
+
 def has_accepted(order_name: str, purpose: str) -> bool:
     """Whether Meta already accepted this order/purpose notification."""
     if not order_name or not purpose:
@@ -162,3 +193,139 @@ def _audit_failed(
     except Exception:
         client.delete(audit_key)
         raise
+
+
+# ---------------------------------------------------------------------------
+# Stage 2e — exactly-once claims, parked notifications, digest counters.
+# ---------------------------------------------------------------------------
+
+DEAD_NOTIFY_KEY = "wa:{inbound}:dead-notify"
+NOTIFY_TODO_TTL_SECONDS = 24 * 60 * 60
+
+
+def claim_once(name: str, ttl_seconds: int) -> bool:
+    """First caller wins for ``ttl_seconds``; everybody else gets False.
+
+    Raises on a Redis failure: the caller decides whether that means "skip"
+    or "notify anyway", and it must never look like a successful claim.
+    """
+    return bool(
+        _redis().set(f"wa:{{inbound}}:once:{_digest(name)}", "1", nx=True, ex=ttl_seconds)
+    )
+
+
+def release_claim(name: str) -> None:
+    """Give a claim back when the claimed action did not actually happen."""
+    try:
+        _redis().delete(f"wa:{{inbound}}:once:{_digest(name)}")
+    except Exception as exc:
+        print(f"[queue] release claim type={type(exc).__name__}")
+
+
+def registrar_aviso_fallido(
+    purpose: str, order_name: str, resumen: str, destinatario_tag: str = ""
+) -> bool:
+    """A notification nobody received: park it, and open ONE ERPNext ToDo per
+    purpose and order per day so a person follows up.
+
+    Returns True when a ToDo exists for it (fresh or from earlier today), so
+    callers can be honest about whether anyone will see the problem. The parked
+    entry carries no phone number: only a hashed recipient tag.
+    """
+    entry = json.dumps(
+        {
+            "purpose": purpose[:80],
+            "order_name": order_name or "",
+            "resumen": (resumen or "")[:300],
+            "destinatario": destinatario_tag[:16],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    client = None
+    try:
+        client = _redis()
+        client.rpush(DEAD_NOTIFY_KEY, entry)
+    except Exception as exc:
+        print(f"[notify] dead-letter no disponible type={type(exc).__name__}")
+
+    todo_key = f"wa:{{inbound}}:notify-todo:{_digest(purpose + chr(0) + (order_name or ''))}"
+    fresh = True
+    if client is not None:
+        try:
+            fresh = bool(client.set(todo_key, "1", nx=True, ex=NOTIFY_TODO_TTL_SECONDS))
+        except Exception as exc:
+            print(f"[notify] dedupe no disponible type={type(exc).__name__}")
+            fresh = True
+    if not fresh:
+        return True
+
+    from app import erpnext
+
+    payload: dict = {
+        "description": (
+            f"[WhatsApp] Aviso no entregado ({purpose})"
+            + (f" para {order_name}" if order_name else "")
+            + f": {(resumen or '')[:300]}. Nadie lo recibió por WhatsApp; revisar la lista "
+            f"{DEAD_NOTIFY_KEY} y contactar manualmente."
+        ),
+        "priority": "High",
+    }
+    if order_name:
+        payload["reference_type"] = "Sales Order"
+        payload["reference_name"] = order_name
+    try:
+        erpnext.create_doc("ToDo", payload)
+        return True
+    except Exception as exc:
+        print(f"[notify] ToDo de aviso fallido no creado type={type(exc).__name__}")
+        if client is not None:
+            try:
+                client.delete(todo_key)
+            except Exception:
+                pass
+        return False
+
+
+def contar_pendientes() -> dict:
+    """Counts for the daily digest. None means "could not read"."""
+    counts: dict = {
+        "respuestas_en_dead_letter": None,
+        "avisos_en_dead_letter": None,
+        "entregas_fallidas": None,
+    }
+    try:
+        client = _redis()
+        counts["respuestas_en_dead_letter"] = int(client.llen("wa:{inbound}:dead"))
+        counts["avisos_en_dead_letter"] = int(client.llen(DEAD_NOTIFY_KEY))
+        fallidas = 0
+        for _ in client.scan_iter(match="wa:{inbound}:failed-audit:*", count=500):
+            fallidas += 1
+        counts["entregas_fallidas"] = fallidas
+    except Exception as exc:
+        print(f"[notify] contadores no disponibles type={type(exc).__name__}")
+    return counts
+
+
+# ---------------------------------------------------------------------------
+# Shared access for the notice queue (app/avisos.py).
+#
+# The confirmation TIMESTAMP no longer lives here. Redis is a cache of it and
+# cannot be its source of truth, because a flush or a restart would silently
+# close a cancellation window the business still has; app/confirmacion.py owns
+# the durable ERPNext record and uses this module only for the cache.
+# ---------------------------------------------------------------------------
+
+
+def cliente():
+    """The same Redis this module uses, for the notice queue and the cache.
+
+    One client, one place tests patch (``outbound_status._client``), so a test
+    can never accidentally reach a real server through a second connection.
+    """
+    return _redis()
+
+
+def digest_recipiente(value: str) -> str:
+    """Stable non-reversible tag; never store or log a phone number itself."""
+    return _digest(value)

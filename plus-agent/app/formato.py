@@ -115,3 +115,25 @@ def whatsapp_texto(texto: str | None) -> str:
     for indice, url in enumerate(urls):
         texto = texto.replace(f"\x00{indice}\x00", url)
     return texto
+
+
+# --- Citas de WhatsApp ----------------------------------------------------
+
+# app/solicitudes.py::citar antepone "> " a cada línea de lo que escribió un
+# cliente, justo para que se lea como una cita. Cuando el dueño responde
+# CITANDO ese mensaje, esas líneas vuelven adentro de su respuesta — y lo que
+# él escribe se lee como el motivo de un rechazo o los términos de una
+# contraoferta. Así que la cita se saca ANTES de que nada de eso se lea como
+# un argumento: lo que escribió un cliente es un dato, nunca una instrucción,
+# ni siquiera después de que una persona lo reenvió.
+#
+# Vive acá, y no en el módulo que lo usa, porque lo usan dos: el router
+# determinista (app/main.py) y la capa que convierte la prosa del dueño en una
+# acción (app/acciones.py). Dos copias de una regla de seguridad son dos
+# reglas, y la segunda se olvida.
+_CITA = re.compile(r"^\s*>.*$", re.MULTILINE)
+
+
+def sin_citas(texto: object) -> str:
+    """El texto sin las líneas citadas, en una sola línea."""
+    return " ".join(_CITA.sub(" ", str(texto or "")).split())

@@ -24,16 +24,31 @@ system works for real customers at all — do not skip it.
 
 ## Stage 0 — The tests (do this first, always)
 
-No credentials, no docker, no network, no Redis, no LLM tokens. About one
-second. `tests/conftest.py` sets dummy values for every variable the app
-requires at import, so a clean checkout passes with no `.env` at all.
+**Requires exactly one thing: a Redis Stack (RedisJSON + RediSearch) on
+database 0.** Nothing else: no credentials, no network, no LLM tokens.
+`tests/conftest.py` sets dummy values for every variable the app requires at
+import, so a clean checkout passes with no `.env` at all.
+
+Redis Stack is not optional: `app/graph.py` creates the checkpointer's
+RediSearch indices at import, so two test modules cannot even be collected
+without one and pytest aborts the whole run. Database 0 is not a preference —
+RediSearch refuses `FT.CREATE` anywhere else. See "Tests and Redis" in
+README.md.
+
+Use a **disposable** container on a loopback port that is not the live agent's
+6379, so a test run can never touch the Redis that holds the owner's limits:
 
 ```bash
 cd plus-agent
-make test
+docker run -d --name redis-test -p 127.0.0.1:6393:6379 redis/redis-stack-server:7.4.0-v1
+REDIS_URL=redis://127.0.0.1:6393/0 make test   # every test passes, none skipped
+docker rm -f redis-test
 ```
 
-**Expect:** `260 passed, 3 xfailed`. The 3 xfails are strict and deliberate: each documents a known gap in the code (see the `reason=` in the test). If one of them ever *passes*, the gap was fixed and the marker must be removed.
+**Expect:** every test passes — nothing skipped, nothing xfailed (the exact
+count is in the pytest summary and in CI; it grows with every change, so it is
+not repeated here). `make test` sets `REDIS_OBLIGATORIO=1`, as CI does, so
+"Redis not reachable" is a failure, never a skip.
 
 Also run the full check that CI runs:
 
@@ -78,9 +93,12 @@ entre sí.`
 `ERPNEXT_MANAGER_API_KEY` and `ERPNEXT_POLICY_API_KEY` are the same value.
 That is not pedantry: they are three ERPNext users with three different
 permission sets, and if the customer agent's credentials can submit, the main
-guardrail of the whole system stops existing. It also requires
-`GOOGLE_API_KEY`: the model is built at import and the process will not start
-without it.
+guardrail of the whole system stops existing. It also requires the key of the
+provider you selected with `LLM_PROVIDER`: `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
+for `gemini`, which is what this deployment runs, or `DASHSCOPE_API_KEY` for
+`qwen`. Both models are built at import and the process will not start without
+that key; the other provider's key is never a substitute (there is no fallback
+provider).
 
 ```bash
 make up
@@ -236,7 +254,7 @@ Send these, in order, from a phone that is **not** on the staff list:
 
 | # | Send | Expect |
 |---|---|---|
-| 1 | `hola` | A short acknowledgement first, then a greeting in Rioplatense Spanish |
+| 1 | `hola` | Exactly **one** message: a greeting in Rioplatense Spanish. No "dame un momento" first — nothing is being checked |
 | 2 | `tenés queso cremoso?` | The product and price, **no** stock promise (STOCK_CONFIABLE=false) |
 | 3 | `dame 10 kilos` | A real `SO-…` number and "te confirmamos en unos minutos" — **never** "confirmado" |
 | 4 | `cuánto salió?` | The total, from the order it just made |
@@ -278,7 +296,7 @@ and I want to know immediately.
 | 1 | Send a **voice note** | A reply asking you to write it instead. Never silence. |
 | 2 | Send a **photo** | A reply. Never silence. |
 | 3 | Send a sticker | A reply. |
-| 4 | Stop ERPNext (`docker stop <erpnext-backend>`), send an order | The acknowledgement, then an apology saying **no order was created** and that a person will follow up — never an invented number |
+| 4 | Stop ERPNext (`docker stop <erpnext-backend>`), send an order | Possibly *"Estoy consultando el sistema, dame un momento"* while the tool is stuck, then **one** apology saying **no order was created** and that a person will follow up — never an invented number, never a notice after the apology |
 
 For step 4, also check `make logs`: you should see `[agent] error …
 type=…` lines, and the message stays in the durable queue rather than

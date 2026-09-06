@@ -55,14 +55,21 @@ services:
     image: redis/redis-stack-server:7.4.0-v1
     restart: unless-stopped
     # appendonly + noeviction: la cola durable de webhooks, los locks, las
-    # marcas de idempotencia y el seguimiento de entregas viven acá. Sin
+    # marcas de idempotencia, el seguimiento de entregas y —desde 2b— LOS
+    # LÍMITES DE AUTO-CONFIRMACIÓN QUE FIJA EL DUEÑO viven acá. Sin
     # persistencia, un restart de Redis hace que los reintentos de Meta
-    # puedan duplicar pedidos; con eviction, se pierden mensajes aceptados.
+    # puedan duplicar pedidos; con eviction, se pierden mensajes aceptados; y
+    # sin el volumen de abajo, un `docker rm` borraría los límites y el
+    # sistema volvería a los valores de arranque del .env, que pueden ser MÁS
+    # FLOJOS que los que puso el dueño. Eso no pasa en silencio —
+    # app/limites.py lo cruza contra la auditoría en ERPNext y falla cerrado—
+    # pero deja todo pendiente hasta que alguien los restaure.
     # En redis-stack-server la config va por REDIS_ARGS, no por `command`:
     # `command` le pisaría el entrypoint que carga los módulos.
     environment:
       REDIS_ARGS: >-
         --appendonly yes
+        --appendfsync everysec
         --maxmemory ${REDIS_MAXMEMORY:-256mb}
         --maxmemory-policy noeviction
     volumes:
@@ -86,6 +93,24 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: ["python", "-m", "app.briefing"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # Resumen de las 18:00 al dueño: "9 pedidos para mañana, respondé OK para confirmar todos".
+  #   0 21 * * * cd /srv/plus-agent && docker compose run --rm digest      (ver deploy/crontab)
+  digest:
+    build: .
+    profiles: ["manual"]
+    env_file: .env
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    extra_hosts:
+      # Sin esto, con ERPNEXT_URL=http://host.docker.internal:8080 el resumen
+      # decía «no pude leer ERPNext» en cada sección: el job del cron no
+      # heredaba el mapeo que sí tienen agente y briefing.
+      - "host.docker.internal:host-gateway"
+    command: ["python", "-m", "app.digest"]
     depends_on:
       redis:
         condition: service_healthy

@@ -5,11 +5,9 @@ from datetime import date
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from app import erpnext, policy
+from app import erpnext, idioma, inventario, policy
 from app.formato import pesos
 from app.runtime_context import RuntimeContextError, actor_context, require_customer
-
-STOCK_CONFIABLE = os.getenv("STOCK_CONFIABLE", "false").strip().lower() == "true"
 
 
 @tool
@@ -73,7 +71,7 @@ def buscar_producto(consulta: str) -> str:
         price_text = (
             f"{matching['currency']} {matching['price_list_rate']}"
             if matching
-            else "precio a confirmar"
+            else idioma.t("precio.a_confirmar")
         )
         out.append(
             f"- {item['item_name']} ({item['item_code']}) — {price_text} "
@@ -116,13 +114,21 @@ def _catalog_price_is_valid(
 @tool
 def consultar_stock(item_code: str) -> str:
     """Consulta un nivel orientativo en el depósito de preparación."""
-    if not STOCK_CONFIABLE:
+    try:
+        warehouse = erpnext.default_warehouse()
+    except erpnext.ERPNextError:
         return (
-            f"{item_code}: inventario no verificado. No confirmes disponibilidad; "
+            f"No pude verificar el depósito de preparación para {item_code}. "
+            "No confirmes disponibilidad."
+        )
+    # Trust is earned per product by a confirmed count, and it expires.
+    fresco, sin_confianza = inventario.confiable(item_code, warehouse)
+    if not fresco:
+        return (
+            f"{item_code}: {sin_confianza}. No confirmes disponibilidad; "
             "el pedido solo puede quedar pendiente de revisión."
         )
     try:
-        warehouse = erpnext.default_warehouse()
         bins = erpnext.get_list(
             "Bin",
             filters=[
@@ -147,6 +153,17 @@ def consultar_stock(item_code: str) -> str:
         float(row.get("actual_qty") or 0) - float(row.get("reserved_qty") or 0)
         for row in bins
     )
+    try:
+        # The same deduction the auto-confirmation rule makes. A draft holds
+        # units ERPNext has not reserved yet, so on Bin alone this tool
+        # answered "hay stock" for milk another customer is already waiting
+        # for — and the customer heard that as a promise.
+        available -= policy.comprometido_en_borradores(item_code, warehouse)
+    except erpnext.ERPNextError:
+        return (
+            f"No pude verificar cuánto de {item_code} ya está comprometido. "
+            "No confirmes disponibilidad."
+        )
     buffer = float(os.getenv("STOCK_BUFFER_PCT", "20")) / 100.0
     if buffer < 0 or buffer >= 1:
         return f"{item_code}: configuración de stock inválida. No confirmes disponibilidad."
@@ -175,7 +192,10 @@ def estado_pedido(numero_pedido: str, config: RunnableConfig) -> str:
         order = erpnext.get_doc("Sales Order", numero_pedido)
     except erpnext.ERPNextError:
         return f"No encontré el pedido {numero_pedido}."
-    if not actor.is_management and (
+    # `gerencia_verificada`, no `is_management`: el alcance lo pone el webhook,
+    # pero leer el pedido de CUALQUIER cliente lo habilita únicamente un
+    # teléfono que sigue estando en la lista del equipo.
+    if not actor.gerencia_verificada and (
         not actor.customer_code or order.get("customer") != actor.customer_code
     ):
         # Deliberately indistinguishable from a missing order to prevent ID

@@ -1,12 +1,19 @@
 name: CI
 
-# Los tests no necesitan Redis, ni ERPNext, ni credenciales de Meta, ni
-# tokens de LLM: son 100% offline (tests/conftest.py fija valores de prueba)
-# y tardan ~1 segundo. Por eso pueden correr en cada push sin fricción.
+# Los tests no llaman a ERPNext, ni a Meta, ni a ningún LLM: eso lo fija
+# tests/conftest.py con valores de prueba y dobles en memoria.
 #
-# El último job sí levanta un Redis Stack: app/graph.py crea los índices del
-# checkpointer al importar, así que "el contenedor arranca" solo se puede
-# probar con un Redis con RedisJSON + RediSearch al lado.
+# SÍ necesitan un Redis Stack, y decir que no lo necesitaban costó todo el
+# valor de este job. app/graph.py construye el checkpointer y llama a setup()
+# AL IMPORTAR, y eso crea índices de RediSearch contra un servidor real. Sin
+# Redis, dos módulos de test explotan al colectarse — y pytest aborta toda la
+# corrida con "Interrupted: 2 errors during collection". CI quedaba en rojo
+# habiendo corrido CERO tests, y el rojo se leía como "un test falla".
+#
+# Por eso el job de tests levanta su propio Redis Stack (RedisJSON +
+# RediSearch, no un Redis pelado) y pone REDIS_OBLIGATORIO para que "Redis no
+# está" sea una FALLA y no un skip silencioso: un skip es exactamente cómo la
+# suite deja de ser la suite.
 
 on:
   push:
@@ -20,6 +27,32 @@ defaults:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # El job corre build y tests, nada que escriba en el repo: token de sólo lectura.
+    permissions:
+      contents: read
+
+    services:
+      redis:
+        # RedisJSON + RediSearch. langgraph-checkpoint-redis needs both, and a
+        # plain `redis:7` image fails at import with a module-not-loaded error.
+        image: redis/redis-stack-server:7.4.0-v1
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+
+    env:
+      # Database 0 is not a choice: RediSearch refuses FT.CREATE on any other
+      # one, and app/graph.py creates the checkpointer's indices at import.
+      # Isolation comes from the service being a throwaway container that dies
+      # with the job — not from the database number.
+      # REDIS_OBLIGATORIO turns "no Redis" into a failure instead of a skip.
+      REDIS_URL: redis://localhost:6379/0
+      REDIS_OBLIGATORIO: "1"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -33,10 +66,12 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Lint
-        run: ruff check app tests
+        run: ruff check app demo tests
 
       - name: Tests
-        run: pytest -q
+        # -rs lists every skip in the log. A suite whose coverage quietly
+        # shrinks by one skipped test is the failure this job just had.
+        run: pytest -q -rs
 
       - name: La imagen buildea
         run: docker build -t plus-agent:ci .
@@ -45,8 +80,8 @@ jobs:
         # Prueba lo que ningún test unitario puede: que TODAS las variables
         # que la app exige al importar estén declaradas, que el checkpointer
         # arranque contra un Redis Stack real y que uvicorn levante en 8081.
-        # GOOGLE_API_KEY: langchain-google-genai exige que exista al construir
-        # el modelo (al importar); no se llama a Google en el arranque.
+        # DASHSCOPE_API_KEY: app/modelos.py exige que exista al construir los
+        # modelos Qwen (al importar); no se llama a DashScope en el arranque.
         run: |
           docker network create ci
           docker run -d --name redis-ci --network ci redis/redis-stack-server:7.4.0-v1
@@ -62,7 +97,7 @@ jobs:
             -e META_APP_SECRET=x -e META_VERIFY_TOKEN=y \
             -e REDIS_URL=redis://redis-ci:6379/0 \
             -e WHATSAPP_PHONE_NUMBER_ID=1 -e WHATSAPP_TOKEN=t \
-            -e GOOGLE_API_KEY=noop \
+            -e DASHSCOPE_API_KEY=noop \
             plus-agent:ci
           for i in $(seq 1 30); do
             if curl -fsS localhost:8081/health; then echo; echo "OK"; exit 0; fi

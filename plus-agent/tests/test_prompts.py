@@ -7,18 +7,41 @@ Cada regla acá salió de un problema visto en vivo:
 """
 from __future__ import annotations
 
+from app import idioma
+from app.conversacion import prompt_clientes, prompt_gerencia
 from app.prompts import SYSTEM_ES_AR
 from app.prompts_gerencia import SYSTEM_GERENCIA
 
 
+def _texto_cliente(config=None):
+    return prompt_clientes({"messages": []}, config or {"configurable": {}})[0].content
+
+
+def _texto_gerencia():
+    return prompt_gerencia({"messages": []}, {})[0].content
+
+
+# La regla de idioma dejó de estar escrita a mano en la plantilla y ahora la
+# pone app/idioma.py al armar el prompt, así que estos tests miran el prompt
+# RENDERIZADO: es lo que el modelo lee de verdad, y no la plantilla.
 def test_cliente_responde_en_el_idioma_del_cliente():
-    assert "Nunca uses inglés" not in SYSTEM_ES_AR
-    assert "idioma en que te escribió" in SYSTEM_ES_AR
-    assert "inglés" in SYSTEM_ES_AR and "español rioplatense" in SYSTEM_ES_AR
+    texto = _texto_cliente()
+    assert "Nunca uses inglés" not in texto
+    assert "idioma en que te escribió" in texto
+    assert "inglés" in texto and "español rioplatense" in texto
 
 
-def test_gerencia_tambien_responde_en_el_idioma_del_que_escribe():
-    assert "idioma en que te escribieron" in SYSTEM_GERENCIA
+def test_gerencia_responde_en_el_idioma_configurado():
+    # Sin nada fijado rige el idioma por defecto, que es español.
+    assert "español rioplatense" in _texto_gerencia()
+
+
+def test_la_plantilla_delega_la_regla_de_idioma_en_el_catalogo():
+    # Nadie debe volver a escribir la regla a mano en la plantilla: si vuelve,
+    # hay dos fuentes de verdad y una se queda vieja.
+    assert "{IDIOMA_REGLA}" in SYSTEM_ES_AR
+    assert "{IDIOMA_REGLA}" in SYSTEM_GERENCIA
+    assert "idioma en que te escribió" in idioma.REGLA_ESPEJO_CLIENTE
 
 
 def test_los_nombres_de_producto_no_se_traducen():

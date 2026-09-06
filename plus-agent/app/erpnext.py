@@ -120,28 +120,64 @@ def _resource_path(doctype: str, name: str | None = None) -> str:
     return f"{path}/{quote(name, safe='')}" if name is not None else path
 
 
+def _list(
+    client: httpx.Client,
+    doctype: str,
+    filters: list | None,
+    fields: list[str] | None,
+    limit: int,
+    parent: str | None,
+    order_by: str | None = None,
+    start: int = 0,
+    timeout: float | None = None,
+) -> list[dict]:
+    params: dict[str, Any] = {"limit_page_length": limit}
+    if start:
+        # Frappe's page offset. Only meaningful with a deterministic order_by:
+        # paging an unordered list re-shuffles the rows between pages and both
+        # skips and repeats them. Callers that page MUST pass an order.
+        params["limit_start"] = start
+    if order_by:
+        params["order_by"] = order_by
+    if filters:
+        params["filters"] = json.dumps(filters, ensure_ascii=False)
+    if fields:
+        params["fields"] = json.dumps(fields, ensure_ascii=False)
+    if parent:
+        # Frappe refuses to list a child doctype (a table row such as "Sales
+        # Order Item") without being told which parent doctype it belongs to.
+        params["parent"] = parent
+    body = _request(
+        client,
+        "GET",
+        _resource_path(doctype),
+        operation=f"la consulta de {doctype}",
+        params=params,
+        # A status probe needs an answer in seconds, not the 30 a real read may
+        # take. Absent, the client's own timeout applies exactly as before.
+        **({"timeout": timeout} if timeout else {}),
+    )
+    data = body.get("data")
+    # An answer with no list in it is NOT "zero rows". This used to coalesce
+    # with `or []`, so a 200 carrying {"data": null}, {} or someone else's
+    # envelope read as "nothing found" — and app/policy.py reads "nothing
+    # found" as "nothing is promised", which is how the last units get sold
+    # twice. Absence of an answer has to be an error.
+    if not isinstance(data, list):
+        raise ERPNextError(f"ERPNext devolvió datos inválidos para {doctype}")
+    return data
+
+
 def get_list(
     doctype: str,
     filters: list | None = None,
     fields: list[str] | None = None,
     limit: int = 20,
+    parent: str | None = None,
+    order_by: str | None = None,
+    start: int = 0,
 ) -> list[dict]:
-    params: dict[str, Any] = {"limit_page_length": limit}
-    if filters:
-        params["filters"] = json.dumps(filters, ensure_ascii=False)
-    if fields:
-        params["fields"] = json.dumps(fields, ensure_ascii=False)
-    body = _request(
-        _active_client(),
-        "GET",
-        _resource_path(doctype),
-        operation=f"la consulta de {doctype}",
-        params=params,
-    )
-    data = body.get("data") or []
-    if not isinstance(data, list):
-        raise ERPNextError(f"ERPNext devolvió datos inválidos para {doctype}")
-    return data
+    return _list(_active_client(), doctype, filters, fields, limit, parent, order_by, start)
 
 
 def get_doc(doctype: str, name: str) -> dict:
@@ -189,6 +225,28 @@ def add_comment(doctype: str, name: str, text: str) -> None:
         )
     except ERPNextError as exc:
         print(f"[erpnext] comentario de auditoría no creado: {exc}")
+
+
+def registrar_comentario(doctype: str, name: str, text: str) -> None:
+    """Like add_comment, but a failure is an error instead of a log line.
+
+    add_comment is best effort on purpose: an audit note must never change a
+    known order outcome. app/limites.py needs the opposite guarantee — the
+    comment IS the durable record of a limit change, and a change with no
+    record must not be applied.
+    """
+    _request(
+        _active_client(),
+        "POST",
+        _resource_path("Comment"),
+        operation="el registro durable del cambio",
+        json={
+            "comment_type": "Comment",
+            "reference_doctype": doctype,
+            "reference_name": name,
+            "content": text,
+        },
+    )
 
 
 def _run_report(client: httpx.Client, report_name: str, filters: dict | None) -> list:
@@ -279,6 +337,255 @@ def policy_get_doc(doctype: str, name: str) -> dict:
     if not isinstance(data, dict):
         raise ERPNextError(f"ERPNext devolvió datos inválidos para {doctype}")
     return data
+
+
+def policy_get_list(
+    doctype: str,
+    filters: list | None = None,
+    fields: list[str] | None = None,
+    limit: int = 20,
+    parent: str | None = None,
+    order_by: str | None = None,
+    start: int = 0,
+    timeout: float | None = None,
+) -> list[dict]:
+    """List documents with the policy identity, for policy checks only.
+
+    The restricted customer-agent user must not be able to enumerate other
+    customers' orders. app/policy.py needs exactly that to know how much stock
+    is already promised, so the read runs under the non-LLM policy identity.
+    """
+    return _list(
+        _policy(), doctype, filters, fields, limit, parent, order_by, start, timeout
+    )
+
+
+def policy_update_status(doctype: str, name: str, status: str) -> dict:
+    """Set only the workflow ``status`` field, with the policy identity.
+
+    Used by the manual rejection path so a draft nobody will fulfil stops
+    holding stock. It writes one Select field: it cannot submit, cancel, or
+    change quantities, prices or amounts. Submitting is still submit_doc alone.
+
+    A Frappe PUT is a save, not a field write: the doctype's own validate() can
+    recompute the field and still answer 200 carrying the OLD value. Reporting
+    that as success would be a lie the caller acts on, so the saved value is
+    checked and a silent reset is raised as an error.
+    """
+    body = _request(
+        _policy(),
+        "PUT",
+        _resource_path(doctype, name),
+        operation=f"la actualización de estado de {doctype}",
+        json={"status": status},
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(
+            f"ERPNext devolvió datos inválidos al actualizar {doctype}"
+        )
+    guardado = str(data.get("status") or "").strip()
+    if guardado != status:
+        raise ERPNextError(
+            f"ERPNext no dejó {doctype} {name} en estado {status}: "
+            f"quedó en {guardado or 'un estado desconocido'}"
+        )
+    return data
+
+
+def policy_create_doc(doctype: str, payload: dict) -> dict:
+    """Create a DRAFT with the policy identity, for the manual (human) path.
+
+    Same forced ``docstatus: 0`` as create_doc: this can prepare a Delivery
+    Note, never dispatch it. Dispatch is submit_doc, a separate human step.
+    """
+    body = _request(
+        _policy(),
+        "POST",
+        _resource_path(doctype),
+        operation=f"la creación de {doctype} (política)",
+        json={**payload, "docstatus": 0},
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(f"ERPNext devolvió datos inválidos al crear {doctype}")
+    return data
+
+
+def policy_cancel_doc(doctype: str, name: str) -> dict:
+    """Cancel ONE submitted document with the policy identity (docstatus 2).
+
+    ERPNext itself refuses when a submitted document links to it, and this
+    never cancels linked documents: the manual path checks them first and
+    refuses. The saved docstatus is verified; a 200 that left the document
+    submitted is reported as an error, never as a cancellation.
+    """
+    body = _request(
+        _policy(),
+        "PUT",
+        _resource_path(doctype, name),
+        operation=f"la cancelación de {doctype}",
+        json={"docstatus": 2},
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(f"ERPNext devolvió datos inválidos al cancelar {doctype}")
+    if int(data.get("docstatus") or 0) != 2:
+        raise ERPNextError(f"ERPNext no dejó {doctype} {name} cancelado")
+    return data
+
+
+def policy_aplicar_terminos(
+    doctype: str,
+    name: str,
+    *,
+    delivery_date: str = "",
+    descuento_pct: float | None = None,
+) -> dict:
+    """Write ONLY the agreed delivery date and/or document discount on a DRAFT.
+
+    The narrowest write that the decision workflow needs (app/solicitudes.py,
+    after the customer accepted the terms and every rule was re-checked). It
+    cannot submit, cancel, change a quantity, a rate or a line.
+
+    A Frappe PUT is a save, not a field write: the doctype's own validate() can
+    recompute what was sent and still answer 200 carrying the old value. So the
+    saved values are read back and a silent reset is raised as an error, the
+    same way policy_update_status does — a caller that believes an unapplied
+    discount would confirm an order at the wrong price.
+    """
+    payload: dict[str, Any] = {}
+    if delivery_date:
+        payload["delivery_date"] = delivery_date
+    if descuento_pct is not None:
+        payload["additional_discount_percentage"] = float(descuento_pct)
+    if not payload:
+        return policy_get_doc(doctype, name)
+
+    actual = policy_get_doc(doctype, name)
+    if int(actual.get("docstatus") or 0) != 0:
+        raise ERPNextError(
+            f"{doctype} {name} no es un borrador: no le cambio los términos"
+        )
+    body = _request(
+        _policy(),
+        "PUT",
+        _resource_path(doctype, name),
+        operation=f"la aplicación de los términos de {doctype}",
+        json=payload,
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(
+            f"ERPNext devolvió datos inválidos al aplicar los términos de {doctype}"
+        )
+    if delivery_date and str(data.get("delivery_date") or "") != delivery_date:
+        raise ERPNextError(
+            f"ERPNext no guardó la fecha de entrega {delivery_date} en {name}"
+        )
+    if descuento_pct is not None:
+        guardado = float(data.get("additional_discount_percentage") or 0)
+        if abs(guardado - float(descuento_pct)) > 0.000001:
+            raise ERPNextError(
+                f"ERPNext no guardó el descuento acordado en {name}"
+            )
+    return data
+
+
+def policy_agregar_cargo(
+    name: str, account_head: str, description: str, amount: float
+) -> dict:
+    """Add ONE delivery charge row to a DRAFT Sales Order, and prove it landed.
+
+    A stock ERPNext has no plain "delivery fee" field: a charge is a Sales
+    Taxes and Charges row of type "Actual" against an account head, and this
+    system cannot invent which account a business uses. So the owner names it
+    (ENTREGA_CARGO_CUENTA) and this write is refused without it, rather than
+    the total being quietly wrong.
+
+    The grand total is read back and must have risen by the amount. Anything
+    else — a validate() that dropped the row, a tax template that recomputed
+    the total differently — is an error, because the customer already agreed to
+    a number and that number has to be the one in the document.
+    """
+    if not account_head.strip():
+        raise ERPNextError("falta la cuenta contable del cargo de envío")
+    importe = round(float(amount), 2)
+    if importe <= 0:
+        raise ERPNextError("el cargo de envío tiene que ser positivo")
+
+    actual = policy_get_doc("Sales Order", name)
+    if int(actual.get("docstatus") or 0) != 0:
+        raise ERPNextError(f"Sales Order {name} no es un borrador: no le agrego cargos")
+    antes = float(actual.get("grand_total") or 0)
+    filas = [
+        fila for fila in (actual.get("taxes") or []) if isinstance(fila, dict)
+    ]
+    if any(
+        str(fila.get("description") or "") == description
+        and abs(float(fila.get("tax_amount") or 0) - importe) < 0.01
+        for fila in filas
+    ):
+        return actual
+
+    body = _request(
+        _policy(),
+        "PUT",
+        _resource_path("Sales Order", name),
+        operation="el cargo de envío del pedido",
+        json={
+            "taxes": [
+                *filas,
+                {
+                    "charge_type": "Actual",
+                    "account_head": account_head.strip(),
+                    "description": description or "Envío",
+                    "tax_amount": importe,
+                },
+            ]
+        },
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError("ERPNext devolvió datos inválidos al agregar el cargo")
+    despues = float(data.get("grand_total") or 0)
+    if abs(despues - (antes + importe)) > 0.01:
+        raise ERPNextError(
+            f"ERPNext no dejó el cargo de {importe:.2f} en {name}: el total pasó de "
+            f"{antes:.2f} a {despues:.2f}"
+        )
+    return data
+
+
+def policy_delete_doc(doctype: str, name: str) -> None:
+    """Delete ONE DRAFT document with the policy identity. Nothing else.
+
+    The document is re-read first and a docstatus other than 0 refuses before
+    any DELETE is sent, so a submitted or cancelled document can never be
+    destroyed through this path — those are ERPNext's to resolve, and
+    cancelling them in cascade is never this system's decision.
+
+    Its only caller is app/decisiones.py::despreparar, undoing a draft Delivery
+    Note that this system itself created and nobody edited, after the reason
+    has already been written onto the Sales Order.
+    """
+    actual = policy_get_doc(doctype, name)
+    if int(actual.get("docstatus") or 0) != 0:
+        raise ERPNextError(
+            f"{doctype} {name} no es un borrador (docstatus "
+            f"{actual.get('docstatus')}): no se borra"
+        )
+    _request(
+        _policy(),
+        "DELETE",
+        _resource_path(doctype, name),
+        operation=f"el borrado de {doctype}",
+    )
+    try:
+        policy_get_doc(doctype, name)
+    except ERPNextError:
+        return
+    raise ERPNextError(f"ERPNext no borró {doctype} {name}")
 
 
 def submit_doc(doctype: str, name: str) -> dict:

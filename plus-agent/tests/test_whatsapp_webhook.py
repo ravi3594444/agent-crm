@@ -10,8 +10,9 @@ from collections import defaultdict, deque
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
-from fastapi import BackgroundTasks, HTTPException, Request
+from fastapi import HTTPException, Request
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -89,6 +90,26 @@ class FakeRedis:
         keys = args[:numkeys]
         argv = args[numkeys:]
         with self.guard:
+            if "dead-letter" in script:
+                lock_key, processing_key, lease_key, dead_key = keys
+                token, raw = argv
+                self._purge_locked(lock_key)
+                self._purge_locked(lease_key)
+                if self.values.get(lock_key) != token:
+                    return -1
+                removed = 0
+                for index, value in enumerate(self.lists[processing_key]):
+                    if value == raw:
+                        del self.lists[processing_key][index]
+                        removed = 1
+                        break
+                if removed:
+                    self.lists[dead_key].append(raw)
+                if self.values.get(lease_key) == token:
+                    self.values.pop(lease_key, None)
+                    self.expires.pop(lease_key, None)
+                return removed
+
             if "RPUSH" in script and "EXISTS" in script:
                 seen_key, queue_key = keys
                 item, ttl = argv
@@ -285,15 +306,14 @@ def _call_body(module, body, run_background=True):
         },
         receive,
     )
-    background = BackgroundTasks()
+    # `run_background` is kept for the callers' sake: the webhook used to hand
+    # a blind acknowledgement to a background task, and it no longer sends
+    # anything at all — the worker owns the whole reply.
+    del run_background
     try:
-        result = asyncio.run(module.inbound(request, background))
+        result = asyncio.run(module.inbound(request))
     except HTTPException as error:
         return SimpleNamespace(status_code=error.status_code, body=error.detail)
-
-    if run_background:
-        for task in background.tasks:
-            task.func(*task.args, **task.kwargs)
     return SimpleNamespace(status_code=200, body=result)
 
 
@@ -302,7 +322,7 @@ def _post(module, payload, run_background=True):
     return _call_body(module, body, run_background)
 
 
-def test_ack_fifo_and_server_bound_customer_identity(webhook, monkeypatch):
+def test_fifo_and_server_bound_customer_identity_with_no_blind_ack(webhook, monkeypatch):
     events = []
     agent_calls = []
     lookups = []
@@ -341,9 +361,10 @@ def test_ack_fifo_and_server_bound_customer_identity(webhook, monkeypatch):
     assert first.status_code == second.status_code == 200
     assert outcome == "worked"
     assert [call[0] for call in agent_calls] == ["Necesito 5 kg", "de leche"]
+    # ONE outbound per inbound, and it is the answer. Nothing goes out before
+    # the agent has looked at the message: a "got it, let me check" that
+    # described work nobody had started yet used to precede every reply.
     assert events == [
-        ("send", webhook.ACK_TEXT),
-        ("send", webhook.ACK_TEXT),
         ("agent", "Necesito 5 kg"),
         ("send", "final:Necesito 5 kg"),
         ("agent", "de leche"),
@@ -379,7 +400,7 @@ def test_ack_fifo_and_server_bound_customer_identity(webhook, monkeypatch):
     assert fake.expires[seen_key] - fake.now == webhook._STATE_TTL_SECONDS
 
     # A successful POST is recorded as API acceptance, never as delivery.
-    outbound_digest = hashlib.sha256(b"wamid.out.3").hexdigest()
+    outbound_digest = hashlib.sha256(b"wamid.out.2").hexdigest()
     assert fake.values[f"wa:{{inbound}}:status:{outbound_digest}"] == (
         "accepted_by_meta"
     )
@@ -396,8 +417,6 @@ def test_send_failure_retains_pending_and_reuses_cached_final(webhook, monkeypat
 
     def send(phone, text):
         nonlocal final_attempts
-        if text == webhook.ACK_TEXT:
-            return {"messages": [{"id": "wamid.ack"}]}
         final_attempts += 1
         if final_attempts == 1:
             raise RuntimeError("private Meta error body")
@@ -433,8 +452,7 @@ def test_completion_failure_does_not_resend_meta_accepted_message(webhook, monke
 
     def send(phone, text):
         nonlocal final_sends
-        if text != webhook.ACK_TEXT:
-            final_sends += 1
+        final_sends += 1
         return {"messages": [{"id": "wamid.accepted"}]}
 
     monkeypatch.setattr(webhook, "_contexto", lambda phone: ("C-1", "cliente"))
@@ -458,11 +476,7 @@ def test_startup_supervisor_recovers_crash_with_expired_leases(webhook, monkeypa
     monkeypatch.setattr(
         webhook,
         "enviar_mensaje",
-        lambda phone, text: (
-            final_sent.set() or {"messages": [{"id": "wamid.recovered"}]}
-            if text != webhook.ACK_TEXT
-            else {"messages": [{"id": "wamid.ack"}]}
-        ),
+        lambda phone, text: (final_sent.set() or {"messages": [{"id": "wamid.recovered"}]}),
     )
 
     assert webhook._enqueue_message("54911", "wamid.pending", "text", "pedido")
@@ -501,8 +515,7 @@ def test_lock_loss_caches_final_and_successor_sends_without_agent_rerun(
         return "final after lost lock"
 
     def send(phone, text):
-        if text != webhook.ACK_TEXT:
-            finals.append(text)
+        finals.append(text)
         return {"messages": [{"id": "wamid.lock-successor"}]}
 
     monkeypatch.setattr(webhook, "_contexto", lambda phone: ("C-1", "cliente"))
@@ -639,3 +652,349 @@ def test_template_button_payload_is_processed(webhook, monkeypatch):
     assert _post(webhook, payload).status_code == 200
     assert webhook._worker_cycle() == "worked"
     assert handled == [("ok:SO-42", "54911")]
+
+
+class _MetaRejection(Exception):
+    """Shape of app.whatsapp.WhatsAppSendError without importing the real module."""
+
+    def __init__(self, status_code, error_code, permanent, retry_after=None):
+        super().__init__(f"HTTP {status_code} code {error_code}")
+        self.status_code = status_code
+        self.error_code = error_code
+        self.permanent = permanent
+        self.retry_after = retry_after
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(401, 190), (400, 131030), (400, 131047), (400, 132001)],
+    ids=["token-expired-190", "recipient-not-allowed", "window-closed", "template-missing"],
+)
+def test_permanent_send_failure_is_dead_lettered_on_first_attempt(webhook, monkeypatch, status, code):
+    """A permanent Meta rejection never retries and never blocks other customers."""
+    monkeypatch.setattr(webhook, "_SEND_MAX_ATTEMPTS", 30)
+    comments = []
+    monkeypatch.setattr(
+        webhook.erpnext,
+        "add_comment",
+        lambda doctype, name, text: comments.append((doctype, name, text)),
+    )
+    monkeypatch.setattr(webhook, "_contexto", lambda phone: ("C-1", "cliente"))
+    monkeypatch.setattr(
+        webhook,
+        "responder_cliente",
+        lambda text, **kwargs: f"PEDIDO_PENDIENTE. Número real: SAL-ORD-2026-00008. {text}",
+    )
+    sends = []
+
+    def send(phone, text):
+        sends.append((phone, text))
+        if phone == "54911bad":
+            raise _MetaRejection(status, code, permanent=True)
+        return {"messages": [{"id": "wamid.ok"}]}
+
+    monkeypatch.setattr(webhook, "enviar_mensaje", send)
+    assert webhook._enqueue_message("54911bad", "wamid.bad", "text", "pedido")
+    assert webhook._enqueue_message("54911good", "wamid.good", "text", "hola")
+
+    # One cycle: the bad item is parked on its first rejection and the next
+    # customer is served immediately, no 30-attempt loop.
+    assert webhook._worker_cycle() == "worked"
+
+    finals_bad = [t for p, t in sends if p == "54911bad"]
+    assert len(finals_bad) == 1
+    dead = [json.loads(raw)["message_id"] for raw in webhook.r.lists[webhook._DEAD_KEY]]
+    assert dead == ["wamid.bad"]
+    assert not webhook.r.lists[webhook._PROCESSING_KEY]
+    assert not webhook.r.lists[webhook._QUEUE_KEY]
+    finals_good = [t for p, t in sends if p == "54911good"]
+    assert finals_good == ["PEDIDO_PENDIENTE. Número real: SAL-ORD-2026-00008. hola"]
+    assert [(d, n) for d, n, _ in comments] == [("Sales Order", "SAL-ORD-2026-00008")]
+    assert "NO recibió el número de pedido" in comments[0][2]
+    assert f"HTTP {status}, código {code}" in comments[0][2]
+    assert "54911bad" not in comments[0][2]
+    # Nothing retryable happened, so no stale backoff hint survives.
+    assert webhook._take_retry_hint() == webhook._RETRY_SECONDS
+
+
+def test_transient_send_failure_backs_off_then_dead_letters(webhook, monkeypatch):
+    """Timeouts/5xx retry with exponential backoff, bounded by the attempt cap."""
+    monkeypatch.setattr(webhook, "_SEND_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(webhook, "_RETRY_SECONDS", 2.0)  # fixture shortens it to 0.01
+    monkeypatch.setattr(webhook, "_RETRY_MAX_SECONDS", 60.0)
+    comments = []
+    monkeypatch.setattr(
+        webhook.erpnext,
+        "add_comment",
+        lambda doctype, name, text: comments.append(text),
+    )
+    monkeypatch.setattr(webhook, "_contexto", lambda phone: ("C-1", "cliente"))
+    monkeypatch.setattr(
+        webhook, "responder_cliente", lambda text, **kwargs: "Número real: SO-0042."
+    )
+    attempts = []
+
+    def send(phone, text):
+        attempts.append(text)
+        raise _MetaRejection(503, 131016, permanent=False)
+
+    monkeypatch.setattr(webhook, "enviar_mensaje", send)
+    assert webhook._enqueue_message("54911", "wamid.flaky", "text", "hola")
+
+    assert webhook._worker_cycle() == "retry"
+    assert webhook._take_retry_hint() == 2.0
+    assert webhook._worker_cycle() == "retry"
+    assert webhook._take_retry_hint() == 4.0
+    assert len(webhook.r.lists[webhook._PROCESSING_KEY]) == 1
+    assert not webhook.r.lists[webhook._DEAD_KEY]
+
+    # Third failure exhausts the budget: parked (counts as handled), FIFO free.
+    assert webhook._worker_cycle() == "worked"
+    assert len(attempts) == 3
+    assert [json.loads(raw)["message_id"] for raw in webhook.r.lists[webhook._DEAD_KEY]] == ["wamid.flaky"]
+    assert not webhook.r.lists[webhook._PROCESSING_KEY]
+    assert len(comments) == 1
+    assert "3 intentos" in comments[0] and "HTTP 503, código 131016" in comments[0]
+
+
+def test_retry_after_header_lengthens_but_never_exceeds_the_bound(webhook, monkeypatch):
+    monkeypatch.setattr(webhook, "_RETRY_SECONDS", 2.0)  # fixture shortens it to 0.01
+    monkeypatch.setattr(webhook, "_RETRY_MAX_SECONDS", 60.0)
+    assert [webhook._retry_delay_seconds(RuntimeError(), n) for n in range(1, 9)] == [
+        2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0, 60.0,
+    ]
+    assert webhook._retry_delay_seconds(_MetaRejection(429, 130429, False, retry_after=45), 1) == 45.0
+    assert webhook._retry_delay_seconds(_MetaRejection(429, 130429, False, retry_after=600), 1) == 60.0
+    assert webhook._retry_delay_seconds(_MetaRejection(429, 130429, False, retry_after=1), 3) == 8.0
+    # An unknown attempt count (Redis failure) still yields the base delay.
+    assert webhook._retry_delay_seconds(RuntimeError(), 0) == 2.0
+
+
+def _http_status_error(status):
+    request = httpx.Request("POST", "https://graph.facebook.com/v21.0/x/messages")
+    return httpx.HTTPStatusError("boom", request=request, response=httpx.Response(status, request=request))
+
+
+@pytest.mark.parametrize(
+    ("error", "permanent"),
+    [
+        (_MetaRejection(401, 190, permanent=True), True),
+        (_MetaRejection(429, 130429, permanent=False), False),
+        (_http_status_error(401), True),
+        (_http_status_error(400), True),
+        (_http_status_error(429), False),
+        (_http_status_error(500), False),
+        (_http_status_error(503), False),
+        (httpx.ConnectTimeout("t"), False),
+        (httpx.ReadTimeout("t"), False),
+        (httpx.ConnectError("refused"), False),
+        (RuntimeError("unknown failure"), False),
+    ],
+    ids=[
+        "flagged-permanent", "flagged-transient", "401", "400", "429", "500", "503",
+        "connect-timeout", "read-timeout", "connect-error", "unknown",
+    ],
+)
+def test_send_error_classification(webhook, error, permanent):
+    assert webhook._send_error_is_permanent(error) is permanent
+
+
+def test_meta_rate_limit_codes_inside_http_400_are_transient(webhook):
+    class Unflagged(Exception):
+        status_code = 400
+        error_code = 130429
+
+    class UnflaggedPermanent(Exception):
+        status_code = 400
+        error_code = 131047
+
+    assert webhook._send_error_is_permanent(Unflagged()) is False
+    assert webhook._send_error_is_permanent(UnflaggedPermanent()) is True
+
+
+def test_redis_failure_never_counts_towards_dead_letter(webhook, monkeypatch):
+    monkeypatch.setattr(webhook, "_SEND_MAX_ATTEMPTS", 1)
+    original_get = webhook.r.get
+
+    def flaky_get(key):
+        if "send-attempts" in key:
+            raise ConnectionError("redis down")
+        return original_get(key)
+
+    monkeypatch.setattr(webhook.r, "get", flaky_get)
+    monkeypatch.setattr(webhook, "_contexto", lambda phone: ("C-1", "cliente"))
+    monkeypatch.setattr(webhook, "responder_cliente", lambda text, **kwargs: "final")
+
+    def send(phone, text):
+        raise RuntimeError("meta down")
+
+    monkeypatch.setattr(webhook, "enviar_mensaje", send)
+    assert webhook._enqueue_message("54911", "wamid.flaky", "text", "hola")
+    # With cap 1 a single counted failure would dead-letter. A counter that
+    # cannot be read must report 0 so the item stays pending instead.
+    assert webhook._note_send_failure("wamid.flaky") == 0
+    assert webhook._worker_cycle() == "retry"
+    assert len(webhook.r.lists[webhook._PROCESSING_KEY]) == 1
+    assert not webhook.r.lists[webhook._DEAD_KEY]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("confirmar SAL-ORD-2026-00008", "ok:SAL-ORD-2026-00008"),
+        ("Confirmar sal-ord-2026-00008", "ok:SAL-ORD-2026-00008"),
+        ("  ok SO-0042 ", "ok:SO-0042"),
+        ("Apruebo SAL-ORD-2026-00008!", "ok:SAL-ORD-2026-00008"),
+        ("ver SAL-ORD-2026-00008", "ver:SAL-ORD-2026-00008"),
+        ("Detalle SO-0042.", "ver:SO-0042"),
+        ("rechazar SAL-ORD-2026-00008", "no:SAL-ORD-2026-00008"),
+        ("Rechazo sal-ord-2026-00008", "no:SAL-ORD-2026-00008"),
+        ("preparar SAL-ORD-2026-00008", "preparar:SAL-ORD-2026-00008"),
+        ("Despachar SAL-ORD-2026-00008!", "despachar:SAL-ORD-2026-00008"),
+        ("despreparar SAL-ORD-2026-00008", "despreparar:SAL-ORD-2026-00008"),
+        ("Desprepara sal-ord-2026-00008.", "despreparar:SAL-ORD-2026-00008"),
+        # "despreparar" must not be swallowed by the cancellation verbs, whose
+        # pattern also matches "<verb> <order> <rest>".
+        ("despreparar SAL-ORD-2026-00008 porque quiero", None),
+        ("hola, cuántos pedidos pendientes hay?", None),
+        ("confirmar", None),
+        ("confirmar todo", None),
+        ("confirmar SAL-ORD-2026-00008 y SAL-ORD-2026-00009", None),
+        ("cancelar SAL-ORD-2026-00008 el cliente se arrepintió", "cancelar:SAL-ORD-2026-00008:el cliente se arrepintió"),
+        ("Anular sal-ord-2026-00008 no hay stock", "cancelar:SAL-ORD-2026-00008:no hay stock"),
+        ("cancelar SAL-ORD-2026-00008", "cancelar:SAL-ORD-2026-00008:"),
+        ("borrar SAL-ORD-2026-00008", None),
+        ("", None),
+    ],
+)
+def test_staff_command_parsing(webhook, text, expected):
+    assert webhook._staff_command(text) == expected
+
+
+def test_staff_text_command_confirms_without_llm(webhook, monkeypatch):
+    staff = "5491100000000"
+    monkeypatch.setattr(webhook, "es_equipo", lambda phone: phone == staff)
+    handled = []
+    monkeypatch.setattr(
+        webhook,
+        "manejar_boton",
+        lambda payload, phone: handled.append((payload, phone)) or "✅ confirmado",
+    )
+    monkeypatch.setattr(
+        webhook,
+        "responder_gerencia",
+        lambda *args, **kwargs: pytest.fail("un comando no debe invocar al LLM"),
+    )
+    sent = []
+    monkeypatch.setattr(
+        webhook,
+        "enviar_mensaje",
+        lambda phone, text: sent.append((phone, text)) or {"messages": [{"id": "wamid.r"}]},
+    )
+
+    payload = _message_payload("wamid.cmd", "Confirmar sal-ord-2026-00008", phone=staff)
+    assert _post(webhook, payload).status_code == 200
+    assert webhook._worker_cycle() == "worked"
+    assert handled == [("ok:SAL-ORD-2026-00008", staff)]
+    assert sent[-1] == (staff, "✅ confirmado")
+
+
+def test_customer_typing_a_command_still_reaches_the_customer_agent(webhook, monkeypatch):
+    monkeypatch.setattr(webhook, "es_equipo", lambda phone: False)
+    monkeypatch.setattr(
+        webhook,
+        "manejar_boton",
+        lambda payload, phone: pytest.fail("un cliente nunca llega al handler de aprobación"),
+    )
+    monkeypatch.setattr(webhook, "_contexto", lambda phone: ("C-1", "cliente"))
+    seen = []
+    monkeypatch.setattr(
+        webhook,
+        "responder_cliente",
+        lambda text, **kwargs: seen.append(text) or "respuesta",
+    )
+    result = webhook._generate_response(
+        {"message_id": "m", "telefono": "54911", "kind": "text", "data": "confirmar SAL-ORD-2026-00008"}
+    )
+    assert result == "respuesta"
+    assert seen == ["confirmar SAL-ORD-2026-00008"]
+
+
+def test_inbound_opens_free_form_window_for_sender(webhook):
+    from app import outbound_status
+
+    assert _post(webhook, _message_payload("wamid.win", "hola", phone="5491122223333")).status_code == 200
+    assert outbound_status.window_open("5491122223333") is True
+    assert outbound_status.window_open("+5491122223333") is True
+    assert outbound_status.window_open("5491199999999") is False
+    webhook.r.advance(outbound_status.WINDOW_TTL_SECONDS + 1)
+    assert outbound_status.window_open("5491122223333") is False
+
+
+def test_technical_failure_alerts_team_once_and_is_truthful(webhook, monkeypatch):
+    todos = []
+    monkeypatch.setattr(
+        webhook.erpnext,
+        "create_doc",
+        lambda doctype, payload: todos.append((doctype, payload)) or {"name": "TD-1"},
+        raising=False,
+    )
+    monkeypatch.setattr(webhook, "_contexto", lambda phone: ("C-1", "cliente"))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("RESOURCE_EXHAUSTED")
+
+    monkeypatch.setattr(webhook, "responder_cliente", boom)
+    item = {"message_id": "m1", "telefono": "54911", "kind": "text", "data": "hola"}
+
+    assert webhook._generate_response(item) == webhook.texto_error_tecnico_avisado("es")
+    assert webhook._generate_response({**item, "message_id": "m2"}) == webhook.texto_error_tecnico_avisado("es")
+    assert len(todos) == 1
+    assert todos[0][0] == "ToDo"
+    assert "RuntimeError" in todos[0][1]["description"]
+    assert "54911" not in todos[0][1]["description"]
+
+
+def test_technical_failure_without_erp_task_never_claims_the_team_was_alerted(webhook, monkeypatch):
+    def cannot_create(doctype, payload):
+        raise RuntimeError("erpnext down")
+
+    monkeypatch.setattr(webhook.erpnext, "create_doc", cannot_create, raising=False)
+    monkeypatch.setattr(webhook, "_contexto", lambda phone: ("C-1", "cliente"))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("model down")
+
+    monkeypatch.setattr(webhook, "responder_cliente", boom)
+    item = {"message_id": "m1", "telefono": "54911", "kind": "text", "data": "hola"}
+    assert webhook._generate_response(item) == webhook.texto_error_tecnico("es")
+    assert "avisé" not in webhook.texto_error_tecnico("es")
+
+
+def test_config_warnings_name_every_gap_that_disables_the_manager_loop(webhook, monkeypatch):
+    for variable in (
+        "TELEFONOS_EQUIPO",
+        "WHATSAPP_STAFF_PENDING_TEMPLATE",
+        "WHATSAPP_STAFF_CONFIRMED_TEMPLATE",
+        "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE",
+        "AUTO_CONFIRM_PRICE_LIST",
+        "AUTO_CONFIRM_CURRENCY",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    warnings = webhook._config_warnings()
+    joined = "\n".join(warnings)
+    assert "TELEFONOS_EQUIPO" in joined
+    assert "WHATSAPP_STAFF_PENDING_TEMPLATE" in joined
+    assert "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE" in joined
+    assert "AUTO_CONFIRM_PRICE_LIST" in joined
+
+    monkeypatch.setenv("TELEFONOS_EQUIPO", "5491100000000")
+    for variable in (
+        "WHATSAPP_STAFF_PENDING_TEMPLATE",
+        "WHATSAPP_STAFF_CONFIRMED_TEMPLATE",
+        "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE",
+    ):
+        monkeypatch.setenv(variable, "plantilla")
+    monkeypatch.setenv("AUTO_CONFIRM_PRICE_LIST", "Standard Selling")
+    monkeypatch.setenv("AUTO_CONFIRM_CURRENCY", "ARS")
+    assert webhook._config_warnings() == []

@@ -12,10 +12,19 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app import erpnext, policy
+from app import (
+    avisos,
+    clientes,
+    confirmacion,
+    entrega,
+    erpnext,
+    excepciones,
+    policy,
+    solicitudes,
+)
 from app.locks import CoordinationError, distributed_lock
-from app.notificar import notificar_equipo
-from app.runtime_context import RuntimeContextError, actor_context, require_customer
+from app.notificar import notificar_confirmacion, notificar_equipo
+from app.runtime_context import RuntimeContextError, actor_context
 
 _MESES = {
     "ene": 1, "enero": 1, "feb": 2, "febrero": 2, "mar": 3, "marzo": 3,
@@ -168,6 +177,61 @@ def _unidad_clave(value: str) -> str:
     return aliases.get(normalized, normalized)
 
 
+class DireccionEntrega(BaseModel):
+    """La dirección donde hay que entregar, como la dijo el cliente.
+
+    El teléfono NO está acá y no está en ninguna herramienta: viene del
+    webhook firmado de Meta. Si el modelo pudiera pasarlo, un mensaje
+    alcanzaría para dar de alta a otra persona o para pedir en su nombre.
+    """
+
+    calle: str = Field(
+        min_length=1, description="Calle y número, tal como lo dijo el cliente"
+    )
+    localidad: str = Field(min_length=1, description="Ciudad, pueblo o localidad")
+    codigo_postal: str = Field(
+        default="", description="Código postal si lo dijo; vacío si no lo dijo"
+    )
+    referencia: str = Field(
+        default="", description="Piso, departamento, entre qué calles; opcional"
+    )
+
+    def como_erpnext(self) -> dict:
+        return {
+            "address_line1": self.calle.strip(),
+            "address_line2": self.referencia.strip(),
+            "city": self.localidad.strip(),
+            "pincode": self.codigo_postal.strip(),
+        }
+
+
+def _cuenta_del_remitente(config: RunnableConfig) -> tuple[object, str]:
+    """(actor, cliente) de quien escribió, siempre por su teléfono verificado.
+
+    El webhook resuelve la cuenta al empezar el turno. Un cliente que se acaba
+    de dar de alta —en este mismo turno, con crear_cliente— todavía no la tiene
+    ahí, así que se vuelve a resolver por teléfono. El número es siempre el del
+    mensaje que firmó Meta: nunca uno que dijo el modelo.
+    """
+    actor = actor_context(config)
+    if actor.scope != "customer" or not actor.actor_phone:
+        raise RuntimeContextError("cliente autenticado ausente")
+    if actor.customer_code:
+        return actor, actor.customer_code
+    try:
+        ficha = clientes.buscar_por_telefono(
+            actor.actor_phone, get_list=erpnext.get_list
+        )
+    except erpnext.ERPNextError as exc:
+        # Un ERPNext caído no es "no tiene cuenta". Falla cerrada, y como
+        # RuntimeContextError para que la herramienta devuelva texto en vez de
+        # levantar: una excepción rompe el hilo de conversación del cliente.
+        raise RuntimeContextError("no pude resolver la cuenta del remitente") from exc
+    if not ficha:
+        raise RuntimeContextError("el remitente todavía no tiene cuenta")
+    return actor, str(ficha["name"])
+
+
 class LineaPedido(BaseModel):
     item_code: str = Field(
         min_length=1, description="Código exacto devuelto por buscar_producto"
@@ -284,6 +348,39 @@ def _safe_notify(name: str, order: dict, *, auto: bool, reasons: str = "") -> bo
         return False
 
 
+def _notificar_confirmada(order: dict) -> None:
+    """Everything a confirmed order owes the world, none of it up to the model.
+
+    Three independent facts, in the order that makes each one safe:
+
+      1. the DURABLE confirmation timestamp (app/confirmacion.py), an ERPNext
+         comment that opens the manual cancellation window and survives any
+         restart of this process or of Redis;
+      2. the customer's authoritative confirmation, queued once per order by
+         app/avisos.py. This used to be the PEDIDO_CONFIRMADO token below,
+         which only reached the customer if the model chose to repeat it, and
+         the "already informed" marker was set whether it did or not. The model
+         may still say something conversational; the fact now travels as data,
+         with retries, dead-lettering and a follow-up ERPNext task of its own;
+      3. the manager's informational notice, exactly once per order.
+
+    Every step is best effort and none can undo the confirmation itself: the
+    order IS confirmed in ERPNext by the time this runs.
+    """
+    try:
+        confirmacion.registrar(str(order.get("name") or ""), "automática (política)")
+    except Exception as exc:
+        print(f"[orders] marca durable de confirmación falló ({type(exc).__name__})")
+    try:
+        avisos.confirmacion_cliente(order)
+    except Exception as exc:
+        print(f"[orders] aviso al cliente no encolado ({type(exc).__name__})")
+    try:
+        notificar_confirmacion(order, "automática (política)")
+    except Exception as exc:
+        print(f"[orders] aviso de confirmación falló ({type(exc).__name__})")
+
+
 def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
     name = str(order.get("name") or "").strip()
     if not name:
@@ -317,7 +414,7 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
                         name,
                         "Auto-confirmado después de revalidación bajo lock distribuido.",
                     )
-                    _safe_notify(name, complete, auto=True)
+                    _notificar_confirmada(complete)
                     return _order_result(complete, validated, delivery)
                 decision = final_decision
         except Exception as exc:
@@ -332,7 +429,7 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
             except erpnext.ERPNextError:
                 pass
             if int(complete.get("docstatus") or 0) == 1:
-                _safe_notify(name, complete, auto=True)
+                _notificar_confirmada(complete)
                 return _order_result(complete, validated, delivery)
             decision = policy.Decision(False, ["auto-confirmación no disponible"])
 
@@ -340,7 +437,19 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
         "Sales Order", name, f"Requiere revisión humana: {decision}"
     )
     _safe_notify(name, complete, auto=False, reasons=str(decision))
-    return _order_result(complete, validated, delivery)
+    resultado = _order_result(complete, validated, delivery)
+    if entrega.MOTIVO in str(decision):
+        # El cliente tiene que escuchar "lo recibimos, estamos viendo la
+        # entrega" — nunca "confirmado". Una paráfrasis alegre de un borrador
+        # es exactamente cómo se pierde un cliente el día de la entrega, así
+        # que la instrucción viaja con el resultado en vez de confiar en que el
+        # modelo lo deduzca.
+        resultado += (
+            " ENTREGA EN REVISIÓN: decile al cliente que el pedido quedó "
+            "RECIBIDO y que estamos revisando la entrega a esa dirección. "
+            "NO le digas que está confirmado, y no prometas día ni hora."
+        )
+    return resultado
 
 
 @tool
@@ -372,13 +481,22 @@ def crear_lead(
             if actor.inbound_message_id
             else "sin referencia"
         )
+        # ERPNext v15+ stores Lead notes as a child table (CRM Note); a plain
+        # string here makes the API return HTTP 500 and no Lead is created.
+        detalle = " ".join(part for part in (nota.strip(), "") if part)
         doc = erpnext.create_doc(
             "Lead",
             {
                 "lead_name": nombre,
                 "mobile_no": actor.actor_phone,
-                "source": "WhatsApp",
-                "notes": f"{nota}\nReferencia segura: {message_ref}",
+                "notes": [
+                    {
+                        "note": (
+                            f"Origen: WhatsApp. {detalle}".strip()
+                            + f"<br>Referencia segura: {message_ref}"
+                        )
+                    }
+                ],
             },
         )
     except erpnext.ERPNextError:
@@ -400,11 +518,11 @@ def crear_pedido(
     unidad ni inventes una fecha.
     """
     try:
-        actor = require_customer(config)
+        actor, cuenta = _cuenta_del_remitente(config)
     except RuntimeContextError:
         return (
             "PEDIDO_NO_CREADO. No hay una cuenta de cliente autenticada; "
-            "derivá el caso al equipo."
+            "si es un cliente nuevo usá crear_cliente primero."
         )
     if not actor.inbound_message_id:
         return (
@@ -416,7 +534,7 @@ def crear_pedido(
 
     message_key = _message_key(actor.inbound_message_id)
     try:
-        existing = _find_existing(actor.customer_code, message_key)
+        existing = _find_existing(cuenta, message_key)
     except erpnext.ERPNextError:
         return (
             "PEDIDO_NO_CREADO. No pude verificar si este mensaje ya tenía un "
@@ -442,7 +560,7 @@ def crear_pedido(
         with distributed_lock(
             f"order-message:{message_key}", lease_seconds=300, wait_seconds=30
         ):
-            existing = _find_existing(actor.customer_code, message_key)
+            existing = _find_existing(cuenta, message_key)
             if existing:
                 return _order_result(existing, [], delivery)
 
@@ -453,7 +571,7 @@ def crear_pedido(
             try:
                 company, warehouse = erpnext.default_context()
                 payload: dict = {
-                    "customer": actor.customer_code,
+                    "customer": cuenta,
                     "company": company,
                     "po_no": message_key,
                     "transaction_date": business_today.isoformat(),
@@ -469,6 +587,16 @@ def crear_pedido(
                         for line in validated
                     ],
                 }
+                # El pedido dice a dónde va. Si ERPNext lo dedujera solo,
+                # dos pedidos del mismo cliente podrían salir con direcciones
+                # distintas; y sin dirección la política no puede verificar la
+                # entrega, así que el pedido queda en borrador (bien). Si el
+                # cliente acaba de dar una dirección en esta conversación, va a
+                # ESA: es la que la política tiene que mirar.
+                envio = clientes.direccion_para_pedido(cuenta, actor.actor_phone)
+                if envio:
+                    payload["customer_address"] = envio
+                    payload["shipping_address_name"] = envio
                 if policy.PRICE_LIST:
                     payload["selling_price_list"] = policy.PRICE_LIST
                 if policy.CURRENCY:
@@ -478,7 +606,7 @@ def crear_pedido(
                 # A transport timeout may have happened after commit. Resolve by
                 # the persisted business key before claiming creation failed.
                 try:
-                    existing = _find_existing(actor.customer_code, message_key)
+                    existing = _find_existing(cuenta, message_key)
                 except erpnext.ERPNextError:
                     existing = None
                 if existing:
@@ -503,7 +631,7 @@ def crear_pedido(
         # Never create without cross-worker idempotency. A concurrent worker may
         # already have completed, so make one final read-only resolution.
         try:
-            existing = _find_existing(actor.customer_code, message_key)
+            existing = _find_existing(cuenta, message_key)
         except erpnext.ERPNextError:
             existing = None
         if existing:
@@ -515,6 +643,63 @@ def crear_pedido(
     # The idempotency critical section ends once the durable keyed draft exists.
     # Policy evaluation can be slow and has its own global submit lock.
     return _after_create(order, validated, delivery)
+
+
+@tool
+def crear_cliente(
+    nombre: str,
+    direccion: DireccionEntrega,
+    config: RunnableConfig,
+) -> str:
+    """Registra al remitente como cliente, con su dirección de entrega.
+
+    Usala cuando escribe alguien que no tiene cuenta y quiere pedir. Pedile
+    ANTES el nombre (o el del negocio) y la dirección completa: calle y
+    número, localidad y código postal si lo sabe. No inventes ninguno de esos
+    datos y no preguntes el teléfono: ya lo tenemos verificado del mensaje.
+
+    Después de esto podés usar crear_pedido en la misma conversación.
+    """
+    try:
+        actor = actor_context(config)
+    except RuntimeContextError:
+        return "No pude autenticar el remitente; no registré la cuenta."
+    if actor.scope != "customer" or not actor.actor_phone:
+        return "No pude autenticar el remitente; no registré la cuenta."
+
+    try:
+        resultado = clientes.crear(nombre, actor.actor_phone, direccion.como_erpnext())
+    except CoordinationError:
+        return (
+            "No pude coordinar el alta de forma segura; no reintentes ahora y "
+            "derivá el caso al equipo."
+        )
+    except erpnext.ERPNextError as exc:
+        print(f"[orders] alta de cliente falló: {exc}")
+        return (
+            "No pude registrar la cuenta. Derivá el caso al equipo y no "
+            "prometas nada."
+        )
+
+    cuenta = resultado["cliente"]
+    ya_estaba = "" if resultado["creado"] else " (ya tenía cuenta)"
+    try:
+        doc = erpnext.get_doc("Address", resultado["direccion"])
+        en_zona, motivo_zona = entrega.en_zona(doc)
+    except erpnext.ERPNextError:
+        en_zona, motivo_zona = False, "no pude verificar la zona de reparto"
+
+    if en_zona:
+        return (
+            f"Cuenta lista: {cuenta}{ya_estaba}. Entregamos en esa zona. "
+            "Ya podés tomarle el pedido con crear_pedido."
+        )
+    return (
+        f"Cuenta lista: {cuenta}{ya_estaba}. ATENCIÓN: {motivo_zona}. Podés "
+        "tomarle el pedido igual, pero va a quedar RECIBIDO y pendiente de "
+        "revisión de entrega: no le prometas la entrega ni le digas que está "
+        "confirmado."
+    )
 
 
 @tool
@@ -544,3 +729,113 @@ def escalar_a_humano(motivo: str, config: RunnableConfig) -> str:
     except erpnext.ERPNextError:
         return "No pude crear la tarea de derivación; avisá que el equipo revisará el caso."
     return f"Derivado al equipo (tarea {doc['name']})."
+
+
+@tool
+def pedir_excepcion_de_entrega(
+    numero_de_pedido: str,
+    lo_que_pidio_el_cliente: str,
+    config: RunnableConfig,
+) -> str:
+    """Pide una entrega fuera de los días de reparto para un pedido ya creado.
+
+    Usala cuando el cliente ya tiene un pedido en borrador y pide algo que las
+    reglas no permiten solas: que se lo lleven un día sin reparto, otra fecha,
+    otro horario. NO decide nada y NO confirma el pedido: o el dueño ya dejó
+    autorizada esa excepción, o queda una solicitud para que la resuelva una
+    persona. Pasá en `lo_que_pidio_el_cliente` sus palabras, sin interpretarlas.
+    """
+    # Resuelta como en crear_pedido: un cliente dado de alta en ESTE turno no
+    # tiene todavía la cuenta en la config y se vuelve a buscar por su teléfono
+    # verificado. Con actor.customer_code solo, su propio pedido le era ajeno.
+    try:
+        _, cuenta = _cuenta_del_remitente(config)
+    except RuntimeContextError:
+        return "No pude autenticar la conversación; no registré el pedido especial."
+
+    nombre = str(numero_de_pedido or "").strip().upper()
+    if not nombre:
+        return "Falta el número real del pedido; no inventes uno."
+    try:
+        so = erpnext.get_doc("Sales Order", nombre)
+    except erpnext.ERPNextError:
+        return f"No pude leer {nombre}. No prometas nada sobre ese pedido."
+
+    # The order has to be the sender's own: the phone comes from the signed
+    # webhook, so no message can open a request on somebody else's order.
+    if not cuenta or str(so.get("customer") or "") != cuenta:
+        return "Ese pedido no es de esta cuenta; no registré nada."
+    estado = int(so.get("docstatus") or 0)
+    if estado != 0:
+        return (
+            f"{nombre} ya no es un borrador (estado {estado}); no corresponde una "
+            "solicitud de excepción."
+        )
+
+    evaluacion = excepciones.evaluar_entrega(so)
+    if evaluacion.preautorizada and evaluacion.oferta is not None:
+        # The owner already decided this case. The offer is HIS, not the
+        # model's: it is recorded and sent to the customer as data, and it still
+        # needs an explicit yes because it changes the date and the money.
+        solicitud = solicitudes.crear(
+            so,
+            solicitado=evaluacion.oferta.como_dict(),
+            nota_cliente=lo_que_pidio_el_cliente,
+        )
+        if solicitud is None:
+            return (
+                "No pude registrar la solicitud. Pedile disculpas y usá "
+                "escalar_a_humano."
+            )
+        ofrecida = solicitudes.registrar(
+            solicitud,
+            "preautorizada",
+            estado=solicitudes.ESPERANDO_CLIENTE,
+            decision="preautorizada",
+            ofrecido=evaluacion.oferta.como_dict(),
+            motivo="condiciones que el dueño dejó autorizadas",
+        )
+        if ofrecida is None:
+            return (
+                "No pude registrar la solicitud. Pedile disculpas y usá "
+                "escalar_a_humano."
+            )
+        solicitudes.ofrecer_al_cliente(ofrecida)
+        condiciones = excepciones.texto_oferta(
+            evaluacion.oferta, str(so.get("currency") or "")
+        )
+        return (
+            "EXCEPCION_PREAUTORIZADA. Le estoy enviando al cliente las condiciones "
+            f"exactas en un mensaje aparte: {condiciones}. Decile que puede "
+            f"aceptarlas respondiendo 'acepto {nombre}'. NO cambies ninguna cifra "
+            "ni prometas otra cosa."
+        )
+
+    solicitud = solicitudes.crear(
+        so, solicitado={"metodo": "entrega"}, nota_cliente=lo_que_pidio_el_cliente
+    )
+    if solicitud is None:
+        return "No pude registrar la solicitud. Pedile disculpas y usá escalar_a_humano."
+    solicitudes.notificar_equipo_nueva(solicitud)
+    _comentar_solicitud(nombre, solicitud, evaluacion.motivo)
+    return (
+        "SOLICITUD_PENDIENTE. Ya le pregunté al encargado y la respuesta no está "
+        "todavía. Decile al cliente exactamente esto: el pedido quedó registrado, "
+        "la excepción la tiene que aprobar el encargado, le contestamos en cuanto "
+        "responda, y el stock se vuelve a verificar en ese momento. NO le digas "
+        "que está confirmado, NO prometas día, hora ni precio, y NO le digas que "
+        "le guardamos la mercadería."
+    )
+
+
+def _comentar_solicitud(nombre: str, solicitud, motivo: str) -> None:
+    try:
+        erpnext.add_comment(
+            "Sales Order",
+            nombre,
+            f"Solicitud {solicitud.id} abierta desde WhatsApp: el cliente pide una "
+            "entrega de excepción y no está pre-autorizada "
+            f"({motivo or 'sin regla que la cubra'}). Espera una decisión humana.",
+        )
+    except Exception as exc:
+        print(f"[orders] comentario de solicitud falló ({type(exc).__name__})")

@@ -32,13 +32,318 @@ _DUMMY = {
     "ERPNEXT_POLICY_API_SECRET": "policy-secret",
     "META_APP_SECRET": "test-app-secret",
     "META_VERIFY_TOKEN": "test-verify-token",
-    "REDIS_URL": "redis://localhost:6379/15",
+    # DATABASE 0, and not by preference: RediSearch refuses FT.CREATE on any
+    # other one ("Cannot create index on db != 0"), and app/graph.py creates the
+    # checkpointer's indices AT IMPORT. This used to say /15, which looked like
+    # isolation and worked on any machine that happened to have those indices
+    # left on db 15 from before — and failed at COLLECTION on every clean Redis
+    # Stack, which is every CI run and every new checkout. Isolation comes from
+    # the server being a throwaway one, not from the database number.
+    "REDIS_URL": "redis://localhost:6379/0",
     "WHATSAPP_PHONE_NUMBER_ID": "test-phone-id",
     "WHATSAPP_TOKEN": "test-token",
+    # app/graph.py builds the chat models at import (app/modelos.py refuses to
+    # start without the key). A dummy lets a test import the real tool lists
+    # (see tests/test_frontera_decisiones.py) without credentials or network:
+    # ChatOpenAI makes no request when constructed.
+    "DASHSCOPE_API_KEY": "test-dashscope-key",
+    # WHICH provider, pinned. The developer's real .env may say
+    # LLM_PROVIDER=gemini, and then the suite would be exercising a different
+    # endpoint, model names and key than the one it asserts on — the exact leak
+    # this file's docstring exists to describe. Tests that care about the other
+    # provider set it themselves (see tests/test_modelos.py).
+    "LLM_PROVIDER": "qwen",
+    # The developer's real .env may still carry the old "google_genai:…" names;
+    # pin the Qwen defaults so the suite never depends on that file.
+    "QWEN_SALES_MODEL": "qwen3.7-plus-2026-05-26",
+    "QWEN_MANAGER_MODEL": "qwen3.8-max",
     # opcionales que cambian comportamiento: valores deterministas para tests
     "BUSINESS_TIMEZONE": "America/Argentina/Buenos_Aires",
     "ERPNEXT_COMPANY": "Lacteos Test SA",
     "ERPNEXT_WAREHOUSE": "Principal - LT",
+    # LAS DOS QUE DECIDEN QUIÉN ES QUIÉN, y las dos que un .env real cambia.
+    # app/telefono.py lee PAIS_TELEFONO AL IMPORTAR y app/router.py arma STAFF
+    # igual, así que un .env con otro país o con el número real del dueño no
+    # "configura" la suite: la hace probar otra cosa. Con PAIS_TELEFONO=91 se
+    # caen veinte tests de identidad que no tienen nada que ver con el país, y
+    # con un TELEFONOS_EQUIPO cargado, un test que dice "nadie autoriza" prueba
+    # lo contrario de lo que dice. Vacío es lo que hay en un checkout limpio,
+    # y los tests que necesitan un equipo lo fijan ellos con router.recargar().
+    "PAIS_TELEFONO": "54",
+    "TELEFONOS_EQUIPO": "",
 }
+# Casi todo es setdefault: un test o CI que ya fijó algo (REDIS_URL, sobre
+# todo) manda. Pero lo que decide QUIÉN ES QUIÉN y QUÉ PROVEEDOR se prueba se
+# fija sin condición: con setdefault, un shell que exporta LLM_PROVIDER=gemini o
+# un TELEFONOS_EQUIPO cargado llegaba a la suite, que es justo la fuga que el
+# docstring de arriba describe.
+_FIJAS = {"LLM_PROVIDER", "QWEN_SALES_MODEL", "QWEN_MANAGER_MODEL", "PAIS_TELEFONO", "TELEFONOS_EQUIPO"}
 for _k, _v in _DUMMY.items():
-    os.environ.setdefault(_k, _v)
+    if _k in _FIJAS:
+        os.environ[_k] = _v
+    else:
+        os.environ.setdefault(_k, _v)
+
+from unittest.mock import Mock
+
+import pytest
+from redis.exceptions import RedisError
+
+from tests.fakes import FakeMarcas
+
+
+class FakeRedis:
+    """Enough Redis for app/limites.py, with no server and no network.
+
+    The limits the owner sets are the numbers that decide whether an order
+    confirms with nobody watching, so no test result may depend on what some
+    real Redis happens to have left over, and no test should need one running.
+    """
+
+    def __init__(self, hashes=None, strings=None, lists=None, zsets=None):
+        self.hashes = {k: dict(v) for k, v in (hashes or {}).items()}
+        self.strings = dict(strings or {})
+        self.lists = {k: list(v) for k, v in (lists or {}).items()}
+        self.zsets = {k: dict(v) for k, v in (zsets or {}).items()}
+        self.ttls: dict[str, int] = {}
+        self.caido = False
+
+    def _vivo(self) -> None:
+        if self.caido:
+            raise RedisError("redis de prueba caído")
+
+    def hgetall(self, key):
+        self._vivo()
+        return dict(self.hashes.get(key, {}))
+
+    def hset(self, key, field, value):
+        self._vivo()
+        self.hashes.setdefault(key, {})[field] = value
+
+    def get(self, key):
+        self._vivo()
+        return self.strings.get(key)
+
+    def setex(self, key, ttl, value):
+        self._vivo()
+        self.strings[key] = value
+        self.ttls[key] = ttl
+
+    def set(self, key, value, nx=False, ex=None):
+        """SET, con NX. app/acciones.py se apoya en que NX sea ATÓMICO.
+
+        Es como se reserva el código de seis dígitos: o la clave no existía y
+        queda escrita, o ya había una propuesta viva con ese código y no se
+        pisa nada. Un doble que ignorara `nx` dejaría pasar exactamente el bug
+        que ese SET existe para hacer imposible.
+        """
+        self._vivo()
+        if nx and key in self.strings:
+            return None
+        self.strings[key] = value
+        if ex is not None:
+            self.ttls[key] = ex
+        return True
+
+    def exists(self, key):
+        self._vivo()
+        return 1 if key in self.strings else 0
+
+    def expire(self, key, ttl):
+        self._vivo()
+        self.ttls[key] = ttl
+        return True
+
+    def incr(self, key):
+        self._vivo()
+        nuevo = int(self.strings.get(key) or 0) + 1
+        self.strings[key] = str(nuevo)
+        return nuevo
+
+    def delete(self, key):
+        self._vivo()
+        self.strings.pop(key, None)
+
+    def getdel(self, key):
+        """Leer y borrar en una sola operación, como el GETDEL de Redis.
+
+        app/acciones.py lo usa para que un código de confirmación sirva UNA
+        vez: dos workers con el mismo mensaje encuentran uno la propuesta y el
+        otro nada. Con get + delete por separado los dos la encontrarían.
+        """
+        self._vivo()
+        return self.strings.pop(key, None)
+
+    def rpush(self, key, value):
+        self._vivo()
+        self.lists.setdefault(key, []).append(value)
+
+    def lrange(self, key, start, end):
+        self._vivo()
+        datos = self.lists.get(key, [])
+        total = len(datos)
+        desde = max(0, total + start) if start < 0 else start
+        hasta = total + end if end < 0 else end
+        return datos[desde : hasta + 1]
+
+    def ltrim(self, key, start, end):
+        self._vivo()
+        self.lists[key] = self.lrange(key, start, end)
+
+    # Los conjuntos ordenados. app/acciones.py guarda ahí los códigos vivos de
+    # un teléfono, con el vencimiento de puntaje, para contestar "¿hay algo
+    # esperando?" sin barrer el keyspace.
+    @staticmethod
+    def _limite(valor, por_defecto):
+        if valor in ("-inf", "+inf", "inf"):
+            return float("-inf") if valor == "-inf" else float("inf")
+        try:
+            return float(valor)
+        except (TypeError, ValueError):
+            return por_defecto
+
+    def zadd(self, key, mapping):
+        self._vivo()
+        self.zsets.setdefault(key, {}).update(
+            {str(m): float(p) for m, p in mapping.items()}
+        )
+        return len(mapping)
+
+    def zrem(self, key, *members):
+        self._vivo()
+        datos = self.zsets.get(key, {})
+        return sum(1 for m in members if datos.pop(str(m), None) is not None)
+
+    def zcard(self, key):
+        self._vivo()
+        return len(self.zsets.get(key, {}))
+
+    def zrangebyscore(self, key, minimo, maximo):
+        self._vivo()
+        desde = self._limite(minimo, float("-inf"))
+        hasta = self._limite(maximo, float("inf"))
+        return [
+            m
+            for m, p in sorted(self.zsets.get(key, {}).items(), key=lambda kv: kv[1])
+            if desde <= p <= hasta
+        ]
+
+    def zremrangebyscore(self, key, minimo, maximo):
+        self._vivo()
+        fuera = self.zrangebyscore(key, minimo, maximo)
+        datos = self.zsets.get(key, {})
+        for m in fuera:
+            datos.pop(m, None)
+        return len(fuera)
+
+
+def inventario_confiable(
+    monkeypatch,
+    *,
+    maestra: bool = True,
+    fresco: bool = True,
+    motivo: str = "el último conteo de LECHE-1L es de hace 40 h (vale 24 h)",
+):
+    """Trust the inventory the way a counted-and-confirmed morning does.
+
+    Trust is earned per product now (app/inventario.py), so a test about some
+    other rule says "the count is in" here instead of restating it. The tests
+    about the counting itself live in tests/test_inventario.py and use the real
+    function.
+    """
+    from app import inventario
+
+    monkeypatch.setenv("STOCK_CONFIABLE", "true" if maestra else "false")
+    monkeypatch.setenv("STOCK_CONFIABLE_HORAS", "24")
+    monkeypatch.setattr(
+        inventario,
+        "confiable",
+        lambda code, warehouse: (fresco, "" if fresco else motivo),
+    )
+
+
+def entrega_autorizada(
+    monkeypatch,
+    *,
+    autorizada: bool = True,
+    motivo: str = "entrega a revisar: Ruta 9 km 300, Villa Rara — el código postal X9999 no está en las zonas de reparto",
+):
+    """Say the delivery address is settled, without restating how.
+
+    Delivery eligibility is decided in app/entrega.py, deterministically and
+    outside the model. A test about some other rule says "the address is fine"
+    here; the tests about the decision itself live in tests/test_entrega.py and
+    use the real function.
+    """
+    from app import entrega
+
+    monkeypatch.setattr(
+        entrega,
+        "autorizada",
+        lambda sales_order: (autorizada, "" if autorizada else motivo),
+    )
+
+
+@pytest.fixture(autouse=True)
+def limites_sin_redis(monkeypatch):
+    """Every test starts with an EMPTY limits store and a clean environment.
+
+    Limits then resolve the way they do in production — store, then the
+    bootstrap environment, then the code default — but from nothing, so a test
+    that cares sets exactly what it needs. A test about the store itself
+    installs its own FakeRedis over this one.
+    """
+    from app import locks
+
+    for nombre in (
+        "AUTO_CONFIRM_MAX",
+        "AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO",
+        "STOCK_BUFFER_PCT",
+        "AUTO_CONFIRM_MAX_CLIENTE_NUEVO",
+        "AUTO_CONFIRM_MAX_DEBT",
+        "AUTO_CONFIRM_DESCUENTOS_APRUEBAN",
+        "AUTO_CONFIRM_MAX_DESCUENTO_PCT",
+        "STOCK_CONFIABLE",
+        "STOCK_CONFIABLE_HORAS",
+        # The two hold deadlines. Without them here, a developer machine with a
+        # real .env resolves them from that file and a test that says "the
+        # owner's number decides" proves nothing — the exact leak this
+        # conftest's docstring exists to describe.
+        "APROBACION_TIMEOUT_HORAS",
+        "REVISION_TIMEOUT_HORAS",
+    ):
+        monkeypatch.delenv(nombre, raising=False)
+    vacio = FakeRedis()
+    monkeypatch.setattr(locks, "conexion", lambda: vacio)
+    # An empty store is only "brand new install" if ERPNext has no record of a
+    # limit ever being changed. Tests answer that question themselves rather
+    # than reaching for ERPNext; the ones about data loss say otherwise.
+    from app import limites
+
+    monkeypatch.setattr(limites, "_hubo_cambios_durables", lambda: False)
+    monkeypatch.setattr(limites, "_durable_cache", None)
+    # The delivery rules have their OWN durable marker, so their own question.
+    # Answering it False here is what lets a test use the bootstrap environment
+    # for a delivery rule; the tests about a wiped store say otherwise.
+    monkeypatch.setattr(limites, "_hubo_cambios_durables_entrega", lambda: False)
+    monkeypatch.setattr(limites, "_durable_cache_entrega", None)
+    # Applying a limit change writes a durable copy to ERPNext. No test may
+    # reach a real one; the tests about that record assert on this mock.
+    monkeypatch.setattr(limites.erpnext, "registrar_comentario", Mock())
+    return vacio
+
+
+@pytest.fixture(autouse=True)
+def marcas_sin_redis(monkeypatch):
+    """Every test starts with an empty, in-memory marker store; tests that need
+    their own fake (the webhook harness) override it.
+
+    app/avisos.py and app/confirmacion.py both reach Redis through
+    outbound_status.cliente(), so patching this one attribute keeps the notice
+    queue and the confirmation cache in memory too.
+    """
+    from app import outbound_status
+
+    marcas = FakeMarcas()
+    monkeypatch.setattr(outbound_status, "_client", marcas)
+    return marcas
