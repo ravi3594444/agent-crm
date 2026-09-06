@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 
 ES = "es"
 EN = "en"
@@ -791,18 +792,79 @@ _PEDIDOS_EXPLICITOS = (
 )
 
 
+# Lo que convierte una frase de pedido en NO-pedido cuando está justo antes,
+# en la misma cláusula: una negación («don't reply in english», «no, en inglés
+# por favor no»), o un verbo que la cita en vez de pedirla («you said 'reply in
+# english'», «el cartel decía respondé en español»). Palabras sueltas y
+# frecuentes, sin tildes, en los dos idiomas.
+_NEGACIONES = frozenset(
+    ["no", "not", "dont", "don't", "never", "nunca", "jamas", "tampoco", "ni", "sin"]
+)
+_CITAS = frozenset(
+    [
+        "said", "says", "saying", "wrote", "typed", "means", "mean", "meant",
+        "dijo", "dice", "decia", "escribio", "escribi", "significa", "puse", "leia",
+    ]
+)
+# Una frase entre comillas se está mostrando, no pidiendo.
+_COMILLAS = "\"'«»“”‘’`"
+# Lo que separa cláusulas: la negación tiene que estar en la MISMA que la
+# frase. «No entiendo, en inglés por favor» pide inglés; «no, en inglés por
+# favor no» no lo pide.
+_SEPARADORES = re.compile(r"[,.;:!?\n]")
+_PALABRA = re.compile(r"[a-z']+")
+_VENTANA = 3
+
+
+def _negada_o_citada(limpio: str, inicio: int, fin: int) -> bool:
+    """¿La aparición [inicio:fin) está negada, citada o entre comillas?"""
+    antes = limpio[:inicio]
+    despues = limpio[fin:]
+    # Comillas pegadas a la frase, de un lado o del otro. Se compara UN
+    # carácter y sólo si existe: la cadena vacía está «contenida» en cualquier
+    # cadena, y una frase al principio del mensaje no tiene nada antes.
+    abre = antes.rstrip()[-1:]
+    cierra = despues.lstrip()[:1]
+    if (abre and abre in _COMILLAS) or (cierra and cierra in _COMILLAS):
+        return True
+    # Negación o verbo de cita en las palabras inmediatamente anteriores, dentro
+    # de la misma cláusula.
+    palabras = _PALABRA.findall(_SEPARADORES.split(antes)[-1])[-_VENTANA:]
+    if any(p in _NEGACIONES or p in _CITAS for p in palabras):
+        return True
+    # Negación al final de la cláusula, como se niega en español: «en inglés
+    # por favor no». Sólo si la negación CIERRA la cláusula: «reply in english
+    # not spanish» sigue pidiendo inglés.
+    siguientes = _PALABRA.findall(_SEPARADORES.split(despues)[0])
+    return bool(siguientes) and len(siguientes) <= 2 and siguientes[-1] in _NEGACIONES
+
+
 def pedido_explicito(texto: object) -> str | None:
     """El idioma que ese mensaje PIDE explícitamente, o None.
 
     El texto del cliente se mira como DATO: se compara contra una lista fija de
-    frases y no se interpreta de ninguna otra forma.
+    frases y no se interpreta de ninguna otra forma. Pero coincidir no alcanza:
+    la frase tiene que estar PEDIDA. Negada («don't reply in english»), citada
+    («you said "reply in english"») o entre comillas, no cambia el idioma de
+    nadie — y esta decisión queda guardada un año (recordar_cliente), así que
+    un falso positivo no es un turno raro, es un cliente atendido en el idioma
+    equivocado hasta que pida el otro.
+
+    Sigue sirviendo dentro de un pedido: «quiero 5 kg de queso, reply in
+    English please» pide inglés. Y si un mensaje niega un idioma y pide el
+    otro, gana el que se pidió.
     """
     limpio = _sin_tildes(texto)
     if not limpio:
         return None
     for frase, idioma in _PEDIDOS_EXPLICITOS:
-        if _sin_tildes(frase) in limpio:
-            return idioma
+        buscada = _sin_tildes(frase)
+        inicio = limpio.find(buscada)
+        while inicio != -1:
+            fin = inicio + len(buscada)
+            if not _negada_o_citada(limpio, inicio, fin):
+                return idioma
+            inicio = limpio.find(buscada, fin)
     return None
 
 

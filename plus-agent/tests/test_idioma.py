@@ -197,6 +197,56 @@ def test_el_cliente_pide_su_idioma_explicitamente(fake_redis_idioma):
     assert idioma.pedido_explicito("quiero 5 unidades de leche") is None
 
 
+# Un pedido de idioma queda guardado un año (recordar_cliente), así que una
+# frase que sólo COINCIDE no puede valer como pedido: negada, citada o entre
+# comillas, no es un pedido. Los dos idiomas, las dos direcciones.
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "don't reply in english",
+        "please do not reply in English",
+        "never speak English to me again",
+        "no, en inglés por favor no",
+        "no me hables en ingles",
+        "nunca me respondas en español",
+        "you said 'reply in english' yesterday and I did not ask that",
+        'what does "speak english" mean?',
+        "yesterday the message said reply in english",
+        "el cartel decía respondé en español",
+        "en el menú dice «en inglés por favor» pero yo no lo pedí",
+        "«hablame en ingles» es lo que escribió mi socio, no yo",
+    ],
+)
+def test_una_frase_negada_o_citada_no_es_un_pedido_de_idioma(fake_redis_idioma, texto):
+    assert idioma.pedido_explicito(texto) is None
+    # Y por eso no se guarda nada para ese cliente.
+    idioma.para_cliente("+5493516666666", texto)
+    assert idioma.cliente_guardado("+5493516666666") is None
+
+
+@pytest.mark.parametrize(
+    ("texto", "esperado"),
+    [
+        # Pedido de idioma junto con un pedido de mercadería: sigue valiendo.
+        ("quiero 5 kg de queso cremoso para mañana, reply in English please", idioma.EN),
+        ("dame 2 leches y contestame en ingles", idioma.EN),
+        ("I need 10 units of butter tomorrow. Respondé en español por favor", idioma.ES),
+        # Una negación en OTRA cláusula no anula el pedido.
+        ("no entiendo, en inglés por favor", idioma.EN),
+        ("I don't want butter, reply in Spanish please", idioma.ES),
+        # Niega uno y pide el otro: gana el que se pidió.
+        ("don't reply in english, reply in spanish", idioma.ES),
+        ("no me hables en ingles, respondeme en espanol", idioma.ES),
+        # Signos y mayúsculas no cambian nada.
+        ("REPLY IN ENGLISH!!", idioma.EN),
+    ],
+)
+def test_un_pedido_de_idioma_dentro_de_otro_mensaje_sigue_valiendo(
+    fake_redis_idioma, texto, esperado
+):
+    assert idioma.pedido_explicito(texto) == esperado
+
+
 def test_pedirlo_lo_deja_guardado_para_los_proximos_mensajes(fake_redis_idioma):
     assert idioma.para_cliente("+5493511111111", "reply in English") == idioma.EN
     # El siguiente mensaje viene en español y NO cambia nada: él eligió inglés.

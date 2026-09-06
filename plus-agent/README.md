@@ -475,8 +475,15 @@ orders waiting for preparation/dispatch, orders waiting for the manager, stock
 counts expired or about to expire, and failed notifications / dead-letter
 counts. The agent sends it once a day from `DIGEST_HORA` in `BUSINESS_TIMEZONE`
 (`DIGEST_ACTIVO=false` disables the in-process scheduler); `python -m app.digest`
-or the `digest` job in `deploy/crontab` sends it on demand. Both share one
-per-day marker in Redis.
+or the `digest` job in `deploy/crontab` attempts it on demand. Both paths take
+the **same atomic per-day claim** in Redis (`SET NX EX`): whichever process
+claims first sends, the other sends nothing, and a failed delivery keeps the
+claim so the day is not retried every minute (the failure is recorded as a
+ToDo). Without Redis nothing is claimed and nothing is sent.
+`python -m app.digest --forzar` bypasses the claim and is for a person at a
+terminal only. The digest goes to the **owner**, `TELEFONO_DUENO`, which must
+be one of `TELEFONOS_EQUIPO`; it is not derived from the alphabetically sorted
+staff list that exception alerts use.
 
 Both paths run the same authorized handler (`manejar_boton`): only numbers in
 `TELEFONOS_EQUIPO` are accepted, a second tap is idempotent, and a successful

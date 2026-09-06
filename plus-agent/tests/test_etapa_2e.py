@@ -326,8 +326,14 @@ def erp_digest(monkeypatch: pytest.MonkeyPatch):
         lambda: {"respuestas_en_dead_letter": 2, "avisos_en_dead_letter": 1, "entregas_fallidas": 0},
     )
     alertas: list[tuple[str, str]] = []
+    # The digest goes to the OWNER (notificar.avisar_dueno), never through the
+    # generic staff funnel: that one picks the first of the sorted staff list.
     monkeypatch.setattr(
-        notificar, "alertar_excepcion", lambda asunto, cuerpo, **kw: alertas.append((asunto, cuerpo)) or True
+        notificar, "avisar_dueno", lambda asunto, cuerpo, **kw: alertas.append((asunto, cuerpo)) or True
+    )
+    monkeypatch.setattr(
+        notificar, "alertar_excepcion",
+        lambda *a, **kw: pytest.fail("el resumen del día no puede salir por la ruta genérica"),
     )
     return alertas
 

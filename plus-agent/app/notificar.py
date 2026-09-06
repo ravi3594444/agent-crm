@@ -416,12 +416,84 @@ def alertar_excepcion(
     acknowledged at least one message, so callers can be honest about whether
     the manager was really reached.
     """
-    from app import router, whatsapp
+    from app import router
 
     destinatarios = _destinatarios(router)
     if not destinatarios:
         print(f"[alerta] {asunto}: TELEFONOS_EQUIPO vacío, nadie fue avisado")
         return False
+    return _alertar(destinatarios, asunto, cuerpo, urgencia, plantilla_env, parametros)
+
+
+def telefono_dueno() -> str:
+    """El número del DUEÑO, explícito: TELEFONO_DUENO. "" si no se puede saber.
+
+    El resumen del día es un mensaje para el dueño, no una alerta para «el
+    equipo». La ruta genérica (_destinatarios) elige el primero de la lista
+    ORDENADA ALFABÉTICAMENTE de TELEFONOS_EQUIPO, y con más de un número ese
+    primero puede ser un empleado. Acá no se deriva nada de esa lista:
+
+      * TELEFONO_DUENO cargado -> ese, y tiene que ser uno de TELEFONOS_EQUIPO
+        (un error de tipeo no puede mandar el estado del negocio a un extraño);
+      * vacío y el equipo tiene UN solo número -> ése, sin ambigüedad;
+      * vacío y hay varios -> "" y se dice en el log. `make check-env` lo
+        marca como error para que no quede así.
+    """
+    from app import router, telefono
+
+    equipo = list(getattr(router, "STAFF", None) or [])
+    crudo = os.getenv("TELEFONO_DUENO", "").strip()
+    if crudo:
+        numero = telefono.normalizar(crudo)
+        if not numero:
+            print("[dueño] TELEFONO_DUENO no se puede interpretar")
+            return ""
+        if numero not in equipo:
+            print("[dueño] TELEFONO_DUENO no está en TELEFONOS_EQUIPO: no le mando nada")
+            return ""
+        return numero
+    if len(equipo) == 1:
+        return equipo[0]
+    print(
+        f"[dueño] TELEFONO_DUENO vacío y el equipo tiene {len(equipo)} números: "
+        "no sé quién es el dueño"
+    )
+    return ""
+
+
+def avisar_dueno(
+    asunto: str,
+    cuerpo: str,
+    *,
+    plantilla_env: str = "",
+    parametros: list[str] | None = None,
+) -> bool:
+    """A message for the OWNER only (the daily digest). Never raises.
+
+    Same delivery as alertar_excepcion — free text first, template if Meta
+    refuses and one is configured — but the recipient is telefono_dueno(), not
+    the first of the sorted staff list. With no owner resolvable nothing is
+    sent and the failure is recorded, so it shows up as a ToDo and in the next
+    digest instead of vanishing.
+    """
+    numero = telefono_dueno()
+    if not numero:
+        print(f"[dueño] {asunto}: sin destinatario, no salió")
+        registrar_aviso_fallido(f"owner:{asunto[:40]}", "", f"{asunto}\n{cuerpo}".strip()[:3500])
+        return False
+    return _alertar([numero], asunto, cuerpo, URGENCIA_NORMAL, plantilla_env, parametros)
+
+
+def _alertar(
+    destinatarios: list[str],
+    asunto: str,
+    cuerpo: str,
+    urgencia: str,
+    plantilla_env: str,
+    parametros: list[str] | None,
+) -> bool:
+    """Deliver one text to these numbers: free text, then the template. Never raises."""
+    from app import whatsapp
 
     texto = f"{asunto}\n{cuerpo}".strip()[:3500]
     locale_plantilla = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"

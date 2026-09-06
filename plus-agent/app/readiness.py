@@ -232,6 +232,27 @@ def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
             reporte.ok("TELEFONOS_EQUIPO", f"{len(unicos)} número(s) válido(s) (no se muestran)")
         if _valor(env, "NOTIFICAR_SOLO_PRIMERO").lower() != "false" and len(unicos) > 1:
             reporte.aviso("NOTIFICAR_SOLO_PRIMERO", "sólo el primer número recibe los avisos")
+        # El resumen del día va al DUEÑO, explícito, no al primero de la lista.
+        dueno_crudo = _valor(env, "TELEFONO_DUENO")
+        if dueno_crudo:
+            dueno = telefono.normalizar(dueno_crudo)
+            if not dueno:
+                reporte.error("TELEFONO_DUENO", "no se puede interpretar")
+            elif dueno not in unicos:
+                reporte.error(
+                    "TELEFONO_DUENO",
+                    "no está en TELEFONOS_EQUIPO: el resumen del día no se manda",
+                )
+            else:
+                reporte.ok("TELEFONO_DUENO", "configurado y es uno del equipo (no se muestra)")
+        elif len(unicos) == 1:
+            reporte.ok("TELEFONO_DUENO", "vacío; el único número del equipo recibe el resumen del día")
+        else:
+            reporte.error(
+                "TELEFONO_DUENO",
+                f"vacío con {len(unicos)} números en el equipo: el resumen del día no sabe "
+                "a quién ir y no se manda",
+            )
 
 
 # --------------------------------------------------------------- WhatsApp

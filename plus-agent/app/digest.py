@@ -12,8 +12,18 @@ resolver:
 CÓMO SE DISPARA
 - El propio agente (app/main.py) lo intenta una vez por día a partir de
   DIGEST_HORA en BUSINESS_TIMEZONE.
-- `python -m app.digest` (cron o docker compose run digest) lo manda ahora.
-Los dos usan la misma marca en Redis, así que un día tiene un solo resumen.
+- `python -m app.digest` (cron o docker compose run digest) lo intenta ahora.
+Los dos pasan por el MISMO reclamo atómico del día en Redis (SET NX EX): el
+primero que lo toma manda, el otro no manda nada. Antes era leer-y-después-
+marcar, y el cron de las 18:00 saltaba la marca: dos procesos a la misma hora
+eran dos resúmenes. Sin Redis no se reclama y no se manda (fallar cerrado).
+`python -m app.digest --forzar` es la única forma de saltarse el reclamo, y es
+para una persona en una terminal, no para un cron.
+
+A QUIÉN VA
+Al dueño, y sólo a él: TELEFONO_DUENO (app/notificar.py::telefono_dueno). No
+sale por la ruta genérica de alertas al equipo, que elige «el primero» de la
+lista ordenada alfabéticamente y podía caer en otro miembro del equipo.
 
 Cada sección falla por separado: si ERPNext no contesta, la sección dice
 "no pude leer" y el resto sale igual. Nunca levanta.
@@ -69,6 +79,9 @@ def _clave(dia: date) -> str:
 
 
 def enviado_hoy(dia: date | None = None) -> bool:
+    """¿Alguien ya reclamó el resumen de ese día? Sólo lectura, para no
+    componer el resumen en vano cada minuto. La decisión de mandar NO se toma
+    acá: la toma ``reclamar``, que es atómico."""
     try:
         return locks.conexion().get(_clave(dia or _ahora().date())) is not None
     except Exception as exc:
@@ -77,11 +90,30 @@ def enviado_hoy(dia: date | None = None) -> bool:
         return True
 
 
-def _marcar(dia: date) -> None:
+def reclamar(dia: date) -> bool:
+    """Toma el día para ESTE proceso, o devuelve False si otro ya lo tomó.
+
+    UN solo SET NX EX: reclamar y marcar son la misma operación, así que dos
+    procesos que llegan a la vez —el scheduler del agente y el cron— no pueden
+    reclamar los dos. El que pierde no compone ni manda nada.
+
+    El reclamo queda aunque el envío después falle: si Meta rechazó el
+    resumen, el aviso ya quedó en la lista de avisos fallidos con su ToDo
+    (notificar.registrar_aviso_fallido), y reintentar cada minuto hasta
+    medianoche no lo arreglaría. Un día tiene un solo intento.
+
+    Sin Redis no hay forma de garantizar «una vez»: no se reclama y no se
+    manda. Es el mismo criterio de ``enviado_hoy``.
+    """
     try:
-        locks.conexion().setex(_clave(dia), MARCA_TTL_SEGUNDOS, "1")
+        return bool(
+            locks.conexion().set(
+                _clave(dia), _ahora().isoformat(), nx=True, ex=MARCA_TTL_SEGUNDOS
+            )
+        )
     except Exception as exc:
-        print(f"[digest] no pude marcar el día ({type(exc).__name__})")
+        print(f"[digest] no pude reclamar el día ({type(exc).__name__}); no mando")
+        return False
 
 
 # ----------------------------------------------------------------- secciones
@@ -236,21 +268,25 @@ def resumen(dia: date | None = None) -> str:
 
 
 def enviar(*, forzar: bool = False) -> bool:
-    """Manda el resumen al equipo. Una vez por día salvo ``forzar``.
+    """Manda el resumen del día AL DUEÑO, una vez por día.
 
-    El día queda marcado aunque nadie lo haya recibido: si Meta lo rechazó, el
-    aviso ya quedó en la lista de avisos fallidos con su ToDo, y reintentar cada
-    minuto hasta medianoche no lo arreglaría.
+    Primero se reclama el día (``reclamar``, atómico); sólo el proceso que lo
+    consigue compone y manda. El reclamo queda aunque nadie lo haya recibido:
+    si Meta lo rechazó, el aviso ya está en la lista de avisos fallidos con su
+    ToDo, y un segundo intento el mismo día sería el mismo rechazo.
+
+    ``forzar`` se salta el reclamo y NO lo toma: es para una persona que quiere
+    el resumen ahora aunque ya haya salido. Ningún camino automático lo usa.
     """
     dia = _ahora().date()
-    if not forzar and enviado_hoy(dia):
+    if forzar:
+        print(f"[digest] {dia.isoformat()} envío forzado: no reclamo el día")
+    elif not reclamar(dia):
         return False
     texto = resumen(dia)
-    _marcar(dia)
-    ok = notificar.alertar_excepcion(
+    ok = notificar.avisar_dueno(
         "📋 Resumen del día",
         texto,
-        urgencia=notificar.URGENCIA_NORMAL,
         plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE",
     )
     print(f"[digest] {dia.isoformat()} {'enviado' if ok else 'NO entregado'}")
@@ -266,8 +302,23 @@ def tick() -> bool:
         return False
     if enviado_hoy(ahora.date()):
         return False
+    # enviar() reclama el día en forma atómica: la lectura de arriba sólo
+    # ahorra componer el resumen cada minuto cuando ya salió.
     return enviar()
 
 
+def main(argv: list[str] | None = None) -> bool:
+    """`python -m app.digest`: el camino del cron. Mismo reclamo que el agente.
+
+    Sin argumentos pasa por ``reclamar`` igual que el scheduler: si el agente
+    ya lo mandó hoy, el cron no manda nada. ``--forzar`` se lo salta, para una
+    persona en una terminal; el cron no debe llevarlo.
+    """
+    import sys
+
+    argumentos = sys.argv[1:] if argv is None else list(argv)
+    return enviar(forzar="--forzar" in argumentos)
+
+
 if __name__ == "__main__":
-    enviar(forzar=True)
+    main()
