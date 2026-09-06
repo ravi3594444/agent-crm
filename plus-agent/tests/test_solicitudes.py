@@ -92,9 +92,26 @@ def _sello_creacion(estado: dict) -> str:
     )
 
 
+# The calendar this module's fixtures are written against. The order is created
+# on 2026-09-03 and delivered 2026-09-10; the counter-offers, pickups and
+# pre-authorised terms all name 2026-09-05. Those are only "a valid day" while
+# the business date is 2026-09-05 or earlier: run on 2026-09-06 the parser in
+# app/tools/pedidos.py refused every one of them as a date in the past and 39
+# tests failed without a single line of code having changed. The date is pinned
+# to the day the fixtures describe, everywhere the code reads it — pedidos.py
+# binds the function by name at import, so patching app.policy alone is not
+# enough. Tests that need another day patch it again on top (see LUNES).
+HOY_DEL_MUNDO = __import__("datetime").date(2026, 9, 5)
+
+
 @pytest.fixture
 def mundo(monkeypatch: pytest.MonkeyPatch):
     """A draft order, an empty Redis, and an ERPNext that records comments."""
+    from app import policy as _policy
+    from app.tools import pedidos as _pedidos
+
+    for modulo in (_policy, _pedidos):
+        monkeypatch.setattr(modulo, "_hoy_del_negocio", lambda: HOY_DEL_MUNDO)
     marcas = FakeMarcas()
     monkeypatch.setattr(outbound_status, "_client", marcas)
     estado: dict = {
