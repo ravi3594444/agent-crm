@@ -243,7 +243,7 @@ Send these, in order, from a phone that is **not** on the staff list:
 
 | # | Send | Expect |
 |---|---|---|
-| 1 | `hola` | A short acknowledgement first, then a greeting in Rioplatense Spanish |
+| 1 | `hola` | Exactly **one** message: a greeting in Rioplatense Spanish. No "dame un momento" first — nothing is being checked |
 | 2 | `tenés queso cremoso?` | The product and price, **no** stock promise (STOCK_CONFIABLE=false) |
 | 3 | `dame 10 kilos` | A real `SO-…` number and "te confirmamos en unos minutos" — **never** "confirmado" |
 | 4 | `cuánto salió?` | The total, from the order it just made |
@@ -285,7 +285,7 @@ and I want to know immediately.
 | 1 | Send a **voice note** | A reply asking you to write it instead. Never silence. |
 | 2 | Send a **photo** | A reply. Never silence. |
 | 3 | Send a sticker | A reply. |
-| 4 | Stop ERPNext (`docker stop <erpnext-backend>`), send an order | The acknowledgement, then an apology saying **no order was created** and that a person will follow up — never an invented number |
+| 4 | Stop ERPNext (`docker stop <erpnext-backend>`), send an order | Possibly *"Estoy consultando el sistema, dame un momento"* while the tool is stuck, then **one** apology saying **no order was created** and that a person will follow up — never an invented number, never a notice after the apology |
 
 For step 4, also check `make logs`: you should see `[agent] error …
 type=…` lines, and the message stays in the durable queue rather than

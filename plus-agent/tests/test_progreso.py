@@ -49,9 +49,15 @@ from app.progreso import Progreso
 
 GERENTE = "5493519999999"
 CLIENTE = "5493511234567"
-DELAY = 0.25  # the configurable progress delay, shortened for the suite
-SLOW = 0.7  # a tool that takes longer than the delay
-BLOQUEANTE = 0.6  # how long a "slow Meta" holds the progress send
+# The configurable progress delay, shortened for the suite — but not to the
+# bone. Every "no notice" assertion below is a race between the delay and a
+# whole agent run through the REAL RedisSaver (three checkpoints per model
+# call), so the margin has to absorb a loaded CI box. Each test also gets its
+# own conversation thread (see `mundo`), so a checkpoint never grows across
+# tests and the run time stays flat.
+DELAY = 0.6
+SLOW = 1.5  # a tool that takes longer than the delay
+BLOQUEANTE = 1.0  # how long a "slow Meta" holds the progress send
 
 
 class ModeloOcupado(AssertionError):
@@ -231,6 +237,17 @@ def mundo(webhook, monkeypatch) -> Mundo:
     salida = Salida()
     registro = Registro()
     m = Mundo(webhook, salida, registro)
+
+    # One FRESH conversation thread per test. The checkpointer is the real
+    # RedisSaver on the disposable Redis, and a thread that every test appends
+    # to grows without bound across runs: each checkpoint write then serialises
+    # hundreds of messages, a "fast" turn stops being fast, and the absence
+    # assertions start racing the timer. Same shape as production's tag, plus
+    # a nonce nobody else shares.
+    nonce = uuid.uuid4().hex[:8]
+    monkeypatch.setattr(
+        webhook, "_thread_tag", lambda telefono: f"wa:{nonce}:{webhook._correlation(telefono)}"
+    )
 
     # Who is staff — in main, in the router stub idioma consults, and for notices.
     router_stub = sys.modules["app.router"]
@@ -466,6 +483,23 @@ def test_terminar_blocks_until_an_in_flight_notice_has_left():
     assert terminado.wait(2)
     assert eventos == ["progreso:inicio", "progreso:fin", "final"]
     assert p.aviso_enviado is True
+
+
+def test_an_orphaned_notice_is_dropped_once_this_message_already_has_its_final(mundo):
+    """Across processes terminar() cannot reach: a worker that lost its lock may
+    still hold an armed timer while its successor has already cached and sent
+    the final. _progress_once then finds the final marker and sends nothing."""
+    webhook = mundo.webhook
+    webhook.r.set(webhook._message_key("final", "wamid.huerfano"), "la respuesta")
+    assert webhook._progress_once(GERENTE, "wamid.huerfano", "es") is False
+    assert mundo.salida.envios == []
+    webhook.r.set(webhook._message_key("accepted", "wamid.huerfano2"), "digest")
+    assert webhook._progress_once(GERENTE, "wamid.huerfano2", "es") is False
+    assert mundo.salida.envios == []
+    # And with neither marker the same call does send, exactly once.
+    assert webhook._progress_once(GERENTE, "wamid.vivo", "es") is True
+    assert webhook._progress_once(GERENTE, "wamid.vivo", "es") is False
+    assert mundo.salida.textos(GERENTE) == [mundo.progreso("es")]
 
 
 def test_only_the_first_tool_start_arms_a_timer_and_a_send_failure_is_contained():

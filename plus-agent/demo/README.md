@@ -86,8 +86,10 @@ verifica antes de arrancarlo (`guardas.relevo_sin_credenciales`).
 Igual que en producción: un `POST /webhook/whatsapp` firmado con
 `X-Hub-Signature-256` sobre los bytes exactos del cuerpo. No hay atajos por
 `_generate_response` ni por el grafo: se ejercitan la firma, la cola durable
-de Redis, el worker con lease, la idempotencia y los dos envíos por turno (el
-acuse y la respuesta).
+de Redis, el worker con lease, la idempotencia y la respuesta única por turno
+(el aviso de avance «estoy consultando…» sólo aparece si una herramienta lleva
+unos segundos corriendo; en modo offline las herramientas contestan al instante
+y no aparece nunca).
 
 Cada turno se mide y se guarda: lo que dijo la persona, lo que recibió, cuánto
 tardó y **qué documentos cambiaron** en ERPNext (una foto antes y después).

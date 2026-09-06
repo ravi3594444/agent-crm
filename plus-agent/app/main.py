@@ -94,7 +94,7 @@ _TECH_ALERT_TTL_SECONDS = 60 * 60
 # contesta y el modelo cierra antes, no sale nada y la persona recibe UNA
 # respuesta. Negativo: el aviso no se manda nunca. La latencia del modelo solo
 # —una respuesta directa de 20 s— no lo dispara: no se está consultando nada.
-_PROGRESS_DELAY_SECONDS = float(os.getenv("WHATSAPP_PROGRESS_DELAY_SECONDS", "3"))
+_PROGRESS_DELAY_SECONDS = float(os.getenv("WHATSAPP_PROGRESS_DELAY_SECONDS", "").strip() or "3")
 # La reserva del aviso mientras está en vuelo; después queda el marcador de
 # aceptación con el TTL de estado, como todo lo demás que salió.
 _PROGRESS_CLAIM_TTL_SECONDS = 60
@@ -867,6 +867,15 @@ def _progress_once(telefono: str, message_id: str, lengua: str) -> bool:
     key = _message_key("progress", message_id)
     claim = uuid.uuid4().hex
     try:
+        # Si la respuesta final de ESTE mensaje ya existe —cacheada o aceptada
+        # por Meta— el turno terminó y el aviso ya no dice nada verdadero. En
+        # este proceso terminar() lo garantiza solo; esto cubre al temporizador
+        # huérfano de un worker que perdió el lock y cuyo sucesor ya contestó.
+        if (
+            r.get(_message_key("final", message_id)) is not None
+            or r.get(_message_key("accepted", message_id)) is not None
+        ):
+            return False
         claimed = bool(r.set(key, claim, nx=True, ex=_PROGRESS_CLAIM_TTL_SECONDS))
     except Exception as error:
         print(
