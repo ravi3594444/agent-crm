@@ -31,6 +31,7 @@ Cada sección falla por separado: si ERPNext no contesta, la sección dice
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -90,8 +91,11 @@ def enviado_hoy(dia: date | None = None) -> bool:
         return True
 
 
-def reclamar(dia: date) -> bool:
+def reclamar(dia: date, testigo: str) -> bool:
     """Toma el día para ESTE proceso, o devuelve False si otro ya lo tomó.
+
+    ``testigo`` es el valor que queda escrito; sólo quien lo escribió puede
+    soltar el reclamo (``liberar``), y sólo si no llegó a mandar nada.
 
     UN solo SET NX EX: reclamar y marcar son la misma operación, así que dos
     procesos que llegan a la vez —el scheduler del agente y el cron— no pueden
@@ -106,14 +110,30 @@ def reclamar(dia: date) -> bool:
     manda. Es el mismo criterio de ``enviado_hoy``.
     """
     try:
-        return bool(
-            locks.conexion().set(
-                _clave(dia), _ahora().isoformat(), nx=True, ex=MARCA_TTL_SEGUNDOS
-            )
-        )
+        return bool(locks.conexion().set(_clave(dia), testigo, nx=True, ex=MARCA_TTL_SEGUNDOS))
     except Exception as exc:
         print(f"[digest] no pude reclamar el día ({type(exc).__name__}); no mando")
         return False
+
+
+def liberar(dia: date, testigo: str) -> None:
+    """Suelta el reclamo si todavía es el nuestro. Sólo cuando NO se mandó nada.
+
+    Es para una falla al COMPONER el resumen: nada salió, nada quedó registrado
+    como fallido, y quedarse con el día tomado sería perder el resumen de hoy
+    por un error que el próximo intento quizá no tenga. Una falla al ENVIAR es
+    otra cosa y conserva el reclamo (ver ``enviar``). Best effort: si Redis no
+    contesta, el reclamo vence solo con su TTL.
+    """
+    try:
+        cliente = locks.conexion()
+        actual = cliente.get(_clave(dia))
+        if isinstance(actual, bytes):
+            actual = actual.decode()
+        if actual == testigo:
+            cliente.delete(_clave(dia))
+    except Exception as exc:
+        print(f"[digest] no pude soltar el reclamo ({type(exc).__name__})")
 
 
 # ----------------------------------------------------------------- secciones
@@ -250,16 +270,35 @@ def seccion_trabadas() -> str:
     )
 
 
+# Cada sección tiene su propio «no pude leer», pero el resumen no puede
+# depender de que cada función lo haya previsto todo: una excepción que se
+# escape de una sección no puede tirar el resumen entero, porque para entonces
+# el día ya está reclamado. La sección que falla dice que falló; las demás
+# salen igual.
+_SECCIONES: tuple[tuple[str, str], ...] = (
+    ("seccion_despacho", "🚚 Confirmados para preparar/despachar: no pude armar esta sección"),
+    ("seccion_pendientes", "🟡 Esperan tu decisión: no pude armar esta sección"),
+    ("seccion_conteos", "📦 Conteos: no pude armar esta sección"),
+    ("seccion_trabadas", "🔒 Borradores trabados: no pude armar esta sección"),
+    ("seccion_fallos", "⚠️ Comunicación: no pude armar esta sección"),
+)
+
+
+def _seccion_segura(nombre: str, respaldo: str) -> str:
+    funcion = globals()[nombre]
+    try:
+        return str(funcion())
+    except Exception as exc:
+        print(f"[digest] {nombre}: {type(exc).__name__}; la sección sale con su respaldo")
+        return respaldo
+
+
 def resumen(dia: date | None = None) -> str:
     dia = dia or _ahora().date()
     return "\n\n".join(
         [
             f"📋 Resumen del {dia.isoformat()}",
-            seccion_despacho(),
-            seccion_pendientes(),
-            seccion_conteos(),
-            seccion_trabadas(),
-            seccion_fallos(),
+            *(_seccion_segura(nombre, respaldo) for nombre, respaldo in _SECCIONES),
         ]
     )
 
@@ -279,11 +318,20 @@ def enviar(*, forzar: bool = False) -> bool:
     el resumen ahora aunque ya haya salido. Ningún camino automático lo usa.
     """
     dia = _ahora().date()
+    testigo = f"{_ahora().isoformat()}:{uuid.uuid4().hex[:8]}"
     if forzar:
         print(f"[digest] {dia.isoformat()} envío forzado: no reclamo el día")
-    elif not reclamar(dia):
+    elif not reclamar(dia, testigo):
         return False
-    texto = resumen(dia)
+    try:
+        texto = resumen(dia)
+    except Exception as exc:
+        # Nada salió y nada quedó registrado: el día tiene que seguir
+        # disponible para el próximo intento. Distinto de una falla al enviar.
+        print(f"[digest] {dia.isoformat()} no pude componer el resumen ({type(exc).__name__})")
+        if not forzar:
+            liberar(dia, testigo)
+        return False
     ok = notificar.avisar_dueno(
         "📋 Resumen del día",
         texto,

@@ -27,6 +27,10 @@ from conftest import FakeRedis
 
 from app import digest, locks, notificar, router, whatsapp
 
+# Captured before any fixture swaps it: the tests about composition need the
+# real resumen() with only its ERPNext-facing sections stubbed.
+_RESUMEN_REAL = digest.resumen
+
 DUENO = "5493519999999"  # sorts AFTER the employee: the sorted-first rule picks the wrong one
 EMPLEADO = "5493511111111"
 HOY = date(2026, 9, 6)
@@ -136,6 +140,51 @@ def test_a_failed_delivery_keeps_the_claim_so_the_day_is_not_retried(mundo, monk
     assert digest.tick() is False
     assert digest.main([]) is False
     assert mundo["redis"].get(digest._clave(HOY)) is not None
+
+
+def test_a_section_whose_dependency_raises_still_lets_the_digest_go_out(mundo, monkeypatch):
+    """The claim is taken before composing, so composition must never abort:
+    a section that blows up says so and the other sections still reach the owner."""
+    from app import outbound_status, solicitudes
+
+    monkeypatch.setattr(digest, "resumen", _RESUMEN_REAL)
+    for nombre in ("seccion_despacho", "seccion_pendientes", "seccion_conteos"):
+        monkeypatch.setattr(digest, nombre, lambda n=nombre: f"{n}: ok")
+
+    def explota(*a, **k):
+        raise RuntimeError("Redis se fue")
+
+    monkeypatch.setattr(outbound_status, "contar_pendientes", explota)
+    monkeypatch.setattr(solicitudes, "trabadas", explota)
+
+    assert digest.enviar() is True
+    texto = mundo["enviados"][0][1]
+    assert "seccion_despacho: ok" in texto
+    assert "🔒 Borradores trabados: no pude armar esta sección" in texto
+    assert "⚠️ Comunicación: no pude armar esta sección" in texto
+    # Sent, so the day stays claimed like any delivered digest.
+    assert digest.enviar() is False
+
+
+def test_a_composition_failure_releases_the_claim_so_the_next_attempt_can_send(mundo, monkeypatch):
+    """Nothing was sent and nothing was recorded: the day must not be burnt."""
+    def explota(dia=None):
+        raise RuntimeError("bug nuevo en el resumen")
+
+    monkeypatch.setattr(digest, "resumen", explota)
+    assert digest.enviar() is False
+    assert mundo["enviados"] == []
+    assert mundo["redis"].get(digest._clave(HOY)) is None  # released
+
+    monkeypatch.setattr(digest, "resumen", lambda dia=None: "📋 recuperado")
+    assert digest.enviar() is True  # the next tick gets the day
+    assert [t for _, t in mundo["enviados"]] == ["📋 Resumen del día\n📋 recuperado"]
+
+
+def test_only_the_process_holding_the_claim_can_release_it(mundo):
+    mundo["redis"].set(digest._clave(HOY), "otro proceso", nx=True, ex=10)
+    digest.liberar(HOY, "yo")
+    assert mundo["redis"].get(digest._clave(HOY)) == "otro proceso"
 
 
 def test_forzar_is_the_only_way_past_the_claim_and_only_by_hand(mundo):
