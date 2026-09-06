@@ -63,7 +63,17 @@ if [ -n "${CODESPACE_NAME:-}" ] && command -v gh >/dev/null 2>&1; then
 fi
 
 PIDFILE=${AGENTE_PIDFILE:-$APP/agente.pid}
-supervisor_vivo() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; }
+# No alcanza con `kill -0`: tras un reboot (rutina en un Codespace) el pid del
+# archivo puede ser de un proceso cualquiera que el SO recicló, y entonces se
+# esperaba 30 s a un supervisor que no existía y el agente no arrancaba nunca.
+# Se exige que ese pid sea EL supervisor: su línea de comando lleva uvicorn.
+supervisor_vivo() {
+  local pid
+  [ -f "$PIDFILE" ] || return 1
+  pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
+    && tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q uvicorn
+}
 
 if curl -sf -m 3 "http://localhost:$PORT/health" >/dev/null 2>&1; then
   echo "[start] el agente ya está corriendo en :$PORT"
@@ -81,6 +91,8 @@ else
   setsid nohup bash -c '
     cd "$1" || exit 1
     echo $$ >"$3"
+    # Al terminar el bucle (kill, apagado) el pidfile se va con él.
+    trap '"'"'rm -f "$3"'"'"' EXIT
     # PYTHONUNBUFFERED: los print() del agente van a un archivo; sin esto quedan
     # en el buffer y el log parece vacío justo cuando hace falta leerlo.
     export PYTHONUNBUFFERED=1

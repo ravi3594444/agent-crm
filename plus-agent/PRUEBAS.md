@@ -37,7 +37,7 @@ README.md.
 ```bash
 cd plus-agent
 docker run -d --name redis-test -p 6379:6379 redis/redis-stack-server:7.4.0-v1
-REDIS_URL=redis://localhost:6379/0 make test   # expect: 1238 passed
+REDIS_URL=redis://localhost:6379/0 make test   # expect: 2003 passed
 ```
 
 **Expect:** every test passes — nothing skipped, nothing xfailed. A skip means Redis was not reachable; set `REDIS_OBLIGATORIO=1` (as CI does) to turn that into a failure.
@@ -85,9 +85,12 @@ entre sí.`
 `ERPNEXT_MANAGER_API_KEY` and `ERPNEXT_POLICY_API_KEY` are the same value.
 That is not pedantry: they are three ERPNext users with three different
 permission sets, and if the customer agent's credentials can submit, the main
-guardrail of the whole system stops existing. It also requires
-`DASHSCOPE_API_KEY`: both Qwen models are built at import and the process will
-not start without it (there is no fallback provider).
+guardrail of the whole system stops existing. It also requires the key of the
+provider you selected with `LLM_PROVIDER`: `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
+for `gemini`, which is what this deployment runs, or `DASHSCOPE_API_KEY` for
+`qwen`. Both models are built at import and the process will not start without
+that key; the other provider's key is never a substitute (there is no fallback
+provider).
 
 ```bash
 make up

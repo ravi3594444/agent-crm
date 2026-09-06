@@ -231,19 +231,24 @@ def asegurar_direccion(cliente: str, direccion: dict) -> str:
     linea = _campo(direccion, "address_line1")
     if not linea:
         raise erpnext.ERPNextError("la dirección no tiene calle y número")
+    # Se compara lo MISMO que se va a guardar. Sin localidad se guarda «Sin
+    # especificar»; comparar contra la localidad vacía del pedido no matcheaba
+    # nunca y cada reintento creaba otra Address igual.
+    ciudad = _campo(direccion, "city") or "Sin especificar"
+    pedida = {**direccion, "address_line1": linea, "city": ciudad}
     for nombre in direcciones_de(cliente):
         try:
             guardada = erpnext.get_doc("Address", nombre)
         except erpnext.ERPNextError:
             continue
-        if misma_direccion(guardada, direccion):
+        if misma_direccion(guardada, pedida):
             return nombre
 
     payload = {
         "address_title": cliente,
         "address_type": "Shipping",
         "address_line1": linea,
-        "city": _campo(direccion, "city") or "Sin especificar",
+        "city": ciudad,
         "country": os.getenv("ERPNEXT_COUNTRY", "Argentina").strip() or "Argentina",
         "links": [{"link_doctype": "Customer", "link_name": cliente}],
     }

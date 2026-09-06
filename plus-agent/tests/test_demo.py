@@ -996,3 +996,18 @@ def test_the_bench_knows_which_container_names_are_its_own() -> None:
         assert nombre.startswith("plus-demo-"), nombre
     # y ninguno puede llamarse como los de staging de la máquina
     assert not (nuestros & {"agent-redis", "frappe_docker-backend-1"})
+
+
+def test_the_relay_refuses_to_send_the_real_key_over_plain_http() -> None:
+    """--relevar-a accepts any URL; with the key set it has to be https."""
+    with pytest.raises(ValueError, match="https"):
+        md.Relevo("http://proveedor.invalid/v1", clave="la-real")
+    # Without a key there is nothing to protect: a plain-http double is fine.
+    assert md.Relevo("http://proveedor.invalid/v1").clave == ""
+
+
+def test_limit_page_length_zero_means_no_limit_like_frappe(almacen: fe.Almacen) -> None:
+    todos = almacen.listar("Item", limite=0)
+    assert len(todos) > 1
+    assert len(todos) == len(almacen.listar("Item", limite=1000))
+    assert len(almacen.listar("Item", limite=1)) == 1

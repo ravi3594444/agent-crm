@@ -745,11 +745,12 @@ def pedir_excepcion_de_entrega(
     autorizada esa excepción, o queda una solicitud para que la resuelva una
     persona. Pasá en `lo_que_pidio_el_cliente` sus palabras, sin interpretarlas.
     """
+    # Resuelta como en crear_pedido: un cliente dado de alta en ESTE turno no
+    # tiene todavía la cuenta en la config y se vuelve a buscar por su teléfono
+    # verificado. Con actor.customer_code solo, su propio pedido le era ajeno.
     try:
-        actor = actor_context(config)
+        _, cuenta = _cuenta_del_remitente(config)
     except RuntimeContextError:
-        return "No pude autenticar la conversación; no registré el pedido especial."
-    if actor.scope != "customer" or not actor.actor_phone:
         return "No pude autenticar la conversación; no registré el pedido especial."
 
     nombre = str(numero_de_pedido or "").strip().upper()
@@ -762,7 +763,7 @@ def pedir_excepcion_de_entrega(
 
     # The order has to be the sender's own: the phone comes from the signed
     # webhook, so no message can open a request on somebody else's order.
-    if not actor.customer_code or str(so.get("customer") or "") != actor.customer_code:
+    if not cuenta or str(so.get("customer") or "") != cuenta:
         return "Ese pedido no es de esta cuenta; no registré nada."
     estado = int(so.get("docstatus") or 0)
     if estado != 0:

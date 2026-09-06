@@ -39,7 +39,11 @@ def preparar(limite: str, valor: str, telefono: str) -> str:
     try:
         propuesta = limites.proponer(limite, valor, telefono)
     except limites.LimiteError as exc:
-        return f"No cambié nada: {exc}."
+        # En el idioma del equipo, como todo lo demás que sale de acá; el
+        # motivo viene con su clave del catálogo cuando la tiene.
+        lengua = idioma.gerencia()
+        motivo = idioma.t(exc.clave, lengua) if getattr(exc, "clave", "") else str(exc)
+        return idioma.t("codigo.ajuste_no_preparado", lengua, motivo=motivo)
 
     # El idioma en que se le habla al equipo AHORA — no el propuesto. Si está
     # pasando de español a inglés, el pedido de confirmación llega todavía en

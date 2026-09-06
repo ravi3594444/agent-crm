@@ -20,9 +20,9 @@ from __future__ import annotations
 import re
 
 import pytest
+from conftest import FakeRedis
 
 from app import idioma, limites, locks
-from tests.conftest import FakeRedis
 
 
 @pytest.fixture
@@ -66,8 +66,9 @@ def test_un_idioma_desconocido_cae_al_por_defecto():
 def test_un_parametro_que_falta_devuelve_el_texto_sin_interpolar():
     # Nunca una excepción: el mensaje sale igual.
     salida = idioma.t("pedido.confirmado_cliente", idioma.EN, pedido="SAL-ORD-1")
-    assert "SAL-ORD-1" not in salida or salida
-    assert isinstance(salida, str) and salida
+    # The text comes back UNformatted, placeholders and all — never half-filled.
+    assert "{renglones}" in salida and "{pedido}" in salida
+    assert "SAL-ORD-1" not in salida
 
 
 # ------------------------------------------------- reconocer el idioma dicho

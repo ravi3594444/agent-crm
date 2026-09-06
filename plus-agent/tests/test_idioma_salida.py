@@ -265,7 +265,7 @@ def test_la_alerta_de_auto_confirmado_no_pide_responder(lengua):
         PEDIDO, _SO, auto=True, motivos="", detalle="5 x Whole Milk 1 L",
         lengua=lengua,
     )
-    assert "confirmar" not in texto.split("\n")[-1] or True
+    assert "confirmar" not in texto.split("\n")[-1]
     assert f"ver {PEDIDO}" not in texto, "un pedido ya confirmado no se decide"
     if lengua == EN:
         assert restos_en_espanol(texto, ("Demo Bakery", "Whole Milk 1 L")) == []

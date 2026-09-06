@@ -49,7 +49,7 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `Dockerfile`, `Makefile`, `.env.example`, `pyproject.toml` | Build, shortcuts, configuration, lint config |
 | `.github/workflows/ci.yml` | Lint, tests, image build, container boot against a real Redis Stack |
 | `demo/` | **Test bench**: seventeen release scenarios against the real image, inside a `--internal` docker network with no route out. See [demo/README.md](demo/README.md). |
-| `tests/` | 1714 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
+| `tests/` | 2003 tests, none skipped and none xfailed. No ERPNext, no Meta, no LLM, no network — but a real Redis Stack is required. See [Tests and Redis](#tests-and-redis). |
 
 ## Two agents, one webhook
 
@@ -963,7 +963,7 @@ then commit.
 
 ```bash
 make install       # .venv with requirements-dev.txt
-make test          # 1238 passed, needs a Redis Stack on REDIS_URL
+make test          # 2003 passed, needs a Redis Stack on REDIS_URL (REDIS_OBLIGATORIO=1: no Redis is a failure)
 make check         # what CI runs (ruff check + tests)
 make check-env     # is .env complete, are the three ERPNext keys distinct
 make up            # docker compose up, wait for :8081/health

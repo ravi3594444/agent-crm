@@ -247,7 +247,14 @@ def _sumar_intento(evento: str, pedido: str) -> int:
     a customer's notice is thrown away.
     """
     try:
-        return int(_redis().incr(_clave_intentos(evento, pedido)))
+        clave = _clave_intentos(evento, pedido)
+        cliente = _redis()
+        intentos = int(cliente.incr(clave))
+        # Mismo horizonte que la marca de encolado: sin esto la clave quedaba
+        # para siempre y un (evento, pedido) vuelto a encolar meses después
+        # arrancaba con el contador agotado y se aparcaba en el primer intento.
+        cliente.expire(clave, ENCOLADO_TTL_SEGUNDOS)
+        return intentos
     except Exception as exc:
         print(f"[avisos] contador de intentos no disponible ({type(exc).__name__})")
         return 0

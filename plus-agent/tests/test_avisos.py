@@ -433,3 +433,12 @@ def test_the_model_can_still_talk_but_owns_nothing(canal, monkeypatch) -> None:
     # ...and the authoritative notice is queued independently of that string.
     avisos.confirmacion_cliente(PEDIDO)
     assert len(_en_cola(canal)) == 1
+
+
+def test_the_attempt_counter_expires_with_the_notice(marcas_sin_redis) -> None:
+    """A counter that never expired parked a re-queued notice on its first try."""
+    from app import avisos
+
+    assert avisos._sumar_intento("confirmacion_cliente", "SAL-ORD-2026-00001") == 1
+    clave = avisos._clave_intentos("confirmacion_cliente", "SAL-ORD-2026-00001")
+    assert marcas_sin_redis.ttls[clave] == avisos.ENCOLADO_TTL_SEGUNDOS

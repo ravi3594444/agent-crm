@@ -631,14 +631,20 @@ def _politica_verde(
     monkeypatch.setattr(policy, "_precio_estandar", Mock(return_value=True))
     monkeypatch.setenv("STOCK_BUFFER_PCT", "0")
 
-    def get_list(doctype, filters=None, fields=None, limit=20, parent=None):
+    # Same signature as app/erpnext.py. A stub without order_by/start made the
+    # Comment read in solicitudes.vencimientos fail with TypeError, which that
+    # function swallows as "no expirations": the hold checks passed for the
+    # wrong reason.
+    def get_list(doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0):
         if doctype == "Bin":
             return [{"actual_qty": fisico, "reserved_qty": 0}]
         if doctype == "Sales Order":  # the customer's order history
             return [{"grand_total": 100}]
         return []
 
-    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None):
+    def policy_get_list(
+        doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0
+    ):
         if rastro is not None:
             rastro.append(f"lee:{doctype}")
         if borradores_fallan:
@@ -647,6 +653,8 @@ def _politica_verde(
             return [dict(row) for row in padres]
         if doctype == "Sales Order Item":
             return [dict(row) for row in renglones]
+        if doctype == "Comment":  # no decision-request events: no lapsed holds
+            return []
         return []
 
     monkeypatch.setattr(erpnext, "get_list", Mock(side_effect=get_list))

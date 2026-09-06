@@ -232,6 +232,23 @@ def test_a_plaintext_graph_host_that_is_not_loopback_is_refused() -> None:
             whatsapp.base_de_graph({"META_GRAPH_BASE_URL": malo})
 
 
+@pytest.mark.parametrize(
+    "disfraz",
+    [
+        "http://127.0.0.1.atacante.example:8443",
+        "http://localhost.evil",
+        "http://127.0.0.1@atacante.example",
+    ],
+)
+def test_a_host_that_merely_starts_like_loopback_is_not_loopback(disfraz):
+    """The token travels in the header: plain http only to the REAL loopback."""
+    with pytest.raises(RuntimeError, match="META_GRAPH_BASE_URL"):
+        whatsapp.base_de_graph({"META_GRAPH_BASE_URL": disfraz})
+    assert whatsapp.base_de_graph({"META_GRAPH_BASE_URL": "http://localhost:8443"}) == (
+        "http://localhost:8443"
+    )
+
+
 def test_the_refusal_never_repeats_the_host_that_was_configured() -> None:
     """El mensaje no puede filtrar a dónde alguien intentó mandar el token."""
     with pytest.raises(RuntimeError) as exc:

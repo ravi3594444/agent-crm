@@ -427,6 +427,10 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "No apliqué nada: {motivo}.",
         EN: "I applied nothing: {motivo}.",
     },
+    "codigo.ajuste_no_preparado": {
+        ES: "No cambié nada: {motivo}.",
+        EN: "I changed nothing: {motivo}.",
+    },
     "codigo.ajuste_error": {
         ES: "No pude aplicar el cambio en este momento. No cambié nada.",
         EN: "I couldn't apply the change right now. Nothing was changed.",

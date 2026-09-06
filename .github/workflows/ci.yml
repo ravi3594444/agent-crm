@@ -27,6 +27,9 @@ defaults:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # El job corre build y tests, nada que escriba en el repo: token de sólo lectura.
+    permissions:
+      contents: read
 
     services:
       redis:

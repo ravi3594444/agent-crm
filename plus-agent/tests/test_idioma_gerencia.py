@@ -157,7 +157,11 @@ def test_un_cliente_no_puede_cambiar_el_idioma_de_la_gerencia(almacen):
     respuesta = configuracion.proponer_limite.func(
         limite="manager language", valor="English", config=_cliente()
     )
-    assert "no" in respuesta.lower()
+    # The tool's own refusal, byte for byte: `"no" in respuesta` matched
+    # «número» and «nombre» in perfectly successful answers.
+    assert respuesta == (
+        "Ese número no está autorizado para ver ni cambiar los límites. No cambié nada."
+    )
     assert idioma.gerencia() == idioma.ES
     assert not almacen.enviados, "no se le manda ningún código a un cliente"
 

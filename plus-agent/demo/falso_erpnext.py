@@ -255,7 +255,9 @@ class Almacen:
             docs = list(self.tabla(doctype).values())
             docs = _filtrar(docs, filtros)
             docs = _ordenar(docs, order_by)
-            recorte = docs[inicio : inicio + max(0, int(limite))]
+            # Frappe: limit_page_length=0 es «sin límite», no «cero filas».
+            tope = int(limite)
+            recorte = docs[inicio:] if tope == 0 else docs[inicio : inicio + max(0, tope)]
             if not campos or "*" in campos:
                 return [dict(d) for d in recorte]
             return [{c: d.get(c) for c in campos} for d in recorte]

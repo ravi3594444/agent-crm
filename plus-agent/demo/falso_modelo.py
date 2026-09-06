@@ -254,6 +254,14 @@ class Relevo:
         # mentira y no tiene salida a internet, así que la única credencial que
         # existe en la corrida está en este proceso y en ningún otro.
         self.clave = clave.strip()
+        # La clave viaja en el header: sólo a un destino https. --relevar-a
+        # acepta cualquier URL, y un http:// con la clave puesta sería mandar la
+        # credencial en claro a donde diga el argumento.
+        if self.clave and not self.destino.lower().startswith("https://"):
+            esquema = self.destino.split("://", 1)[0] if "://" in self.destino else self.destino
+            raise ValueError(
+                f"el relevo sólo entrega la clave sobre https; destino {esquema!r} rechazado"
+            )
         self.cliente = httpx.Client(timeout=timeout)
         self.candado = threading.Lock()
         self.llamadas = 0

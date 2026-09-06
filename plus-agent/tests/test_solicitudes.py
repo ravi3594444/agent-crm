@@ -1313,6 +1313,39 @@ def test_no_tool_can_decide_a_request_or_move_an_order() -> None:
             assert "policy_aplicar_terminos" not in fuente
 
 
+def test_a_customer_registered_this_turn_can_ask_for_an_exception_on_their_own_order(
+    mundo, monkeypatch
+) -> None:
+    """crear_pedido resolves the account by the verified phone when the config
+    has none yet (the customer signed up in this same turn). The exception tool
+    used only the config value, so that customer's own order was 'not theirs'."""
+    from app import clientes
+    from app.tools import pedidos
+
+    monkeypatch.setattr(erpnext, "get_doc", lambda dt, n: dict(mundo["so"]))
+    monkeypatch.setattr(
+        clientes, "buscar_por_telefono", lambda tel, get_list=None: {"name": CLIENTE}
+    )
+    config = {
+        "configurable": {
+            "thread_id": "cli:nuevo",
+            "actor_scope": "customer",
+            "customer_code": "",  # registered this turn: the webhook had nothing
+            "actor_phone": CUSTOMER_PHONE,
+            "inbound_message_id": "wamid.nuevo",
+        }
+    }
+
+    respuesta = pedidos.pedir_excepcion_de_entrega.func(
+        numero_de_pedido=SO, lo_que_pidio_el_cliente="hoy no hay reparto, ¿me lo traen?",
+        config=config,
+    )
+
+    assert "no es de esta cuenta" not in respuesta
+    solicitud = solicitudes.leer(SO)
+    assert solicitud is not None and solicitud.abierta
+
+
 def test_the_sales_tool_can_only_ask_never_decide() -> None:
     """It is a real tool the model may call, so what it CANNOT do is the point."""
     import inspect
@@ -1475,7 +1508,7 @@ def _vencer(mundo, solicitud) -> None:
 
 def _respaldo(mundo, monkeypatch, *, entrega_ok: bool = True):
     """Expire a request with a delivery round configured, and return the offer."""
-    from tests.conftest import entrega_autorizada
+    from conftest import entrega_autorizada
 
     entrega_autorizada(monkeypatch, autorizada=entrega_ok)
     _reparto(monkeypatch)
@@ -1535,7 +1568,7 @@ def test_the_fallback_never_carries_a_fee_nobody_configured_an_account_for(
 
 def test_the_fallback_is_never_today_however_the_round_falls(monkeypatch, lunes) -> None:
     """That request sat unanswered for hours; today's round may have left."""
-    from tests.conftest import entrega_autorizada
+    from conftest import entrega_autorizada
 
     entrega_autorizada(monkeypatch)
     _reparto(monkeypatch, dias="lunes,martes")
@@ -1753,7 +1786,7 @@ def test_a_second_timeout_event_for_the_same_order_offers_nothing_twice(
 ) -> None:
     """The sweep is at-least-once: a repeat must be a no-op."""
     solicitud = _abrir(mundo)
-    from tests.conftest import entrega_autorizada
+    from conftest import entrega_autorizada
 
     entrega_autorizada(monkeypatch)
     _reparto(monkeypatch)
@@ -1778,7 +1811,7 @@ def test_a_second_timeout_event_for_the_same_order_offers_nothing_twice(
 def test_two_sweeps_at_once_produce_one_fallback(mundo, monkeypatch, lunes) -> None:
     """The lock serializes them; the second re-reads and finds it done."""
     solicitud = _abrir(mundo)
-    from tests.conftest import entrega_autorizada
+    from conftest import entrega_autorizada
 
     entrega_autorizada(monkeypatch)
     _reparto(monkeypatch)
@@ -1846,7 +1879,7 @@ def test_a_fallback_that_expires_gets_no_fallback_of_its_own(
 def test_each_order_gets_its_own_fallback_and_nothing_leaks(
     mundo, monkeypatch, lunes
 ) -> None:
-    from tests.conftest import entrega_autorizada
+    from conftest import entrega_autorizada
 
     entrega_autorizada(monkeypatch)
     _reparto(monkeypatch)
@@ -1895,7 +1928,7 @@ def test_nothing_configured_means_nothing_is_offered(mundo, monkeypatch, lunes) 
 def test_half_configured_rounds_are_never_stretched_into_an_offer(
     mundo, monkeypatch, lunes, dias, hora
 ) -> None:
-    from tests.conftest import entrega_autorizada
+    from conftest import entrega_autorizada
 
     entrega_autorizada(monkeypatch)
     _reparto(monkeypatch, dias=dias, hora=hora)
@@ -1921,7 +1954,7 @@ def test_a_customer_with_no_phone_is_never_given_a_durable_offer(
     mundo, monkeypatch, lunes
 ) -> None:
     """A record nobody can accept would be a promise with no way to answer."""
-    from tests.conftest import entrega_autorizada
+    from conftest import entrega_autorizada
 
     entrega_autorizada(monkeypatch)
     _reparto(monkeypatch)
@@ -1947,7 +1980,7 @@ def test_an_order_a_person_already_confirmed_is_not_expired_underneath_them(
     record VENCIDA and tell the customer their order had no answer in time — on
     an order that was confirmed — and then offer them a fallback delivery date
     for an order that already had one. The request is over; that is all."""
-    from tests.conftest import entrega_autorizada
+    from conftest import entrega_autorizada
 
     entrega_autorizada(monkeypatch)
     _reparto(monkeypatch)
@@ -1971,7 +2004,7 @@ def test_an_order_a_person_already_confirmed_is_not_expired_underneath_them(
 def test_an_offer_erpnext_refuses_to_record_is_never_sent(
     mundo, monkeypatch, lunes
 ) -> None:
-    from tests.conftest import entrega_autorizada
+    from conftest import entrega_autorizada
 
     entrega_autorizada(monkeypatch)
     _reparto(monkeypatch)
@@ -2356,7 +2389,7 @@ def con_plazo(request, mundo, monkeypatch, lunes):
     one wrote VENCIDA whatever soltar_reserva answered, so these invariants had
     only ever been run against the guarded half of the code.
     """
-    from tests.conftest import entrega_autorizada
+    from conftest import entrega_autorizada
 
     if request.param == "revisión humana":
         solicitud = _a_revision(mundo, monkeypatch, lunes)

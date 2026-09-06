@@ -491,3 +491,19 @@ def test_a_redis_outage_never_blocks_the_order_or_leaks_the_phone(
     assert _pedir(customer="CUST-001").startswith("PEDIDO_PENDIENTE")
     assert creados[0]["shipping_address_name"] == sorted(erp.addresses)[0]
     assert TELEFONO not in capsys.readouterr().out
+
+
+def test_an_address_without_locality_is_found_again_instead_of_duplicated(monkeypatch) -> None:
+    """The stored city is «Sin especificar»; the retry must compare against THAT."""
+    guardada = {"address_line1": "San Martin 450", "city": "Sin especificar", "pincode": ""}
+    creadas: list[dict] = []
+    monkeypatch.setattr(clientes, "direcciones_de", lambda cliente: ["ADDR-1"])
+    monkeypatch.setattr(clientes.erpnext, "get_doc", lambda dt, n: dict(guardada))
+    monkeypatch.setattr(
+        clientes.erpnext, "create_doc", lambda dt, p: creadas.append(p) or {"name": "ADDR-NUEVA"}
+    )
+
+    nombre = clientes.asegurar_direccion("CUST-1", {"address_line1": "San Martin 450", "city": ""})
+
+    assert nombre == "ADDR-1"
+    assert creadas == [], "the same address was created again"

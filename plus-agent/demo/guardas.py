@@ -214,7 +214,7 @@ def red_es_interna(red: str) -> list[str]:
             ["docker", "network", "inspect", red, "-f", "{{.Internal}}"],
             capture_output=True, text=True, timeout=30, check=False,
         )
-    except OSError as exc:
+    except (subprocess.TimeoutExpired, OSError) as exc:
         return [f"no pude inspeccionar la red {red}: {type(exc).__name__}"]
     if salida.stdout.strip() != "true":
         return [f"la red {red} NO es --internal: el agente tendría salida a internet"]
@@ -252,7 +252,7 @@ def relevo_sin_credenciales(contenedor: str, variable_clave: str) -> list[str]:
              contenedor],
             capture_output=True, text=True, timeout=30, check=False,
         )
-    except OSError as exc:
+    except (subprocess.TimeoutExpired, OSError) as exc:
         return [f"no pude inspeccionar {contenedor}: {type(exc).__name__}"]
     if salida.returncode != 0:
         return [f"no pude inspeccionar {contenedor}: docker inspect falló"]

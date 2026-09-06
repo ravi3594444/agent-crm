@@ -1,7 +1,12 @@
-# Progress — read this first
+# Progress — HISTORICAL (stages 1 to 2e, September 2026)
 
-Working branch: **`feat/experiencia`** (based on `main`). Do **not** merge to `main`
-or delete any branch yet.
+> This file records how the early stages were built and is kept for the
+> reasoning behind them. It is **not** current: the branch it names no longer
+> exists, `main` is the only branch after PR #3, Stage 2e is built, and the test
+> count below is from that time. The current status lives in
+> [`plus-agent/PROGRESS.md`](plus-agent/PROGRESS.md) and the README.
+
+Working branch at the time: `feat/experiencia` (based on `main`).
 
 Run everything from `plus-agent/`. Tests need no credentials, no ERPNext and no
 network — but they DO need a Redis Stack on `REDIS_URL`, database 0 (see "Tests
@@ -9,7 +14,7 @@ and Redis" in `plus-agent/README.md`):
 
 ```bash
 cd plus-agent
-REDIS_URL=redis://localhost:6379/0 .venv/bin/python -m pytest -q   # expect: 1238 passed, nothing skipped or xfailed
+REDIS_URL=redis://localhost:6379/0 .venv/bin/python -m pytest -q   # at the time: 1238 passed; today see plus-agent/README.md
 .venv/bin/ruff check app tests     # expect: All checks passed!
 ```
 

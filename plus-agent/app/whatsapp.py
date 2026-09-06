@@ -6,6 +6,7 @@ confirmations use pre-approved templates instead.
 """
 import os
 from collections.abc import Mapping
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -22,7 +23,9 @@ GRAPH_VERSION = os.getenv("META_GRAPH_API_VERSION", "v21.0").strip() or "v21.0"
 # mandarlos: en producción no se toca. Se exige https:// salvo loopback —
 # 127.0.0.1 nunca sale de la máquina— porque el token viaja en el header.
 GRAPH_HOST_DEFAULT = "https://graph.facebook.com"
-_LOOPBACK = ("http://127.0.0.1", "http://localhost", "http://[::1]")
+# Sólo estos hosts, comparados ENTEROS: un prefijo dejaba pasar
+# http://127.0.0.1.atacante.example con el token en el header.
+_HOSTS_LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 def base_de_graph(env: Mapping[str, str] | None = None) -> str:
@@ -31,7 +34,9 @@ def base_de_graph(env: Mapping[str, str] | None = None) -> str:
     base = str(fuente.get("META_GRAPH_BASE_URL", "") or "").strip().rstrip("/")
     if not base:
         return GRAPH_HOST_DEFAULT
-    if not base.startswith("https://") and not base.startswith(_LOOPBACK):
+    partes = urlsplit(base)
+    es_loopback = partes.scheme == "http" and (partes.hostname or "").lower() in _HOSTS_LOOPBACK
+    if partes.scheme != "https" and not es_loopback:
         # Sin el esquema no se ve el host, que puede ser de quien lo puso.
         esquema = base.split("://", 1)[0] if "://" in base else base
         raise RuntimeError(

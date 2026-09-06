@@ -239,6 +239,9 @@ def test_management_scope_alone_does_not_elevate_without_a_staff_phone(
     Con `is_management` a secas, un contexto de gerencia cuyo teléfono no está
     (o ya no está) en TELEFONOS_EQUIPO leía el pedido de cualquier cliente.
     """
+    import os
+
+    original = os.environ.get("TELEFONOS_EQUIPO", "")
     monkeypatch.setenv("TELEFONOS_EQUIPO", "5493511234567")  # otro número
     router.recargar()
     monkeypatch.setattr(erpnext, "get_doc", Mock(return_value=dict(OTHER_CUSTOMER_ORDER)))
@@ -247,7 +250,9 @@ def test_management_scope_alone_does_not_elevate_without_a_staff_phone(
             {"numero_pedido": "SO-0042"}, config=_management_config()
         )
     finally:
-        monkeypatch.delenv("TELEFONOS_EQUIPO", raising=False)
+        # Back to what the suite started with, THEN reload: monkeypatch restores
+        # the variable at teardown but nobody reloads router after that.
+        monkeypatch.setenv("TELEFONOS_EQUIPO", original)
         router.recargar()
 
     # Byte por byte igual a un pedido que no existe: sin enumeración.

@@ -72,8 +72,17 @@ _DUMMY = {
     "PAIS_TELEFONO": "54",
     "TELEFONOS_EQUIPO": "",
 }
+# Casi todo es setdefault: un test o CI que ya fijó algo (REDIS_URL, sobre
+# todo) manda. Pero lo que decide QUIÉN ES QUIÉN y QUÉ PROVEEDOR se prueba se
+# fija sin condición: con setdefault, un shell que exporta LLM_PROVIDER=gemini o
+# un TELEFONOS_EQUIPO cargado llegaba a la suite, que es justo la fuga que el
+# docstring de arriba describe.
+_FIJAS = {"LLM_PROVIDER", "QWEN_SALES_MODEL", "QWEN_MANAGER_MODEL", "PAIS_TELEFONO", "TELEFONOS_EQUIPO"}
 for _k, _v in _DUMMY.items():
-    os.environ.setdefault(_k, _v)
+    if _k in _FIJAS:
+        os.environ[_k] = _v
+    else:
+        os.environ.setdefault(_k, _v)
 
 from unittest.mock import Mock
 

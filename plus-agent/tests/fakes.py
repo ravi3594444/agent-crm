@@ -22,6 +22,7 @@ class FakeMarcas:
         self.values: dict[str, str] = {}
         self.lists: dict[str, list] = {}
         self.zsets: dict[str, dict[str, float]] = {}
+        self.ttls: dict[str, int] = {}
         self.caido = False
 
     # ----------------------------------------------------------- strings
@@ -56,6 +57,11 @@ class FakeMarcas:
         nuevo = int(self.values.get(key) or 0) + 1
         self.values[key] = str(nuevo)
         return nuevo
+
+    def expire(self, key, ttl):
+        self._vivo()
+        self.ttls[key] = int(ttl)
+        return True
 
     def scan_iter(self, match="*", count=100):
         self._vivo()
