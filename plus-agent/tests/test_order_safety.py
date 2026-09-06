@@ -542,9 +542,16 @@ def _catalogo_erp(
         Mock(return_value=[{"warehouse": "Depósito A - LP", "actual_qty": fisico, "reserved_qty": 0}]),
     )
 
-    def policy_get_list(doctype, filters=None, fields=None, limit=20, parent=None):
+    # Same signature as app/erpnext.py, so the Comment read in
+    # solicitudes.vencimientos is answered (no events: no lapsed holds) instead
+    # of failing with a TypeError that the function swallows.
+    def policy_get_list(
+        doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0
+    ):
         if borradores_fallan:
             raise erpnext.ERPNextError("ERPNext no disponible")
+        if doctype == "Comment":
+            return []
         if doctype == "Sales Order":
             return [
                 {
