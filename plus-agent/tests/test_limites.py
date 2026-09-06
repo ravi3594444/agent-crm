@@ -1329,6 +1329,33 @@ def test_a_limit_only_history_still_fails_closed_after_a_wipe(
     assert any("límites sin verificar" in m for m in decision.motivos)
 
 
+def test_a_language_or_delivery_write_after_a_wipe_does_not_disarm_the_limits_fuse(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The store is ONE hash for limits, delivery rules and language.
+
+    After a wipe with [limite] changes on record, the owner switches the team
+    language or moves a delivery day. The hash is no longer empty — and the old
+    fuse asked exactly that, so every ceiling quietly came back from the .env.
+    The question is whether the LIMITS are there, not whether anything is.
+    """
+    monkeypatch.setenv("AUTO_CONFIRM_MAX", "1000000")  # the looser bootstrap
+    _historia_durable(monkeypatch, limite=True, entrega=False)
+    almacen.hashes.clear()
+    almacen.hset(limites.CLAVE_VALORES, "IDIOMA_GERENCIA", "en")
+    almacen.hset(limites.CLAVE_VALORES, "ENTREGA_DIAS", "lunes,martes")
+
+    with pytest.raises(limites.LimiteError) as fallo:
+        limites.configuracion()
+    assert "restaurarlos" in str(fallo.value)
+    decision = policy.evaluar({"name": "SO-1", "customer": "CUST-001"})
+    assert decision.auto is False
+
+    # Restoring one real limit is what disarms it — the owner's value, not .env.
+    almacen.hset(limites.CLAVE_VALORES, "AUTO_CONFIRM_MAX", "50000")
+    assert limites.configuracion().tope == 50_000.0
+
+
 def test_both_histories_still_fail_closed_after_a_wipe(
     almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
 ) -> None:

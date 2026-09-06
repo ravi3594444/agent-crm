@@ -867,6 +867,11 @@ def test_a_forbidden_phrase_fails_in_both_modes(modo: str) -> None:
     cazar, y no es una cuestión de redacción."""
     paso = escenarios.Paso("549", "dame 10", prohibe=["confirmado"])
     turno = _turno_con(modo, paso, ["Tu pedido quedó confirmado."])
+    # And in English: the prohibition reads through _EQUIVALENTES like `espera`
+    # does, or with IDIOMA_DEMO=en the strongest assertion tested nothing.
+    en_ingles = _turno_con(modo, paso, ["Your order is confirmed."])
+    assert not en_ingles.ok
+    assert any("confirmado" in p for p in en_ingles.problemas)
     assert not turno.ok
     assert any("confirmado" in p for p in turno.problemas)
 

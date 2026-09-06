@@ -1347,6 +1347,10 @@ def test_the_sales_tool_can_only_ask_never_decide() -> None:
         "acepto",
         "dale",
         "de acuerdo",
+        "Acepto.",
+        "dale!",
+        "yes",
+        "I accept SAL-ORD-2026-00021",
     ],
 )
 def test_an_acceptance_is_matched_without_a_model(mundo, texto) -> None:
@@ -1369,6 +1373,31 @@ def test_a_refusal_is_matched_without_a_model(mundo, texto) -> None:
 
     assert respuesta is not None and "no avanzo" in respuesta
     assert mundo["submits"] == []
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        # Starts like a yes, but questions the terms: NOT an acceptance.
+        "dale, pero cambiame la fecha",
+        "acepto si es para el lunes",
+        "de acuerdo con el precio pero no con la hora",
+        "yes but can you change the date",
+        "I accept the price but not the day",
+        # Starts like a no, but is a counter-question: NOT a refusal either.
+        "no acepto la hora, ¿puede ser a las 10?",
+        "no thanks unless you deliver on Monday",
+    ],
+)
+def test_a_qualified_reply_is_neither_an_acceptance_nor_a_refusal(mundo, texto) -> None:
+    """A price and a delivery date get committed by the WHOLE message, never by
+    its first word: «dale, pero cambiame la fecha» is a question about the
+    terms, and it goes to the agent like any other sentence."""
+    _aprobar_y_esperar(mundo)
+
+    assert main._customer_command(texto, CUSTOMER_PHONE, CLIENTE) is None
+    assert mundo["submits"] == []
+    assert solicitudes.leer(SO).abierta  # still waiting for a real answer
 
 
 def test_an_ordinary_customer_message_is_left_to_the_agent(mundo) -> None:

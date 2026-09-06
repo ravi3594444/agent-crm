@@ -105,6 +105,11 @@ services:
     env_file: .env
     environment:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+    extra_hosts:
+      # Sin esto, con ERPNEXT_URL=http://host.docker.internal:8080 el resumen
+      # decía «no pude leer ERPNext» en cada sección: el job del cron no
+      # heredaba el mapeo que sí tienen agente y briefing.
+      - "host.docker.internal:host-gateway"
     command: ["python", "-m", "app.digest"]
     depends_on:
       redis:

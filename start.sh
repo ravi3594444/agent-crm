@@ -29,9 +29,18 @@ if docker ps -a --format '{{.Names}}' | grep -qx agent-redis; then
     echo "[start] !! agent-redis corre SIN volumen: los límites del dueño no sobreviven un docker rm."
     echo "[start]    Migralo sin perder nada:  $APP/deploy/migrar_redis_a_volumen.sh"
   fi
+  # Redis Stack no pide contraseña. Publicado en 0.0.0.0, cualquier vecino de
+  # red puede escribir plus-agent:limites y subir un tope sin pasar por el
+  # código del dueño. `docker start` conserva el mapeo con que se creó, así que
+  # un contenedor viejo hay que recrearlo: el script de migración lo hace en
+  # loopback.
+  if docker inspect -f '{{json .HostConfig.PortBindings}}' agent-redis 2>/dev/null | grep -q '"HostIp":""\|"HostIp":"0.0.0.0"'; then
+    echo "[start] !! agent-redis está publicado en TODAS las interfaces (0.0.0.0:6379) y sin contraseña."
+    echo "[start]    Recrealo en loopback sin perder nada:  $APP/deploy/migrar_redis_a_volumen.sh"
+  fi
 else
   docker run -d --name agent-redis --restart unless-stopped \
-    -p 6379:6379 \
+    -p 127.0.0.1:6379:6379 \
     -v agent-redis-data:/data \
     -e REDIS_ARGS="--appendonly yes --appendfsync everysec --maxmemory-policy noeviction" \
     redis/redis-stack-server:latest >/dev/null

@@ -689,7 +689,14 @@ def _almacen() -> dict[str, str]:
     except (locks.CoordinationError, RedisError) as exc:
         raise LimiteError("no pude leer los límites configurados") from exc
     valores = {_texto(k): _texto(v) for k, v in (crudo or {}).items()}
-    if not valores and _hubo_cambios_durables():
+    # El hash es UNO para límites, reglas de entrega e idioma. La pregunta es
+    # si faltan LOS LÍMITES, no si el hash está vacío: después de una pérdida,
+    # un cambio de idioma o de un día de reparto vuelve a llenar el hash y, con
+    # la pregunta anterior, desarmaba este fusible para siempre — cada tope
+    # pasaba a resolverse del .env sin aviso. Misma forma que
+    # _reglas_de_entrega_perdidas: se mira el registro propio.
+    sin_limites_del_dueno = not any(valores.get(nombre, "").strip() for nombre in LIMITES)
+    if sin_limites_del_dueno and _hubo_cambios_durables():
         raise LimiteError(
             "los límites que configuró el dueño no están en el almacén, y "
             "ERPNext tiene cambios registrados: hay que restaurarlos antes de "

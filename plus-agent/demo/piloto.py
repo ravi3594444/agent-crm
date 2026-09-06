@@ -146,6 +146,7 @@ def _post(url: str, cuerpo: dict | None = None, timeout: float = 30) -> dict:
 # no cambian de idioma, que es justamente lo que el guard exige.
 _EQUIVALENTES = {
     "código para confirmar": "code to confirm",
+    "confirmado": "confirmed",
     "no cambié nada": "i applied nothing",
     "no cancelo": "i am not cancelling",
     "rechazado": "rejected",
@@ -484,8 +485,12 @@ class Piloto:
         # Lo PROHIBIDO falla en los dos modos: que el modelo prometa un
         # descuento o diga "confirmado" cuando no lo está es justo lo que hay
         # que cazar, y no es una cuestión de redacción.
+        # En los dos idiomas, como `espera`: con IDIOMA_DEMO=en el agente
+        # contesta en inglés y un fragmento prohibido escrito en español no
+        # aparecía nunca, así que la prohibición —que es la aserción que caza
+        # un «confirmado» que no lo está— pasaba sin probar nada.
         for fragmento in paso.prohibe:
-            if fragmento.lower() in todo:
+            if _dice(todo, fragmento):
                 problemas.append(f"la respuesta dice {fragmento!r} y no debería")
         # Que un documento NO aparezca es una afirmación distinta de que exista
         # con cierto estado, y es la única forma de probar que una escritura no

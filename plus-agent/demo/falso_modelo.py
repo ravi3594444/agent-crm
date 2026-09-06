@@ -240,12 +240,15 @@ def _sobre(modelo: str, paso: Paso) -> dict:
 class Relevo:
     """Reenvía a Google sin tocar el cuerpo. Un solo cliente, reutilizado."""
 
-    def __init__(self, destino: str, *, clave: str = "", timeout: float = 120.0,
+    def __init__(self, destino: str, *, clave: str = "", timeout: float = 45.0,
                  reintentos: int = 4, espera_maxima: float = 40.0) -> None:
         self.destino = destino.rstrip("/")
         self.reintentos = reintentos
-        # Menos que el LLM_TIMEOUT_SECONDS del agente (60): si el relevo
-        # esperara más, el agente cortaría la llamada creyendo que se cayó.
+        # Tanto el timeout de UNA request como el techo de esperas por 429
+        # tienen que quedar por debajo del LLM_TIMEOUT_SECONDS del agente (60):
+        # si el relevo esperara más, el agente cortaría la llamada creyendo que
+        # se cayó y reintentaría mientras el relevo sigue gastando cuota en un
+        # turno que ya falló. Antes el timeout por request era 120 s.
         self.espera_maxima = espera_maxima
         # La clave REAL vive sólo acá. El contenedor del agente lleva una de
         # mentira y no tiene salida a internet, así que la única credencial que
