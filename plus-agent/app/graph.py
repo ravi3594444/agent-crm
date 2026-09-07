@@ -172,25 +172,26 @@ def _config(configurable: dict, callbacks: list | None) -> dict:
 def responder_cliente(
     mensaje: str,
     thread_id: str,
-    contexto_cliente: str = "",
     *,
     customer_code: str = "",
+    customer_name: str = "",
     inbound_message_id: str = "",
     actor_phone: str = "",
     callbacks: list | None = None,
 ) -> str:
     """Run one customer turn with server-authenticated values hidden from the LLM.
 
-    ``contexto_cliente`` remains accepted while callers migrate, but is
-    deliberately not interpolated: it previously contained phone, ERP customer
-    code and group. Tools receive those values only through RunnableConfig,
-    and the system prompt reads ``customer_code`` from the same config.
+``customer_name`` is the ONLY identifier of the account the model may say out
+    loud. The phone, the ERP customer code and the group are not in the prompt:
+    tools receive them through RunnableConfig, which the model cannot forge. The
+    old ``contexto_cliente`` parameter is gone — it carried a prose sentence that
+    this function deleted unread, because the system prompt is built per call in
+    app/conversacion.py and never saw it.
 
     ``callbacks`` are LangChain callback handlers (app/progreso.py) and travel
     in the run config, which is the documented way to observe a run: they see
     every model call and every tool start of THIS turn, and nothing else.
     """
-    del contexto_cliente
     with erpnext.customer_scope():
         out = agente_clientes.invoke(
             {"messages": [("user", mensaje)]},
@@ -199,6 +200,7 @@ def responder_cliente(
                     "thread_id": f"cli:{thread_id}",
                     "actor_scope": "customer",
                     "customer_code": customer_code,
+                    "customer_name": customer_name,
                     "actor_phone": actor_phone,
                     "inbound_message_id": inbound_message_id,
                 },

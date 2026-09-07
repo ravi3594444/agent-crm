@@ -389,9 +389,12 @@ def test_fifo_and_server_bound_customer_identity_with_no_blind_ack(webhook, monk
         assert kwargs["actor_phone"] == phone
         assert kwargs["thread_id"] == webhook._thread_tag(phone)
         assert phone not in kwargs["thread_id"]
-        context = kwargs["contexto_cliente"]
-        assert phone not in context
-        assert "CUST-INTERNAL" not in context
+        # El nombre es el único dato de la ficha que el modelo puede decir en
+        # voz alta; el teléfono y el código de cuenta no viajan por el prompt.
+        # Esta ficha no tiene nombre cargado, así que va vacío.
+        nombre = kwargs["customer_name"]
+        assert nombre == ""
+        assert phone not in nombre and "CUST-INTERNAL" not in nombre
 
     fake = webhook.r
     assert not fake.lists[webhook._QUEUE_KEY]

@@ -155,3 +155,52 @@ def test_max_history_has_a_sane_floor(monkeypatch):
     monkeypatch.setenv("CONVERSATION_MAX_MESSAGES", "abc")
     with pytest.raises(RuntimeError):
         conversacion.max_history()
+
+
+# ------------------------------------------------- el nombre del cliente
+# «Usá su nombre una vez» era una regla inerte: el nombre no llegaba al modelo.
+# `_contexto` lo tiraba y `responder_cliente` borraba la frase de contexto sin
+# leerla, porque el prompt se arma acá y nunca la veía.
+
+
+def _prompt_cliente(**configurable) -> str:
+    return conversacion.prompt_clientes(
+        {"messages": []}, {"configurable": configurable}
+    )[0].content
+
+
+def test_el_nombre_del_cliente_llega_al_prompt():
+    texto = _prompt_cliente(customer_code="CUST-001", customer_name="Panaderia La Nueva")
+    assert "Panaderia La Nueva" in texto
+    assert "usalo UNA vez" in texto
+
+
+def test_el_codigo_de_cuenta_nunca_se_muestra_como_nombre():
+    """ERPNext usa el código como customer_name mientras nadie cargue uno."""
+    texto = _prompt_cliente(customer_code="CUST-001", customer_name="CUST-001")
+    assert "Se llama" not in texto
+
+
+def test_sin_nombre_el_prompt_no_inventa_ninguno():
+    texto = _prompt_cliente(customer_code="CUST-001", customer_name="")
+    assert "Se llama" not in texto
+    assert "Cliente con cuenta registrada" in texto
+
+
+def test_el_nombre_se_limpia_porque_lo_carga_una_persona():
+    sucio = "  Panaderia\n\nLa   Nueva  " + "x" * 200
+    limpio = conversacion.nombre_para_prompt(sucio, "CUST-001")
+    assert "\n" not in limpio
+    assert len(limpio) <= 60
+    assert limpio.startswith("Panaderia La Nueva")
+    # Un nombre que no tiene ni una letra no sirve para nombrar a nadie.
+    assert conversacion.nombre_para_prompt("   ", "CUST-001") == ""
+    assert conversacion.nombre_para_prompt("12345", "CUST-001") == ""
+
+
+def test_a_quien_no_tiene_cuenta_se_lo_da_de_alta_y_no_se_lo_deriva():
+    """Decía «derivá el alta comercial» y nombraba crear_lead, contra la regla 4."""
+    texto = _prompt_cliente(customer_code="")
+    assert "no lo derives" in texto
+    assert "crear_cliente" in texto
+    assert "crear_lead" not in texto

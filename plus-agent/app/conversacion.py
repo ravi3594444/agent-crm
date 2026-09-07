@@ -93,21 +93,55 @@ def _configurable(config: RunnableConfig | None) -> dict:
     return dict((config or {}).get("configurable") or {})
 
 
+def nombre_para_prompt(crudo: object, customer_code: str = "") -> str:
+    """El nombre del cliente listo para el prompt, o "" si no sirve para nombrarlo.
+
+    Es el único dato de la ficha que el modelo puede decir en voz alta, así que
+    se limpia: una línea y acotado, porque viene de un campo que carga una
+    persona. Y se descarta cuando es el código de la cuenta —ERPNext usa el
+    código como `customer_name` mientras nadie escriba un nombre— porque
+    «Hola CUST-001» es peor que no saludar.
+    """
+    nombre = " ".join(str(crudo or "").split())[:60].strip()
+    if not nombre:
+        return ""
+    if customer_code and nombre.casefold() == str(customer_code).strip().casefold():
+        return ""
+    if not any(caracter.isalpha() for caracter in nombre):
+        return ""
+    return nombre
+
+
 def prompt_clientes(state, config: RunnableConfig) -> list[BaseMessage]:
     """Fresh customer system prompt; identity comes only from server config."""
-    customer_code = str(_configurable(config).get("customer_code") or "").strip()
-    contexto = (
-        "Cliente con cuenta registrada en ERPNext."
-        if customer_code
-        else (
-            "Remitente sin cuenta de cliente registrada. Si quiere comprar, "
-            "registrá primero un contacto y derivá el alta comercial."
+    configurable = _configurable(config)
+    customer_code = str(configurable.get("customer_code") or "").strip()
+    if customer_code:
+        contexto = "Cliente con cuenta registrada en ERPNext."
+        nombre = nombre_para_prompt(configurable.get("customer_name"), customer_code)
+        if nombre:
+            # El nombre suele ser el del comercio, no el de la persona: «Hola,
+            # Panadería La Nueva» no lo dice nadie.
+            contexto += (
+                f" Se llama {nombre}: usalo UNA vez en la conversación, y si es el"
+                " nombre del negocio y no de una persona, nombralo al pasar y no"
+                " como saludo."
+            )
+    else:
+        # Antes decía «registrá primero un contacto y derivá el alta comercial»,
+        # que contradice la regla 4: a alguien sin cuenta que quiere comprar no
+        # se lo deriva, se lo da de alta con crear_cliente y se le toma el pedido
+        # en la misma conversación.
+        contexto = (
+            "Remitente sin cuenta de cliente registrada. Si quiere comprar, no lo "
+            "derives: pedile en UNA pregunta el nombre (o el del negocio) y la "
+            "dirección de entrega completa, dalo de alta con crear_cliente y seguí "
+            "con el pedido en la misma conversación."
         )
-    )
     # Sólo lo que el cliente PIDIÓ explícitamente fija su idioma. Sin nada
     # guardado, la regla es la de espejo de siempre: el modelo sigue el idioma
     # del último mensaje, que es el comportamiento anterior palabra por palabra.
-    guardado = idioma.cliente_guardado(_configurable(config).get("actor_phone"))
+    guardado = idioma.cliente_guardado(configurable.get("actor_phone"))
     system = SYSTEM_ES_AR.format(
         IDENTIDAD=identidad(),
         CONTEXTO_CLIENTE=contexto,

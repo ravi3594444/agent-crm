@@ -245,24 +245,25 @@ def _enqueue_message(telefono: str, message_id: str, kind: str, data: str) -> bo
 
 
 def _contexto(telefono: str) -> tuple[str, str]:
-    """Resolve authorization internally; identifiers never enter the prompt.
+    """(código de cuenta, nombre para mostrar) de quien escribió. Vacíos si no tiene.
 
     The lookup tolerates hand-typed mobile_no formats (+54 9 351 123-4567,
     0351 15 123-4567, ...) by matching in canonical form; see app/clientes.py.
+
+    El segundo valor era una frase de contexto que `responder_cliente` borraba
+    sin leer: el prompt se arma en app/conversacion.py y nunca la veía. Ahora es
+    el NOMBRE, que es el único dato de esta ficha que el modelo puede decir en
+    voz alta — el código de cuenta y el teléfono no se muestran nunca, y por eso
+    viajan aparte y por el canal seguro. `clientes.CAMPOS` ya lo traía en la
+    misma consulta, así que esto no agrega una llamada a ERPNext.
     """
     # Local import: keeps main.py's import block untouched for this concern.
     from app import clientes
 
     cliente = clientes.buscar_por_telefono(telefono, get_list=erpnext.get_list)
     if cliente:
-        return str(cliente["name"]), (
-            "Cliente registrado y validado por el servidor. "
-            "Podés ayudarlo con su pedido."
-        )
-    return "", (
-        "Cliente no registrado todavía. Si hace un pedido, "
-        "registralo primero con crear_lead."
-    )
+        return str(cliente["name"]), str(cliente.get("customer_name") or "")
+    return "", ""
 
 
 def _non_empty(respuesta: object, message_id: str, lengua: str | None = None) -> str:
@@ -838,7 +839,7 @@ def _responder(item: dict, lengua: str, progreso: Progreso) -> str:
     if pedido_idioma:
         idioma.recordar_cliente(telefono, pedido_idioma)
 
-    customer_code, contexto = _contexto(telefono)
+    customer_code, customer_name = _contexto(telefono)
     # El idioma del turno viaja hasta la respuesta determinista: es el mismo
     # que usa todo lo demás que sale de este turno.
     acuerdo = _customer_command(data, telefono, customer_code, lengua)
@@ -848,7 +849,7 @@ def _responder(item: dict, lengua: str, progreso: Progreso) -> str:
         responder_cliente(
             data,
             thread_id=thread_tag,
-            contexto_cliente=contexto,
+            customer_name=customer_name,
             customer_code=customer_code,
             inbound_message_id=message_id,
             actor_phone=telefono,
