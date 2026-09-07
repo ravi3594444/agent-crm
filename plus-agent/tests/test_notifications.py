@@ -707,3 +707,119 @@ def test_pending_alert_without_template_and_closed_window_fails_closed_with_audi
     assert "24 h" in texto
 
 
+
+
+# ------------------------------------------------- derivar a una persona, de verdad
+# `avisar_escalamiento` estaba escrita, traducida y probada —«un ToDo es invisible
+# hasta que alguien abre el sistema; un reclamo esperaría a la mañana»— y NADIE la
+# llamaba. Un cliente que pedía hablar con una persona quedaba a merced de que
+# alguien abriera ERPNext, y si además la tarea fallaba, la herramienta le decía al
+# modelo que prometiera que el equipo iba a revisar el caso: nadie se había enterado.
+
+
+def _config_cliente() -> dict:
+    return {
+        "configurable": {
+            "thread_id": "cli:thread",
+            "actor_scope": "customer",
+            "customer_code": "CUST-001",
+            "actor_phone": "5493510000000",
+            "inbound_message_id": "wamid.test",
+        }
+    }
+
+
+@pytest.fixture
+def derivacion(monkeypatch: pytest.MonkeyPatch):
+    """La herramienta con sus dos salidas —la tarea y el aviso— controlables."""
+    from app import erpnext as erpnext_mod
+    from app.tools import pedidos
+
+    estado: dict = {"avisos": []}
+
+    def _crear(doctype, payload, *a, **k):
+        if estado.get("tarea_falla"):
+            raise erpnext_mod.ERPNextError("ERPNext caído")
+        return {"name": "TODO-0001"}
+
+    def _avisar(motivo, telefono, cliente, tarea=""):
+        estado["avisos"].append((motivo, telefono, cliente, tarea))
+        return not estado.get("aviso_falla")
+
+    monkeypatch.setattr(erpnext_mod, "create_doc", _crear)
+    monkeypatch.setattr(pedidos, "avisar_escalamiento", _avisar)
+    return estado
+
+
+def _derivar() -> str:
+    from app.tools import pedidos
+
+    return pedidos.escalar_a_humano.invoke(
+        {"motivo": "quiere hablar con una persona"}, config=_config_cliente()
+    )
+
+
+def test_derivar_hace_sonar_el_telefono_del_equipo(derivacion) -> None:
+    reply = _derivar()
+
+    assert len(derivacion["avisos"]) == 1, "el equipo tiene que enterarse en el momento"
+    motivo, telefono, cliente, tarea = derivacion["avisos"][0]
+    assert motivo == "quiere hablar con una persona"
+    # El teléfono del cliente va al equipo para que puedan llamarlo, y la tarea
+    # viaja en el aviso para que se pueda encontrar.
+    assert telefono == "5493510000000"
+    assert cliente == "CUST-001"
+    assert tarea == "TODO-0001"
+    assert "TODO-0001" in reply
+    assert "ya le" in reply and "avisaste" in reply
+
+
+def test_sin_tarea_pero_con_aviso_la_derivacion_sigue_valiendo(derivacion) -> None:
+    """ERPNext caído no puede dejar a un cliente sin derivar: el aviso alcanza."""
+    derivacion["tarea_falla"] = True
+
+    reply = _derivar()
+
+    assert len(derivacion["avisos"]) == 1
+    assert derivacion["avisos"][0][3] == "", "no hay número de tarea que mandar"
+    assert "NO pude derivarlo" not in reply
+    assert "avisaste" in reply
+
+
+def test_con_tarea_y_sin_aviso_no_se_dice_que_ya_se_aviso(derivacion) -> None:
+    """Queda el registro, pero nadie lo vio todavía: no se promete un aviso."""
+    derivacion["aviso_falla"] = True
+
+    reply = _derivar()
+
+    assert "TODO-0001" in reply
+    assert "no digas que ya le avisaste" in reply
+    assert "le van a responder" in reply
+
+
+def test_sin_tarea_y_sin_aviso_el_modelo_tiene_prohibido_prometer(derivacion) -> None:
+    """El caso que mentía. Nadie se enteró: no se le puede decir que sí."""
+    derivacion["tarea_falla"] = True
+    derivacion["aviso_falla"] = True
+
+    reply = _derivar()
+
+    assert "NO pude derivarlo" in reply
+    assert "NO le digas al cliente que avisaste al equipo" in reply
+    # Y la vieja promesa ya no está en ninguna variante.
+    assert "el equipo revisará el caso" not in reply
+
+
+def test_un_aviso_que_explota_no_tumba_la_derivacion(monkeypatch, derivacion) -> None:
+    """El aviso es best effort: la tarea ya está creada y el turno sigue."""
+    from app.tools import pedidos
+
+    def _explota(*a, **k):
+        raise RuntimeError("Meta timeout")
+
+    monkeypatch.setattr(pedidos, "avisar_escalamiento", _explota)
+
+    reply = _derivar()
+
+    assert "TODO-0001" in reply
+    assert "no digas que ya le avisaste" in reply

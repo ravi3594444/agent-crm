@@ -23,7 +23,7 @@ from app import (
     solicitudes,
 )
 from app.locks import CoordinationError, distributed_lock
-from app.notificar import notificar_confirmacion, notificar_equipo
+from app.notificar import avisar_escalamiento, notificar_confirmacion, notificar_equipo
 from app.runtime_context import RuntimeContextError, actor_context
 
 _MESES = {
@@ -727,8 +727,44 @@ def escalar_a_humano(motivo: str, config: RunnableConfig) -> str:
             },
         )
     except erpnext.ERPNextError:
-        return "No pude crear la tarea de derivación; avisá que el equipo revisará el caso."
-    return f"Derivado al equipo (tarea {doc['name']})."
+        # No se corta acá: la tarea es el registro, pero no es el aviso.
+        print("[orders] no pude crear la tarea de derivación")
+        tarea = ""
+    else:
+        tarea = str(doc.get("name") or "")
+
+    # Un ToDo no suena. Hasta que alguien abre ERPNext, un reclamo espera a la
+    # mañana siguiente —eso dice el docstring de avisar_escalamiento, que estaba
+    # escrito, traducido y probado, y que nadie llamaba— así que un cliente que
+    # pedía una persona podía no llegar a ninguna. Su resultado es además lo
+    # único que autoriza a decirle al cliente que el equipo ya se enteró.
+    try:
+        avisado = bool(
+            avisar_escalamiento(motivo, actor.actor_phone, account, tarea)
+        )
+    except Exception as exc:  # es un aviso: no puede tumbar la derivación
+        print(f"[orders] alerta de derivación falló ({type(exc).__name__})")
+        avisado = False
+
+    if not tarea and not avisado:
+        # Nadie se enteró y no quedó registro. Decirle que avisamos al equipo
+        # sería la mentira que la regla 6 del prompt prohíbe.
+        return (
+            "NO pude derivarlo: no quedó registrado y no pude avisarle a nadie. "
+            "NO le digas al cliente que avisaste al equipo. Pedile perdón UNA vez "
+            "y decile que lo vuelva a escribir en un rato."
+        )
+    if avisado:
+        return (
+            f"Derivado al equipo y avisado{f' (tarea {tarea})' if tarea else ''}. "
+            "Al cliente decile en UNA línea que eso lo ve el encargado y que ya le "
+            "avisaste; no le menciones la tarea ni su número."
+        )
+    return (
+        f"Derivado al equipo (tarea {tarea}), pero el aviso no salió: lo van a ver "
+        "cuando abran el sistema. Decile al cliente en UNA línea que eso lo ve el "
+        "encargado y que le van a responder; no digas que ya le avisaste."
+    )
 
 
 @tool
