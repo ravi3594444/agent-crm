@@ -1050,6 +1050,44 @@ _SEPARADORES = re.compile(r"[,.;:!?\n]")
 _PALABRA = re.compile(r"[a-z']+")
 _VENTANA = 3
 
+# Quién es el sujeto. Una frase de la lista puede estar CONTANDO lo que hace
+# otra persona en vez de pidiendo algo: «my daughter can write in English» no
+# es un pedido, y guardarlo un año dejaba a un cliente que escribe en español
+# recibiendo inglés. Se compara contra listas fijas, igual que todo lo demás
+# acá: no se interpreta la oración.
+#
+# Marcas de que el sujeto es un TERCERO —posesivos, pronombres de tercera
+# persona y los parentescos y oficios con los que se nombra a alguien que no
+# está en la conversación.
+_TERCEROS = frozenset(
+    [
+        "my", "his", "her", "hers", "their", "theirs", "its", "our", "ours",
+        "she", "he", "they", "them", "somebody", "someone", "anybody", "nobody",
+        "mi", "mis", "su", "sus", "nuestro", "nuestra", "nuestros", "nuestras",
+        "ella", "ellas", "ellos", "alguien", "nadie",
+        "daughter", "son", "child", "kid", "wife", "husband", "friend",
+        "brother", "sister", "partner", "colleague", "boss", "employee",
+        "neighbor", "neighbour", "cousin", "mother", "father", "mom", "dad",
+        "hija", "hijo", "chico", "chica", "nene", "nena", "esposa", "esposo",
+        "marido", "mujer", "amigo", "amiga", "hermano", "hermana", "socio",
+        "socia", "empleado", "empleada", "vecino", "vecina", "primo", "prima",
+        "jefe", "jefa", "secretaria", "secretario", "contador", "contadora",
+        "madre", "padre", "mama", "papa", "gente", "encargado", "encargada",
+    ]
+)
+# Marcas de que el pedido va dirigido a QUIEN ATIENDE: «can you talk in
+# English?», «contestame», «answer me». Si aparecen en la cláusula, la frase es
+# un pedido aunque también haya un tercero nombrado.
+_INTERLOCUTOR = frozenset(
+    ["you", "u", "yourself", "vos", "usted", "ustedes", "me", "us", "nos", "te"]
+)
+# Los dos idiomas nombrados en la misma cláusula, y un «o» entre ellos, es una
+# duda y no un pedido: «answer in english or spanish» no elige nada. Se exige
+# la marca de alternativa porque «reply in english not spanish» también nombra
+# los dos y sí pide inglés.
+_IDIOMA_NOMBRADO = {"english": EN, "ingles": EN, "spanish": ES, "espanol": ES}
+_ALTERNATIVA = frozenset(["or", "either", "o", "cualquiera", "cualquier", "indistinto"])
+
 
 def _negada_o_citada(limpio: str, inicio: int, fin: int) -> bool:
     """¿La aparición [inicio:fin) está negada, citada o entre comillas?"""
@@ -1074,6 +1112,27 @@ def _negada_o_citada(limpio: str, inicio: int, fin: int) -> bool:
     return bool(siguientes) and len(siguientes) <= 2 and siguientes[-1] in _NEGACIONES
 
 
+def _clausula(limpio: str, inicio: int) -> int:
+    """En qué cláusula del mensaje cae esa posición."""
+    return len(_SEPARADORES.findall(limpio[:inicio]))
+
+
+def _describe_a_un_tercero(limpio: str, inicio: int) -> bool:
+    """¿La frase cuenta lo que hace otro, en vez de pedirle algo a quien atiende?
+
+    Mira la cláusula ANTES de la frase. «my daughter can write in english» tiene
+    un tercero (`my`, `daughter`) y no nombra a quien atiende: es una
+    descripción. «can you talk in english?» nombra a quien atiende (`you`), así
+    que es un pedido. Si están los dos, gana el pedido: quien escribe «my
+    daughter is here, can you talk in english» está pidiendo.
+    """
+    antes = _SEPARADORES.split(limpio[:inicio])[-1]
+    palabras = _PALABRA.findall(antes)
+    if any(p in _INTERLOCUTOR for p in palabras):
+        return False
+    return any(p in _TERCEROS for p in palabras)
+
+
 def pedido_explicito(texto: object) -> str | None:
     """El idioma que ese mensaje PIDE explícitamente, o None.
 
@@ -1088,19 +1147,46 @@ def pedido_explicito(texto: object) -> str | None:
     Sigue sirviendo dentro de un pedido: «quiero 5 kg de queso, reply in
     English please» pide inglés. Y si un mensaje niega un idioma y pide el
     otro, gana el que se pidió.
+
+    Antes devolvía la PRIMERA frase de la lista que aparecía en el texto, así
+    que el orden de `_PEDIDOS_EXPLICITOS` decidía por encima del orden del
+    mensaje: «my daughter can write in English; answer me in Spanish» guardaba
+    inglés —«write in english» está más arriba en la lista— y le contestaba en
+    inglés a alguien que acababa de pedir español, por un año. Ahora se juntan
+    TODAS las apariciones, se descartan las que no son pedidos y se resuelve en
+    el orden del texto: gana el último pedido claro.
     """
     limpio = _sin_tildes(texto)
     if not limpio:
         return None
+    pedidos: list[tuple[int, str]] = []
     for frase, idioma in _PEDIDOS_EXPLICITOS:
         buscada = _sin_tildes(frase)
         inicio = limpio.find(buscada)
         while inicio != -1:
             fin = inicio + len(buscada)
-            if not _negada_o_citada(limpio, inicio, fin):
-                return idioma
+            if not _negada_o_citada(limpio, inicio, fin) and not _describe_a_un_tercero(
+                limpio, inicio
+            ):
+                pedidos.append((inicio, idioma))
             inicio = limpio.find(buscada, fin)
-    return None
+    if not pedidos:
+        return None
+    pedidos.sort()
+    # Dos idiomas pedidos en la MISMA cláusula no eligen nada: «answer in
+    # english or spanish» no es un pedido, es una duda, y esto se guarda un año.
+    # En cláusulas distintas sí hay orden y gana el último: «answer in English;
+    # actually answer me in Spanish» pide español.
+    ultima = _clausula(limpio, pedidos[-1][0])
+    idiomas = {i for pos, i in pedidos if _clausula(limpio, pos) == ultima}
+    if len(idiomas) > 1:
+        return None
+    # Y tampoco elige nada una cláusula que OFRECE los dos idiomas.
+    palabras = _PALABRA.findall(_SEPARADORES.split(limpio)[ultima])
+    nombrados = {_IDIOMA_NOMBRADO[p] for p in palabras if p in _IDIOMA_NOMBRADO}
+    if len(nombrados) > 1 and any(p in _ALTERNATIVA for p in palabras):
+        return None
+    return pedidos[-1][1]
 
 
 def para_cliente(

@@ -405,6 +405,87 @@ def test_nombrar_un_idioma_no_es_pedirlo(fake_redis_idioma, texto):
     assert idioma.cliente_guardado("+5493517777777") is None
 
 
+# ------------------------------------------- quién es el sujeto, y en qué orden
+# `pedido_explicito` devolvía la PRIMERA frase de `_PEDIDOS_EXPLICITOS` que
+# aparecía en el texto, así que el orden de la LISTA decidía por encima del
+# orden del MENSAJE. «write in english» está más arriba que cualquier frase en
+# español, así que «my daughter can write in English; answer me in Spanish»
+# guardaba inglés — y lo guardaba un año, para alguien que acababa de pedir
+# español en la misma oración.
+
+
+@pytest.mark.parametrize(
+    ("texto", "esperado"),
+    [
+        # Lo que reportó la revisión: un tercero que SABE un idioma, y un
+        # pedido en el otro. Gana el pedido, no el orden de la lista.
+        ("My daughter can write in English; answer me in Spanish", idioma.ES),
+        ("mi hija sabe escribir en ingles, contestame en espanol", idioma.ES),
+        # Dos pedidos de verdad: gana el último, que es como se corrige uno.
+        ("Answer in English; actually answer me in Spanish", idioma.ES),
+        ("contestame en espanol, mejor reply in english", idioma.EN),
+        # Un tercero nombrado no arruina un pedido que SÍ va dirigido a quien
+        # atiende.
+        ("my daughter is here, can you talk in english", idioma.EN),
+    ],
+)
+def test_el_orden_del_texto_decide_y_no_el_de_la_lista(
+    fake_redis_idioma, texto, esperado
+):
+    assert idioma.pedido_explicito(texto) == esperado
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        # Describir lo que hace un tercero no es pedir nada.
+        "my daughter can write in English",
+        "mi hija sabe hablar en ingles",
+        "my friend speaks spanish",
+        "mi socio habla en ingles",
+        "su hijo escribe en ingles",
+        # Ofrecer los dos idiomas tampoco elige: es una duda, y esto se guarda
+        # un año.
+        "answer in english or spanish",
+        "respondeme en ingles o espanol",
+    ],
+)
+def test_una_descripcion_o_una_duda_no_cambian_la_preferencia(
+    fake_redis_idioma, texto
+):
+    assert idioma.pedido_explicito(texto) is None
+    idioma.para_cliente("+5493517777778", texto)
+    assert idioma.cliente_guardado("+5493517777778") is None
+
+
+@pytest.mark.parametrize(
+    ("texto", "esperado"),
+    [
+        # Negar el otro idioma no es ofrecerlo: esto sigue pidiendo inglés.
+        ("reply in english not spanish", idioma.EN),
+        ("hablame en ingles, no en espanol", idioma.EN),
+    ],
+)
+def test_negar_el_otro_idioma_sigue_siendo_un_pedido(
+    fake_redis_idioma, texto, esperado
+):
+    assert idioma.pedido_explicito(texto) == esperado
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        # Citada y entre comillas, con un tercero de por medio.
+        'my boss said "reply in english"',
+        "el cartel decia respondé en español",
+        "don't reply in english",
+        "no me hables en ingles",
+    ],
+)
+def test_citada_o_negada_no_pide_nada_aunque_haya_varias(fake_redis_idioma, texto):
+    assert idioma.pedido_explicito(texto) is None
+
+
 @pytest.mark.parametrize("lengua", [idioma.ES, idioma.EN])
 def test_la_regla_de_idioma_no_le_hace_hablar_de_su_configuracion(lengua):
     """El mensaje observado en vivo: «por configuración del sistema te tengo que
