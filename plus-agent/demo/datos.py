@@ -25,6 +25,14 @@ CLIENTE_MOROSO = "Kiosco La Esquina"
 TELEFONO_MOROSO = "5493512223333"
 # Este no existe en ERPNext: es el alta del escenario de cliente nuevo.
 TELEFONO_NUEVO = "5493514445555"
+# El único con el código de cuenta SEPARADO del nombre para mostrar, como lo
+# deja ERPNext cuando la serie de numeración nombra al cliente. Los otros dos
+# usan el nombre como código —así los nombra el doble— y con eso
+# `conversacion.nombre_del_cliente` los descarta (nunca «Hola CUST-001»), así
+# que el perfil del cliente no viajaba nunca y el camino quedaba sin ejercitar.
+CODIGO_CON_NOMBRE = "CUST-0009"
+CLIENTE_CON_NOMBRE = "Panaderia Santa Rita"
+TELEFONO_CON_NOMBRE = "5493516667777"
 
 # (código, nombre, unidad, precio, stock)
 CATALOGO = [
@@ -80,13 +88,19 @@ def sembrar(almacen: Almacen, *, hoy: date | None = None) -> None:
             **pol,
         )
 
-    for cliente, telefono, calle in (
-        (CLIENTE_HABITUAL, TELEFONO_HABITUAL, "Belgrano 1200"),
-        (CLIENTE_MOROSO, TELEFONO_MOROSO, "Rivadavia 45"),
+    # (código de cuenta, nombre para mostrar, teléfono, calle). En los dos
+    # primeros el código ES el nombre, que es como los nombra el doble; el
+    # tercero los tiene separados.
+    for codigo, cliente, telefono, calle in (
+        (CLIENTE_HABITUAL, CLIENTE_HABITUAL, TELEFONO_HABITUAL, "Belgrano 1200"),
+        (CLIENTE_MOROSO, CLIENTE_MOROSO, TELEFONO_MOROSO, "Rivadavia 45"),
+        (CODIGO_CON_NOMBRE, CLIENTE_CON_NOMBRE, TELEFONO_CON_NOMBRE,
+         "Sarmiento 880"),
     ):
         almacen.crear(
             "Customer",
             {
+                "name": codigo,
                 "customer_name": cliente, "mobile_no": telefono,
                 "customer_group": "Comercios", "territory": "Cordoba",
                 "default_currency": MONEDA, "disabled": 0,
@@ -100,7 +114,7 @@ def sembrar(almacen: Almacen, *, hoy: date | None = None) -> None:
                 "address_type": "Shipping", "address_line1": calle,
                 "city": "Cordoba", "pincode": "5000", "country": "Argentina",
                 "is_primary_address": 1, "is_shipping_address": 1,
-                "links": [{"link_doctype": "Customer", "link_name": cliente,
+                "links": [{"link_doctype": "Customer", "link_name": codigo,
                            "parenttype": "Address"}],
             },
             **pol,

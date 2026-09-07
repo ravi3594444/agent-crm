@@ -818,9 +818,11 @@ def test_the_pilot_reads_both_confirmation_code_lengths() -> None:
 
 def test_the_fake_phones_are_obviously_invented() -> None:
     """Ningún dato del banco de pruebas puede parecer de una persona real."""
-    telefonos = (datos.TELEFONO_DUENO, datos.TELEFONO_EQUIPO,
-                 datos.TELEFONO_HABITUAL, datos.TELEFONO_MOROSO,
-                 datos.TELEFONO_NUEVO)
+    # De datos.py, no a mano: un teléfono nuevo entra solo a este test.
+    telefonos = tuple(
+        v for k, v in vars(datos).items() if k.startswith("TELEFONO_")
+    )
+    assert len(telefonos) >= 5
     for t in telefonos:
         assert t.startswith("54935"), t
         cuerpo = t[5:]
