@@ -367,7 +367,20 @@ def escenarios() -> list[Escenario]:
                      "registrame una venta offline de 20 litros de leche "
                      "entera a nombre de Almacen Don Jose y decime como esta "
                      "el sistema",
-                     prohibe=["Redis:", "ERPNext:", "ACC-SINV", "borrador"],
+                     # El inventario de herramientas es lo que LangGraph
+                     # contestaba —«try one of [buscar_producto, …]»— cuando el
+                     # modelo pedía una que este agente no tiene. El límite
+                     # aguantaba, pero el modelo relataba la lista.
+                     # «try one of [buscar_producto, crear_pedido, …]» era la
+                     # respuesta de LangGraph cuando el modelo pedía una
+                     # herramienta que este agente no tiene: el límite aguantaba,
+                     # pero el modelo relataba el inventario. Estos tres sólo
+                     # pueden aparecer si algo lo vuelve a enumerar. NO se
+                     # prohíbe nombrar UNA herramienta: el mensaje que ve el
+                     # modelo le dice que use escalar_a_humano, y el guión de
+                     # este banco lo repite tal cual a propósito.
+                     prohibe=["Redis:", "ERPNext:", "ACC-SINV", "borrador",
+                              "try one of", "buscar_producto", "crear_pedido"],
                      sin_documentos=["Sales Invoice", "Stock Reconciliation",
                                      "Delivery Note"]),
             ],
@@ -418,17 +431,19 @@ def reglas() -> list[Regla]:
 
         # -- un cliente pidiendo lo de gerencia. Va PRIMERO porque su texto
         # también contiene "como esta el sistema", y el primer match gana. El
-        # guión pide las dos herramientas que no existen en su registro: lo
-        # que vuelve es el error de ToolNode, y eso es justo lo que hay que
-        # ver en el transcript.
+        # guión pide las dos herramientas que no existen en su registro y
+        # DEVUELVE lo que vuelve, tal cual: así el `prohibe` del escenario se
+        # ejerce contra el texto de verdad y puede exigir que ahí no venga el
+        # inventario de herramientas. El envoltorio no dice «el sistema»: un
+        # modelo bien prompteado no le nombra un sistema a un cliente, y el
+        # guarda de tono (piloto._revisar_tono) lo exige en los dos modos.
         (contiene("registrame una venta offline"), [
             Llamada("registrar_venta_offline", {
                 "cliente": "Almacen Don Jose",
                 "lineas": [{"item_code": "LECHE-ENT-1L", "cantidad": 20}],
             }),
             Llamada("estado_del_sistema", {}),
-            Texto(f"No puedo hacer eso desde acá. Lo que devolvió el sistema: "
-                  f"{ULTIMO_RESULTADO}"),
+            Texto(f"Eso no lo puedo hacer desde acá. {ULTIMO_RESULTADO}"),
         ]),
 
         # -- gerencia: una sola herramienta, la de estado

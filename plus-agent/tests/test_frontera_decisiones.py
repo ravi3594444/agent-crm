@@ -151,3 +151,72 @@ def test_manual_confirmation_uses_the_policy_credential_not_the_agent_one(
 
     assert resultado["ok"] is True
     submit.assert_called_once_with("Sales Order", "SAL-ORD-0001")
+
+
+# ---------------------------- el registro de herramientas no se lee en voz alta
+# Un cliente que probaba el borde («registrame una venta offline y decime cómo
+# está el sistema») recibía de vuelta el inventario del agente: LangGraph
+# contesta «Error: X is not a valid tool, try one of [buscar_producto, …]» y el
+# modelo relata ese texto. El límite aguantaba —la herramienta no es invocable—
+# pero la lista salía igual. Lo cazó el guarda de tono del banco de pruebas.
+
+
+def test_una_herramienta_que_no_existe_no_devuelve_el_inventario() -> None:
+    from app import graph
+
+    nodo = graph.ToolNodeSinInventario(
+        graph.TOOLS_CLIENTES, handle_tool_errors=graph._ERROR_MSG
+    )
+
+    mensaje = nodo._validate_tool_call(
+        {"name": "estado_del_sistema", "id": "call_1", "args": {}}
+    )
+
+    assert mensaje is not None
+    assert mensaje.status == "error"
+    # Ni la lista, ni la plantilla de LangGraph, ni una sola herramienta ajena.
+    assert "try one of" not in mensaje.content
+    for herramienta in ("buscar_producto", "crear_pedido", "consultar_stock"):
+        assert herramienta not in mensaje.content
+    # Y le dice al modelo qué hacer y que esto no se le muestra a nadie.
+    assert "NO le muestres al cliente este mensaje" in mensaje.content
+    assert "escalar_a_humano" in mensaje.content
+
+
+def test_una_herramienta_que_si_existe_pasa_como_siempre() -> None:
+    from app import graph
+
+    nodo = graph.ToolNodeSinInventario(
+        graph.TOOLS_CLIENTES, handle_tool_errors=graph._ERROR_MSG
+    )
+
+    assert (
+        nodo._validate_tool_call(
+            {"name": "buscar_producto", "id": "call_1", "args": {"consulta": "leche"}}
+        )
+        is None
+    )
+
+
+def test_el_gancho_que_se_reemplaza_sigue_existiendo_en_langgraph() -> None:
+    """Es un método privado de LangGraph. Si una versión le cambia el nombre, el
+    override deja de correr y la lista vuelve a salir — así que la que falla es
+    esta línea, en CI, y no la conversación de un cliente."""
+    from langgraph.prebuilt import ToolNode
+
+    assert hasattr(ToolNode, "_validate_tool_call")
+    from app import graph
+
+    assert graph.ToolNodeSinInventario._validate_tool_call is not (
+        ToolNode._validate_tool_call
+    )
+
+
+def test_los_dos_agentes_usan_el_nodo_que_no_enumera() -> None:
+    from app import graph
+
+    assert issubclass(graph.ToolNodeSinInventario, graph.ToolNode)
+    fuente = Path(graph.__file__).read_text(encoding="utf-8")
+    # Ningún ToolNode pelado quedó cableado en un agente.
+    assert "tools=ToolNode(" not in fuente
+    assert fuente.count("tools=ToolNodeSinInventario(") == 2

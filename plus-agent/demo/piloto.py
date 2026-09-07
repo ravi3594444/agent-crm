@@ -156,6 +156,51 @@ _EQUIVALENTES = {
 }
 
 
+# --------------------------------------------------------------------- el tono
+# Lo que el producto vende es cómo se lee, así que el tono se verifica igual que
+# el estado de un documento: en los 17 escenarios y en los que vengan, y en los
+# DOS modos. Contra el guión prueba que el SISTEMA no mete jerga por su cuenta
+# —los avisos que escribe Python, lo que la herramienta le dicta al modelo—; y
+# contra Gemini de verdad prueba lo único que no se puede probar sin un modelo,
+# que es cómo redacta.
+#
+# Sólo del lado del CLIENTE. El aviso al equipo puede decir «borrador» y
+# «estado del sistema»: es su vocabulario de trabajo, y hay un escenario que se
+# lo pide.
+_JERGA_CLIENTE = (
+    ("borrador", "draft"),
+    ("pendiente de revisión", "pending review"),
+    ("el sistema", "the system"),
+    ("por configuración", "my configuration"),
+    ("estoy consultando", "i'm checking the system"),
+    ("quedó recibido", "was received"),
+)
+
+# Se saluda UNA vez por conversación. El segundo «¡Hola!» es el que delata que
+# del otro lado no se leyó lo anterior: fue una de las cuatro fallas de la
+# transcripción que abrió este trabajo.
+_SALUDO_PALABRA = frozenset({"hola", "buenas", "hello", "hi", "hey"})
+_SALUDO_FRASE = frozenset(
+    {"buen dia", "buen día", "buenos dias", "buenos días",
+     "good morning", "good afternoon", "good evening"}
+)
+_PALABRAS_SALUDO = re.compile(r"[a-záéíóúüñ']+")
+
+
+def _saluda(texto: str) -> bool:
+    """¿Ese mensaje ARRANCA saludando?
+
+    Por palabra y no por prefijo: «hicimos» empieza con «hi» y no saluda a
+    nadie.
+    """
+    palabras = _PALABRAS_SALUDO.findall(str(texto).strip().lower())[:2]
+    if not palabras:
+        return False
+    if palabras[0] in _SALUDO_PALABRA:
+        return True
+    return len(palabras) > 1 and " ".join(palabras[:2]) in _SALUDO_FRASE
+
+
 def _dice(todo: str, fragmento: str) -> bool:
     """¿El texto dice eso, en el idioma que sea?"""
     corto = fragmento.lower()
@@ -492,6 +537,7 @@ class Piloto:
         for fragmento in paso.prohibe:
             if _dice(todo, fragmento):
                 problemas.append(f"la respuesta dice {fragmento!r} y no debería")
+        problemas.extend(self._revisar_tono(paso, turno, todo))
         # Que un documento NO aparezca es una afirmación distinta de que exista
         # con cierto estado, y es la única forma de probar que una escritura no
         # autorizada no escribió: "no hay ninguna factura" no se puede decir
@@ -525,6 +571,30 @@ class Piloto:
                 )
         return problemas
 
+    def _revisar_tono(self, paso: esc.Paso, turno: Turno, todo: str) -> list[str]:
+        """Cómo le habla al CLIENTE. Falla en los dos modos, como los documentos.
+
+        No mira si la redacción es linda —eso no se puede afirmar— sino dos
+        cosas que sí: que no aparezca vocabulario interno, y que no se salude
+        dos veces en la misma conversación.
+        """
+        if turno.rol != "cliente":
+            return []
+        problemas: list[str] = []
+        for es, en in _JERGA_CLIENTE:
+            if es in todo or en in todo:
+                problemas.append(f"le habló al cliente en jerga interna: {es!r}")
+        # El aviso de avance no es la respuesta y no cuenta como saludo.
+        saluda = sum(1 for t in turno.respuestas if not _es_acuse(t) and _saluda(t))
+        if saluda:
+            self.saludos[paso.quien] = self.saludos.get(paso.quien, 0) + saluda
+            if self.saludos[paso.quien] > 1:
+                problemas.append(
+                    "saludó más de una vez en la misma conversación "
+                    f"({self.saludos[paso.quien]} veces)"
+                )
+        return problemas
+
     # -- un escenario
 
     def calentar(self) -> None:
@@ -547,6 +617,8 @@ class Piloto:
         print(f"\n=== {escenario.clave}: {escenario.titulo}", flush=True)
         self.ultimo_pedido = ""
         self.ultimo_codigo = ""
+        # Saludos por número en ESTA conversación: se permite uno.
+        self.saludos: dict[str, int] = {}
         if escenario.entorno:
             self.recrear_agente(escenario.entorno)
         elif self.entorno_cambiado:

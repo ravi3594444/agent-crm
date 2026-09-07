@@ -1011,3 +1011,38 @@ def test_limit_page_length_zero_means_no_limit_like_frappe(almacen: fe.Almacen) 
     assert len(todos) > 1
     assert len(todos) == len(almacen.listar("Item", limite=1000))
     assert len(almacen.listar("Item", limite=1)) == 1
+
+
+# ------------------------------------------------------------ el guarda de tono
+# El producto se vende por cómo se lee, así que el tono se verifica como el
+# estado de un documento: en los 17 escenarios y en los dos modos. Estas son las
+# dos afirmaciones que sí se pueden hacer sin opinar de la redacción.
+
+
+@pytest.mark.parametrize(
+    ("texto", "saluda"),
+    [
+        ("¡Hola! Decime para qué cliente es", True),
+        ("Buenas, ¿qué necesitás?", True),
+        ("Buen día, te anoto eso", True),
+        ("Hi there, one sec", True),
+        ("Hello! I can help", True),
+        # Lo que NO es un saludo, y por qué se mira la PALABRA y no el prefijo.
+        ("Hicimos el pedido ayer", False),
+        ("Listo, te lo anoté", False),
+        ("Dame un segundo que lo miro.", False),
+        ("✅ Pedido SO-1 confirmado", False),
+        ("", False),
+    ],
+)
+def test_el_guarda_reconoce_un_saludo_por_palabra(texto: str, saluda: bool) -> None:
+    assert piloto._saluda(texto) is saluda
+
+
+def test_la_jerga_que_no_puede_salirle_a_un_cliente() -> None:
+    """Cada par es (español, inglés): el banco corre en los dos idiomas."""
+    jerga = dict(piloto._JERGA_CLIENTE)
+    for palabra in ("borrador", "pendiente de revisión", "el sistema",
+                    "por configuración", "estoy consultando"):
+        assert palabra in jerga, f"{palabra!r} tiene que estar prohibida"
+        assert jerga[palabra], f"{palabra!r} necesita su equivalente en inglés"

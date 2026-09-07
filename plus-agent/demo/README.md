@@ -60,6 +60,25 @@ estado de documentos (`documentos`). No pesan igual en los dos modos:
   nadie.
 - **`prohibe` falla siempre.** Que el modelo prometa un descuento o diga
   "confirmado" cuando no lo está es exactamente lo que hay que cazar.
+- **El tono falla siempre, y del lado del cliente.** `piloto._revisar_tono`
+  revisa TODA respuesta a un cliente, en los 17 escenarios y en los que vengan:
+  que no aparezca vocabulario interno (`borrador`, `pendiente de revisión`,
+  `el sistema`, `por configuración`, `estoy consultando`, en los dos idiomas) y
+  que no se salude dos veces en la misma conversación. No opina de la
+  redacción, que no se puede afirmar; afirma esas dos cosas, que sí. Contra el
+  guión prueba que el SISTEMA no mete jerga por su cuenta —los avisos que
+  escribe Python, lo que la herramienta le dicta al modelo—; contra Gemini de
+  verdad prueba lo único que no se puede probar sin un modelo, que es cómo
+  redacta. Los avisos al EQUIPO no se revisan: «borrador» y «estado del
+  sistema» son su vocabulario de trabajo.
+
+  La primera corrida con este guarda encontró algo que no era de tono: cuando
+  el modelo pedía una herramienta que su agente no tiene, LangGraph contestaba
+  «Error: X is not a valid tool, try one of [buscar_producto, …]» y el modelo
+  relataba la lista. El límite aguantaba —la herramienta no es invocable— pero
+  un cliente que probaba el borde recibía el inventario. Está arreglado en
+  `app/graph.py::ToolNodeSinInventario`.
+
 - **`espera` sólo falla en modo offline.** Contra un guión el texto es exacto;
   contra un modelo libre, "tengo leche entera" es una respuesta correcta que
   no contiene la cadena `LECHE-ENT-1L`. En modo gemini esas diferencias se
