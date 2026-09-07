@@ -296,6 +296,10 @@ def entorno_del_agente(modo: str = "offline", modelo_llm: str = "") -> dict[str,
         "WHATSAPP_PHONE_NUMBER_ID": PHONE_ID,
         # --- el negocio
         "ERPNEXT_COMPANY": "Lacteos Demo SA",
+        # Con qué nombre se presenta el asistente. Faltaba, así que el prompt
+        # decía «atendés el WhatsApp de la empresa» y el modelo no tenía cómo
+        # nombrar el negocio cuando un cliente le preguntaba para quién trabaja.
+        "NOMBRE_NEGOCIO": "Lacteos Demo SA",
         "ERPNEXT_WAREHOUSE": "Principal - LD",
         "TELEFONOS_EQUIPO": f"{datos.TELEFONO_DUENO},{datos.TELEFONO_EQUIPO}",
         "TELEFONO_DUENO": datos.TELEFONO_DUENO,

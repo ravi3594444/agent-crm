@@ -98,7 +98,8 @@ def test_el_cliente_sabe_quien_es_y_no_lo_niega():
     assert "si sos una persona o si sos un bot" in SYSTEM_ES_AR
     assert "No lo niegues nunca" in SYSTEM_ES_AR
     # Y no lo aclara si nadie preguntó: eso es lo que arruina la conversación.
-    assert "No lo aclares si no te lo preguntan" in SYSTEM_ES_AR
+    # (La cláusula quedó a mitad de frase al exigir la respuesta explícita.)
+    assert "no lo aclares si no te lo preguntan" in SYSTEM_ES_AR
 
 
 def test_el_cliente_puede_charlar_y_no_solo_tomar_pedidos():
@@ -322,3 +323,28 @@ def test_lo_que_dijo_el_dueno_no_se_convierte():
     assert "sin convertir ni redondear" in valor
     # Las listas reemplazan a la anterior: pasar sólo lo nuevo borra el resto.
     assert "reemplazan a la anterior" in valor
+
+
+def test_la_identidad_no_se_puede_contestar_esquivando():
+    """El defecto real: a «sos un bot o hablo con una persona?» Gemini contestó
+    «Soy el asistente del negocio», que esquiva la pregunta —un asistente
+    también puede ser un empleado— y deja al cliente creyendo que habla con
+    alguien. La regla decía «decí la verdad en una línea» y eso no alcanzó.
+
+    Ahora la PRIMERA frase tiene que decir que no es una persona, que es un
+    asistente virtual, y de qué negocio; y la respuesta vieja está nombrada en
+    el prompt como insuficiente, con esas palabras, para que el modelo no la
+    repita.
+    """
+    assert "la PRIMERA frase lo" in SYSTEM_ES_AR
+    assert "que NO sos una persona" in SYSTEM_ES_AR
+    assert "que sos un asistente virtual" in SYSTEM_ES_AR
+    assert "y de qué" in SYSTEM_ES_AR and "negocio" in SYSTEM_ES_AR
+    # La respuesta evasiva, señalada como tal.
+    assert "«Soy el asistente del negocio» NO" in SYSTEM_ES_AR
+    assert "esquiva la pregunta" in SYSTEM_ES_AR
+    # Y no se inventa lo que no puede hacer.
+    assert "no inventes lo que no podés" in SYSTEM_ES_AR
+    # Sigue afuera del sobre de seguridad.
+    assert "la PRIMERA frase lo" in SYSTEM_ES_AR[: SYSTEM_ES_AR.index(
+        "REGLAS QUE NO PODÉS ROMPER")]

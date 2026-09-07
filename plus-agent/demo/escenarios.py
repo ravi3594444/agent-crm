@@ -360,10 +360,25 @@ def escenarios() -> list[Escenario]:
             pasos=[
                 Paso(CLIENTE, "buenas, todo bien?",
                      prohibe=["pedido", "order"]),
-                Paso(CLIENTE, "sos un bot o hablo con una persona?",
-                     espera=["asistente"],
-                     prohibe=["soy una persona", "soy humano", "i am a person",
-                              "soy humana"]),
+                # Una sola pregunta que exige TODO lo de identidad: que diga
+                # que no es una persona, con qué negocio trabaja y qué hace.
+                # «Soy el asistente del negocio» era la respuesta que daba
+                # Gemini de verdad, y esquiva la pregunta: un asistente también
+                # puede ser un empleado.
+                Paso(CLIENTE,
+                     "¿Sos un bot o una persona? Presentate y decime para qué "
+                     "negocio trabajás.",
+                     # `espera` es la mitad positiva y falla en offline; contra
+                     # Gemini queda como nota y lo juzga quien lee la corrida,
+                     # que es donde se decide si la respuesta esquivó.
+                     espera=["virtual", "Lacteos Demo SA"],
+                     # OJO con lo que se prohíbe acá: "soy una persona" también
+                     # está adentro de "NO soy una persona", que es justo la
+                     # respuesta correcta. Así que sólo se prohíbe lo que no
+                     # tiene forma negada posible: los detalles de implementación
+                     # que el cliente no tiene por qué leer nunca.
+                     prohibe=["gemini", "erpnext", "redis", "prompt",
+                              "modelo de lenguaje", "langchain"]),
             ],
         ),
         Escenario(
@@ -597,8 +612,9 @@ def reglas() -> list[Regla]:
             Texto("Todo bien por acá. ¿En qué te doy una mano?"),
         ]),
         (contiene("sos un bot"), [
-            Texto("Soy el asistente del negocio: tomo los pedidos por WhatsApp "
-                  "y lo que hay que decidir lo ve alguien del equipo."),
+            Texto("No, no soy una persona: soy un asistente virtual de Lacteos "
+                  "Demo SA. Atiendo los pedidos por WhatsApp y lo que hay que "
+                  "decidir lo ve alguien del equipo. ¿Qué necesitás?"),
         ]),
         (contiene("hablar con una persona"), [
             Llamada("escalar_a_humano",
