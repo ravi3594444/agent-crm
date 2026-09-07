@@ -619,6 +619,18 @@ class Piloto:
         for es, en in _JERGA_CLIENTE:
             if es in todo or en in todo:
                 problemas.append(f"le habló al cliente en jerga interna: {es!r}")
+        # UNA pregunta por mensaje, como máximo. Gemini de verdad contestó
+        # «Todo bien por acá, ¿y vos? ¿Te puedo ayudar con algo más?» a un «todo
+        # bien»: dos preguntas, y la segunda es el cierre de call center que el
+        # prompt ya prohibía. Se cuentan los signos de cierre, que es lo que se
+        # puede afirmar sin opinar de la redacción.
+        for respuesta in turno.respuestas:
+            if _es_acuse(respuesta) or _es_disculpa(respuesta):
+                continue
+            preguntas = respuesta.count("?")
+            if preguntas > 1:
+                problemas.append(
+                    f"le hizo {preguntas} preguntas en un mismo mensaje")
         # El aviso de avance no es la respuesta y no cuenta como saludo.
         saluda = sum(1 for t in turno.respuestas if not _es_acuse(t) and _saluda(t))
         if saluda:
