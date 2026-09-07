@@ -510,7 +510,7 @@ failures never count towards that limit.
 is really being checked.** There is no blind acknowledgement. A text gets its
 answer; if the model started a tool (a stock lookup, an order) and that work is
 still running after `WHATSAPP_PROGRESS_DELAY_SECONDS` (default 3 s), the person
-gets one short *"Estoy consultando el sistema, dame un momento."* first, in
+gets one short *"Dame un segundo que lo miro."* first, in
 their language, and then the answer. A fast tool, a direct answer from the
 model, a four-digit code or a button never produce that notice: they produce
 the answer and nothing else, however long the provider takes (the latency is
@@ -1017,11 +1017,13 @@ message they send, plus — only sometimes — one progress notice before it:
 3. When a tool really starts, `app/progreso.py` (a LangChain callback handler
    passed in the run config, i.e. the documented observation hook) arms **one**
    timer. If the turn is still open after `WHATSAPP_PROGRESS_DELAY_SECONDS`
-   (default 3 s) the person gets *"Estoy consultando el sistema, dame un
-   momento."* / *"I'm checking the system, give me a moment."* in their own
+   (default 3 s) **and that tool work is still running**, the person gets
+   *"Dame un segundo que lo miro."* / *"One sec, let me check."* in their own
    language — the manager's setting for the team, the customer's preference or
    mirrored language for customers. Several tools in one turn share that one
-   notice. A fast tool cancels it, so the person still gets one message.
+   notice. A fast tool cancels it, so the person still gets one message — and
+   so does a fast tool followed by a slow model call, which used to send the
+   notice anyway and describe a lookup that had already finished.
 4. The worker closes the notice **before** sending the final reply, holding the
    same lock the in-flight notice holds, so a progress message can never arrive
    after the answer. The notice is claimed once per inbound message in Redis

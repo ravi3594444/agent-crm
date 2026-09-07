@@ -373,7 +373,7 @@ class Piloto:
         """Los textos nuevos para ese número, sin contar el aviso de avance.
 
         Un turno de texto manda UNA respuesta. Si una herramienta tarda, antes
-        puede llegar el aviso de avance («Estoy consultando el sistema…»); no
+        puede llegar el aviso de avance («Dame un segundo que lo miro»); no
         es la respuesta y no se cuenta como tal. Se espera la respuesta.
 
         El aviso se reconoce contra el CATÁLOGO, en los dos idiomas, y no

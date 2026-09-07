@@ -37,8 +37,14 @@ def test_el_aviso_de_avance_sale_en_el_idioma_del_destinatario(lengua):
     assert texto.strip()
     if lengua == EN:
         assert restos_en_espanol(texto) == []
-    else:
-        assert "consultando" in texto
+    # Cada idioma tiene su texto escrito a mano: no se le manda el mismo a los dos.
+    assert webhook.texto_progreso(ES) != webhook.texto_progreso(EN)
+    # Y ninguno de los dos narra lo que pasa por dentro. Antes decía «Estoy
+    # consultando el sistema, dame un momento»: quien está esperando no tiene por
+    # qué enterarse de que existe un sistema, y en la mitad de los turnos en que
+    # ese aviso salía ya no se estaba consultando nada (app/progreso.py).
+    assert "sistema" not in texto.lower()
+    assert "system" not in texto.lower()
 
 
 @pytest.mark.parametrize("lengua", IDIOMAS)

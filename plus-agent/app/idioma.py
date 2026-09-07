@@ -98,9 +98,12 @@ CATALOGO: dict[str, dict[str, str]] = {
     # herramienta y ésta ya está corriendo hace unos segundos (app/progreso.py):
     # recién entonces es verdad que se está consultando algo. Una respuesta
     # directa del modelo no manda esto, tarde lo que tarde.
+    # La clave se llama «consultando» por historia; el texto ya no nombra
+    # ningún sistema. Nadie le dice a un cliente que está consultando un
+    # sistema: le dice que le da un segundo.
     "progreso.consultando": {
-        ES: "Estoy consultando el sistema, dame un momento.",
-        EN: "I'm checking the system, give me a moment.",
+        ES: "Dame un segundo que lo miro.",
+        EN: "One sec, let me check.",
     },
     "ack.solo_texto": {
         ES: (
