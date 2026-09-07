@@ -1,9 +1,16 @@
-"""Read-only customer/management tools with server-enforced authorization."""
+"""Read-only customer/management tools with server-enforced authorization.
+
+Los parámetros llevan `description`: es lo que el modelo lee para decidir QUÉ
+mandarle a cada herramienta. Sin eso veía `item_code` pelado y le pasaba las
+palabras del cliente («muzzarella») donde va el código del catálogo.
+"""
 import os
 from datetime import date
+from typing import Annotated
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
+from pydantic import Field
 
 from app import erpnext, idioma, inventario, policy
 from app.formato import pesos
@@ -11,7 +18,13 @@ from app.runtime_context import RuntimeContextError, actor_context, require_cust
 
 
 @tool
-def buscar_producto(consulta: str) -> str:
+def buscar_producto(
+    consulta: Annotated[
+        str,
+        Field(description="Lo que nombró el cliente, con SUS palabras "
+                          "(«muzzarella», «leche entera»). Nunca un código."),
+    ],
+) -> str:
     """Busca productos del catálogo por nombre y muestra su unidad exacta."""
     items = erpnext.get_list(
         "Item",
@@ -117,7 +130,13 @@ def _catalog_price_is_valid(
 
 
 @tool
-def consultar_stock(item_code: str) -> str:
+def consultar_stock(
+    item_code: Annotated[
+        str,
+        Field(description="Código EXACTO del catálogo, tal como lo devolvió "
+                          "buscar_producto. No las palabras del cliente."),
+    ],
+) -> str:
     """Consulta un nivel orientativo en el depósito de preparación."""
     try:
         warehouse = erpnext.default_warehouse()
@@ -193,7 +212,15 @@ def consultar_stock(item_code: str) -> str:
 
 
 @tool
-def estado_pedido(numero_pedido: str, config: RunnableConfig) -> str:
+def estado_pedido(
+    numero_pedido: Annotated[
+        str,
+        Field(description="El número real del pedido, como se lo dio el "
+                          "sistema (SAL-ORD-2026-00042). Si no lo tenés, "
+                          "pedíselo: no lo inventes."),
+    ],
+    config: RunnableConfig,
+) -> str:
     """Consulta un pedido; clientes solo pueden ver pedidos de su propia cuenta."""
     try:
         actor = actor_context(config)

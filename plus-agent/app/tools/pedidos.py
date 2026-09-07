@@ -6,6 +6,7 @@ import os
 import re
 import unicodedata
 from datetime import date, datetime, timedelta
+from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain_core.runnables import RunnableConfig
@@ -465,9 +466,16 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
 
 @tool
 def crear_lead(
-    nombre: str,
+    nombre: Annotated[
+        str,
+        Field(description="El nombre del negocio o de la persona, como lo dijo. "
+                          "No lo inventes."),
+    ],
     config: RunnableConfig,
-    nota: str = "",
+    nota: Annotated[
+        str,
+        Field(description="Opcional: en una frase, qué quería. Lo lee el equipo."),
+    ] = "",
 ) -> str:
     """Registra al remitente autenticado como contacto potencial."""
     try:
@@ -521,8 +529,18 @@ def crear_lead(
 
 @tool
 def crear_pedido(
-    lineas: list[LineaPedido],
-    fecha_entrega: str,
+    lineas: Annotated[
+        list[LineaPedido],
+        Field(description="Una línea por producto, con el código del catálogo, "
+                          "la cantidad y la unidad que confirmó el cliente."),
+    ],
+    fecha_entrega: Annotated[
+        str,
+        Field(description="Cuándo lo quiere. En AAAA-MM-DD calculada desde HOY, "
+                          "o tal como lo dijo si fue «mañana», «el martes» o "
+                          "«2 de septiembre». Nunca la inventes ni la supongas: "
+                          "si no la dijo, preguntala."),
+    ],
     config: RunnableConfig,
 ) -> str:
     """Crea un pedido para el cliente autenticado.
@@ -661,7 +679,11 @@ def crear_pedido(
 
 @tool
 def crear_cliente(
-    nombre: str,
+    nombre: Annotated[
+        str,
+        Field(description="El nombre del negocio o de la persona, como lo dijo. "
+                          "No lo inventes ni lo completes."),
+    ],
     direccion: DireccionEntrega,
     config: RunnableConfig,
 ) -> str:
@@ -719,7 +741,14 @@ def crear_cliente(
 
 
 @tool
-def escalar_a_humano(motivo: str, config: RunnableConfig) -> str:
+def escalar_a_humano(
+    motivo: Annotated[
+        str,
+        Field(description="En una frase: qué necesita y por qué lo tiene que ver "
+                          "una persona. Esto lo lee el EQUIPO, no el cliente."),
+    ],
+    config: RunnableConfig,
+) -> str:
     """Deriva la conversación autenticada a una persona del equipo."""
     try:
         actor = actor_context(config)
@@ -785,8 +814,17 @@ def escalar_a_humano(motivo: str, config: RunnableConfig) -> str:
 
 @tool
 def pedir_excepcion_de_entrega(
-    numero_de_pedido: str,
-    lo_que_pidio_el_cliente: str,
+    numero_de_pedido: Annotated[
+        str,
+        Field(description="El número real del pedido que YA está creado. No lo "
+                          "inventes: si no lo tenés, pedíselo."),
+    ],
+    lo_que_pidio_el_cliente: Annotated[
+        str,
+        Field(description="Sus palabras, tal cual. No las interpretes, no "
+                          "conviertas la fecha y no propongas condiciones: eso "
+                          "lo decide el encargado."),
+    ],
     config: RunnableConfig,
 ) -> str:
     """Pide una entrega fuera de los días de reparto para un pedido ya creado.
