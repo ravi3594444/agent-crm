@@ -42,6 +42,30 @@ def business_today() -> str:
         raise RuntimeError("BUSINESS_TIMEZONE inválida") from exc
 
 
+def negocio() -> str:
+    return os.getenv("NOMBRE_NEGOCIO", "la empresa").strip() or "la empresa"
+
+
+def identidad(nombre_negocio: str | None = None) -> str:
+    """La primera línea del prompt: quién es el que atiende.
+
+    ``NOMBRE_AGENTE`` es opcional y lo pone el dueño. Con un nombre cargado el
+    asistente se presenta con él («Sos Sofi, y atendés…»); sin nada, se presenta
+    por lo que hace y no por un nombre inventado. Un nombre no lo convierte en
+    una persona: la regla de QUIÉN SOS le exige decir la verdad cuando se lo
+    preguntan, y eso no depende de esta variable.
+
+    El valor se limpia porque viene del entorno: una sola línea y acotado, así
+    una variable mal cargada no puede empujar texto adentro del prompt.
+    """
+    empresa = (nombre_negocio or negocio()).strip() or "la empresa"
+    crudo = str(os.getenv("NOMBRE_AGENTE", "") or "")
+    nombre = " ".join(crudo.split())[:40].strip()
+    if nombre:
+        return f"Sos {nombre}, y atendés el WhatsApp de {empresa}, una empresa láctea argentina."
+    return f"Atendés el WhatsApp de {empresa}, una empresa láctea argentina."
+
+
 def _mensajes(state) -> list[BaseMessage]:
     messages = state.messages if hasattr(state, "messages") else state["messages"]
     return list(messages or [])
@@ -85,7 +109,7 @@ def prompt_clientes(state, config: RunnableConfig) -> list[BaseMessage]:
     # del último mensaje, que es el comportamiento anterior palabra por palabra.
     guardado = idioma.cliente_guardado(_configurable(config).get("actor_phone"))
     system = SYSTEM_ES_AR.format(
-        NEGOCIO=os.getenv("NOMBRE_NEGOCIO", "la empresa"),
+        IDENTIDAD=identidad(),
         CONTEXTO_CLIENTE=contexto,
         HORARIO=os.getenv("HORARIO_ATENCION", "lunes a viernes de 8 a 17"),
         HOY=business_today(),

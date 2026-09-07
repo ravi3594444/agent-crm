@@ -333,3 +333,74 @@ def test_los_digitos_de_un_codigo_no_cambian_al_traducir():
     assert re.findall(r"\d{6}", es) == [CODIGO]
     assert re.findall(r"\d{6}", en) == [CODIGO]
     assert PEDIDO in es and PEDIDO in en
+
+
+# ------------------------------------------- cómo se pide el idioma en la vida real
+# «can u talk in english» llegó de un cliente y no coincidía con ninguna frase de
+# la lista, así que el modelo quedaba solo con la regla del prompt y contestaba que
+# «por configuración del sistema» tenía que hablar en español. Nadie habla así.
+
+
+@pytest.mark.parametrize(
+    ("texto", "esperado"),
+    [
+        ("can u talk in english", idioma.EN),
+        ("can you talk in english?", idioma.EN),
+        ("english please", idioma.EN),
+        ("do you speak english", idioma.EN),
+        ("please write in english", idioma.EN),
+        ("switch to english", idioma.EN),
+        ("I prefer english", idioma.EN),
+        ("talk to me in english", idioma.EN),
+        ("answer me in english", idioma.EN),
+        ("podés hablar en inglés?", idioma.EN),
+        ("escribime en inglés", idioma.EN),
+        ("talk in spanish", idioma.ES),
+        ("spanish please", idioma.ES),
+        ("switch to spanish", idioma.ES),
+        ("please respond in spanish", idioma.ES),
+        ("write to me in spanish", idioma.ES),
+    ],
+)
+def test_las_formas_en_que_se_pide_un_idioma_de_verdad(fake_redis_idioma, texto, esperado):
+    assert idioma.pedido_explicito(texto) == esperado
+
+
+# La otra mitad, y la que importa más: la preferencia se guarda UN AÑO, así que una
+# frase que sólo NOMBRA un idioma no puede cambiárselo a nadie. «¿Hablás inglés?»
+# escrito en español pregunta qué sabemos hacer; contestarlo no es cambiar el idioma
+# de la atención, y un falso positivo acá deja a un cliente que escribe en español
+# recibiendo inglés hasta que pida lo contrario.
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "hablas ingles?",
+        "¿hablás inglés?",
+        "el cartel esta en ingles",
+        "the label is in english",
+        "necesito la factura en ingles",
+        "tenes algo escrito en ingles?",
+        "quiero 5 unidades de leche",
+    ],
+)
+def test_nombrar_un_idioma_no_es_pedirlo(fake_redis_idioma, texto):
+    assert idioma.pedido_explicito(texto) is None
+    idioma.para_cliente("+5493517777777", texto)
+    assert idioma.cliente_guardado("+5493517777777") is None
+
+
+@pytest.mark.parametrize("lengua", [idioma.ES, idioma.EN])
+def test_la_regla_de_idioma_no_le_hace_hablar_de_su_configuracion(lengua):
+    """El mensaje observado en vivo: «por configuración del sistema te tengo que
+    hablar en español». La regla ahora gobierna cómo escribe y nada más."""
+    regla = idioma.regla_prompt(lengua)
+    # Le dice explícitamente que eso no se dice, en su propio idioma.
+    prohibido = "configuración" if lengua == idioma.ES else "configuration"
+    assert prohibido in regla
+    assert "NO expliques reglas" in regla or "do NOT explain rules" in regla
+    # Y le da la frase de persona para cuando no puede cambiarlo.
+    assert "encargado" in regla or "manager" in regla
+    # Lo que desapareció: la explicación de quién eligió el idioma y la herramienta.
+    assert "eligió esta persona" not in regla
+    assert "usá la herramienta" not in regla
+    assert "use the tool" not in regla

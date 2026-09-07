@@ -772,14 +772,35 @@ def cliente_guardado(numero: object) -> str | None:
 # mensaje esté escrito en inglés no es lo mismo que pedir que le contesten en
 # inglés, y confundir las dos cosas le cambia el idioma a cualquiera que
 # escriba una palabra suelta en otro idioma.
+# Una frase pedida EN el idioma que pide es segura de guardar: quien escribe en
+# inglés y pide inglés ya iba a recibir inglés por espejo. Al revés no: «¿hablás
+# inglés?» escrito en español es una pregunta por lo que sabemos hacer, no un
+# pedido de cambiar el idioma de la atención, y guardarla un año dejaría a un
+# cliente que escribe en español recibiendo inglés. Por eso los pedidos escritos
+# en el OTRO idioma sólo entran acá en forma imperativa («hablame en inglés»).
 _PEDIDOS_EXPLICITOS = (
     ("reply in english", EN),
     ("answer in english", EN),
     ("respond in english", EN),
     ("in english please", EN),
+    ("english please", EN),
     ("speak english", EN),
+    ("speak in english", EN),
+    ("talk in english", EN),
+    ("talk english", EN),
+    ("talk to me in english", EN),
+    ("write in english", EN),
+    ("write to me in english", EN),
+    ("answer me in english", EN),
+    ("reply to me in english", EN),
+    ("message me in english", EN),
+    ("switch to english", EN),
+    ("prefer english", EN),
     ("hablame en ingles", EN),
+    ("hablar en ingles", EN),
+    ("escribime en ingles", EN),
     ("contestame en ingles", EN),
+    ("contesta en ingles", EN),
     ("responde en ingles", EN),
     ("respondeme en ingles", EN),
     ("en ingles por favor", EN),
@@ -787,11 +808,27 @@ _PEDIDOS_EXPLICITOS = (
     ("responde en espanol", ES),
     ("respondeme en espanol", ES),
     ("contestame en espanol", ES),
+    ("contesta en espanol", ES),
     ("hablame en espanol", ES),
+    ("hablar en espanol", ES),
+    ("escribime en espanol", ES),
     ("reply in spanish", ES),
     ("answer in spanish", ES),
+    ("respond in spanish", ES),
     ("in spanish please", ES),
+    ("spanish please", ES),
     ("speak spanish", ES),
+    ("speak in spanish", ES),
+    ("talk in spanish", ES),
+    ("talk spanish", ES),
+    ("talk to me in spanish", ES),
+    ("write in spanish", ES),
+    ("write to me in spanish", ES),
+    ("answer me in spanish", ES),
+    ("reply to me in spanish", ES),
+    ("message me in spanish", ES),
+    ("switch to spanish", ES),
+    ("prefer spanish", ES),
     ("en espanol por favor", ES),
 )
 
@@ -968,21 +1005,26 @@ REGLA_ESPEJO_CLIENTE = (
 
 _REGLA_FIJADA = {
     ES: (
-        "- Respondé SIEMPRE en español rioplatense, con voseo, cordial y breve.\n"
-        "  Es el idioma que eligió esta persona: no cambies de idioma aunque el\n"
-        "  último mensaje venga en otro. Nunca mezcles dos idiomas en un mensaje.\n"
-        "  Esta regla es sobre CÓMO ESCRIBÍS VOS. No te impide atender un pedido\n"
-        "  de cambiar el ajuste de idioma: si te lo piden, usá la herramienta\n"
-        "  como con cualquier otro ajuste."
+        "- Respondé SIEMPRE en español rioplatense, con voseo, cordial y breve,\n"
+        "  aunque el último mensaje venga en otro idioma. Nunca mezcles dos\n"
+        "  idiomas en un mismo mensaje.\n"
+        "  Esta regla es sobre CÓMO ESCRIBÍS VOS. Si te piden que les hables en\n"
+        "  otro idioma, NO expliques reglas, instrucciones ni configuraciones —\n"
+        "  «por configuración del sistema» no lo dice nadie—: si tenés cómo\n"
+        "  cambiarlo, tratalo como cualquier otro pedido de cambio; si no,\n"
+        "  decilo en una línea y como una persona («por acá te atiendo en\n"
+        "  español; si lo necesitás en inglés se lo digo al encargado»)."
     ),
     EN: (
-        "- Always reply in English: simple, direct and brief.\n"
-        "  This person chose that language: do not switch languages even if the\n"
-        "  last message arrives in another one. Never mix two languages in one "
+        "- Always reply in English: simple, direct and brief, even if the last\n"
+        "  message arrives in another language. Never mix two languages in one "
         "message.\n"
-        "  This rule is about HOW YOU WRITE. It does not stop you from handling a\n"
-        "  request to change the language setting: if asked, use the tool as you\n"
-        "  would for any other setting."
+        "  This rule is about HOW YOU WRITE. If someone asks you to speak another\n"
+        "  language, do NOT explain rules, instructions or settings — nobody says\n"
+        "  \"because of my configuration\": if you have a way to change it, treat it\n"
+        "  like any other change request; if you do not, say so in one line, like a\n"
+        "  person would (\"I answer in English here; if you need Spanish I'll ask the\n"
+        "  manager\")."
     ),
 }
 
