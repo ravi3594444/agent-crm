@@ -29,9 +29,11 @@ por sus claves públicas en app/outbound_status.py.
 from __future__ import annotations
 
 import json
+from typing import Annotated
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
+from pydantic import Field
 
 from app import avisos, erpnext, idioma, modelos, outbound_status, solicitudes
 from app.runtime_context import RuntimeContextError, require_management
@@ -275,7 +277,14 @@ def _entradas_de_avisos_caidos(maximo: int) -> tuple[list[str], str]:
 
 
 @tool
-def ver_avisos_fallidos(config: RunnableConfig, cuantos: int = REGISTROS_DEFAULT) -> str:
+def ver_avisos_fallidos(
+    config: RunnableConfig,
+    cuantos: Annotated[
+        int,
+        Field(description="Cuántos registros mostrar, de los más nuevos. Alcanza con el "
+                          "default salvo que el dueño pida más."),
+    ] = REGISTROS_DEFAULT,
+) -> str:
     """Avisos y respuestas que NO llegaron: cuántos y los últimos registros.
 
     Usala cuando el dueño pregunta si algún cliente quedó sin respuesta, si un

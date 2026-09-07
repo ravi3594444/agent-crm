@@ -17,9 +17,11 @@ entero. Cada una llama a ``require_management`` con el teléfono que firmó Meta
 (app/runtime_context.py), antes de tocar ERPNext.
 """
 from datetime import timedelta
+from typing import Annotated
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
+from pydantic import Field
 
 from app import erpnext, policy
 from app.formato import pesos
@@ -28,7 +30,18 @@ from app.runtime_context import SIN_PERMISO, RuntimeContextError, require_manage
 
 @tool
 def ejecutar_reporte(
-    config: RunnableConfig, nombre_reporte: str, filtros: dict | None = None
+    config: RunnableConfig,
+    nombre_reporte: Annotated[
+        str,
+        Field(description="El nombre EXACTO del reporte en ERPNext. Si no estás seguro de "
+                          "cuál es, preguntale al dueño qué quiere ver en vez de probar "
+                          "nombres."),
+    ],
+    filtros: Annotated[
+        dict | None,
+        Field(description="Los filtros del reporte, tal como los pide ERPNext. Vacío si "
+                          "no hace falta ninguno."),
+    ] = None,
 ) -> str:
     """Ejecuta un reporte oficial de ERPNext y devuelve los datos reales.
 
@@ -75,7 +88,14 @@ def pedidos_pendientes(config: RunnableConfig) -> str:
 
 
 @tool
-def ventas_del_periodo(config: RunnableConfig, dias: int = 7) -> str:
+def ventas_del_periodo(
+    config: RunnableConfig,
+    dias: Annotated[
+        int,
+        Field(description="Cuántos días hacia atrás mirar. Si el dueño dijo «esta semana» "
+                          "son 7; si no dijo nada, 7."),
+    ] = 7,
+) -> str:
     """Ventas confirmadas de los últimos N días."""
     try:
         require_management(config)
@@ -146,7 +166,14 @@ def cobranzas_vencidas(config: RunnableConfig) -> str:
 
 
 @tool
-def ficha_cliente(config: RunnableConfig, nombre_o_codigo: str) -> str:
+def ficha_cliente(
+    config: RunnableConfig,
+    nombre_o_codigo: Annotated[
+        str,
+        Field(description="El nombre del cliente como lo nombró el dueño, o su código de "
+                          "ERPNext. Cualquiera de los dos sirve."),
+    ],
+) -> str:
     """Vista 360 de un cliente: datos, últimos pedidos y saldo."""
     try:
         require_management(config)

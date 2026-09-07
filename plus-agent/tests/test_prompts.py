@@ -231,6 +231,12 @@ def _herramientas_del_cliente():
     return graph.TOOLS_CLIENTES
 
 
+def _todas_las_herramientas():
+    from app import graph
+
+    return [*graph.TOOLS_CLIENTES, *graph.TOOLS_GERENCIA]
+
+
 def test_toda_herramienta_del_cliente_se_explica_sola():
     for herramienta in _herramientas_del_cliente():
         assert herramienta.description.strip(), f"{herramienta.name} sin descripción"
@@ -239,7 +245,7 @@ def test_toda_herramienta_del_cliente_se_explica_sola():
 def test_todo_parametro_que_ve_el_modelo_dice_qué_poner():
     """Un parámetro sin descripción es una llamada mal armada esperando pasar."""
     sin_explicar = []
-    for herramienta in _herramientas_del_cliente():
+    for herramienta in _todas_las_herramientas():
         esquema = (
             herramienta.args_schema.model_json_schema()
             if herramienta.args_schema
@@ -281,3 +287,38 @@ def test_los_parametros_que_mas_se_equivocan_dicen_exactamente_qué_va():
     assert "No las interpretes" in descripcion(
         "pedir_excepcion_de_entrega", "lo_que_pidio_el_cliente"
     )
+
+
+def test_la_accion_del_dueno_se_elige_de_una_lista_cerrada():
+    """`proponer_accion` acepta ocho verbos y nada más, y el modelo tiene que
+    leerlo en el parámetro y no sólo en la descripción de la herramienta."""
+    from app import graph
+
+    accion = next(t for t in graph.TOOLS_GERENCIA if t.name == "proponer_accion")
+    descripcion = accion.args_schema.model_json_schema()["properties"]["accion"][
+        "description"
+    ]
+    for verbo in ("confirmar", "rechazar", "preparar", "despachar", "despreparar",
+                  "cancelar", "contraoferta", "retiro"):
+        assert verbo in descripcion
+    assert "no se inventan" in descripcion
+
+
+def test_lo_que_dijo_el_dueno_no_se_convierte():
+    """Los días, las horas y la plata los valida Python: el modelo los pasa tal
+    cual. Estaba en el docstring y no en el parámetro, que es lo que se lee
+    junto con el argumento que hay que armar."""
+    from app import graph
+
+    por_nombre = {t.name: t for t in graph.TOOLS_GERENCIA}
+    detalle = por_nombre["proponer_accion"].args_schema.model_json_schema()[
+        "properties"
+    ]["detalle"]["description"]
+    valor = por_nombre["proponer_limite"].args_schema.model_json_schema()[
+        "properties"
+    ]["valor"]["description"]
+
+    assert "TAL COMO los dijo" in detalle
+    assert "sin convertir ni redondear" in valor
+    # Las listas reemplazan a la anterior: pasar sólo lo nuevo borra el resto.
+    assert "reemplazan a la anterior" in valor

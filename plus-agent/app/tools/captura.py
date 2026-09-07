@@ -21,6 +21,8 @@ teléfono de un cliente. Dos de ellas no chequeaban nada: alcanzaba con que el
 router dejara pasar el mensaje. Ahora las tres llaman a ``require_management``
 antes de leer o escribir cualquier cosa (app/runtime_context.py).
 """
+from typing import Annotated
+
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -43,10 +45,21 @@ class LineaVenta(BaseModel):
 @tool
 def registrar_venta_offline(
     config: RunnableConfig,
-    cliente: str,
+    cliente: Annotated[
+        str,
+        Field(description="A nombre de quién fue la venta, como lo nombró quien la dicta. "
+                          "No lo inventes: si no lo dijo, preguntáselo."),
+    ],
     lineas: list[LineaVenta],
-    cobrado: bool = True,
-    nota: str = "",
+    cobrado: Annotated[
+        bool,
+        Field(description="Si ya se cobró. Verdadero salvo que hayan dicho que quedó a "
+                          "cuenta."),
+    ] = True,
+    nota: Annotated[
+        str,
+        Field(description="Opcional: cualquier aclaración que hayan dicho, tal cual."),
+    ] = "",
 ) -> str:
     """Registra una venta que ya ocurrió fuera del sistema (mostrador, reparto,
     teléfono). Usar cuando alguien del equipo dice que vendió algo.
@@ -102,10 +115,22 @@ def registrar_venta_offline(
 
 @tool
 def contar_stock(
-    item_code: str,
-    cantidad_real: float,
+    item_code: Annotated[
+        str,
+        Field(description="El código EXACTO del producto en el catálogo, no las palabras "
+                          "con que lo nombraron."),
+    ],
+    cantidad_real: Annotated[
+        float,
+        Field(description="Lo que contaron de verdad, en la unidad de stock del producto. "
+                          "No lo estimes: es el número que dijeron."),
+    ],
     config: RunnableConfig,
-    deposito: str = "",
+    deposito: Annotated[
+        str,
+        Field(description="Opcional: el depósito, si nombraron uno. Vacío usa el de "
+                          "preparación."),
+    ] = "",
 ) -> str:
     """Corrige el stock de un producto al valor contado físicamente.
     Usar en el conteo de la mañana o cuando alguien dice "quedan X".
@@ -177,7 +202,15 @@ def contar_stock(
 
 @tool
 def confirmar_entrega(
-    config: RunnableConfig, numero_pedido: str, nota: str = ""
+    config: RunnableConfig,
+    numero_pedido: Annotated[
+        str,
+        Field(description="El número real del pedido que se entregó. No lo inventes."),
+    ],
+    nota: Annotated[
+        str,
+        Field(description="Opcional: lo que contó el repartidor, tal cual."),
+    ] = "",
 ) -> str:
     """Marca un pedido como entregado por el reparto.
     Usar cuando el repartidor avisa que dejó la mercadería."""
@@ -220,7 +253,16 @@ def confirmar_entrega(
 
 @tool
 def redactar_mensaje_cliente(
-    config: RunnableConfig, cliente: str, intencion: str
+    config: RunnableConfig,
+    cliente: Annotated[
+        str,
+        Field(description="A quién hay que escribirle, como lo nombró el dueño."),
+    ],
+    intencion: Annotated[
+        str,
+        Field(description="Qué le quiere decir, en una frase y con sus palabras. El texto "
+                          "lo redactás vos, pero lo manda una persona."),
+    ],
 ) -> str:
     """Redacta un mensaje de WhatsApp para enviarle a un cliente.
     NO lo envía — devuelve el texto para que una persona lo revise y mande.
