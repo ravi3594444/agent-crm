@@ -105,13 +105,47 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "Dame un segundo que lo miro.",
         EN: "One sec, let me check.",
     },
+    # Lo que llega y no es texto. Se dice QUÉ llegó: contestarle «escribime el
+    # pedido» a alguien que mandó su ubicación, o «no puedo ver fotos» a un
+    # audio, es la clase de respuesta que sólo puede haber escrito un programa.
+    # Un almacén argentino manda audios todo el día, así que ésta es una de las
+    # respuestas más leídas del sistema. Transcribirlos todavía no está hecho
+    # (ver «Not done yet» en el README): esto es lo que se dice mientras no lo
+    # esté, y por eso dice «todavía».
     "ack.solo_texto": {
+        ES: "Uy, eso no lo puedo abrir. ¿Me lo escribís? Aunque sea cortito.",
+        EN: "Sorry, I can't open that. Could you type it? Even a short line.",
+    },
+    "ack.audio": {
         ES: (
-            "Por ahora necesito que me escribas el pedido en texto para poder "
-            "ayudarte."
+            "Uy, los audios todavía no los puedo escuchar. ¿Me lo escribís? "
+            "Aunque sea cortito."
         ),
         EN: (
-            "For now I need you to write the order as text so I can help you."
+            "Sorry, I can't listen to voice notes yet. Could you type it? Even a "
+            "short line."
+        ),
+    },
+    "ack.imagen": {
+        ES: "Uy, las fotos todavía no las puedo ver. ¿Me lo escribís?",
+        EN: "Sorry, I can't see photos yet. Could you type it?",
+    },
+    "ack.video": {
+        ES: "Uy, los videos todavía no los puedo ver. ¿Me lo escribís?",
+        EN: "Sorry, I can't watch videos yet. Could you type it?",
+    },
+    "ack.archivo": {
+        ES: "Uy, los archivos todavía no los puedo abrir. ¿Me lo escribís?",
+        EN: "Sorry, I can't open files yet. Could you type it?",
+    },
+    "ack.ubicacion": {
+        ES: (
+            "Uy, la ubicación no la puedo abrir. Si es para la entrega, pasame la "
+            "calle y el número."
+        ),
+        EN: (
+            "Sorry, I can't open a dropped pin. If it's for the delivery, send me "
+            "the street and number."
         ),
     },
     "fallback.respuesta_vacia": {

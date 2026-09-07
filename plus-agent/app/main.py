@@ -60,8 +60,29 @@ def texto_progreso(lengua: str | None = None) -> str:
     return idioma.t("progreso.consultando", lengua)
 
 
-def texto_solo_texto(lengua: str | None = None) -> str:
-    return idioma.t("ack.solo_texto", lengua)
+# El tipo de mensaje de Meta -> qué se le contesta. Lo que no está acá cae al
+# texto genérico: un tipo nuevo de WhatsApp no puede dejar a nadie sin respuesta.
+_ACK_POR_TIPO = {
+    "audio": "ack.audio",
+    "voice": "ack.audio",
+    "image": "ack.imagen",
+    "sticker": "ack.imagen",
+    "video": "ack.video",
+    "document": "ack.archivo",
+    "location": "ack.ubicacion",
+}
+
+
+def texto_solo_texto(lengua: str | None = None, tipo: object = "") -> str:
+    """Lo que se le contesta a un mensaje que no es texto, según QUÉ mandó.
+
+    El tipo viaja en `data` desde el webhook (ver el ruteo de tipos abajo), así
+    que acá no se adivina nada. Antes había un solo texto para todo, y le
+    contestaba «escribime el pedido en texto» a alguien que había mandado su
+    ubicación.
+    """
+    clave = _ACK_POR_TIPO.get(str(tipo or "").strip().lower(), "ack.solo_texto")
+    return idioma.t(clave, lengua)
 
 
 # Dos variantes para que al cliente nunca se le diga que se avisó al equipo si
@@ -795,7 +816,8 @@ def _responder(item: dict, lengua: str, progreso: Progreso) -> str:
     if kind in {"interactive", "button"}:
         return str(manejar_boton(data, telefono))
     if kind != "text":
-        return texto_solo_texto(lengua)
+        # `data` trae el tipo que mandó Meta ("audio", "location", ...).
+        return texto_solo_texto(lengua, data)
     if es_equipo(telefono):
         # ANTES que el modelo, y por eso está acá arriba. Ver
         # _comando_de_idioma: en vivo este comando llegó a Gemini, que

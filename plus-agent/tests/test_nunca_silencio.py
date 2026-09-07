@@ -83,7 +83,8 @@ def test_non_text_message_always_gets_a_reply_instead_of_silence(
     assert outcome == "worked"
     replies = [text for recipient, text in outbox if recipient == CUSTOMER]
     assert len(replies) >= 1, "zero outbound messages: the customer was left in silence"
-    assert replies == [webhook.texto_solo_texto("es")]
+    # Y le contesta sobre lo que MANDÓ: un audio no recibe «no puedo ver fotos».
+    assert replies == [webhook.texto_solo_texto("es", tipo)]
     # Media never reaches the LLM (nothing to transcribe/see) and the queue drains.
     assert agent == []
     assert not webhook.r.lists[webhook._PROCESSING_KEY]
@@ -108,7 +109,9 @@ def test_non_text_from_a_staff_phone_also_gets_a_reply(webhook, outbox, monkeypa
     _post(webhook, _payload("wamid.staff-audio", "audio", phone=STAFF, audio={"id": "m"}))
     webhook._worker_cycle()
 
-    assert [t for r, t in outbox if r == STAFF] == [webhook.texto_solo_texto("es")]
+    assert [t for r, t in outbox if r == STAFF] == [
+        webhook.texto_solo_texto("es", "audio")
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -320,3 +323,41 @@ def test_payload_without_processable_messages_is_acknowledged_with_200(
     assert response.status_code == 200
     assert webhook._worker_cycle() == "idle"
     assert outbox == []
+
+
+# ------------------------------------------- se le contesta sobre lo que mandó
+# Había UN texto para todo lo que no era texto, así que a quien mandaba su
+# ubicación se le contestaba «escribime el pedido en texto». Un almacén acá
+# manda audios todo el día: es una de las respuestas más leídas del sistema.
+
+
+@pytest.mark.parametrize(
+    ("tipo", "tiene_que_decir"),
+    [
+        ("audio", "audios"),
+        ("voice", "audios"),
+        ("image", "fotos"),
+        ("sticker", "fotos"),
+        ("video", "videos"),
+        ("document", "archivos"),
+        ("location", "calle"),
+    ],
+)
+def test_cada_tipo_recibe_su_propia_respuesta(
+    webhook, tipo: str, tiene_que_decir: str
+) -> None:
+    texto = webhook.texto_solo_texto("es", tipo)
+
+    assert tiene_que_decir in texto
+    # Y ninguna suena a formulario: era «Por ahora necesito que me escribas el
+    # pedido en texto para poder ayudarte».
+    assert "en texto para poder ayudarte" not in texto
+
+
+@pytest.mark.parametrize("tipo", ["contacts", "unknown", "", None, "un_tipo_nuevo"])
+def test_un_tipo_que_no_conocemos_no_deja_a_nadie_sin_respuesta(webhook, tipo) -> None:
+    """WhatsApp agrega tipos: uno nuevo cae al texto genérico, nunca al vacío."""
+    texto = webhook.texto_solo_texto("es", tipo)
+
+    assert texto.strip()
+    assert texto == webhook.idioma.t("ack.solo_texto", "es")

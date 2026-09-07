@@ -71,6 +71,13 @@ def _todos_los_constructores(lengua):
         # 1. aviso de avance, fallbacks y errores
         ("main.texto_progreso", main.texto_progreso(lengua)),
         ("main.texto_solo_texto", main.texto_solo_texto(lengua)),
+        # Una por tipo: son las respuestas que más lee un cliente que manda
+        # un audio, y cada una tiene su propio texto.
+        *[
+            (f"main.texto_solo_texto:{tipo}", main.texto_solo_texto(lengua, tipo))
+            for tipo in ("audio", "image", "sticker", "video", "document",
+                         "location", "contacts", "unknown")
+        ],
         ("main.texto_error_tecnico", main.texto_error_tecnico(lengua)),
         ("main.texto_error_tecnico_avisado", main.texto_error_tecnico_avisado(lengua)),
         ("main.texto_respuesta_vacia", main.texto_respuesta_vacia(lengua)),
