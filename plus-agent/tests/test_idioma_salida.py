@@ -569,3 +569,15 @@ def test_sin_terminos_el_texto_dice_sin_cambios_en_su_idioma(lengua):
     assert texto == idioma.t("terminos.sin_cambios", lengua)
     if lengua == EN:
         assert restos_en_espanol(texto) == []
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_la_oferta_no_le_pide_apretar_un_boton_que_no_existe(lengua):
+    """Al cliente la oferta le llega como texto o plantilla (app/avisos.py).
+    Los botones son del aviso al EQUIPO (app/notificar.py)."""
+    from app import solicitudes
+
+    texto = solicitudes.texto_oferta_cliente(_solicitud(), lengua)
+    assert "botón" not in texto and "button" not in texto
+    # Y sigue diciendo, en su idioma, las palabras exactas que el router parsea.
+    assert ("acepto" in texto) or ("accept" in texto)

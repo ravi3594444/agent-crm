@@ -449,16 +449,20 @@ CATALOGO: dict[str, dict[str, str]] = {
             "alternative. A person will look at it."
         ),
     },
+    # Sin «respondé con el botón»: al cliente la oferta le llega como texto o
+    # como plantilla (app/avisos.py), nunca con botones — los botones son del
+    # aviso al EQUIPO (app/notificar.py). Le decía que apretara algo que no
+    # estaba ahí.
     "entrega.oferta": {
         ES: (
             "Sobre tu pedido {pedido}: el encargado te ofrece {terminos}.\n"
-            "¿Lo tomás? Respondé con el botón, o escribí 'acepto {pedido}' o "
-            "'no acepto {pedido}'. Sin tu respuesta no cierro nada."
+            "¿Lo tomás? Contestame 'acepto {pedido}' o 'no acepto {pedido}'. "
+            "Sin tu respuesta no cierro nada."
         ),
         EN: (
             "About your order {pedido}: the manager offers {terminos}.\n"
-            "Do you take it? Reply with the button, or write 'accept {pedido}' "
-            "or 'reject {pedido}'. Nothing is closed without your reply."
+            "Do you take it? Write 'accept {pedido}' or 'reject {pedido}'. "
+            "Nothing is closed without your reply."
         ),
     },
     "entrega.solicitud_rechazada": {
