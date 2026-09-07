@@ -684,7 +684,11 @@ def crear_cliente(
         Field(description="El nombre del negocio o de la persona, como lo dijo. "
                           "No lo inventes ni lo completes."),
     ],
-    direccion: DireccionEntrega,
+    direccion: Annotated[
+        DireccionEntrega,
+        Field(description="La dirección de entrega, con cada dato en su campo: "
+                          "no la manden como una sola línea de texto."),
+    ],
     config: RunnableConfig,
 ) -> str:
     """Registra al remitente como cliente, con su dirección de entrega.

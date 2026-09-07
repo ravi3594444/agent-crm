@@ -225,6 +225,34 @@ def test_todo_parametro_que_ve_el_modelo_dice_qué_poner():
     """Un parámetro sin descripción es una llamada mal armada esperando pasar."""
     from app import graph
 
+    # Se recorre el esquema COMPLETO: properties, el `items` de un array y los
+    # `$ref` locales. Antes se miraba un solo nivel y se salteaba todo lo
+    # anidado —«el modelo anidado explica sus propios campos»—, así que
+    # `registrar_venta_offline.lineas` y `LineaVenta.cantidad` estaban sin
+    # descripción y el test no podía verlo, que es justo la clase de agujero
+    # que este test existe para cerrar.
+    def sin_descripcion(esquema: dict, defs: dict, ruta: str, visto: frozenset):
+        referencia = esquema.get("$ref")
+        if referencia:
+            nombre = referencia.rsplit("/", 1)[-1]
+            if nombre in visto:  # un modelo que se referencia a sí mismo
+                return []
+            return sin_descripcion(
+                defs.get(nombre, {}), defs, ruta, visto | {nombre}
+            )
+        faltan = []
+        for campo, detalle in (esquema.get("properties") or {}).items():
+            camino = f"{ruta}.{campo}"
+            if not detalle.get("description"):
+                faltan.append(camino)
+            hijo = detalle.get("items") or detalle
+            if detalle.get("$ref") or detalle.get("items") or detalle.get("properties"):
+                faltan += sin_descripcion(hijo, defs, camino, visto)
+        for combinador in ("anyOf", "oneOf", "allOf"):
+            for alternativa in esquema.get(combinador) or []:
+                faltan += sin_descripcion(alternativa, defs, ruta, visto)
+        return faltan
+
     sin_explicar = []
     for herramienta in [*graph.TOOLS_CLIENTES, *graph.TOOLS_GERENCIA]:
         esquema = (
@@ -232,13 +260,10 @@ def test_todo_parametro_que_ve_el_modelo_dice_qué_poner():
             if herramienta.args_schema
             else {}
         )
-        for campo, detalle in (esquema.get("properties") or {}).items():
-            # Un modelo anidado (la dirección, las líneas) explica sus propios
-            # campos: alcanza con que el suyo esté descripto.
-            anidado = detalle.get("$ref") or detalle.get("items")
-            if not detalle.get("description") and not anidado:
-                sin_explicar.append(f"{herramienta.name}.{campo}")
-    assert sin_explicar == []
+        sin_explicar += sin_descripcion(
+            esquema, esquema.get("$defs") or {}, herramienta.name, frozenset()
+        )
+    assert sorted(set(sin_explicar)) == []
 
 
 def test_los_parametros_que_mas_se_equivocan_dicen_exactamente_qué_va():

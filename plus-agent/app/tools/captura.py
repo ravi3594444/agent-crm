@@ -38,7 +38,9 @@ def _hoy() -> str:
 
 class LineaVenta(BaseModel):
     item_code: str = Field(description="Código del producto")
-    cantidad: float = Field(gt=0)
+    cantidad: float = Field(
+        gt=0, description="Cuántas unidades, en la unidad del catálogo"
+    )
     precio_unitario: float | None = Field(default=None, description="Si difiere de lista")
 
 
@@ -50,7 +52,11 @@ def registrar_venta_offline(
         Field(description="A nombre de quién fue la venta, como lo nombró quien la dicta. "
                           "No lo inventes: si no lo dijo, preguntáselo."),
     ],
-    lineas: list[LineaVenta],
+    lineas: Annotated[
+        list[LineaVenta],
+        Field(description="Una línea por producto vendido, con el código del "
+                          "catálogo y la cantidad que se entregó."),
+    ],
     cobrado: Annotated[
         bool,
         Field(description="Si ya se cobró. Verdadero salvo que hayan dicho que quedó a "
