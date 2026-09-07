@@ -179,10 +179,26 @@ def ficha_cliente(
         require_management(config)
     except RuntimeContextError:
         return SIN_PERMISO
+    # El parámetro promete las dos formas —«el nombre …, o su código de
+    # ERPNext»— y esto buscaba sólo por `customer_name`, así que un código no
+    # encontraba nada. Andaba de casualidad mientras cada cliente del banco de
+    # pruebas se llamaba igual que su código; el primero que los tiene
+    # separados (CUST-0009) lo dejó a la vista.
+    #
+    # El código EXACTO primero, porque `name` es la clave del documento y no
+    # puede coincidir con dos; después el nombre, con el mismo `like` de antes.
+    # No se amplía nada más: los mismos campos, el mismo limit=1 y el mismo
+    # portón de gerencia de acá arriba.
+    campos = ["name", "customer_name", "customer_group", "mobile_no"]
     clientes = erpnext.get_list(
         "Customer",
+        filters=[["name", "=", nombre_o_codigo]],
+        fields=campos,
+        limit=1,
+    ) or erpnext.get_list(
+        "Customer",
         filters=[["customer_name", "like", f"%{nombre_o_codigo}%"]],
-        fields=["name", "customer_name", "customer_group", "mobile_no"],
+        fields=campos,
         limit=1,
     )
     if not clientes:
