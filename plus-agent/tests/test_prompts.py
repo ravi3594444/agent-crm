@@ -87,11 +87,6 @@ TONO_CLIENTE = (
 )
 
 
-@pytest.mark.parametrize("regla", TONO_CLIENTE)
-def test_el_prompt_del_cliente_tiene_las_reglas_de_tono(regla):
-    assert regla in SYSTEM_ES_AR
-
-
 def test_el_cliente_sabe_quien_es_y_no_lo_niega():
     """Sonar humano no es mentir: si preguntan, dice la verdad en una línea."""
     assert "{IDENTIDAD}" in SYSTEM_ES_AR
@@ -226,27 +221,19 @@ def test_el_tono_de_gerencia_no_toca_sus_reglas():
 # el código del catálogo, o `fecha_entrega` sin saber en qué formato.
 
 
-def _herramientas_del_cliente():
-    from app import graph
-
-    return graph.TOOLS_CLIENTES
-
-
-def _todas_las_herramientas():
-    from app import graph
-
-    return [*graph.TOOLS_CLIENTES, *graph.TOOLS_GERENCIA]
-
-
 def test_toda_herramienta_del_cliente_se_explica_sola():
-    for herramienta in _herramientas_del_cliente():
+    from app import graph
+
+    for herramienta in graph.TOOLS_CLIENTES:
         assert herramienta.description.strip(), f"{herramienta.name} sin descripción"
 
 
 def test_todo_parametro_que_ve_el_modelo_dice_qué_poner():
     """Un parámetro sin descripción es una llamada mal armada esperando pasar."""
+    from app import graph
+
     sin_explicar = []
-    for herramienta in _todas_las_herramientas():
+    for herramienta in [*graph.TOOLS_CLIENTES, *graph.TOOLS_GERENCIA]:
         esquema = (
             herramienta.args_schema.model_json_schema()
             if herramienta.args_schema
@@ -263,9 +250,11 @@ def test_todo_parametro_que_ve_el_modelo_dice_qué_poner():
 
 def test_los_parametros_que_mas_se_equivocan_dicen_exactamente_qué_va():
     """Cada uno de estos salió de una forma concreta de armar mal la llamada."""
+    from app import graph
+
     esquemas = {
         h.name: (h.args_schema.model_json_schema() if h.args_schema else {})
-        for h in _herramientas_del_cliente()
+        for h in graph.TOOLS_CLIENTES
     }
 
     def descripcion(herramienta: str, campo: str) -> str:

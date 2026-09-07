@@ -1056,23 +1056,18 @@ _VENTANA = 3
 # recibiendo inglés. Se compara contra listas fijas, igual que todo lo demás
 # acá: no se interpreta la oración.
 #
-# Marcas de que el sujeto es un TERCERO —posesivos, pronombres de tercera
-# persona y los parentescos y oficios con los que se nombra a alguien que no
-# está en la conversación.
+# Marcas de que el sujeto es un TERCERO: posesivos y pronombres de tercera
+# persona. Alcanza con eso —«my daughter», «mi hija», «su hijo» empiezan todos
+# por acá— y no se listan los parentescos ni los oficios: esa lista no tiene
+# final («contadora», «vecina», «secretario»…) y para nombrar a un tercero sin
+# ninguna de estas marcas hay que escribir algo que además coincida con una
+# frase de pedido, que no es lo que escribe nadie.
 _TERCEROS = frozenset(
     [
         "my", "his", "her", "hers", "their", "theirs", "its", "our", "ours",
         "she", "he", "they", "them", "somebody", "someone", "anybody", "nobody",
         "mi", "mis", "su", "sus", "nuestro", "nuestra", "nuestros", "nuestras",
         "ella", "ellas", "ellos", "alguien", "nadie",
-        "daughter", "son", "child", "kid", "wife", "husband", "friend",
-        "brother", "sister", "partner", "colleague", "boss", "employee",
-        "neighbor", "neighbour", "cousin", "mother", "father", "mom", "dad",
-        "hija", "hijo", "chico", "chica", "nene", "nena", "esposa", "esposo",
-        "marido", "mujer", "amigo", "amiga", "hermano", "hermana", "socio",
-        "socia", "empleado", "empleada", "vecino", "vecina", "primo", "prima",
-        "jefe", "jefa", "secretaria", "secretario", "contador", "contadora",
-        "madre", "padre", "mama", "papa", "gente", "encargado", "encargada",
     ]
 )
 # Marcas de que el pedido va dirigido a QUIEN ATIENDE: «can you talk in
@@ -1081,12 +1076,6 @@ _TERCEROS = frozenset(
 _INTERLOCUTOR = frozenset(
     ["you", "u", "yourself", "vos", "usted", "ustedes", "me", "us", "nos", "te"]
 )
-# Los dos idiomas nombrados en la misma cláusula, y un «o» entre ellos, es una
-# duda y no un pedido: «answer in english or spanish» no elige nada. Se exige
-# la marca de alternativa porque «reply in english not spanish» también nombra
-# los dos y sí pide inglés.
-_IDIOMA_NOMBRADO = {"english": EN, "ingles": EN, "spanish": ES, "espanol": ES}
-_ALTERNATIVA = frozenset(["or", "either", "o", "cualquiera", "cualquier", "indistinto"])
 
 
 def _negada_o_citada(limpio: str, inicio: int, fin: int) -> bool:
@@ -1180,11 +1169,6 @@ def pedido_explicito(texto: object) -> str | None:
     ultima = _clausula(limpio, pedidos[-1][0])
     idiomas = {i for pos, i in pedidos if _clausula(limpio, pos) == ultima}
     if len(idiomas) > 1:
-        return None
-    # Y tampoco elige nada una cláusula que OFRECE los dos idiomas.
-    palabras = _PALABRA.findall(_SEPARADORES.split(limpio)[ultima])
-    nombrados = {_IDIOMA_NOMBRADO[p] for p in palabras if p in _IDIOMA_NOMBRADO}
-    if len(nombrados) > 1 and any(p in _ALTERNATIVA for p in palabras):
         return None
     return pedidos[-1][1]
 

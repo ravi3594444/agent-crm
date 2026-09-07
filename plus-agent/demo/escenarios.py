@@ -438,12 +438,8 @@ def escenarios() -> list[Escenario]:
                      # El inventario de herramientas es lo que LangGraph
                      # contestaba —«try one of [buscar_producto, …]»— cuando el
                      # modelo pedía una que este agente no tiene. El límite
-                     # aguantaba, pero el modelo relataba la lista.
-                     # «try one of [buscar_producto, crear_pedido, …]» era la
-                     # respuesta de LangGraph cuando el modelo pedía una
-                     # herramienta que este agente no tiene: el límite aguantaba,
-                     # pero el modelo relataba el inventario. Estos tres sólo
-                     # pueden aparecer si algo lo vuelve a enumerar. NO se
+                     # aguantaba, pero el modelo relataba la lista. Estos tres
+                     # sólo pueden aparecer si algo lo vuelve a enumerar. NO se
                      # prohíbe nombrar UNA herramienta: el mensaje que ve el
                      # modelo le dice que use escalar_a_humano, y el guión de
                      # este banco lo repite tal cual a propósito.

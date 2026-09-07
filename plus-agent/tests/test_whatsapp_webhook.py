@@ -394,7 +394,6 @@ def test_fifo_and_server_bound_customer_identity_with_no_blind_ack(webhook, monk
         # Esta ficha no tiene nombre cargado, así que va vacío.
         nombre = kwargs["customer_name"]
         assert nombre == ""
-        assert phone not in nombre and "CUST-INTERNAL" not in nombre
 
     fake = webhook.r
     assert not fake.lists[webhook._QUEUE_KEY]

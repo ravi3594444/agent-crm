@@ -85,7 +85,7 @@ class Progreso(BaseCallbackHandler):
         # nunca anidados, así que no hay ciclo posible.
         self._candado_envio = threading.Lock()
         self._candado = threading.Lock()
-        self._timers: list[threading.Timer] = []
+        self._timer: threading.Timer | None = None
         # Cuántas herramientas están corriendo AHORA, y si hay un temporizador
         # esperando su plazo. Las dos cosas juntas son lo que distingue «se
         # está consultando algo» de «estamos esperando al modelo».
@@ -140,19 +140,23 @@ class Progreso(BaseCallbackHandler):
             self.herramientas.append(nombre)
             self._inicio_herramienta[run_id] = time.monotonic()
             self._en_vuelo += 1
-            if self._terminado or self._demora < 0 or self._intentado:
-                return
-            if self._pendiente:
-                # Ya hay un plazo corriendo: una segunda o tercera herramienta
-                # —en serie o en paralelo— no programa nada más.
+            # `_pendiente` dice que ya hay un plazo corriendo: una segunda o
+            # tercera herramienta —en serie o en paralelo— no programa nada más.
+            if (
+                self._terminado
+                or self._demora < 0
+                or self._intentado
+                or self._pendiente
+            ):
                 return
             # Acá nace el aviso: empezó a haber trabajo y no hay ningún plazo
-            # esperando. Daemon: un proceso que se apaga no espera por él.
+            # esperando. Sólo puede haber UNO vivo, porque `_pendiente` se limpia
+            # recién cuando el anterior disparó. Daemon: un proceso que se apaga
+            # no espera por él.
             self._pendiente = True
-            timer = threading.Timer(self._demora, self._disparar)
-            timer.daemon = True
-            self._timers.append(timer)
-            timer.start()
+            self._timer = threading.Timer(self._demora, self._disparar)
+            self._timer.daemon = True
+            self._timer.start()
 
     def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
         self._cerrar_herramienta(run_id)
@@ -204,8 +208,10 @@ class Progreso(BaseCallbackHandler):
         (o de fallar), y uno que todavía no empezó ya no va a empezar.
         """
         with self._candado:
-            timers = list(self._timers)
-        for timer in timers:
+            timer = self._timer
+        if timer:
+            # Cancelar uno que ya disparó no hace nada, así que no hace falta
+            # distinguir.
             timer.cancel()
         with self._candado_envio:
             self._terminado = True

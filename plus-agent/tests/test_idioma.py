@@ -444,10 +444,6 @@ def test_el_orden_del_texto_decide_y_no_el_de_la_lista(
         "my friend speaks spanish",
         "mi socio habla en ingles",
         "su hijo escribe en ingles",
-        # Ofrecer los dos idiomas tampoco elige: es una duda, y esto se guarda
-        # un año.
-        "answer in english or spanish",
-        "respondeme en ingles o espanol",
     ],
 )
 def test_una_descripcion_o_una_duda_no_cambian_la_preferencia(

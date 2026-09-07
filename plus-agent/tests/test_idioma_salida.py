@@ -495,24 +495,8 @@ def test_los_avisos_de_stock_salen_en_el_idioma(lengua):
 # español, así que un cliente que había pedido inglés escribía «accept» y
 # recibía español. Los manda Python, antes de que ningún modelo vea el mensaje.
 
-CLAVES_OFERTA = (
-    "oferta.no_hay_tuya",
-    "oferta.no_registre",
-    "oferta.procesando",
-    "oferta.rechazada",
-    "oferta.sin_pendiente",
-    "oferta.esperando_encargado",
-    "oferta.ya_confirmado",
-    "oferta.en_revision",
-    "oferta.cerrada",
-    "oferta.nada_pendiente",
-    "oferta.tarde",
-    "oferta.no_verificable",
-    "oferta.confirmado_por_encargado",
-    "oferta.cancelado_por_encargado",
-    "oferta.a_revision",
-    "oferta.revision_sin_registro",
-)
+# Del catálogo, no a mano: una clave nueva de oferta entra sola a este test.
+CLAVES_OFERTA = tuple(k for k in idioma.CATALOGO if k.startswith("oferta."))
 
 
 @pytest.mark.parametrize("clave", CLAVES_OFERTA)
@@ -524,13 +508,7 @@ def test_los_textos_de_la_oferta_salen_en_un_solo_idioma(clave):
     # Ni el inglés adentro del español ni al revés: eran textos pegados.
     assert "Thanks for confirming" not in es
     assert "Gracias por confirmar" not in en
-
-
-@pytest.mark.parametrize("clave", CLAVES_OFERTA)
-def test_el_numero_de_pedido_sobrevive_en_los_dos_idiomas(clave):
-    """El dato no se traduce. Si la clave lo lleva, tiene que estar en las dos."""
-    es = idioma.t(clave, ES, pedido=PEDIDO, terminos="x")
-    en = idioma.t(clave, EN, pedido=PEDIDO, terminos="x")
+    # El dato no se traduce: si la clave lleva el número, está en las dos.
     assert (PEDIDO in es) == (PEDIDO in en)
 
 

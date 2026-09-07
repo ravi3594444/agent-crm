@@ -212,11 +212,26 @@ def test_el_gancho_que_se_reemplaza_sigue_existiendo_en_langgraph() -> None:
     )
 
 
-def test_los_dos_agentes_usan_el_nodo_que_no_enumera() -> None:
+def test_los_dos_agentes_tienen_instalado_el_nodo_que_no_enumera() -> None:
+    """El nodo que quedó INSTALADO en cada agente compilado, no el texto del archivo.
+
+    Antes esto se afirmaba grepeando app/graph.py —«tools=ToolNode(» ausente y
+    «tools=ToolNodeSinInventario(» dos veces—, que sólo prueba cómo está escrito
+    el archivo: un ToolNode pelado pasado por una variable lo habría burlado sin
+    cambiar una letra del grep. Acá se mira el grafo compilado, que es lo que
+    corre.
+
+    `nodes["tools"].bound` es API interna de LangGraph, igual que el
+    `_validate_tool_call` de acá arriba. Es a propósito: si una versión la
+    mueve, esto explota con KeyError o AttributeError en CI y alguien vuelve a
+    mirar el cableado, en vez de que el test siga pasando sobre un grafo que ya
+    no es el que se afirma.
+    """
     from app import graph
 
-    assert issubclass(graph.ToolNodeSinInventario, graph.ToolNode)
-    fuente = Path(graph.__file__).read_text(encoding="utf-8")
-    # Ningún ToolNode pelado quedó cableado en un agente.
-    assert "tools=ToolNode(" not in fuente
-    assert fuente.count("tools=ToolNodeSinInventario(") == 2
+    for nombre in ("agente_clientes", "agente_gerencia"):
+        instalado = getattr(graph, nombre).nodes["tools"].bound
+        # isinstance contra la SUBCLASE: un ToolNode pelado no la satisface.
+        assert isinstance(instalado, graph.ToolNodeSinInventario), (
+            f"{nombre}: quedó instalado {type(instalado).__name__}"
+        )

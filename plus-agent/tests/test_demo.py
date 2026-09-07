@@ -1095,29 +1095,6 @@ def test_las_disculpas_se_leen_del_catalogo_y_no_de_una_lista_a_mano():
             assert idioma.t(clave, lengua).lower() in disculpas
 
 
-# ------------------------------------------- una sola pregunta por mensaje
-# Gemini de verdad contestó «Todo bien por acá, ¿y vos? ¿Te puedo ayudar con
-# algo más?» a un «todo bien»: dos preguntas, y la segunda es el cierre de call
-# center que el prompt ya prohibía. El guarda cuenta los signos de cierre, que
-# es lo que se puede afirmar sin opinar de la redacción.
-
-
-@pytest.mark.parametrize(
-    ("respuesta", "preguntas"),
-    [
-        ("Dale. ¿Para cuándo lo necesitás?", 1),
-        ("Listo, te lo anoté. El equipo te confirma en un rato.", 0),
-        ("Todo bien por acá, ¿y vos?", 1),
-        # El caso real que se escapó.
-        ("Todo bien por acá, ¿y vos? ¿Te puedo ayudar con algo más?", 2),
-        ("How many do you need?", 1),
-        ("Yes, I can. How can I help you today?", 1),
-    ],
-)
-def test_se_cuentan_las_preguntas_de_una_respuesta(respuesta: str, preguntas: int) -> None:
-    assert respuesta.count("?") == preguntas
-
-
 def test_el_prompt_le_pide_contar_los_signos_de_pregunta():
     """La regla estaba y el modelo la rompió igual, así que ahora es concreta."""
     from app.prompts import SYSTEM_ES_AR
