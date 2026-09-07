@@ -1089,6 +1089,11 @@ _TERCEROS = frozenset(
 _INTERLOCUTOR = frozenset(
     ["you", "u", "yourself", "vos", "usted", "ustedes", "me", "us", "nos", "te"]
 )
+# Quien escribe hablando de SÍ MISMO no está describiendo a un tercero, aunque
+# nombre a uno: «soy la mama de Tomas, en ingles por favor» pide para ella.
+_PRIMERA_PERSONA = frozenset(
+    ["soy", "somos", "yo", "nosotros", "nosotras", "i", "im", "we"]
+)
 # Los dos idiomas nombrados en la misma cláusula, y un «o» entre ellos, es una
 # duda y no un pedido: «answer in english or spanish» no elige nada. Se exige
 # la marca de alternativa porque «reply in english not spanish» también nombra
@@ -1130,18 +1135,68 @@ def _clausula(limpio: str, inicio: int) -> int:
     return len(_SEPARADORES.findall(limpio[:inicio]))
 
 
-def _describe_a_un_tercero(limpio: str, inicio: int) -> bool:
+def _dirigida_a_quien_atiende(frase: str) -> bool:
+    """¿La FRASE misma le habla a quien atiende, sin depender del contexto?
+
+    «answer me in spanish» lo dice con un `me` suelto y «contestame en espanol»
+    lo dice pegado al verbo: las dos nombran al destinatario adentro del pedido,
+    así que no necesitan que el contexto lo confirme. «hablar en ingles» y «talk
+    in english» no dicen a quién: ésas sí dependen de lo que venga antes.
+
+    El clítico se reconoce por la forma —una palabra de más de tres letras que
+    termina en «me»— y no por una lista de verbos, que habría que ampliar cada
+    vez que se agrega una frase.
+    """
+    palabras = _PALABRA.findall(_sin_tildes(frase))
+    return any(
+        p in _INTERLOCUTOR or (len(p) > 3 and p.endswith("me")) for p in palabras
+    )
+
+
+# Qué frases de la lista se piden solas. Se calcula una vez, de la lista misma.
+_DIRIGIDAS = frozenset(
+    frase for frase, _ in _PEDIDOS_EXPLICITOS if _dirigida_a_quien_atiende(frase)
+)
+
+
+def _describe_a_un_tercero(limpio: str, inicio: int, dirigida: bool) -> bool:
     """¿La frase cuenta lo que hace otro, en vez de pedirle algo a quien atiende?
 
-    Mira la cláusula ANTES de la frase. «my daughter can write in english» tiene
-    un tercero (`my`, `daughter`) y no nombra a quien atiende: es una
-    descripción. «can you talk in english?» nombra a quien atiende (`you`), así
-    que es un pedido. Si están los dos, gana el pedido: quien escribe «my
-    daughter is here, can you talk in english» está pidiendo.
+    Dos correcciones sobre la primera versión, las dos por el mismo tipo de
+    falla —descartaba pedidos de verdad—:
+
+    - Una frase DIRIGIDA gana siempre. «For my boss answer me in Spanish» y
+      «Mi hija esta aca por favor hablame en ingles» nombran un tercero y piden
+      igual; antes el tercero las mataba y el cliente se quedaba con el idioma
+      espejado. Si el pedido dice a quién va, el contexto no lo discute.
+    - El tercero se busca en TODO lo que viene antes, sin partir por comas.
+      Partir hacía que «La contadora, contestame en espanol» y «La contadora
+      contestame en espanol» dieran distinto, que es una coma decidiendo el
+      idioma de un cliente por un año. Y una ventana de pocas palabras no
+      alcanza: en «Mi jefa empezo un curso para hablar en ingles» el tercero
+      queda seis palabras atrás y la frase volvía a leerse como un pedido, que
+      es el falso positivo que esto vino a evitar.
+
+    Quien habla de sí mismo cancela, como cancela nombrar a quien atiende: en
+    «soy la mama de Tomas, en ingles por favor» hay un parentesco nombrado y el
+    pedido es de ella.
+
+    Límite conocido: un posesivo suelto cuenta como tercero, así que «mi pedido
+    no llego, en ingles por favor» no fija idioma —«mi» está en `_TERCEROS` y
+    acá no hay con qué saber que habla de su propio pedido—. Falla del lado
+    seguro: no guarda nada y contesta espejando el mensaje. Distinguir «mi
+    hija» de «mi pedido» pide separar los posesivos de los nombres de persona,
+    y eso es más que arreglar esta función.
+
+    Lo que NO cambió: una frase que no dice a quién va sigue dependiendo del
+    contexto, así que «la contadora necesita hablar en ingles» y «the boss needs
+    to talk in English» siguen sin pedir nada. Eso es lo que 50ba7be arregló y
+    no se puede volver a perder.
     """
-    antes = _SEPARADORES.split(limpio[:inicio])[-1]
-    palabras = _PALABRA.findall(antes)
-    if any(p in _INTERLOCUTOR for p in palabras):
+    if dirigida:
+        return False
+    palabras = _PALABRA.findall(limpio[:inicio])
+    if any(p in _INTERLOCUTOR or p in _PRIMERA_PERSONA for p in palabras):
         return False
     return any(p in _TERCEROS for p in palabras)
 
@@ -1178,9 +1233,9 @@ def pedido_explicito(texto: object) -> str | None:
         inicio = limpio.find(buscada)
         while inicio != -1:
             fin = inicio + len(buscada)
-            if not _negada_o_citada(limpio, inicio, fin) and not _describe_a_un_tercero(
-                limpio, inicio
-            ):
+            if not _negada_o_citada(
+                limpio, inicio, fin
+            ) and not _describe_a_un_tercero(limpio, inicio, frase in _DIRIGIDAS):
                 pedidos.append((inicio, idioma))
             inicio = limpio.find(buscada, fin)
     if not pedidos:

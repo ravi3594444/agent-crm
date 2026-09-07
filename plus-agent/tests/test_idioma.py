@@ -467,6 +467,72 @@ def test_una_descripcion_o_una_duda_no_cambian_la_preferencia(
     assert idioma.cliente_guardado("+5493517777778") is None
 
 
+# ------------------- un pedido dirigido gana, aunque se nombre a un tercero
+# El filtro de terceros llegó descartando pedidos de verdad: miraba SÓLO lo que
+# venía antes de la frase, así que un tercero nombrado en la misma oración
+# mataba un pedido que decía a quién iba. «For my boss answer me in Spanish»
+# quedaba sin idioma y el cliente recibía el espejo del mensaje. Y como la
+# búsqueda partía por comas, «La contadora, contestame en espanol» y «La
+# contadora contestame en espanol» daban distinto: una coma decidiendo el
+# idioma de un cliente por un año.
+
+
+@pytest.mark.parametrize(
+    ("texto", "esperado"),
+    [
+        # La frase dice a quién va —«answer me», «hablame», «contestame»—, así
+        # que el tercero de la misma oración no la discute.
+        ("For my boss answer me in Spanish", idioma.ES),
+        ("Mi hija esta aca por favor hablame en ingles", idioma.EN),
+        ("La contadora contestame en espanol", idioma.ES),
+        # Y sigue ganando el último pedido claro del texto.
+        ("My daughter can write in English; answer me in Spanish", idioma.ES),
+        # Nombrar un parentesco hablando de UNO MISMO no es describir a un
+        # tercero: el pedido es de quien escribe.
+        ("soy la mama de tomas, en ingles por favor", idioma.EN),
+        ("my wife and i prefer spanish", idioma.ES),
+    ],
+)
+def test_un_pedido_dirigido_gana_sobre_el_tercero_nombrado(
+    fake_redis_idioma, texto, esperado
+):
+    assert idioma.pedido_explicito(texto) == esperado
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        # Sin decir a quién va, sigue dependiendo del contexto: esto es lo que
+        # arregló 50ba7be y no se puede volver a perder.
+        "la contadora necesita hablar en ingles",
+        "the boss needs to talk in English",
+        # Y el tercero se busca en TODO lo anterior, no en las últimas
+        # palabras: acá queda seis atrás. Con una ventana corta esto volvía a
+        # leerse como un pedido y le fijaba inglés por un año.
+        "Mi jefa empezo un curso para hablar en ingles",
+    ],
+)
+def test_una_frase_que_no_dice_a_quien_va_sigue_sin_pedir_nada(
+    fake_redis_idioma, texto
+):
+    assert idioma.pedido_explicito(texto) is None
+
+
+@pytest.mark.parametrize(
+    ("con_coma", "sin_coma", "esperado"),
+    [
+        ("La contadora, contestame en espanol", "La contadora contestame en espanol",
+         idioma.ES),
+        ("la contadora, necesita hablar en ingles",
+         "la contadora necesita hablar en ingles", None),
+    ],
+)
+def test_una_coma_no_decide_el_idioma(fake_redis_idioma, con_coma, sin_coma, esperado):
+    """El mismo mensaje con y sin coma tiene que dar lo mismo."""
+    assert idioma.pedido_explicito(con_coma) == esperado
+    assert idioma.pedido_explicito(sin_coma) == esperado
+
+
 @pytest.mark.parametrize(
     ("texto", "esperado"),
     [
