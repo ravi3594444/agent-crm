@@ -80,6 +80,13 @@ def _todos_los_constructores(lengua):
         ("decisiones._texto_rechazo", decisiones._texto_rechazo(PEDIDO, MOTIVO, lengua)),
         ("decisiones._texto_cancelacion",
          decisiones._texto_cancelacion(PEDIDO, MOTIVO, lengua)),
+        # La oferta de entrega del lado del cliente: `_sin_oferta` es el
+        # constructor puro de ese camino (los otros escriben en ERPNext).
+        ("solicitudes._sin_oferta", solicitudes._sin_oferta(PEDIDO, None, lengua)),
+        ("solicitudes.terminos_texto",
+         solicitudes.terminos_texto(
+             {"metodo": "retiro", "fecha": "2026-09-08", "hora": "10:00",
+              "cargo": 1500.0, "descuento_pct": 5}, "ARS", lengua)),
         ("solicitudes.texto_pendiente_cliente",
          solicitudes.texto_pendiente_cliente(sol, lengua)),
         # 3. avisos a la gerencia

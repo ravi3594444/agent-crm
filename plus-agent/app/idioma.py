@@ -169,29 +169,182 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "a coordinar",
         EN: "to be arranged",
     },
+    # Sin saludo: estos llegan cuando ya se estuvo hablando, y el saludo va una
+    # sola vez por conversación. «Hola!» en la mitad de una charla es lo que
+    # delata que del otro lado hay un programa que no leyó lo anterior.
     "pedido.rechazado": {
         ES: (
-            "Hola! Sobre tu pedido {pedido}: no vamos a poder cumplirlo{motivo}. "
+            "Sobre tu pedido {pedido}: no vamos a poder cumplirlo{motivo}. "
             "En breve te escribe alguien del equipo. Perdón por la molestia."
         ),
         EN: (
-            "Hi! About your order {pedido}: we won't be able to fulfil it{motivo}. "
+            "About your order {pedido}: we won't be able to fulfil it{motivo}. "
             "Someone from our team will message you shortly. Sorry about that."
         ),
     },
     "pedido.cancelado": {
         ES: (
-            "Hola! Tu pedido {pedido} quedó cancelado ({motivo}). Si fue un error, "
+            "Tu pedido {pedido} quedó cancelado ({motivo}). Si fue un error, "
             "escribinos y lo revisamos."
         ),
         EN: (
-            "Hi! Your order {pedido} has been cancelled ({motivo}). If this is a "
+            "Your order {pedido} has been cancelled ({motivo}). If this is a "
             "mistake, message us and we will sort it out."
         ),
     },
     "pedido.sin_confirmar": {
         ES: "Tu pedido {pedido} sigue sin confirmar.",
         EN: "Your order {pedido} is still unconfirmed.",
+    },
+    # --------------------------------------- la oferta de entrega, del lado del cliente
+    # Estos los manda Python cuando el cliente contesta «acepto» / «no acepto»:
+    # se resuelven ANTES de que ningún modelo vea el mensaje (app/main.py), así
+    # que son texto de acá y no del modelo. Tres de ellos salían en los dos
+    # idiomas pegados con un salto de línea —el mismo parche que este catálogo
+    # existe para no tener— y el resto sólo en español, así que un cliente que
+    # había pedido inglés escribía «accept» y recibía español.
+    "terminos.sin_cambios": {ES: "sin cambios", EN: "no changes"},
+    "terminos.retiro": {ES: "retiro en el local", EN: "pickup at the shop"},
+    "terminos.a_las": {ES: "a las {hora}", EN: "at {hora}"},
+    "terminos.cargo": {ES: "cargo de envío {monto}", EN: "delivery fee {monto}"},
+    "terminos.descuento": {ES: "descuento {pct}%", EN: "{pct}% discount"},
+    "oferta.no_hay_tuya": {
+        ES: "No encontré una oferta tuya pendiente.",
+        EN: "I don't have an open offer for you.",
+    },
+    "oferta.no_registre": {
+        ES: "No me quedó registrada tu respuesta. Escribime de nuevo en un momento.",
+        EN: "Your reply did not get saved. Message me again in a moment.",
+    },
+    "oferta.procesando": {
+        ES: "Justo estoy con algo de este pedido. Escribime en un minuto.",
+        EN: "I'm on something for that order right now. Message me in a minute.",
+    },
+    "oferta.rechazada": {
+        ES: (
+            "Listo, no avanzo con {pedido}. Si querés, lo dejamos para un día de "
+            "reparto normal."
+        ),
+        EN: (
+            "Alright, I won't go ahead with {pedido}. If you like, we can leave it "
+            "for a normal delivery day."
+        ),
+    },
+    "oferta.sin_pendiente": {
+        ES: "No tengo una oferta pendiente para {pedido}.",
+        EN: "I don't have an open offer for {pedido}.",
+    },
+    "oferta.esperando_encargado": {
+        ES: (
+            "Todavía no tengo la respuesta del encargado sobre {pedido}. Te "
+            "escribo en cuanto la tenga."
+        ),
+        EN: (
+            "I still don't have the manager's answer on {pedido}. I'll write as "
+            "soon as I do."
+        ),
+    },
+    "oferta.ya_confirmado": {
+        ES: "{pedido} ya quedó confirmado con lo que acordamos.",
+        EN: "{pedido} is already closed on what we agreed.",
+    },
+    "oferta.en_revision": {
+        ES: (
+            "Sobre {pedido} está mirándolo una persona antes de cerrarlo. Te "
+            "contestamos en cuanto lo revise."
+        ),
+        EN: (
+            "Someone is looking at {pedido} before we close it. We'll get back to "
+            "you as soon as they do."
+        ),
+    },
+    "oferta.cerrada": {
+        ES: (
+            "Sobre {pedido} ya no tengo nada pendiente para cerrar. Si lo querés "
+            "igual, escribime y lo armamos con el stock del momento."
+        ),
+        EN: (
+            "There's nothing left open on {pedido}. If you still want it, message "
+            "me and we'll put it together with what's in stock."
+        ),
+    },
+    "oferta.nada_pendiente": {
+        ES: (
+            "Sobre {pedido} no me quedó nada pendiente de tu parte. Si necesitás "
+            "algo más, decime."
+        ),
+        EN: (
+            "There's nothing waiting on you for {pedido}. If you need anything "
+            "else, tell me."
+        ),
+    },
+    "oferta.tarde": {
+        ES: (
+            "Pasó el plazo de la oferta de {pedido}, así que no la puedo cerrar. "
+            "Escribime y lo vemos de nuevo con el stock de ahora."
+        ),
+        EN: (
+            "That offer on {pedido} has run out, so I can't close it. Message me "
+            "and we'll look at it again with what's in stock now."
+        ),
+    },
+    "oferta.no_verificable": {
+        ES: "Ahora no lo pude mirar. Escribime en un rato y lo vemos.",
+        EN: "I couldn't look at it just now. Message me shortly and we'll sort it.",
+    },
+    "oferta.confirmado_por_encargado": {
+        ES: (
+            "El encargado ya confirmó {pedido} por su cuenta, así que no hay nada "
+            "más que cerrar de tu lado. Cualquier duda, escribime."
+        ),
+        EN: (
+            "The manager already closed {pedido} himself, so there's nothing left "
+            "on your side. Any questions, message me."
+        ),
+    },
+    "oferta.cancelado_por_encargado": {
+        ES: (
+            "{pedido} fue cancelado por el encargado. Si lo querés igual, "
+            "escribime y lo armamos de nuevo con el stock de ahora."
+        ),
+        EN: (
+            "The manager cancelled {pedido}. If you still want it, message me and "
+            "we'll put it together again with what's in stock now."
+        ),
+    },
+    "oferta.aceptada": {
+        ES: (
+            "¡Listo! {pedido} quedó confirmado con lo que acordamos: {terminos}. "
+            "Te mando el detalle enseguida."
+        ),
+        EN: (
+            "Done! {pedido} is confirmed on what we agreed: {terminos}. I'll send "
+            "you the details right away."
+        ),
+    },
+    "oferta.a_revision": {
+        ES: (
+            "Gracias por confirmar. Sobre {pedido} necesito revisarlo con una "
+            "persona antes de cerrarlo: cambió algo desde la oferta. Te "
+            "contestamos a la brevedad."
+        ),
+        EN: (
+            "Thanks for confirming. Someone has to look at {pedido} with me before "
+            "we close it: something moved since the offer. We'll get back to you "
+            "shortly."
+        ),
+    },
+    "oferta.revision_sin_registro": {
+        ES: (
+            "Gracias por confirmar. Sobre {pedido} se me complicó algo y necesito "
+            "que lo vea una persona. No queda nada confirmado a tu nombre; te "
+            "contestamos a la brevedad."
+        ),
+        EN: (
+            "Thanks for confirming. Something went wrong with {pedido} on my side "
+            "and a person has to look at it. Nothing is closed in your name; we'll "
+            "get back to you shortly."
+        ),
     },
     # ------------------------------------------------- avisos a la gerencia
     # El encabezado y el cuerpo del aviso de pedido. Los COMANDOS que van

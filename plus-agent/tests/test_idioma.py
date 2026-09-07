@@ -41,6 +41,22 @@ def test_toda_clave_del_catalogo_tiene_los_dos_idiomas():
     assert idioma.claves_incompletas() == []
 
 
+def test_todo_valor_del_catalogo_es_un_texto():
+    """Una coma de más convierte el valor en una tupla y nadie se entera.
+
+    `claves_incompletas` mira `str(valor).strip()`, y `("x",)` no está vacío, así
+    que una tupla pasa el control y lo que sale por WhatsApp es `('Hola',)`.
+    Pasó al migrar los textos de la oferta.
+    """
+    tuplas = [
+        f"{clave}:{lengua} es {type(valor).__name__}"
+        for clave, textos in idioma.CATALOGO.items()
+        for lengua, valor in textos.items()
+        if not isinstance(valor, str)
+    ]
+    assert tuplas == []
+
+
 def test_el_catalogo_no_esta_vacio_y_cubre_las_categorias_pedidas():
     categorias = {clave.split(".")[0] for clave in idioma.CATALOGO}
     for esperada in (

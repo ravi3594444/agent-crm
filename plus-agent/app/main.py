@@ -604,7 +604,9 @@ _RECHAZA_RE = re.compile(
 )
 
 
-def _customer_command(text: str, telefono: str, customer_code: str) -> str | None:
+def _customer_command(
+    text: str, telefono: str, customer_code: str, lengua: str | None = None
+) -> str | None:
     """A customer's explicit yes or no to a pending offer, or None.
 
     Deterministic on purpose: this is where a price and a delivery date get
@@ -631,8 +633,8 @@ def _customer_command(text: str, telefono: str, customer_code: str) -> str | Non
                 return None
             pedido = esperando.pedido
         if rechaza is not None:
-            return solicitudes.rechazar_cliente(pedido, telefono)
-        return solicitudes.aceptar_cliente(pedido, telefono)
+            return solicitudes.rechazar_cliente(pedido, telefono, lengua)
+        return solicitudes.aceptar_cliente(pedido, telefono, lengua)
     except Exception as error:
         print(
             f"[solicitudes] respuesta de cliente falló phone={_correlation(telefono)} "
@@ -837,7 +839,9 @@ def _responder(item: dict, lengua: str, progreso: Progreso) -> str:
         idioma.recordar_cliente(telefono, pedido_idioma)
 
     customer_code, contexto = _contexto(telefono)
-    acuerdo = _customer_command(data, telefono, customer_code)
+    # El idioma del turno viaja hasta la respuesta determinista: es el mismo
+    # que usa todo lo demás que sale de este turno.
+    acuerdo = _customer_command(data, telefono, customer_code, lengua)
     if acuerdo:
         return acuerdo
     return _non_empty(

@@ -35,6 +35,7 @@ from app import (
     decisiones,
     erpnext,
     excepciones,
+    idioma,
     limites,
     main,
     outbound_status,
@@ -710,12 +711,50 @@ def test_refusing_the_offer_frees_the_stock_and_confirms_nothing(mundo) -> None:
     assert solicitudes.leer(SO).estado == solicitudes.RECHAZADA_CLIENTE
 
 
+# El idioma lo resuelve el worker UNA vez por turno y lo pasa hasta acá
+# (app/main.py::_customer_command). Estos textos los escribe Python: antes tres
+# de ellos salían en los dos idiomas pegados y el resto sólo en español, así que
+# un cliente que había pedido inglés escribía «accept» y recibía español.
+
+
+def test_la_respuesta_al_rechazo_sale_en_el_idioma_del_cliente(mundo) -> None:
+    _aprobar_y_esperar(mundo)
+
+    respuesta = solicitudes.rechazar_cliente(SO, CUSTOMER_PHONE, idioma.EN)
+
+    assert respuesta == idioma.t("oferta.rechazada", idioma.EN, pedido=SO)
+    assert "no avanzo" not in respuesta
+    # Y la decisión es la misma, en cualquier idioma.
+    assert solicitudes.leer(SO).estado == solicitudes.RECHAZADA_CLIENTE
+
+
+def test_la_confirmacion_de_la_aceptacion_sale_en_el_idioma_del_cliente(mundo) -> None:
+    _aprobar_y_esperar(mundo)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE, idioma.EN)
+
+    assert SO in respuesta
+    assert respuesta.startswith("Done!")
+    assert mundo["submits"] == [SO], "el pedido se confirma igual"
+
+
+def test_un_idioma_que_no_llega_se_resuelve_por_el_telefono(mundo, monkeypatch) -> None:
+    """Un barrido o un llamador viejo no pasan idioma: se pregunta por el número,
+    y preguntar no le fija el idioma a nadie."""
+    _aprobar_y_esperar(mundo)
+    monkeypatch.setattr(idioma, "cliente_guardado", lambda numero: idioma.EN)
+
+    respuesta = solicitudes.rechazar_cliente(SO, CUSTOMER_PHONE)
+
+    assert respuesta == idioma.t("oferta.rechazada", idioma.EN, pedido=SO)
+
+
 def test_only_the_orders_own_customer_can_accept(mundo) -> None:
     _aprobar_y_esperar(mundo)
 
     respuesta = solicitudes.aceptar_cliente(SO, "5493519999999")
 
-    assert "No encontré una oferta tuya" in respuesta
+    assert respuesta == idioma.t("oferta.no_hay_tuya")
     assert mundo["submits"] == []
 
 
@@ -1035,7 +1074,9 @@ def test_a_late_acceptance_that_cannot_read_the_order_writes_nothing(mundo, monk
 
     respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
 
-    assert "No pude verificar" in respuesta
+    # Contra la CLAVE del catálogo, no contra su redacción: lo que importa es
+    # que eligió ese mensaje y no una confirmación.
+    assert respuesta == idioma.t("oferta.no_verificable")
     assert len(mundo["durables"]) == escritos
     assert mundo["estados"] == []
     assert solicitudes.leer(SO).estado == solicitudes.ESPERANDO_CLIENTE
@@ -1752,7 +1793,7 @@ def test_only_the_orders_own_customer_can_accept_the_fallback(
 
     respuesta = solicitudes.aceptar_cliente(SO, OTRO)
 
-    assert "No encontré una oferta tuya pendiente" in respuesta
+    assert respuesta == idioma.t("oferta.no_hay_tuya")
     assert mundo["submits"] == []
 
 
