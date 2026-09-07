@@ -296,7 +296,7 @@ and I want to know immediately.
 | 1 | Send a **voice note** | A reply asking you to write it instead. Never silence. |
 | 2 | Send a **photo** | A reply. Never silence. |
 | 3 | Send a sticker | A reply. |
-| 4 | Stop ERPNext (`docker stop <erpnext-backend>`), send an order | Possibly *"Estoy consultando el sistema, dame un momento"* while the tool is stuck, then **one** apology saying **no order was created** and that a person will follow up — never an invented number, never a notice after the apology |
+| 4 | Stop ERPNext (`docker stop <erpnext-backend>`), send an order | Possibly *"Dame un segundo que lo miro"* while the tool is stuck, then **one** apology saying **no order was created** and that a person will follow up — never an invented number, never a notice after the apology |
 
 For step 4, also check `make logs`: you should see `[agent] error …
 type=…` lines, and the message stays in the durable queue rather than

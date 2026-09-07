@@ -156,6 +156,51 @@ _EQUIVALENTES = {
 }
 
 
+# --------------------------------------------------------------------- el tono
+# Lo que el producto vende es cómo se lee, así que el tono se verifica igual que
+# el estado de un documento: en los 20 escenarios y en los que vengan, y en los
+# DOS modos. Contra el guión prueba que el SISTEMA no mete jerga por su cuenta
+# —los avisos que escribe Python, lo que la herramienta le dicta al modelo—; y
+# contra Gemini de verdad prueba lo único que no se puede probar sin un modelo,
+# que es cómo redacta.
+#
+# Sólo del lado del CLIENTE. El aviso al equipo puede decir «borrador» y
+# «estado del sistema»: es su vocabulario de trabajo, y hay un escenario que se
+# lo pide.
+_JERGA_CLIENTE = (
+    ("borrador", "draft"),
+    ("pendiente de revisión", "pending review"),
+    ("el sistema", "the system"),
+    ("por configuración", "my configuration"),
+    ("estoy consultando", "i'm checking the system"),
+    ("quedó recibido", "was received"),
+)
+
+# Se saluda UNA vez por conversación. El segundo «¡Hola!» es el que delata que
+# del otro lado no se leyó lo anterior: fue una de las cuatro fallas de la
+# transcripción que abrió este trabajo.
+_SALUDO_PALABRA = frozenset({"hola", "buenas", "hello", "hi", "hey"})
+_SALUDO_FRASE = frozenset(
+    {"buen dia", "buen día", "buenos dias", "buenos días",
+     "good morning", "good afternoon", "good evening"}
+)
+_PALABRAS_SALUDO = re.compile(r"[a-záéíóúüñ']+")
+
+
+def _saluda(texto: str) -> bool:
+    """¿Ese mensaje ARRANCA saludando?
+
+    Por palabra y no por prefijo: «hicimos» empieza con «hi» y no saluda a
+    nadie.
+    """
+    palabras = _PALABRAS_SALUDO.findall(str(texto).strip().lower())[:2]
+    if not palabras:
+        return False
+    if palabras[0] in _SALUDO_PALABRA:
+        return True
+    return len(palabras) > 1 and " ".join(palabras[:2]) in _SALUDO_FRASE
+
+
 def _dice(todo: str, fragmento: str) -> bool:
     """¿El texto dice eso, en el idioma que sea?"""
     corto = fragmento.lower()
@@ -182,6 +227,44 @@ def _es_acuse(texto: str) -> bool:
     """¿Es el aviso de avance, y no la respuesta?"""
     limpio = str(texto or "").strip().lower()
     return any(limpio.startswith(a[:20]) for a in _acuses())
+
+
+def _disculpas() -> tuple[str, ...]:
+    """Las disculpas técnicas que manda Python, en TODOS los idiomas.
+
+    Estaban escritas a mano y sólo en español —«problema técnico», «error
+    tecnico»— así que un turno ROTO en inglés («Sorry, I hit a technical
+    problem») pasaba como OK. El banco corre en los dos idiomas, así que en uno
+    de los dos este chequeo no veía nada: cinco turnos contra Gemini de verdad
+    fallaron por cuota y dos se contaron como buenos. Se resuelven del catálogo,
+    igual que el aviso de avance, y así no hay una lista que se quede vieja.
+
+    La respuesta vacía entra acá a propósito: el modelo no contestó nada y
+    Python rellenó, que es un turno roto y no una redacción.
+    """
+    from app import idioma
+
+    claves = (
+        "fallback.problema_tecnico",
+        "fallback.problema_tecnico_avisado",
+        "fallback.error_tecnico",
+        "fallback.respuesta_vacia",
+    )
+    return tuple(
+        idioma.t(clave, lengua).lower()
+        for clave in claves
+        for lengua in idioma.IDIOMAS
+    )
+
+
+def _es_disculpa(texto: str) -> bool:
+    """¿Es una disculpa técnica de Python, en cualquiera de los dos idiomas?
+
+    Se compara por el ARRANQUE del texto: la disculpa ES la respuesta entera,
+    así que un modelo que apenas menciona un problema no cuenta como turno roto.
+    """
+    limpio = str(texto or "").strip().lower()
+    return any(limpio.startswith(d[:24]) for d in _disculpas() if d)
 
 
 def _idioma_demo() -> str:
@@ -213,6 +296,10 @@ def entorno_del_agente(modo: str = "offline", modelo_llm: str = "") -> dict[str,
         "WHATSAPP_PHONE_NUMBER_ID": PHONE_ID,
         # --- el negocio
         "ERPNEXT_COMPANY": "Lacteos Demo SA",
+        # Con qué nombre se presenta el asistente. Faltaba, así que el prompt
+        # decía «atendés el WhatsApp de la empresa» y el modelo no tenía cómo
+        # nombrar el negocio cuando un cliente le preguntaba para quién trabaja.
+        "NOMBRE_NEGOCIO": "Lacteos Demo SA",
         "ERPNEXT_WAREHOUSE": "Principal - LD",
         "TELEFONOS_EQUIPO": f"{datos.TELEFONO_DUENO},{datos.TELEFONO_EQUIPO}",
         "TELEFONO_DUENO": datos.TELEFONO_DUENO,
@@ -298,6 +385,9 @@ class Piloto:
         self.ip_servicios = ""
         self.ip_agente = ""
         self.entorno_cambiado = False
+        # Se reinicia por escenario (correr()); acá arranca vacío para que
+        # revisar un turno suelto —como hacen los tests— no explote.
+        self.saludos: dict[str, int] = {}
         self._cert_de_esta_corrida: tuple[pathlib.Path, pathlib.Path] | None = None
 
     # -- infraestructura
@@ -373,7 +463,7 @@ class Piloto:
         """Los textos nuevos para ese número, sin contar el aviso de avance.
 
         Un turno de texto manda UNA respuesta. Si una herramienta tarda, antes
-        puede llegar el aviso de avance («Estoy consultando el sistema…»); no
+        puede llegar el aviso de avance («Dame un segundo que lo miro»); no
         es la respuesta y no se cuenta como tal. Se espera la respuesta.
 
         El aviso se reconoce contra el CATÁLOGO, en los dos idiomas, y no
@@ -463,12 +553,9 @@ class Piloto:
         # el paso. app/main.py convierte cualquier excepción en una disculpa,
         # así que sin este chequeo un escenario cuyas condiciones son sólo
         # "prohibe" pasaría con el agente completamente roto.
-        for disculpa in ("problema técnico", "problema tecnico",
-                         "error tecnico", "error técnico"):
-            if disculpa in todo:
-                problemas.append(
-                    "el agente contestó con una disculpa técnica: se rompió algo")
-                break
+        if any(_es_disculpa(t) for t in turno.respuestas):
+            problemas.append(
+                "el agente contestó con una disculpa técnica: se rompió algo")
         # Los fragmentos de texto son EXACTOS contra un guión y sólo
         # orientativos contra un modelo libre: "tengo leche entera" es una
         # respuesta correcta que no contiene "LECHE-ENT-1L". Así que en modo
@@ -492,6 +579,7 @@ class Piloto:
         for fragmento in paso.prohibe:
             if _dice(todo, fragmento):
                 problemas.append(f"la respuesta dice {fragmento!r} y no debería")
+        problemas.extend(self._revisar_tono(paso, turno, todo))
         # Que un documento NO aparezca es una afirmación distinta de que exista
         # con cierto estado, y es la única forma de probar que una escritura no
         # autorizada no escribió: "no hay ninguna factura" no se puede decir
@@ -525,6 +613,42 @@ class Piloto:
                 )
         return problemas
 
+    def _revisar_tono(self, paso: esc.Paso, turno: Turno, todo: str) -> list[str]:
+        """Cómo le habla al CLIENTE. Falla en los dos modos, como los documentos.
+
+        No mira si la redacción es linda —eso no se puede afirmar— sino dos
+        cosas que sí: que no aparezca vocabulario interno, y que no se salude
+        dos veces en la misma conversación.
+        """
+        if turno.rol != "cliente":
+            return []
+        problemas: list[str] = []
+        for es, en in _JERGA_CLIENTE:
+            if es in todo or en in todo:
+                problemas.append(f"le habló al cliente en jerga interna: {es!r}")
+        # UNA pregunta por mensaje, como máximo. Gemini de verdad contestó
+        # «Todo bien por acá, ¿y vos? ¿Te puedo ayudar con algo más?» a un «todo
+        # bien»: dos preguntas, y la segunda es el cierre de call center que el
+        # prompt ya prohibía. Se cuentan los signos de cierre, que es lo que se
+        # puede afirmar sin opinar de la redacción.
+        for respuesta in turno.respuestas:
+            if _es_acuse(respuesta) or _es_disculpa(respuesta):
+                continue
+            preguntas = respuesta.count("?")
+            if preguntas > 1:
+                problemas.append(
+                    f"le hizo {preguntas} preguntas en un mismo mensaje")
+        # El aviso de avance no es la respuesta y no cuenta como saludo.
+        saluda = sum(1 for t in turno.respuestas if not _es_acuse(t) and _saluda(t))
+        if saluda:
+            self.saludos[paso.quien] = self.saludos.get(paso.quien, 0) + saluda
+            if self.saludos[paso.quien] > 1:
+                problemas.append(
+                    "saludó más de una vez en la misma conversación "
+                    f"({self.saludos[paso.quien]} veces)"
+                )
+        return problemas
+
     # -- un escenario
 
     def calentar(self) -> None:
@@ -547,6 +671,8 @@ class Piloto:
         print(f"\n=== {escenario.clave}: {escenario.titulo}", flush=True)
         self.ultimo_pedido = ""
         self.ultimo_codigo = ""
+        # Saludos por número en ESTA conversación: se permite uno.
+        self.saludos: dict[str, int] = {}
         if escenario.entorno:
             self.recrear_agente(escenario.entorno)
         elif self.entorno_cambiado:

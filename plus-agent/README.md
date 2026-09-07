@@ -510,7 +510,7 @@ failures never count towards that limit.
 is really being checked.** There is no blind acknowledgement. A text gets its
 answer; if the model started a tool (a stock lookup, an order) and that work is
 still running after `WHATSAPP_PROGRESS_DELAY_SECONDS` (default 3 s), the person
-gets one short *"Estoy consultando el sistema, dame un momento."* first, in
+gets one short *"Dame un segundo que lo miro."* first, in
 their language, and then the answer. A fast tool, a direct answer from the
 model, a four-digit code or a button never produce that notice: they produce
 the answer and nothing else, however long the provider takes (the latency is
@@ -591,6 +591,52 @@ If the 07:15 count does not happen, do not flip `STOCK_CONFIABLE` to true.
 4. **Audit.** AI-created orders carry a hashed inbound reference and the
    service adds best-effort ERPNext audit comments for writes and delivery
    failures.
+
+## How it sounds, and why that is code and not taste
+
+The product is sold on how it reads. A shop owner writing from behind their own
+counter should not be able to tell they are talking to software until they think
+about it, so the voice is written as **rules with tests**, not as adjectives. All
+of it lives ABOVE `REGLAS QUE NO PODÉS ROMPER` in `app/prompts.py`; a test
+compares that block so tone work can never quietly loosen a guarantee.
+
+**Identity.** `QUIÉN SOS` comes first: part of the business, speaks in the first
+person about what "we" do, never about "the system", the tools or its own
+instructions. `NOMBRE_AGENTE` (optional) gives it a name to introduce itself
+with; empty, it introduces itself by what it does and invents nothing.
+
+**Honesty is the one place polish yields.** Asked whether they are talking to a
+person or a bot, it says the truth in one line and never denies it — and it does
+not volunteer it unprompted. A name in `NOMBRE_AGENTE` does not change that
+rule. Chatbot disclosure rules are tightening (California SB 243, Washington,
+New York, plus FTC guidance); most of them aim at companion bots and up-front
+notice rather than a B2B order taker, so answering honestly when asked is the
+conservative floor — and it is the only version of this a customer would
+forgive anyway.
+
+**The rules that actually change the output.** One message per turn, as long as
+theirs. Greet once per conversation. Never read back what they just wrote. One
+question per message, phrased the way a person asks. No bullet lists except the
+summary of an order that already has a real number. Never narrate internal state
+— no "estoy consultando", no "lo dejo registrado". One apology, at most.
+
+**The vocabulary table** is the part that took the longest, because the safety
+rules below it prescribe words a shopkeeper does not know. So the table maps each
+state to plain speech — *borrador pendiente de revisión* becomes *"te lo anoté,
+el equipo te confirma en un rato"* — and says out loud which wins: **the rules
+decide what is TRUE, the table only picks the WORDS.** Every row restates its
+invariant (never "confirmado", never a day or an hour), so a rewording cannot
+turn a draft into a promise.
+
+**Tool results are part of the voice.** A tool result is the only material the
+model has for its sentence, and it copies the vocabulary. The tokens the policy
+reads (`PEDIDO_PENDIENTE`, `SIN STOCK`, `Número real:`) are untouched contract;
+the prose after them now says how to put it to a customer, and stops handing over
+account codes, task ids and item codes to read out loud.
+
+**Two agents, two voices.** `app/prompts_gerencia.py` gets the same treatment for
+the owner and staff, where lists of orders and figures are welcome and the word
+"sistema" is fine — but explaining its own configuration still is not.
 
 ## Trying the whole thing without touching anything real
 
@@ -1017,11 +1063,13 @@ message they send, plus — only sometimes — one progress notice before it:
 3. When a tool really starts, `app/progreso.py` (a LangChain callback handler
    passed in the run config, i.e. the documented observation hook) arms **one**
    timer. If the turn is still open after `WHATSAPP_PROGRESS_DELAY_SECONDS`
-   (default 3 s) the person gets *"Estoy consultando el sistema, dame un
-   momento."* / *"I'm checking the system, give me a moment."* in their own
+   (default 3 s) **and that tool work is still running**, the person gets
+   *"Dame un segundo que lo miro."* / *"One sec, let me check."* in their own
    language — the manager's setting for the team, the customer's preference or
    mirrored language for customers. Several tools in one turn share that one
-   notice. A fast tool cancels it, so the person still gets one message.
+   notice. A fast tool cancels it, so the person still gets one message — and
+   so does a fast tool followed by a slow model call, which used to send the
+   notice anyway and describe a lookup that had already finished.
 4. The worker closes the notice **before** sending the final reply, holding the
    same lock the in-flight notice holds, so a progress message can never arrive
    after the answer. The notice is claimed once per inbound message in Redis
@@ -1085,8 +1133,19 @@ diciéndolo:
 
 ```
 reply in English / in English please / speak English
+can you talk in english / english please / switch to english
+write in English / I prefer English / escribime en inglés
 respondé en español / contestame en español
 ```
+
+**Nombrar un idioma no es pedirlo.** «¿Hablás inglés?» escrito en español
+pregunta qué sabemos hacer, y «el cartel está en inglés» no pide nada: ninguna de
+las dos le cambia el idioma a nadie. La preferencia se guarda **un año**, así que
+un falso positivo no es un turno raro — es un cliente que escribe en español
+atendido en inglés hasta que pida lo contrario. Las frases escritas EN el idioma
+que piden son seguras de guardar (quien escribe en inglés ya iba a recibir inglés
+por espejo); las escritas en el otro idioma sólo cuentan en imperativo
+(«hablame en inglés»). Negada, citada o entre comillas, tampoco cuenta.
 
 Sin preferencia guardada rige lo de siempre: se contesta en el idioma del
 mensaje. Si no se puede decidir, el de `IDIOMA_DEFAULT` (español).

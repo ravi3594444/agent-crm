@@ -105,7 +105,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from app import erpnext
+from app import erpnext, idioma
 from app.outbound_status import cliente as _redis
 from app.outbound_status import digest_recipiente
 
@@ -1583,35 +1583,62 @@ def _momento_del_negocio(fecha: str, hora: str) -> float:
 # ---------------------------------------------------------------------------
 
 
-def terminos_texto(datos: dict, moneda: str = "") -> str:
-    """The agreed or requested terms, in one line, for a person to read."""
+# --------------------------------------------------------------- el idioma
+# Lo que sigue lo escribe Python y lo lee el CLIENTE, así que sale de
+# app/idioma.py como todo el resto: acá no se traduce nada en el momento.
+
+
+def _lengua_cliente(telefono: str, lengua: str | None = None) -> str:
+    """El idioma en que Python le escribe a ESE cliente.
+
+    El worker lo resuelve UNA vez por turno y lo pasa hasta acá (app/main.py):
+    si un aviso saliera en un idioma y el de al lado en otro, quien lee pensaría
+    que le escriben dos sistemas. Si no llega —un barrido, un llamador viejo— se
+    resuelve por su teléfono verificado, y preguntar no le fija el idioma a
+    nadie (para_destinatario no tiene efectos).
+    """
+    if lengua:
+        return idioma.valido(lengua)
+    return idioma.para_destinatario(telefono)
+
+
+def terminos_texto(datos: dict, moneda: str = "", lengua: str | None = None) -> str:
+    """The agreed or requested terms, in one line, for a person to read.
+
+    ``lengua`` es el idioma de quien lo va a leer. Sin nada, el de por defecto,
+    que es lo que quieren los avisos al equipo. Los textos del cliente pasan el
+    suyo: antes esta función metía «retiro en el local» y «cargo de envío» en
+    español adentro de un mensaje que por lo demás estaba en inglés.
+    """
     from app.formato import pesos
 
     if not datos:
-        return "sin cambios"
+        return idioma.t("terminos.sin_cambios", lengua)
     partes: list[str] = []
     metodo = str(datos.get("metodo") or "")
     if metodo == "retiro":
-        partes.append("retiro en el local")
+        partes.append(idioma.t("terminos.retiro", lengua))
     fecha = str(datos.get("fecha") or "")
     hora = str(datos.get("hora") or "")
+    a_las = idioma.t("terminos.a_las", lengua, hora=hora) if hora else ""
     if fecha:
-        partes.append(f"{fecha}{f' a las {hora}' if hora else ''}")
+        partes.append(f"{fecha} {a_las}".strip())
     elif hora:
-        partes.append(f"a las {hora}")
+        partes.append(a_las)
     try:
         cargo = float(datos.get("cargo") or 0)
     except (TypeError, ValueError):
         cargo = 0.0
     if cargo > 0:
-        partes.append(f"cargo de envío {pesos(cargo, 2)} {moneda}".strip())
+        monto = f"{pesos(cargo, 2)} {moneda}".strip()
+        partes.append(idioma.t("terminos.cargo", lengua, monto=monto))
     try:
         descuento = float(datos.get("descuento_pct") or 0)
     except (TypeError, ValueError):
         descuento = 0.0
     if descuento > 0:
-        partes.append(f"descuento {descuento:g}%")
-    return "; ".join(partes) or "sin cambios"
+        partes.append(idioma.t("terminos.descuento", lengua, pct=f"{descuento:g}"))
+    return "; ".join(partes) or idioma.t("terminos.sin_cambios", lengua)
 
 
 def texto_para_equipo(solicitud: Solicitud) -> str:
@@ -1659,8 +1686,6 @@ def solicitado_o_vacio(solicitud: Solicitud) -> dict:
 
 def texto_pendiente_cliente(solicitud: Solicitud, lengua: str | None = None) -> str:
     """Told immediately: a person was asked, and nothing is promised yet."""
-    from app import idioma
-
     horas = max(0.0, (solicitud.vence_en - solicitud.creada_en) / 3600.0)
     return idioma.t(
         "pedido.pendiente", lengua, pedido=solicitud.pedido, horas=f"{horas:g}"
@@ -1669,18 +1694,14 @@ def texto_pendiente_cliente(solicitud: Solicitud, lengua: str | None = None) -> 
 
 def texto_oferta_cliente(solicitud: Solicitud, lengua: str | None = None) -> str:
     """The offer, and the explicit yes/no the customer has to give."""
-    from app import idioma
-
     return idioma.t(
         "entrega.oferta",
         lengua,
         pedido=solicitud.pedido,
-        terminos=terminos_texto(solicitud.ofrecido, solicitud.moneda),
+        terminos=terminos_texto(solicitud.ofrecido, solicitud.moneda, lengua),
     )
 
 def texto_rechazo_cliente(solicitud: Solicitud, lengua: str | None = None) -> str:
-    from app import idioma
-
     return idioma.t(
         "entrega.solicitud_rechazada",
         lengua,
@@ -1690,14 +1711,10 @@ def texto_rechazo_cliente(solicitud: Solicitud, lengua: str | None = None) -> st
 
 def texto_vencida_cliente(solicitud: Solicitud, lengua: str | None = None) -> str:
     """Last resort: nobody answered AND nothing could be offered instead."""
-    from app import idioma
-
     return idioma.t("entrega.vencida", lengua, pedido=solicitud.pedido)
 
 def texto_respaldo_cliente(solicitud: Solicitud, lengua: str | None = None) -> str:
     """Nobody answered, so here is what we CAN do — a date, and a yes/no."""
-    from app import idioma
-
     retiro = str(solicitud.ofrecido.get("metodo") or "entrega") == "retiro"
     return idioma.t(
         "entrega.respaldo",
@@ -1707,15 +1724,13 @@ def texto_respaldo_cliente(solicitud: Solicitud, lengua: str | None = None) -> s
             "entrega.respaldo_retiro" if retiro else "entrega.respaldo_reparto",
             lengua,
         ),
-        terminos=terminos_texto(solicitud.ofrecido, solicitud.moneda),
+        terminos=terminos_texto(solicitud.ofrecido, solicitud.moneda, lengua),
     )
 
 def texto_revision_vencida_cliente(
     solicitud: Solicitud, lengua: str | None = None
 ) -> str:
     """We said a person would look at it, and nobody did."""
-    from app import idioma
-
     return idioma.t("entrega.revision_vencida", lengua, pedido=solicitud.pedido)
 
 def texto_respaldo_vencido_cliente(
@@ -1728,13 +1743,11 @@ def texto_respaldo_vencido_cliente(
     ESPERANDO_CLIENTE precisely because the write that would have said otherwise
     failed. Whose silence it was stays in the team notice.
     """
-    from app import idioma
-
     return idioma.t(
         "entrega.respaldo_vencido",
         lengua,
         pedido=solicitud.pedido,
-        terminos=terminos_texto(solicitud.ofrecido, solicitud.moneda),
+        terminos=terminos_texto(solicitud.ofrecido, solicitud.moneda, lengua),
     )
 
 def _telefono_cliente(pedido: str) -> str:
@@ -1771,8 +1784,6 @@ def _encolar_cliente(solicitud: Solicitud, evento: str, texto) -> bool:
             pass
         return False
     if callable(texto):
-        from app import idioma
-
         texto = texto(idioma.para_destinatario(tel))
     try:
         return avisos.encolar(f"{evento}:{solicitud.id}", solicitud.pedido, tel, texto)
@@ -2043,18 +2054,27 @@ def _es_su_pedido(solicitud: Solicitud, telefono_cliente: str) -> bool:
     return esperado == _telefono_cliente(solicitud.pedido)
 
 
-def rechazar_cliente(pedido: str, telefono_cliente: str) -> str:
-    """The customer turns the offer down. Deterministic, and it frees the stock."""
+def rechazar_cliente(
+    pedido: str, telefono_cliente: str, lengua: str | None = None
+) -> str:
+    """The customer turns the offer down. Deterministic, and it frees the stock.
+
+    ``lengua`` la resuelve el worker UNA vez por turno (app/main.py) y viaja
+    hasta acá: si no llega, se resuelve por el teléfono verificado. Estos
+    textos los escribe Python y los lee el cliente, así que salen en su idioma
+    como todo el resto del catálogo.
+    """
     from app.locks import CoordinationError, distributed_lock
 
+    lengua = _lengua_cliente(telefono_cliente, lengua)
     try:
         with distributed_lock(f"solicitud:{pedido}", lease_seconds=60, wait_seconds=10):
             solicitud = leer(pedido)
             if solicitud is None or solicitud.estado != ESPERANDO_CLIENTE:
-                return _sin_oferta(pedido, solicitud)
+                return _sin_oferta(pedido, solicitud, lengua)
             if not _es_su_pedido(solicitud, telefono_cliente):
                 print(f"[solicitudes] {pedido}: respuesta de otro número, ignorada")
-                return "No encontré una oferta tuya pendiente."
+                return idioma.t("oferta.no_hay_tuya", lengua)
             liberado, detalle = soltar_reserva(pedido)
             cerrada = registrar(
                 solicitud,
@@ -2064,11 +2084,9 @@ def rechazar_cliente(pedido: str, telefono_cliente: str) -> str:
                 decidida_en=_ahora(),
             )
             if cerrada is None:
-                return (
-                    "No pude registrar tu respuesta. Escribime de nuevo en un momento."
-                )
+                return idioma.t("oferta.no_registre", lengua)
     except CoordinationError:
-        return "Estoy procesando algo de este pedido. Escribime de nuevo en un momento."
+        return idioma.t("oferta.procesando", lengua)
 
     del liberado
     _avisar_equipo(
@@ -2076,43 +2094,28 @@ def rechazar_cliente(pedido: str, telefono_cliente: str) -> str:
         f"🙅 {pedido}: el cliente no aceptó la oferta "
         f"({terminos_texto(cerrada.ofrecido, cerrada.moneda)}). {detalle.capitalize()}.",
     )
-    return (
-        f"Listo, no avanzo con {pedido}. Si querés, lo dejamos para un día de "
-        "reparto normal.\n\n"
-        f"Understood, {pedido} will not go ahead. We can schedule it for a "
-        "normal delivery day instead."
-    )
+    return idioma.t("oferta.rechazada", lengua, pedido=pedido)
 
 
-def _sin_oferta(pedido: str, solicitud: Solicitud | None) -> str:
+def _sin_oferta(
+    pedido: str, solicitud: Solicitud | None, lengua: str | None = None
+) -> str:
     if solicitud is None:
-        return f"No tengo una oferta pendiente para {pedido}."
+        return idioma.t("oferta.sin_pendiente", lengua, pedido=pedido)
     if solicitud.estado == PENDIENTE:
-        return (
-            f"Todavía no tengo la respuesta del encargado sobre {pedido}. "
-            "Te escribo en cuanto la tenga."
-        )
+        return idioma.t("oferta.esperando_encargado", lengua, pedido=pedido)
     if solicitud.estado == CUMPLIDA:
-        return f"{pedido} ya quedó confirmado con lo que acordamos."
+        return idioma.t("oferta.ya_confirmado", lengua, pedido=pedido)
     if solicitud.estado == REVISION_HUMANA:
-        return (
-            f"Sobre {pedido} está mirándolo una persona antes de cerrarlo. Te "
-            "contestamos en cuanto lo revise."
-        )
+        return idioma.t("oferta.en_revision", lengua, pedido=pedido)
     if solicitud.estado in (REVISION_VENCIDA, REVISION_RESUELTA, VENCIDA):
-        return (
-            f"Sobre {pedido} ya no tengo nada pendiente para cerrar. Si lo "
-            "querés igual, escribime y lo armamos con el stock del momento."
-        )
+        return idioma.t("oferta.cerrada", lengua, pedido=pedido)
     # Never the raw state name: "ya está cerrada (rechazada_cliente)" is
     # internal vocabulary, and the customer did not ask about a state machine.
-    return (
-        f"Sobre {pedido} no me quedó nada pendiente de tu parte. Si necesitás "
-        "algo más, decime."
-    )
+    return idioma.t("oferta.nada_pendiente", lengua, pedido=pedido)
 
 
-def _vencer_tarde(solicitud: Solicitud) -> str:
+def _vencer_tarde(solicitud: Solicitud, lengua: str | None = None) -> str:
     """The customer accepted after the deadline. Lock held. Same proof as the sweep.
 
     This ending used to write VENCIDA whatever soltar_reserva had managed, and
@@ -2141,13 +2144,8 @@ def _vencer_tarde(solicitud: Solicitud) -> str:
     """
     pedido = solicitud.pedido
     ahora = _ahora()
-    tarde = (
-        f"Pasó el plazo de la oferta de {pedido}, así que no la puedo cerrar. "
-        "Escribime y lo vemos de nuevo con el stock de ahora."
-    )
-    no_verificable = (
-        "No pude verificar el pedido en este momento. Escribime de nuevo en un rato."
-    )
+    tarde = idioma.t("oferta.tarde", lengua, pedido=pedido)
+    no_verificable = idioma.t("oferta.no_verificable", lengua)
     resultado, estado_doc, detalle = _liberar(pedido)
     if resultado == _ILEGIBLE:
         return no_verificable
@@ -2155,14 +2153,8 @@ def _vencer_tarde(solicitud: Solicitud) -> str:
         if not _resuelta_por_persona(solicitud, estado_doc, ahora):
             return no_verificable
         if estado_doc == 1:
-            return (
-                f"El encargado ya confirmó {pedido} por su cuenta, así que no hay "
-                "nada más que cerrar de tu lado. Cualquier duda, escribime."
-            )
-        return (
-            f"{pedido} fue cancelado por el encargado. Si lo querés igual, "
-            "escribime y lo armamos de nuevo con el stock de ahora."
-        )
+            return idioma.t("oferta.confirmado_por_encargado", lengua, pedido=pedido)
+        return idioma.t("oferta.cancelado_por_encargado", lengua, pedido=pedido)
     if resultado == _REINTENTAR:
         _avisar_equipo(
             solicitud,
@@ -2185,7 +2177,7 @@ def _vencer_tarde(solicitud: Solicitud) -> str:
     )
     if vencida is None:
         # Not durable means it did not happen: the sweep comes back for it.
-        return "No pude registrar tu respuesta. Escribime de nuevo en un momento."
+        return idioma.t("oferta.no_registre", lengua)
     _avisar_equipo(
         vencida,
         evento=f"acepto_tarde:{solicitud.id}",
@@ -2198,7 +2190,9 @@ def _vencer_tarde(solicitud: Solicitud) -> str:
     return tarde
 
 
-def aceptar_cliente(pedido: str, telefono_cliente: str) -> str:
+def aceptar_cliente(
+    pedido: str, telefono_cliente: str, lengua: str | None = None
+) -> str:
     """The customer accepts. Re-check EVERYTHING, then confirm the order.
 
     This is the only place in the workflow that submits, and it runs under the
@@ -2209,16 +2203,17 @@ def aceptar_cliente(pedido: str, telefono_cliente: str) -> str:
     from app import erpnext as erp
     from app.locks import CoordinationError, distributed_lock
 
+    lengua = _lengua_cliente(telefono_cliente, lengua)
     try:
         with distributed_lock(f"solicitud:{pedido}", lease_seconds=90, wait_seconds=10):
             solicitud = leer(pedido)
             if solicitud is None or solicitud.estado != ESPERANDO_CLIENTE:
-                return _sin_oferta(pedido, solicitud)
+                return _sin_oferta(pedido, solicitud, lengua)
             if not _es_su_pedido(solicitud, telefono_cliente):
                 print(f"[solicitudes] {pedido}: respuesta de otro número, ignorada")
-                return "No encontré una oferta tuya pendiente."
+                return idioma.t("oferta.no_hay_tuya", lengua)
             if solicitud.vencida():
-                return _vencer_tarde(solicitud)
+                return _vencer_tarde(solicitud, lengua)
 
             if solicitud.es_respaldo:
                 # This offer was made on a draft that was deliberately closed
@@ -2228,24 +2223,21 @@ def aceptar_cliente(pedido: str, telefono_cliente: str) -> str:
                 # there, and it refuses a closed order outright.
                 reabierto, por_que = reabrir_borrador(pedido)
                 if not reabierto:
-                    return _a_revision(solicitud, [por_que])
+                    return _a_revision(solicitud, [por_que], lengua)
 
             try:
                 so = erp.policy_get_doc("Sales Order", pedido)
             except Exception as exc:
                 print(f"[solicitudes] {pedido}: relectura falló ({type(exc).__name__})")
-                return (
-                    "No pude verificar el pedido en este momento. Escribime de "
-                    "nuevo en un rato."
-                )
+                return idioma.t("oferta.no_verificable", lengua)
 
             problemas = revalidar(so, solicitud)
             if problemas:
-                return _a_revision(solicitud, problemas)
+                return _a_revision(solicitud, problemas, lengua)
 
             aplicado, detalle_aplicado = _aplicar_terminos(pedido, solicitud)
             if not aplicado:
-                return _a_revision(solicitud, [detalle_aplicado])
+                return _a_revision(solicitud, [detalle_aplicado], lengua)
 
             try:
                 erp.submit_doc("Sales Order", pedido)
@@ -2257,7 +2249,7 @@ def aceptar_cliente(pedido: str, telefono_cliente: str) -> str:
                     actual = {}
                 if int(actual.get("docstatus") or 0) != 1:
                     return _a_revision(
-                        solicitud, ["no pude confirmar el pedido en ERPNext"]
+                        solicitud, ["no pude confirmar el pedido en ERPNext"], lengua
                     )
                 so = actual
 
@@ -2269,13 +2261,14 @@ def aceptar_cliente(pedido: str, telefono_cliente: str) -> str:
                 decidida_en=_ahora(),
             )
     except CoordinationError:
-        return "Estoy procesando algo de este pedido. Escribime de nuevo en un momento."
+        return idioma.t("oferta.procesando", lengua)
 
     _cerrar_confirmado(pedido, solicitud, confirmada, so, telefono_cliente)
-    return (
-        f"¡Listo! {pedido} quedó confirmado con lo que acordamos: "
-        f"{terminos_texto(solicitud.ofrecido, solicitud.moneda)}. Te mando el "
-        "detalle enseguida."
+    return idioma.t(
+        "oferta.aceptada",
+        lengua,
+        pedido=pedido,
+        terminos=terminos_texto(solicitud.ofrecido, solicitud.moneda, lengua),
     )
 
 
@@ -2339,7 +2332,9 @@ def _cerrar_confirmado(
         print(f"[solicitudes] {pedido}: el cierre de la solicitud no quedó durable")
 
 
-def _a_revision(solicitud: Solicitud, problemas: list[str]) -> str:
+def _a_revision(
+    solicitud: Solicitud, problemas: list[str], lengua: str | None = None
+) -> str:
     """The customer said yes but the world moved. Nobody is told a half-truth.
 
     This is the one exit from the workflow that leaves a LIVE draft behind: the
@@ -2366,7 +2361,7 @@ def _a_revision(solicitud: Solicitud, problemas: list[str]) -> str:
         # is the permanent stock commitment this whole path exists to avoid.
         # Closing the draft now is the fail-closed direction: a person can
         # always reopen it, and nobody was promised anything.
-        return _revision_sin_registro(solicitud, detalle)
+        return _revision_sin_registro(solicitud, detalle, lengua)
     _avisar_equipo(
         en_revision,
         f"⚠️ {solicitud.pedido}: el cliente aceptó la oferta pero NO lo confirmé. "
@@ -2375,17 +2370,12 @@ def _a_revision(solicitud: Solicitud, problemas: list[str]) -> str:
         f"\nTenés {horas:g} h: pasado ese plazo cierro el borrador para que deje "
         f"de retener stock, y le aviso al cliente.",
     )
-    return (
-        f"Gracias por confirmar. Sobre {solicitud.pedido} necesito revisarlo con "
-        "una persona antes de cerrarlo: cambió algo desde la oferta. Te "
-        "contestamos a la brevedad.\n\n"
-        f"Thanks for confirming. I need a person to review {solicitud.pedido} "
-        "before closing it: something changed since the offer. We will get back "
-        "to you shortly."
-    )
+    return idioma.t("oferta.a_revision", lengua, pedido=solicitud.pedido)
 
 
-def _revision_sin_registro(solicitud: Solicitud, detalle: str) -> str:
+def _revision_sin_registro(
+    solicitud: Solicitud, detalle: str, lengua: str | None = None
+) -> str:
     """The review could not be recorded, so the draft must not keep the units.
 
     Without a durable record there is no deadline, and without a deadline this
@@ -2412,14 +2402,7 @@ def _revision_sin_registro(solicitud: Solicitud, detalle: str) -> str:
         f"borrador para que no retenga stock sin plazo: {como}. "
         f"Está sin confirmar y sin revisión abierta — miralo a mano.",
     )
-    return (
-        f"Gracias por confirmar. Sobre {solicitud.pedido} tengo un problema "
-        "para registrarlo y necesito que lo vea una persona. No queda nada "
-        "confirmado a tu nombre; te contestamos a la brevedad.\n\n"
-        f"Thanks for confirming. I hit a problem recording {solicitud.pedido} "
-        "and a person has to look at it. Nothing is confirmed in your name; we "
-        "will get back to you shortly."
-    )
+    return idioma.t("oferta.revision_sin_registro", lengua, pedido=solicitud.pedido)
 
 
 # ---------------------------------------------------------------------------

@@ -9,3 +9,4 @@
 
 # logs de verificaciones corridas a mano
 *.log
+__pycache__/

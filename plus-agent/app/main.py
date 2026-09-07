@@ -60,8 +60,29 @@ def texto_progreso(lengua: str | None = None) -> str:
     return idioma.t("progreso.consultando", lengua)
 
 
-def texto_solo_texto(lengua: str | None = None) -> str:
-    return idioma.t("ack.solo_texto", lengua)
+# El tipo de mensaje de Meta -> qué se le contesta. Lo que no está acá cae al
+# texto genérico: un tipo nuevo de WhatsApp no puede dejar a nadie sin respuesta.
+_ACK_POR_TIPO = {
+    "audio": "ack.audio",
+    "voice": "ack.audio",
+    "image": "ack.imagen",
+    "sticker": "ack.imagen",
+    "video": "ack.video",
+    "document": "ack.archivo",
+    "location": "ack.ubicacion",
+}
+
+
+def texto_solo_texto(lengua: str | None = None, tipo: object = "") -> str:
+    """Lo que se le contesta a un mensaje que no es texto, según QUÉ mandó.
+
+    El tipo viaja en `data` desde el webhook (ver el ruteo de tipos abajo), así
+    que acá no se adivina nada. Antes había un solo texto para todo, y le
+    contestaba «escribime el pedido en texto» a alguien que había mandado su
+    ubicación.
+    """
+    clave = _ACK_POR_TIPO.get(str(tipo or "").strip().lower(), "ack.solo_texto")
+    return idioma.t(clave, lengua)
 
 
 # Dos variantes para que al cliente nunca se le diga que se avisó al equipo si
@@ -245,24 +266,25 @@ def _enqueue_message(telefono: str, message_id: str, kind: str, data: str) -> bo
 
 
 def _contexto(telefono: str) -> tuple[str, str]:
-    """Resolve authorization internally; identifiers never enter the prompt.
+    """(código de cuenta, nombre para mostrar) de quien escribió. Vacíos si no tiene.
 
     The lookup tolerates hand-typed mobile_no formats (+54 9 351 123-4567,
     0351 15 123-4567, ...) by matching in canonical form; see app/clientes.py.
+
+    El segundo valor era una frase de contexto que `responder_cliente` borraba
+    sin leer: el prompt se arma en app/conversacion.py y nunca la veía. Ahora es
+    el NOMBRE, que es el único dato de esta ficha que el modelo puede decir en
+    voz alta — el código de cuenta y el teléfono no se muestran nunca, y por eso
+    viajan aparte y por el canal seguro. `clientes.CAMPOS` ya lo traía en la
+    misma consulta, así que esto no agrega una llamada a ERPNext.
     """
     # Local import: keeps main.py's import block untouched for this concern.
     from app import clientes
 
     cliente = clientes.buscar_por_telefono(telefono, get_list=erpnext.get_list)
     if cliente:
-        return str(cliente["name"]), (
-            "Cliente registrado y validado por el servidor. "
-            "Podés ayudarlo con su pedido."
-        )
-    return "", (
-        "Cliente no registrado todavía. Si hace un pedido, "
-        "registralo primero con crear_lead."
-    )
+        return str(cliente["name"]), str(cliente.get("customer_name") or "")
+    return "", ""
 
 
 def _non_empty(respuesta: object, message_id: str, lengua: str | None = None) -> str:
@@ -604,7 +626,9 @@ _RECHAZA_RE = re.compile(
 )
 
 
-def _customer_command(text: str, telefono: str, customer_code: str) -> str | None:
+def _customer_command(
+    text: str, telefono: str, customer_code: str, lengua: str | None = None
+) -> str | None:
     """A customer's explicit yes or no to a pending offer, or None.
 
     Deterministic on purpose: this is where a price and a delivery date get
@@ -631,8 +655,8 @@ def _customer_command(text: str, telefono: str, customer_code: str) -> str | Non
                 return None
             pedido = esperando.pedido
         if rechaza is not None:
-            return solicitudes.rechazar_cliente(pedido, telefono)
-        return solicitudes.aceptar_cliente(pedido, telefono)
+            return solicitudes.rechazar_cliente(pedido, telefono, lengua)
+        return solicitudes.aceptar_cliente(pedido, telefono, lengua)
     except Exception as error:
         print(
             f"[solicitudes] respuesta de cliente falló phone={_correlation(telefono)} "
@@ -792,7 +816,8 @@ def _responder(item: dict, lengua: str, progreso: Progreso) -> str:
     if kind in {"interactive", "button"}:
         return str(manejar_boton(data, telefono))
     if kind != "text":
-        return texto_solo_texto(lengua)
+        # `data` trae el tipo que mandó Meta ("audio", "location", ...).
+        return texto_solo_texto(lengua, data)
     if es_equipo(telefono):
         # ANTES que el modelo, y por eso está acá arriba. Ver
         # _comando_de_idioma: en vivo este comando llegó a Gemini, que
@@ -836,15 +861,17 @@ def _responder(item: dict, lengua: str, progreso: Progreso) -> str:
     if pedido_idioma:
         idioma.recordar_cliente(telefono, pedido_idioma)
 
-    customer_code, contexto = _contexto(telefono)
-    acuerdo = _customer_command(data, telefono, customer_code)
+    customer_code, customer_name = _contexto(telefono)
+    # El idioma del turno viaja hasta la respuesta determinista: es el mismo
+    # que usa todo lo demás que sale de este turno.
+    acuerdo = _customer_command(data, telefono, customer_code, lengua)
     if acuerdo:
         return acuerdo
     return _non_empty(
         responder_cliente(
             data,
             thread_id=thread_tag,
-            contexto_cliente=contexto,
+            customer_name=customer_name,
             customer_code=customer_code,
             inbound_message_id=message_id,
             actor_phone=telefono,

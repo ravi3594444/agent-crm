@@ -98,17 +98,54 @@ CATALOGO: dict[str, dict[str, str]] = {
     # herramienta y ésta ya está corriendo hace unos segundos (app/progreso.py):
     # recién entonces es verdad que se está consultando algo. Una respuesta
     # directa del modelo no manda esto, tarde lo que tarde.
+    # La clave se llama «consultando» por historia; el texto ya no nombra
+    # ningún sistema. Nadie le dice a un cliente que está consultando un
+    # sistema: le dice que le da un segundo.
     "progreso.consultando": {
-        ES: "Estoy consultando el sistema, dame un momento.",
-        EN: "I'm checking the system, give me a moment.",
+        ES: "Dame un segundo que lo miro.",
+        EN: "One sec, let me check.",
     },
+    # Lo que llega y no es texto. Se dice QUÉ llegó: contestarle «escribime el
+    # pedido» a alguien que mandó su ubicación, o «no puedo ver fotos» a un
+    # audio, es la clase de respuesta que sólo puede haber escrito un programa.
+    # Un almacén argentino manda audios todo el día, así que ésta es una de las
+    # respuestas más leídas del sistema. Transcribirlos todavía no está hecho
+    # (ver «Not done yet» en el README): esto es lo que se dice mientras no lo
+    # esté, y por eso dice «todavía».
     "ack.solo_texto": {
+        ES: "Uy, eso no lo puedo abrir. ¿Me lo escribís? Aunque sea cortito.",
+        EN: "Sorry, I can't open that. Could you type it? Even a short line.",
+    },
+    "ack.audio": {
         ES: (
-            "Por ahora necesito que me escribas el pedido en texto para poder "
-            "ayudarte."
+            "Uy, los audios todavía no los puedo escuchar. ¿Me lo escribís? "
+            "Aunque sea cortito."
         ),
         EN: (
-            "For now I need you to write the order as text so I can help you."
+            "Sorry, I can't listen to voice notes yet. Could you type it? Even a "
+            "short line."
+        ),
+    },
+    "ack.imagen": {
+        ES: "Uy, las fotos todavía no las puedo ver. ¿Me lo escribís?",
+        EN: "Sorry, I can't see photos yet. Could you type it?",
+    },
+    "ack.video": {
+        ES: "Uy, los videos todavía no los puedo ver. ¿Me lo escribís?",
+        EN: "Sorry, I can't watch videos yet. Could you type it?",
+    },
+    "ack.archivo": {
+        ES: "Uy, los archivos todavía no los puedo abrir. ¿Me lo escribís?",
+        EN: "Sorry, I can't open files yet. Could you type it?",
+    },
+    "ack.ubicacion": {
+        ES: (
+            "Uy, la ubicación no la puedo abrir. Si es para la entrega, pasame la "
+            "calle y el número."
+        ),
+        EN: (
+            "Sorry, I can't open a dropped pin. If it's for the delivery, send me "
+            "the street and number."
         ),
     },
     "fallback.respuesta_vacia": {
@@ -166,29 +203,182 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "a coordinar",
         EN: "to be arranged",
     },
+    # Sin saludo: estos llegan cuando ya se estuvo hablando, y el saludo va una
+    # sola vez por conversación. «Hola!» en la mitad de una charla es lo que
+    # delata que del otro lado hay un programa que no leyó lo anterior.
     "pedido.rechazado": {
         ES: (
-            "Hola! Sobre tu pedido {pedido}: no vamos a poder cumplirlo{motivo}. "
+            "Sobre tu pedido {pedido}: no vamos a poder cumplirlo{motivo}. "
             "En breve te escribe alguien del equipo. Perdón por la molestia."
         ),
         EN: (
-            "Hi! About your order {pedido}: we won't be able to fulfil it{motivo}. "
+            "About your order {pedido}: we won't be able to fulfil it{motivo}. "
             "Someone from our team will message you shortly. Sorry about that."
         ),
     },
     "pedido.cancelado": {
         ES: (
-            "Hola! Tu pedido {pedido} quedó cancelado ({motivo}). Si fue un error, "
+            "Tu pedido {pedido} quedó cancelado ({motivo}). Si fue un error, "
             "escribinos y lo revisamos."
         ),
         EN: (
-            "Hi! Your order {pedido} has been cancelled ({motivo}). If this is a "
+            "Your order {pedido} has been cancelled ({motivo}). If this is a "
             "mistake, message us and we will sort it out."
         ),
     },
     "pedido.sin_confirmar": {
         ES: "Tu pedido {pedido} sigue sin confirmar.",
         EN: "Your order {pedido} is still unconfirmed.",
+    },
+    # --------------------------------------- la oferta de entrega, del lado del cliente
+    # Estos los manda Python cuando el cliente contesta «acepto» / «no acepto»:
+    # se resuelven ANTES de que ningún modelo vea el mensaje (app/main.py), así
+    # que son texto de acá y no del modelo. Tres de ellos salían en los dos
+    # idiomas pegados con un salto de línea —el mismo parche que este catálogo
+    # existe para no tener— y el resto sólo en español, así que un cliente que
+    # había pedido inglés escribía «accept» y recibía español.
+    "terminos.sin_cambios": {ES: "sin cambios", EN: "no changes"},
+    "terminos.retiro": {ES: "retiro en el local", EN: "pickup at the shop"},
+    "terminos.a_las": {ES: "a las {hora}", EN: "at {hora}"},
+    "terminos.cargo": {ES: "cargo de envío {monto}", EN: "delivery fee {monto}"},
+    "terminos.descuento": {ES: "descuento {pct}%", EN: "{pct}% discount"},
+    "oferta.no_hay_tuya": {
+        ES: "No encontré una oferta tuya pendiente.",
+        EN: "I don't have an open offer for you.",
+    },
+    "oferta.no_registre": {
+        ES: "No me quedó registrada tu respuesta. Escribime de nuevo en un momento.",
+        EN: "Your reply did not get saved. Message me again in a moment.",
+    },
+    "oferta.procesando": {
+        ES: "Justo estoy con algo de este pedido. Escribime en un minuto.",
+        EN: "I'm on something for that order right now. Message me in a minute.",
+    },
+    "oferta.rechazada": {
+        ES: (
+            "Listo, no avanzo con {pedido}. Si querés, lo dejamos para un día de "
+            "reparto normal."
+        ),
+        EN: (
+            "Alright, I won't go ahead with {pedido}. If you like, we can leave it "
+            "for a normal delivery day."
+        ),
+    },
+    "oferta.sin_pendiente": {
+        ES: "No tengo una oferta pendiente para {pedido}.",
+        EN: "I don't have an open offer for {pedido}.",
+    },
+    "oferta.esperando_encargado": {
+        ES: (
+            "Todavía no tengo la respuesta del encargado sobre {pedido}. Te "
+            "escribo en cuanto la tenga."
+        ),
+        EN: (
+            "I still don't have the manager's answer on {pedido}. I'll write as "
+            "soon as I do."
+        ),
+    },
+    "oferta.ya_confirmado": {
+        ES: "{pedido} ya quedó confirmado con lo que acordamos.",
+        EN: "{pedido} is already closed on what we agreed.",
+    },
+    "oferta.en_revision": {
+        ES: (
+            "Sobre {pedido} está mirándolo una persona antes de cerrarlo. Te "
+            "contestamos en cuanto lo revise."
+        ),
+        EN: (
+            "Someone is looking at {pedido} before we close it. We'll get back to "
+            "you as soon as they do."
+        ),
+    },
+    "oferta.cerrada": {
+        ES: (
+            "Sobre {pedido} ya no tengo nada pendiente para cerrar. Si lo querés "
+            "igual, escribime y lo armamos con el stock del momento."
+        ),
+        EN: (
+            "There's nothing left open on {pedido}. If you still want it, message "
+            "me and we'll put it together with what's in stock."
+        ),
+    },
+    "oferta.nada_pendiente": {
+        ES: (
+            "Sobre {pedido} no me quedó nada pendiente de tu parte. Si necesitás "
+            "algo más, decime."
+        ),
+        EN: (
+            "There's nothing waiting on you for {pedido}. If you need anything "
+            "else, tell me."
+        ),
+    },
+    "oferta.tarde": {
+        ES: (
+            "Pasó el plazo de la oferta de {pedido}, así que no la puedo cerrar. "
+            "Escribime y lo vemos de nuevo con el stock de ahora."
+        ),
+        EN: (
+            "That offer on {pedido} has run out, so I can't close it. Message me "
+            "and we'll look at it again with what's in stock now."
+        ),
+    },
+    "oferta.no_verificable": {
+        ES: "Ahora no lo pude mirar. Escribime en un rato y lo vemos.",
+        EN: "I couldn't look at it just now. Message me shortly and we'll sort it.",
+    },
+    "oferta.confirmado_por_encargado": {
+        ES: (
+            "El encargado ya confirmó {pedido} por su cuenta, así que no hay nada "
+            "más que cerrar de tu lado. Cualquier duda, escribime."
+        ),
+        EN: (
+            "The manager already closed {pedido} himself, so there's nothing left "
+            "on your side. Any questions, message me."
+        ),
+    },
+    "oferta.cancelado_por_encargado": {
+        ES: (
+            "{pedido} fue cancelado por el encargado. Si lo querés igual, "
+            "escribime y lo armamos de nuevo con el stock de ahora."
+        ),
+        EN: (
+            "The manager cancelled {pedido}. If you still want it, message me and "
+            "we'll put it together again with what's in stock now."
+        ),
+    },
+    "oferta.aceptada": {
+        ES: (
+            "¡Listo! {pedido} quedó confirmado con lo que acordamos: {terminos}. "
+            "Te mando el detalle enseguida."
+        ),
+        EN: (
+            "Done! {pedido} is confirmed on what we agreed: {terminos}. I'll send "
+            "you the details right away."
+        ),
+    },
+    "oferta.a_revision": {
+        ES: (
+            "Gracias por confirmar. Sobre {pedido} necesito revisarlo con una "
+            "persona antes de cerrarlo: cambió algo desde la oferta. Te "
+            "contestamos a la brevedad."
+        ),
+        EN: (
+            "Thanks for confirming. Someone has to look at {pedido} with me before "
+            "we close it: something moved since the offer. We'll get back to you "
+            "shortly."
+        ),
+    },
+    "oferta.revision_sin_registro": {
+        ES: (
+            "Gracias por confirmar. Sobre {pedido} se me complicó algo y necesito "
+            "que lo vea una persona. No queda nada confirmado a tu nombre; te "
+            "contestamos a la brevedad."
+        ),
+        EN: (
+            "Thanks for confirming. Something went wrong with {pedido} on my side "
+            "and a person has to look at it. Nothing is closed in your name; we'll "
+            "get back to you shortly."
+        ),
     },
     # ------------------------------------------------- avisos a la gerencia
     # El encabezado y el cuerpo del aviso de pedido. Los COMANDOS que van
@@ -293,16 +483,20 @@ CATALOGO: dict[str, dict[str, str]] = {
             "alternative. A person will look at it."
         ),
     },
+    # Sin «respondé con el botón»: al cliente la oferta le llega como texto o
+    # como plantilla (app/avisos.py), nunca con botones — los botones son del
+    # aviso al EQUIPO (app/notificar.py). Le decía que apretara algo que no
+    # estaba ahí.
     "entrega.oferta": {
         ES: (
             "Sobre tu pedido {pedido}: el encargado te ofrece {terminos}.\n"
-            "¿Lo tomás? Respondé con el botón, o escribí 'acepto {pedido}' o "
-            "'no acepto {pedido}'. Sin tu respuesta no cierro nada."
+            "¿Lo tomás? Contestame 'acepto {pedido}' o 'no acepto {pedido}'. "
+            "Sin tu respuesta no cierro nada."
         ),
         EN: (
             "About your order {pedido}: the manager offers {terminos}.\n"
-            "Do you take it? Reply with the button, or write 'accept {pedido}' "
-            "or 'reject {pedido}'. Nothing is closed without your reply."
+            "Do you take it? Write 'accept {pedido}' or 'reject {pedido}'. "
+            "Nothing is closed without your reply."
         ),
     },
     "entrega.solicitud_rechazada": {
@@ -772,14 +966,35 @@ def cliente_guardado(numero: object) -> str | None:
 # mensaje esté escrito en inglés no es lo mismo que pedir que le contesten en
 # inglés, y confundir las dos cosas le cambia el idioma a cualquiera que
 # escriba una palabra suelta en otro idioma.
+# Una frase pedida EN el idioma que pide es segura de guardar: quien escribe en
+# inglés y pide inglés ya iba a recibir inglés por espejo. Al revés no: «¿hablás
+# inglés?» escrito en español es una pregunta por lo que sabemos hacer, no un
+# pedido de cambiar el idioma de la atención, y guardarla un año dejaría a un
+# cliente que escribe en español recibiendo inglés. Por eso los pedidos escritos
+# en el OTRO idioma sólo entran acá en forma imperativa («hablame en inglés»).
 _PEDIDOS_EXPLICITOS = (
     ("reply in english", EN),
     ("answer in english", EN),
     ("respond in english", EN),
     ("in english please", EN),
+    ("english please", EN),
     ("speak english", EN),
+    ("speak in english", EN),
+    ("talk in english", EN),
+    ("talk english", EN),
+    ("talk to me in english", EN),
+    ("write in english", EN),
+    ("write to me in english", EN),
+    ("answer me in english", EN),
+    ("reply to me in english", EN),
+    ("message me in english", EN),
+    ("switch to english", EN),
+    ("prefer english", EN),
     ("hablame en ingles", EN),
+    ("hablar en ingles", EN),
+    ("escribime en ingles", EN),
     ("contestame en ingles", EN),
+    ("contesta en ingles", EN),
     ("responde en ingles", EN),
     ("respondeme en ingles", EN),
     ("en ingles por favor", EN),
@@ -787,11 +1002,27 @@ _PEDIDOS_EXPLICITOS = (
     ("responde en espanol", ES),
     ("respondeme en espanol", ES),
     ("contestame en espanol", ES),
+    ("contesta en espanol", ES),
     ("hablame en espanol", ES),
+    ("hablar en espanol", ES),
+    ("escribime en espanol", ES),
     ("reply in spanish", ES),
     ("answer in spanish", ES),
+    ("respond in spanish", ES),
     ("in spanish please", ES),
+    ("spanish please", ES),
     ("speak spanish", ES),
+    ("speak in spanish", ES),
+    ("talk in spanish", ES),
+    ("talk spanish", ES),
+    ("talk to me in spanish", ES),
+    ("write in spanish", ES),
+    ("write to me in spanish", ES),
+    ("answer me in spanish", ES),
+    ("reply to me in spanish", ES),
+    ("message me in spanish", ES),
+    ("switch to spanish", ES),
+    ("prefer spanish", ES),
     ("en espanol por favor", ES),
 )
 
@@ -819,6 +1050,62 @@ _SEPARADORES = re.compile(r"[,.;:!?\n]")
 _PALABRA = re.compile(r"[a-z']+")
 _VENTANA = 3
 
+# Quién es el sujeto. Una frase de la lista puede estar CONTANDO lo que hace
+# otra persona en vez de pidiendo algo: «my daughter can write in English» no
+# es un pedido, y guardarlo un año dejaba a un cliente que escribe en español
+# recibiendo inglés. Se compara contra listas fijas, igual que todo lo demás
+# acá: no se interpreta la oración.
+#
+# Marcas de que el sujeto es un TERCERO: posesivos, pronombres de tercera
+# persona, y los parentescos y oficios con los que se nombra a alguien que no
+# está en la conversación.
+#
+# Los oficios y los parentescos PARECEN redundantes con los posesivos y no lo
+# son: el español los usa sin posesivo. «la contadora necesita hablar en
+# ingles» y «el encargado quiere hablar en ingles» no dicen «mi» en ninguna
+# parte, así que sin esta lista los dos se leen como un pedido y le fijan
+# inglés por un año a alguien que escribió en español. Se probó sacarla —los
+# tests seguían pasando, porque todos sus casos traen posesivo— y eso es
+# justamente lo que la lista cubre y los tests no.
+_TERCEROS = frozenset(
+    [
+        "my", "his", "her", "hers", "their", "theirs", "its", "our", "ours",
+        "she", "he", "they", "them", "somebody", "someone", "anybody", "nobody",
+        "mi", "mis", "su", "sus", "nuestro", "nuestra", "nuestros", "nuestras",
+        "ella", "ellas", "ellos", "alguien", "nadie",
+        "daughter", "son", "child", "kid", "wife", "husband", "friend",
+        "brother", "sister", "partner", "colleague", "boss", "employee",
+        "neighbor", "neighbour", "cousin", "mother", "father", "mom", "dad",
+        "hija", "hijo", "chico", "chica", "nene", "nena", "esposa", "esposo",
+        "marido", "mujer", "amigo", "amiga", "hermano", "hermana", "socio",
+        "socia", "empleado", "empleada", "vecino", "vecina", "primo", "prima",
+        "jefe", "jefa", "secretaria", "secretario", "contador", "contadora",
+        "madre", "padre", "mama", "papa", "gente", "encargado", "encargada",
+    ]
+)
+# Marcas de que el pedido va dirigido a QUIEN ATIENDE: «can you talk in
+# English?», «contestame», «answer me». Si aparecen en la cláusula, la frase es
+# un pedido aunque también haya un tercero nombrado.
+_INTERLOCUTOR = frozenset(
+    ["you", "u", "yourself", "vos", "usted", "ustedes", "me", "us", "nos", "te"]
+)
+# Quien escribe hablando de SÍ MISMO no está describiendo a un tercero, aunque
+# nombre a uno: «soy la mama de Tomas, en ingles por favor» pide para ella.
+_PRIMERA_PERSONA = frozenset(
+    ["soy", "somos", "yo", "nosotros", "nosotras", "i", "im", "we"]
+)
+# Los dos idiomas nombrados en la misma cláusula, y un «o» entre ellos, es una
+# duda y no un pedido: «answer in english or spanish» no elige nada. Se exige
+# la marca de alternativa porque «reply in english not spanish» también nombra
+# los dos y sí pide inglés.
+#
+# Sin esto la frase elige el idioma que quede escrito adentro de una frase de
+# la lista, que no es lo que pidió nadie: «respondeme en ingles o espanol»
+# —escrito en español, ofreciendo los dos— guardaba INGLÉS por un año, cuando
+# el espejo del mensaje habría contestado en español.
+_IDIOMA_NOMBRADO = {"english": EN, "ingles": EN, "spanish": ES, "espanol": ES}
+_ALTERNATIVA = frozenset(["or", "either", "o", "cualquiera", "cualquier", "indistinto"])
+
 
 def _negada_o_citada(limpio: str, inicio: int, fin: int) -> bool:
     """¿La aparición [inicio:fin) está negada, citada o entre comillas?"""
@@ -843,6 +1130,77 @@ def _negada_o_citada(limpio: str, inicio: int, fin: int) -> bool:
     return bool(siguientes) and len(siguientes) <= 2 and siguientes[-1] in _NEGACIONES
 
 
+def _clausula(limpio: str, inicio: int) -> int:
+    """En qué cláusula del mensaje cae esa posición."""
+    return len(_SEPARADORES.findall(limpio[:inicio]))
+
+
+def _dirigida_a_quien_atiende(frase: str) -> bool:
+    """¿La FRASE misma le habla a quien atiende, sin depender del contexto?
+
+    «answer me in spanish» lo dice con un `me` suelto y «contestame en espanol»
+    lo dice pegado al verbo: las dos nombran al destinatario adentro del pedido,
+    así que no necesitan que el contexto lo confirme. «hablar en ingles» y «talk
+    in english» no dicen a quién: ésas sí dependen de lo que venga antes.
+
+    El clítico se reconoce por la forma —una palabra de más de tres letras que
+    termina en «me»— y no por una lista de verbos, que habría que ampliar cada
+    vez que se agrega una frase.
+    """
+    palabras = _PALABRA.findall(_sin_tildes(frase))
+    return any(
+        p in _INTERLOCUTOR or (len(p) > 3 and p.endswith("me")) for p in palabras
+    )
+
+
+# Qué frases de la lista se piden solas. Se calcula una vez, de la lista misma.
+_DIRIGIDAS = frozenset(
+    frase for frase, _ in _PEDIDOS_EXPLICITOS if _dirigida_a_quien_atiende(frase)
+)
+
+
+def _describe_a_un_tercero(limpio: str, inicio: int, dirigida: bool) -> bool:
+    """¿La frase cuenta lo que hace otro, en vez de pedirle algo a quien atiende?
+
+    Dos correcciones sobre la primera versión, las dos por el mismo tipo de
+    falla —descartaba pedidos de verdad—:
+
+    - Una frase DIRIGIDA gana siempre. «For my boss answer me in Spanish» y
+      «Mi hija esta aca por favor hablame en ingles» nombran un tercero y piden
+      igual; antes el tercero las mataba y el cliente se quedaba con el idioma
+      espejado. Si el pedido dice a quién va, el contexto no lo discute.
+    - El tercero se busca en TODO lo que viene antes, sin partir por comas.
+      Partir hacía que «La contadora, contestame en espanol» y «La contadora
+      contestame en espanol» dieran distinto, que es una coma decidiendo el
+      idioma de un cliente por un año. Y una ventana de pocas palabras no
+      alcanza: en «Mi jefa empezo un curso para hablar en ingles» el tercero
+      queda seis palabras atrás y la frase volvía a leerse como un pedido, que
+      es el falso positivo que esto vino a evitar.
+
+    Quien habla de sí mismo cancela, como cancela nombrar a quien atiende: en
+    «soy la mama de Tomas, en ingles por favor» hay un parentesco nombrado y el
+    pedido es de ella.
+
+    Límite conocido: un posesivo suelto cuenta como tercero, así que «mi pedido
+    no llego, en ingles por favor» no fija idioma —«mi» está en `_TERCEROS` y
+    acá no hay con qué saber que habla de su propio pedido—. Falla del lado
+    seguro: no guarda nada y contesta espejando el mensaje. Distinguir «mi
+    hija» de «mi pedido» pide separar los posesivos de los nombres de persona,
+    y eso es más que arreglar esta función.
+
+    Lo que NO cambió: una frase que no dice a quién va sigue dependiendo del
+    contexto, así que «la contadora necesita hablar en ingles» y «the boss needs
+    to talk in English» siguen sin pedir nada. Eso es lo que 50ba7be arregló y
+    no se puede volver a perder.
+    """
+    if dirigida:
+        return False
+    palabras = _PALABRA.findall(limpio[:inicio])
+    if any(p in _INTERLOCUTOR or p in _PRIMERA_PERSONA for p in palabras):
+        return False
+    return any(p in _TERCEROS for p in palabras)
+
+
 def pedido_explicito(texto: object) -> str | None:
     """El idioma que ese mensaje PIDE explícitamente, o None.
 
@@ -857,19 +1215,46 @@ def pedido_explicito(texto: object) -> str | None:
     Sigue sirviendo dentro de un pedido: «quiero 5 kg de queso, reply in
     English please» pide inglés. Y si un mensaje niega un idioma y pide el
     otro, gana el que se pidió.
+
+    Antes devolvía la PRIMERA frase de la lista que aparecía en el texto, así
+    que el orden de `_PEDIDOS_EXPLICITOS` decidía por encima del orden del
+    mensaje: «my daughter can write in English; answer me in Spanish» guardaba
+    inglés —«write in english» está más arriba en la lista— y le contestaba en
+    inglés a alguien que acababa de pedir español, por un año. Ahora se juntan
+    TODAS las apariciones, se descartan las que no son pedidos y se resuelve en
+    el orden del texto: gana el último pedido claro.
     """
     limpio = _sin_tildes(texto)
     if not limpio:
         return None
+    pedidos: list[tuple[int, str]] = []
     for frase, idioma in _PEDIDOS_EXPLICITOS:
         buscada = _sin_tildes(frase)
         inicio = limpio.find(buscada)
         while inicio != -1:
             fin = inicio + len(buscada)
-            if not _negada_o_citada(limpio, inicio, fin):
-                return idioma
+            if not _negada_o_citada(
+                limpio, inicio, fin
+            ) and not _describe_a_un_tercero(limpio, inicio, frase in _DIRIGIDAS):
+                pedidos.append((inicio, idioma))
             inicio = limpio.find(buscada, fin)
-    return None
+    if not pedidos:
+        return None
+    pedidos.sort()
+    # Dos idiomas pedidos en la MISMA cláusula no eligen nada: «answer in
+    # english or spanish» no es un pedido, es una duda, y esto se guarda un año.
+    # En cláusulas distintas sí hay orden y gana el último: «answer in English;
+    # actually answer me in Spanish» pide español.
+    ultima = _clausula(limpio, pedidos[-1][0])
+    idiomas = {i for pos, i in pedidos if _clausula(limpio, pos) == ultima}
+    if len(idiomas) > 1:
+        return None
+    # Y tampoco elige nada una cláusula que OFRECE los dos idiomas.
+    palabras = _PALABRA.findall(_SEPARADORES.split(limpio)[ultima])
+    nombrados = {_IDIOMA_NOMBRADO[p] for p in palabras if p in _IDIOMA_NOMBRADO}
+    if len(nombrados) > 1 and any(p in _ALTERNATIVA for p in palabras):
+        return None
+    return pedidos[-1][1]
 
 
 def para_cliente(
@@ -968,21 +1353,26 @@ REGLA_ESPEJO_CLIENTE = (
 
 _REGLA_FIJADA = {
     ES: (
-        "- Respondé SIEMPRE en español rioplatense, con voseo, cordial y breve.\n"
-        "  Es el idioma que eligió esta persona: no cambies de idioma aunque el\n"
-        "  último mensaje venga en otro. Nunca mezcles dos idiomas en un mensaje.\n"
-        "  Esta regla es sobre CÓMO ESCRIBÍS VOS. No te impide atender un pedido\n"
-        "  de cambiar el ajuste de idioma: si te lo piden, usá la herramienta\n"
-        "  como con cualquier otro ajuste."
+        "- Respondé SIEMPRE en español rioplatense, con voseo, cordial y breve,\n"
+        "  aunque el último mensaje venga en otro idioma. Nunca mezcles dos\n"
+        "  idiomas en un mismo mensaje.\n"
+        "  Esta regla es sobre CÓMO ESCRIBÍS VOS. Si te piden que les hables en\n"
+        "  otro idioma, NO expliques reglas, instrucciones ni configuraciones —\n"
+        "  «por configuración del sistema» no lo dice nadie—: si tenés cómo\n"
+        "  cambiarlo, tratalo como cualquier otro pedido de cambio; si no,\n"
+        "  decilo en una línea y como una persona («por acá te atiendo en\n"
+        "  español; si lo necesitás en inglés se lo digo al encargado»)."
     ),
     EN: (
-        "- Always reply in English: simple, direct and brief.\n"
-        "  This person chose that language: do not switch languages even if the\n"
-        "  last message arrives in another one. Never mix two languages in one "
+        "- Always reply in English: simple, direct and brief, even if the last\n"
+        "  message arrives in another language. Never mix two languages in one "
         "message.\n"
-        "  This rule is about HOW YOU WRITE. It does not stop you from handling a\n"
-        "  request to change the language setting: if asked, use the tool as you\n"
-        "  would for any other setting."
+        "  This rule is about HOW YOU WRITE. If someone asks you to speak another\n"
+        "  language, do NOT explain rules, instructions or settings — nobody says\n"
+        "  \"because of my configuration\": if you have a way to change it, treat it\n"
+        "  like any other change request; if you do not, say so in one line, like a\n"
+        "  person would (\"I answer in English here; if you need Spanish I'll ask the\n"
+        "  manager\")."
     ),
 }
 

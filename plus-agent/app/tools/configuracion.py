@@ -38,8 +38,11 @@ Cada herramienta verifica de nuevo que quien habla sea del equipo
 """
 from __future__ import annotations
 
+from typing import Annotated
+
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
+from pydantic import Field
 
 from app import ajustes, limites, policy
 from app.formato import pesos
@@ -128,7 +131,21 @@ def ver_limites(config: RunnableConfig) -> str:
 
 
 @tool
-def proponer_limite(limite: str, valor: str, config: RunnableConfig) -> str:
+def proponer_limite(
+    limite: Annotated[
+        str,
+        Field(description="Qué ajuste, con el nombre que usó el dueño («tope», «colchón "
+                          "de stock», «localidades de reparto»). Si es ambiguo la "
+                          "herramienta te da las opciones: preguntale cuál."),
+    ],
+    valor: Annotated[
+        str,
+        Field(description="El valor TAL COMO lo dijo, sin convertir ni redondear. Las "
+                          "listas van completas y separadas por comas, porque reemplazan "
+                          "a la anterior."),
+    ],
+    config: RunnableConfig,
+) -> str:
     """Prepara un cambio de UN ajuste y pide confirmación. NO lo aplica.
 
     Sirve para los límites de auto-confirmación ("tope", "colchón de stock",

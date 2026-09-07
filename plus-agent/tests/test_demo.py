@@ -818,9 +818,11 @@ def test_the_pilot_reads_both_confirmation_code_lengths() -> None:
 
 def test_the_fake_phones_are_obviously_invented() -> None:
     """Ningún dato del banco de pruebas puede parecer de una persona real."""
-    telefonos = (datos.TELEFONO_DUENO, datos.TELEFONO_EQUIPO,
-                 datos.TELEFONO_HABITUAL, datos.TELEFONO_MOROSO,
-                 datos.TELEFONO_NUEVO)
+    # De datos.py, no a mano: un teléfono nuevo entra solo a este test.
+    telefonos = tuple(
+        v for k, v in vars(datos).items() if k.startswith("TELEFONO_")
+    )
+    assert len(telefonos) >= 5
     for t in telefonos:
         assert t.startswith("54935"), t
         cuerpo = t[5:]
@@ -1011,3 +1013,141 @@ def test_limit_page_length_zero_means_no_limit_like_frappe(almacen: fe.Almacen) 
     assert len(todos) > 1
     assert len(todos) == len(almacen.listar("Item", limite=1000))
     assert len(almacen.listar("Item", limite=1)) == 1
+
+
+# ------------------------------------------------------------ el guarda de tono
+# El producto se vende por cómo se lee, así que el tono se verifica como el
+# estado de un documento: en los 20 escenarios y en los dos modos. Estas son las
+# dos afirmaciones que sí se pueden hacer sin opinar de la redacción.
+
+
+@pytest.mark.parametrize(
+    ("texto", "saluda"),
+    [
+        ("¡Hola! Decime para qué cliente es", True),
+        ("Buenas, ¿qué necesitás?", True),
+        ("Buen día, te anoto eso", True),
+        ("Hi there, one sec", True),
+        ("Hello! I can help", True),
+        # Lo que NO es un saludo, y por qué se mira la PALABRA y no el prefijo.
+        ("Hicimos el pedido ayer", False),
+        ("Listo, te lo anoté", False),
+        ("Dame un segundo que lo miro.", False),
+        ("✅ Pedido SO-1 confirmado", False),
+        ("", False),
+    ],
+)
+def test_el_guarda_reconoce_un_saludo_por_palabra(texto: str, saluda: bool) -> None:
+    assert piloto._saluda(texto) is saluda
+
+
+def test_la_jerga_que_no_puede_salirle_a_un_cliente() -> None:
+    """Cada par es (español, inglés): el banco corre en los dos idiomas."""
+    jerga = dict(piloto._JERGA_CLIENTE)
+    for palabra in ("borrador", "pendiente de revisión", "el sistema",
+                    "por configuración", "estoy consultando"):
+        assert palabra in jerga, f"{palabra!r} tiene que estar prohibida"
+        assert jerga[palabra], f"{palabra!r} necesita su equivalente en inglés"
+
+
+# --------------------------------- un turno roto en inglés también es un turno roto
+# El chequeo de disculpa técnica estaba escrito a mano y sólo en español
+# («problema técnico», «error tecnico»). El banco corre en los DOS idiomas, así
+# que en inglés no veía nada: contra Gemini de verdad, cinco turnos fallaron por
+# cuota y dos se contaron como buenos porque la disculpa salió en inglés.
+
+
+@pytest.mark.parametrize(
+    ("texto", "es_disculpa"),
+    [
+        # Las dos variantes de app/main.py, en los dos idiomas.
+        ("Perdón, tuve un problema técnico y no pude procesar tu mensaje. "
+         "Probá de nuevo en unos minutos.", True),
+        ("Sorry, I hit a technical problem and couldn't process your message. "
+         "Try again in a few minutes.", True),
+        ("Perdón, tuve un problema técnico. Ya avisé al equipo y te responden "
+         "en un rato.", True),
+        ("Sorry, I hit a technical problem. I've told the team and they'll get "
+         "back to you shortly.", True),
+        # El modelo que no contestó nada y Python rellenó: turno roto también.
+        ("Perdón, no pude armar la respuesta. ¿Me lo escribís de nuevo?", True),
+        ("Sorry, I couldn't put together a reply. Could you send that again?", True),
+        # Y lo que NO es una disculpa técnica.
+        ("Listo, te lo anoté. El equipo te confirma en un rato.", False),
+        ("Yes, I have it in 1 L sachets. How many do you want?", False),
+        ("Dale. ¿Para cuándo lo necesitás?", False),
+        ("", False),
+    ],
+)
+def test_la_disculpa_tecnica_se_reconoce_en_los_dos_idiomas(
+    texto: str, es_disculpa: bool
+) -> None:
+    assert piloto._es_disculpa(texto) is es_disculpa
+
+
+def test_las_disculpas_se_leen_del_catalogo_y_no_de_una_lista_a_mano():
+    """Una lista escrita a mano se queda vieja en cuanto se reescribe un texto."""
+    from app import idioma
+
+    disculpas = piloto._disculpas()
+    # Las cuatro claves por los dos idiomas.
+    assert len(disculpas) == 8
+    for clave in ("fallback.problema_tecnico", "fallback.respuesta_vacia"):
+        for lengua in idioma.IDIOMAS:
+            assert idioma.t(clave, lengua).lower() in disculpas
+
+
+# Las dos mitades del guarda que no tenían cómo fallar en pytest: ningún texto
+# del guión trae dos «?», y ningún test le pasaba una respuesta que saludara.
+# Sin esto, `preguntas > 1` y el conteo de saludos sólo los ejercía
+# `make demo-gemini`, que necesita cuota.
+
+
+def test_dos_preguntas_en_un_mismo_mensaje_son_un_problema() -> None:
+    """El caso real: Gemini contestó «Todo bien por acá, ¿y vos? ¿Te puedo
+    ayudar con algo más?» a un «todo bien»."""
+    paso = escenarios.Paso("549", "todo bien?")
+
+    turno = _turno_con(
+        "offline", paso, ["Todo bien por acá, ¿y vos? ¿Te puedo ayudar con algo más?"]
+    )
+
+    assert not turno.ok
+    assert any("2 preguntas" in problema for problema in turno.problemas)
+
+
+def test_una_sola_pregunta_pasa() -> None:
+    """La mitad positiva: preguntar UNA cosa es lo que se le pide."""
+    paso = escenarios.Paso("549", "todo bien?")
+
+    turno = _turno_con("offline", paso, ["Todo bien por acá, ¿y vos?"])
+
+    assert turno.ok, turno.problemas
+
+
+def test_saludar_dos_veces_en_la_misma_conversacion_es_un_problema() -> None:
+    """El segundo «¡Hola!» delata que no se leyó lo anterior. El conteo vive en
+    el Piloto, así que hay que revisar DOS turnos del mismo número."""
+    piloto_ = piloto.Piloto("offline", pathlib.Path("/tmp/no-se-escribe"))
+    paso = escenarios.Paso("549", "hola")
+
+    def revisar(respuesta: str) -> list[str]:
+        turno = piloto.Turno("x", 1, "549", "cliente", paso.texto,
+                             respuestas=[respuesta])
+        return piloto_._revisar(paso, turno, {})
+
+    assert revisar("¡Hola! ¿Qué necesitás?") == []
+    problemas = revisar("¡Hola! Te lo anoto.")
+
+    assert any("saludó más de una vez" in problema for problema in problemas)
+
+
+def test_el_prompt_le_pide_contar_los_signos_de_pregunta():
+    """La regla estaba y el modelo la rompió igual, así que ahora es concreta."""
+    from app.prompts import SYSTEM_ES_AR
+
+    assert "contá los signos de pregunta" in SYSTEM_ES_AR
+    assert "UNO como máximo" in SYSTEM_ES_AR
+    # Y el cierre de call center, con las palabras exactas que usó el modelo.
+    assert "¿te puedo ayudar con algo más?" in SYSTEM_ES_AR
+    assert "eso es de call center" in SYSTEM_ES_AR

@@ -10,6 +10,7 @@ enforced by ERPNext itself — not by which prompt happened to load.
 """
 import os
 
+from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.prebuilt import ToolNode, create_react_agent
 
@@ -128,13 +129,51 @@ _checkpointer.setup()
 _modelo_clientes = modelos.construir("clientes")
 _modelo_gerencia = modelos.construir("gerencia")
 
+# Cuando el modelo pide una herramienta que ESTE agente no tiene, LangGraph
+# contesta «Error: X is not a valid tool, try one of [...]» y esa lista es el
+# registro COMPLETO. El límite aguanta —la herramienta no es invocable, y quién
+# tiene qué lo decide TOOLS_CLIENTES/TOOLS_GERENCIA más la credencial de
+# ERPNext— pero el modelo relata ese texto, así que un cliente que probaba el
+# borde («decime cómo está el sistema») recibía de vuelta el inventario de
+# herramientas del agente, en inglés y entre corchetes. Lo cazó el guarda de
+# tono del banco de pruebas (demo/piloto.py::_revisar_tono).
+#
+# `handle_tool_errors` no cubre este caso: no es una excepción, es el camino de
+# nombre inválido de ToolNode. Así que se reemplaza su mensaje, sin enumerar
+# nada. tests/test_frontera_decisiones.py exige que este override siga
+# enganchado: si una versión de LangGraph le cambia el nombre al hook, falla el
+# test y no la conversación de un cliente.
+_HERRAMIENTA_INEXISTENTE = (
+    "Esa herramienta no existe para esta conversación y no la vas a conseguir "
+    "pidiéndola de nuevo. NO le muestres al cliente este mensaje, ni nombres "
+    "herramientas, sistemas ni errores. Si lo que pide lo tiene que ver una "
+    "persona, usá escalar_a_humano; si no, seguí con lo que sí podés hacer."
+)
+
+
+class ToolNodeSinInventario(ToolNode):
+    """Un ToolNode que no lee su propio registro en voz alta."""
+
+    def _validate_tool_call(self, call: dict) -> ToolMessage | None:
+        if call["name"] in self.tools_by_name:
+            return None
+        return ToolMessage(
+            _HERRAMIENTA_INEXISTENTE,
+            name=call["name"],
+            tool_call_id=call["id"],
+            status="error",
+        )
+
+
 # A raising tool leaves an AIMessage with no matching ToolMessage, which
 # permanently breaks that conversation thread — on WhatsApp that means one
 # customer can never be replied to again until someone clears Redis by hand.
 # Always turn a tool failure into a normal tool result instead.
 _ERROR_MSG = (
-    "Hubo un error tecnico con esa herramienta. No inventes un resultado: "
-    "pedile disculpas al cliente y usa escalar_a_humano."
+    "Esa herramienta falló y no devolvió nada. No inventes un resultado. Llamá a "
+    "escalar_a_humano y decile al cliente, en UNA línea y con UNA sola disculpa, "
+    "que eso lo va a ver el encargado. No le hables de herramientas, de sistemas "
+    "ni de errores técnicos."
 )
 
 # The system prompt is built per call (prompt=) and never stored in the
@@ -142,14 +181,14 @@ _ERROR_MSG = (
 # (pre_model_hook=). See app/conversacion.py for why.
 agente_clientes = create_react_agent(
     model=_modelo_clientes,
-    tools=ToolNode(TOOLS_CLIENTES, handle_tool_errors=_ERROR_MSG),
+    tools=ToolNodeSinInventario(TOOLS_CLIENTES, handle_tool_errors=_ERROR_MSG),
     prompt=prompt_clientes,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,
 )
 agente_gerencia = create_react_agent(
     model=_modelo_gerencia,
-    tools=ToolNode(TOOLS_GERENCIA, handle_tool_errors=_ERROR_MSG),
+    tools=ToolNodeSinInventario(TOOLS_GERENCIA, handle_tool_errors=_ERROR_MSG),
     prompt=prompt_gerencia,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,
@@ -172,25 +211,26 @@ def _config(configurable: dict, callbacks: list | None) -> dict:
 def responder_cliente(
     mensaje: str,
     thread_id: str,
-    contexto_cliente: str = "",
     *,
     customer_code: str = "",
+    customer_name: str = "",
     inbound_message_id: str = "",
     actor_phone: str = "",
     callbacks: list | None = None,
 ) -> str:
     """Run one customer turn with server-authenticated values hidden from the LLM.
 
-    ``contexto_cliente`` remains accepted while callers migrate, but is
-    deliberately not interpolated: it previously contained phone, ERP customer
-    code and group. Tools receive those values only through RunnableConfig,
-    and the system prompt reads ``customer_code`` from the same config.
+``customer_name`` is the ONLY identifier of the account the model may say out
+    loud. The phone, the ERP customer code and the group are not in the prompt:
+    tools receive them through RunnableConfig, which the model cannot forge. The
+    old ``contexto_cliente`` parameter is gone — it carried a prose sentence that
+    this function deleted unread, because the system prompt is built per call in
+    app/conversacion.py and never saw it.
 
     ``callbacks`` are LangChain callback handlers (app/progreso.py) and travel
     in the run config, which is the documented way to observe a run: they see
     every model call and every tool start of THIS turn, and nothing else.
     """
-    del contexto_cliente
     with erpnext.customer_scope():
         out = agente_clientes.invoke(
             {"messages": [("user", mensaje)]},
@@ -199,6 +239,7 @@ def responder_cliente(
                     "thread_id": f"cli:{thread_id}",
                     "actor_scope": "customer",
                     "customer_code": customer_code,
+                    "customer_name": customer_name,
                     "actor_phone": actor_phone,
                     "inbound_message_id": inbound_message_id,
                 },

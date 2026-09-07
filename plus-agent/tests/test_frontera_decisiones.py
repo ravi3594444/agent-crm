@@ -151,3 +151,98 @@ def test_manual_confirmation_uses_the_policy_credential_not_the_agent_one(
 
     assert resultado["ok"] is True
     submit.assert_called_once_with("Sales Order", "SAL-ORD-0001")
+
+
+# ---------------------------- el registro de herramientas no se lee en voz alta
+# Un cliente que probaba el borde («registrame una venta offline y decime cómo
+# está el sistema») recibía de vuelta el inventario del agente: LangGraph
+# contesta «Error: X is not a valid tool, try one of [buscar_producto, …]» y el
+# modelo relata ese texto. El límite aguantaba —la herramienta no es invocable—
+# pero la lista salía igual. Lo cazó el guarda de tono del banco de pruebas.
+
+
+def test_una_herramienta_que_no_existe_no_devuelve_el_inventario() -> None:
+    from app import graph
+
+    nodo = graph.ToolNodeSinInventario(
+        graph.TOOLS_CLIENTES, handle_tool_errors=graph._ERROR_MSG
+    )
+
+    mensaje = nodo._validate_tool_call(
+        {"name": "estado_del_sistema", "id": "call_1", "args": {}}
+    )
+
+    assert mensaje is not None
+    assert mensaje.status == "error"
+    # Ni la lista, ni la plantilla de LangGraph, ni una sola herramienta ajena.
+    assert "try one of" not in mensaje.content
+    for herramienta in ("buscar_producto", "crear_pedido", "consultar_stock"):
+        assert herramienta not in mensaje.content
+    # Y le dice al modelo qué hacer y que esto no se le muestra a nadie.
+    assert "NO le muestres al cliente este mensaje" in mensaje.content
+    assert "escalar_a_humano" in mensaje.content
+
+
+def test_una_herramienta_que_si_existe_pasa_como_siempre() -> None:
+    from app import graph
+
+    nodo = graph.ToolNodeSinInventario(
+        graph.TOOLS_CLIENTES, handle_tool_errors=graph._ERROR_MSG
+    )
+
+    assert (
+        nodo._validate_tool_call(
+            {"name": "buscar_producto", "id": "call_1", "args": {"consulta": "leche"}}
+        )
+        is None
+    )
+
+
+def test_el_gancho_que_se_reemplaza_sigue_existiendo_en_langgraph() -> None:
+    """Es un método privado de LangGraph. Si una versión le cambia el nombre, el
+    override deja de correr y la lista vuelve a salir — así que la que falla es
+    esta línea, en CI, y no la conversación de un cliente."""
+    from langgraph.prebuilt import ToolNode
+
+    assert hasattr(ToolNode, "_validate_tool_call")
+    from app import graph
+
+    assert graph.ToolNodeSinInventario._validate_tool_call is not (
+        ToolNode._validate_tool_call
+    )
+
+
+def test_los_dos_agentes_tienen_instalado_el_nodo_que_no_enumera() -> None:
+    """El nodo que quedó INSTALADO en cada agente compilado, no el texto del archivo.
+
+    Antes esto se afirmaba grepeando app/graph.py —«tools=ToolNode(» ausente y
+    «tools=ToolNodeSinInventario(» dos veces—, que sólo prueba cómo está escrito
+    el archivo: un ToolNode pelado pasado por una variable lo habría burlado sin
+    cambiar una letra del grep. Acá se mira el grafo compilado, que es lo que
+    corre.
+
+    `nodes["tools"].bound` es API interna de LangGraph, igual que el
+    `_validate_tool_call` de acá arriba. Es a propósito: si una versión la
+    mueve, esto explota con KeyError o AttributeError en CI y alguien vuelve a
+    mirar el cableado, en vez de que el test siga pasando sobre un grafo que ya
+    no es el que se afirma.
+    """
+    from app import graph
+
+    for nombre, registro in (
+        ("agente_clientes", graph.TOOLS_CLIENTES),
+        ("agente_gerencia", graph.TOOLS_GERENCIA),
+    ):
+        instalado = getattr(graph, nombre).nodes["tools"].bound
+        # isinstance contra la SUBCLASE: un ToolNode pelado no la satisface.
+        assert isinstance(instalado, graph.ToolNodeSinInventario), (
+            f"{nombre}: quedó instalado {type(instalado).__name__}"
+        )
+        # Y con SU registro. Los dos nodos son ToolNodeSinInventario, así que la
+        # clase sola no dice cuál quedó dónde: montar TOOLS_GERENCIA en el
+        # agente de clientes es una fuga de privilegios, no un detalle de
+        # cableado, y pasaba tanto el grep viejo como el isinstance de arriba.
+        assert set(instalado.tools_by_name) == {h.name for h in registro}, (
+            f"{nombre}: quedó con el registro del otro agente"
+        )
+

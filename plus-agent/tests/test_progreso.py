@@ -834,3 +834,121 @@ def test_the_webhook_sends_nothing_before_the_worker_runs(mundo):
     assert mundo.salida.envios == []
     assert mundo.webhook._worker_cycle() == "worked"
     assert mundo.salida.textos(GERENTE) == ["hola"]
+
+
+# ------------------------------- la espera del modelo no es una consulta
+# El aviso se armaba con la primera herramienta y NADA lo cancelaba cuando ésa
+# terminaba. El log de producción mostraba el caso normal de un pedido:
+#     [agent] turno ... modelo=2x10.3s herramientas=1x0.1s progreso=si
+# una herramienta de una décima y diez segundos de modelo, y la persona recibía
+# «estoy consultando el sistema» cuando ya no se consultaba nada.
+
+
+def test_una_herramienta_rapida_y_un_modelo_lento_no_avisan_nada(mundo, capsys):
+    """El caso de producción: el aviso mira el trabajo, no el reloj del turno."""
+    mundo.instalar(
+        "gerencia",
+        [
+            herramientas("consultar_stock_prueba", producto="leche"),
+            # La herramienta contesta al toque; lo que tarda es el modelo.
+            texto("Hay 12 de leche.", demora=SLOW),
+        ],
+        demora_herramientas=0.0,
+    )
+
+    assert mundo.turno(GERENTE, "cuánta leche hay?") == "worked"
+
+    assert mundo.salida.textos(GERENTE) == ["Hay 12 de leche."]
+    turno = next(
+        line for line in capsys.readouterr().out.splitlines() if "[agent] turno" in line
+    )
+    # La latencia no se esconde: se mide y queda en el log, que es donde se lee.
+    assert "herramientas=1x" in turno and "progreso=no" in turno
+
+
+# --------------------------------------- el contrato del callback, sin agente
+# Acá se maneja el reloj a mano: es la única forma de tener una herramienta
+# rápida y otra lenta en el mismo turno, que es lo que el harness de arriba
+# (una demora para todas) no puede armar.
+
+DEMORA_UNIT = 0.4
+ESPERA_UNIT = 1.0
+
+
+def _contador():
+    enviados: list[int] = []
+
+    def enviar() -> bool:
+        enviados.append(1)
+        return True
+
+    return enviados, enviar
+
+
+def test_un_plazo_que_vence_sin_trabajo_no_gasta_el_aviso_del_turno():
+    """Y la herramienta lenta que viene después sí lo merece."""
+    enviados, enviar = _contador()
+    progreso = Progreso(enviar=enviar, demora=DEMORA_UNIT)
+    rapida, lenta = uuid.uuid4(), uuid.uuid4()
+
+    progreso.on_tool_start({"name": "rapida"}, "", run_id=rapida)
+    progreso.on_tool_end("ok", run_id=rapida)
+    time.sleep(ESPERA_UNIT)
+    assert enviados == [], "no se estaba consultando nada cuando venció el plazo"
+    assert not progreso.aviso_intentado
+
+    progreso.on_tool_start({"name": "lenta"}, "", run_id=lenta)
+    time.sleep(ESPERA_UNIT)
+    assert enviados == [1], "ésta sí seguía corriendo: el aviso corresponde"
+    assert progreso.aviso_enviado
+
+    progreso.on_tool_end("ok", run_id=lenta)
+    progreso.terminar()
+
+
+def test_con_herramientas_en_paralelo_alcanza_que_una_siga_corriendo():
+    enviados, enviar = _contador()
+    progreso = Progreso(enviar=enviar, demora=DEMORA_UNIT)
+    una, otra = uuid.uuid4(), uuid.uuid4()
+
+    progreso.on_tool_start({"name": "una"}, "", run_id=una)
+    progreso.on_tool_start({"name": "otra"}, "", run_id=otra)
+    progreso.on_tool_end("ok", run_id=una)
+    time.sleep(ESPERA_UNIT)
+
+    assert enviados == [1]
+    progreso.on_tool_end("ok", run_id=otra)
+    progreso.terminar()
+
+
+def test_el_aviso_sigue_siendo_uno_solo_por_turno():
+    """Dos tramos lentos, un aviso: lo que ya estaba garantizado sigue igual."""
+    enviados, enviar = _contador()
+    progreso = Progreso(enviar=enviar, demora=DEMORA_UNIT)
+
+    for nombre in ("primera", "segunda", "tercera"):
+        run_id = uuid.uuid4()
+        progreso.on_tool_start({"name": nombre}, "", run_id=run_id)
+        time.sleep(ESPERA_UNIT)
+        progreso.on_tool_end("ok", run_id=run_id)
+
+    assert enviados == [1]
+    assert progreso.herramientas == ["primera", "segunda", "tercera"]
+    progreso.terminar()
+
+
+def test_terminar_cancela_todos_los_plazos_de_todos_los_tramos():
+    """Un tramo que vence deja su plazo consumido; terminar() cierra los demás."""
+    enviados, enviar = _contador()
+    progreso = Progreso(enviar=enviar, demora=DEMORA_UNIT)
+    rapida, otra = uuid.uuid4(), uuid.uuid4()
+
+    progreso.on_tool_start({"name": "rapida"}, "", run_id=rapida)
+    progreso.on_tool_end("ok", run_id=rapida)
+    time.sleep(ESPERA_UNIT)
+    # Segundo tramo, y el turno cierra antes de que venza su plazo.
+    progreso.on_tool_start({"name": "otra"}, "", run_id=otra)
+    progreso.terminar()
+    time.sleep(ESPERA_UNIT)
+
+    assert enviados == [], "después de terminar() ningún aviso puede salir"

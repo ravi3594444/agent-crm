@@ -6,6 +6,7 @@ import os
 import re
 import unicodedata
 from datetime import date, datetime, timedelta
+from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain_core.runnables import RunnableConfig
@@ -23,7 +24,7 @@ from app import (
     solicitudes,
 )
 from app.locks import CoordinationError, distributed_lock
-from app.notificar import notificar_confirmacion, notificar_equipo
+from app.notificar import avisar_escalamiento, notificar_confirmacion, notificar_equipo
 from app.runtime_context import RuntimeContextError, actor_context
 
 _MESES = {
@@ -306,11 +307,13 @@ def _summary(order: dict, fallback: list[dict]) -> str:
             qty = float(item.get("qty") or 0)
         except (TypeError, ValueError):
             qty = 0
+        # El NOMBRE antes que el código: este resumen termina en la frase que
+        # lee el cliente, y «10 Unidad de LECHE-ENT-1L» no lo dice nadie.
         parts.append(
             f"{qty:g} {item.get('uom') or item.get('stock_uom') or 'unidad'} "
-            f"de {item.get('item_code') or 'producto'}"
+            f"de {item.get('item_name') or item.get('item_code') or 'producto'}"
         )
-    return ", ".join(parts) or "detalle disponible en ERPNext"
+    return ", ".join(parts) or "(sin detalle de renglones)"
 
 
 def _order_result(order: dict, fallback: list[dict], fallback_date: str) -> str:
@@ -326,17 +329,24 @@ def _order_result(order: dict, fallback: list[dict], fallback_date: str) -> str:
     if status == 1:
         return (
             f"PEDIDO_CONFIRMADO. Número real: {name}. Resumen: {detail}. "
-            f"Entrega: {delivery}. Estado: confirmado."
+            f"Entrega: {delivery}. Estado: confirmado. "
+            "Al cliente: UNA línea con el número real y qué quedó confirmado. El "
+            "detalle completo le llega aparte y solo, así que no lo repitas "
+            "renglón por renglón y no le pongas el ✅."
         )
     if status == 2:
         return (
             f"PEDIDO_CANCELADO. Número real: {name}. Resumen: {detail}. "
             f"Entrega: {delivery}. Estado: cancelado; no crees otro pedido "
-            "sin una nueva solicitud del cliente."
+            "sin una nueva solicitud del cliente. Decile que ese pedido quedó "
+            "cancelado y preguntale en una frase si quiere que lo armes de nuevo."
         )
     return (
         f"PEDIDO_PENDIENTE. Número real: {name}. Resumen: {detail}. "
-        f"Entrega: {delivery}. Estado: borrador pendiente de revisión."
+        f"Entrega: {delivery}. Estado: borrador pendiente de revisión. "
+        "Al cliente NO le digas «borrador» ni «pendiente de revisión»: en UNA "
+        "línea, que se lo anotaste —con el número real— y que el equipo se lo "
+        "confirma en un rato. Nunca «confirmado», y no le prometas día ni hora."
     )
 
 
@@ -445,18 +455,27 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
         # que la instrucción viaja con el resultado en vez de confiar en que el
         # modelo lo deduzca.
         resultado += (
-            " ENTREGA EN REVISIÓN: decile al cliente que el pedido quedó "
-            "RECIBIDO y que estamos revisando la entrega a esa dirección. "
-            "NO le digas que está confirmado, y no prometas día ni hora."
+            " ENTREGA EN REVISIÓN: decile al cliente, en UNA línea y con el "
+            "número real, que se lo anotaste y que estamos revisando la entrega "
+            "a esa dirección, y que le avisás. No uses las palabras RECIBIDO ni "
+            "«pendiente». NO le digas que está confirmado, y no prometas día ni "
+            "hora."
         )
     return resultado
 
 
 @tool
 def crear_lead(
-    nombre: str,
+    nombre: Annotated[
+        str,
+        Field(description="El nombre del negocio o de la persona, como lo dijo. "
+                          "No lo inventes."),
+    ],
     config: RunnableConfig,
-    nota: str = "",
+    nota: Annotated[
+        str,
+        Field(description="Opcional: en una frase, qué quería. Lo lee el equipo."),
+    ] = "",
 ) -> str:
     """Registra al remitente autenticado como contacto potencial."""
     try:
@@ -502,13 +521,26 @@ def crear_lead(
     except erpnext.ERPNextError:
         return "No pude registrar el contacto. Derivá el caso al equipo."
     erpnext.add_comment("Lead", doc["name"], "Creado por Agente IA vía WhatsApp.")
-    return f"Contacto registrado como {doc['name']}."
+    return (
+        f"Contacto registrado como {doc['name']}. Ese código es interno: no se lo "
+        "muestres. Decile que ya lo tenés anotado y seguí con lo que pidió."
+    )
 
 
 @tool
 def crear_pedido(
-    lineas: list[LineaPedido],
-    fecha_entrega: str,
+    lineas: Annotated[
+        list[LineaPedido],
+        Field(description="Una línea por producto, con el código del catálogo, "
+                          "la cantidad y la unidad que confirmó el cliente."),
+    ],
+    fecha_entrega: Annotated[
+        str,
+        Field(description="Cuándo lo quiere. En AAAA-MM-DD calculada desde HOY, "
+                          "o tal como lo dijo si fue «mañana», «el martes» o "
+                          "«2 de septiembre». Nunca la inventes ni la supongas: "
+                          "si no la dijo, preguntala."),
+    ],
     config: RunnableConfig,
 ) -> str:
     """Crea un pedido para el cliente autenticado.
@@ -647,8 +679,16 @@ def crear_pedido(
 
 @tool
 def crear_cliente(
-    nombre: str,
-    direccion: DireccionEntrega,
+    nombre: Annotated[
+        str,
+        Field(description="El nombre del negocio o de la persona, como lo dijo. "
+                          "No lo inventes ni lo completes."),
+    ],
+    direccion: Annotated[
+        DireccionEntrega,
+        Field(description="La dirección de entrega, con cada dato en su campo: "
+                          "no la manden como una sola línea de texto."),
+    ],
     config: RunnableConfig,
 ) -> str:
     """Registra al remitente como cliente, con su dirección de entrega.
@@ -692,7 +732,9 @@ def crear_cliente(
     if en_zona:
         return (
             f"Cuenta lista: {cuenta}{ya_estaba}. Entregamos en esa zona. "
-            "Ya podés tomarle el pedido con crear_pedido."
+            "Ya podés tomarle el pedido con crear_pedido. Ese código de cuenta "
+            "es interno: no se lo muestres. Decile que ya lo tenés anotado y "
+            "seguí con lo que pidió."
         )
     return (
         f"Cuenta lista: {cuenta}{ya_estaba}. ATENCIÓN: {motivo_zona}. Podés "
@@ -703,7 +745,14 @@ def crear_cliente(
 
 
 @tool
-def escalar_a_humano(motivo: str, config: RunnableConfig) -> str:
+def escalar_a_humano(
+    motivo: Annotated[
+        str,
+        Field(description="En una frase: qué necesita y por qué lo tiene que ver "
+                          "una persona. Esto lo lee el EQUIPO, no el cliente."),
+    ],
+    config: RunnableConfig,
+) -> str:
     """Deriva la conversación autenticada a una persona del equipo."""
     try:
         actor = actor_context(config)
@@ -727,14 +776,59 @@ def escalar_a_humano(motivo: str, config: RunnableConfig) -> str:
             },
         )
     except erpnext.ERPNextError:
-        return "No pude crear la tarea de derivación; avisá que el equipo revisará el caso."
-    return f"Derivado al equipo (tarea {doc['name']})."
+        # No se corta acá: la tarea es el registro, pero no es el aviso.
+        print("[orders] no pude crear la tarea de derivación")
+        tarea = ""
+    else:
+        tarea = str(doc.get("name") or "")
+
+    # Un ToDo no suena. Hasta que alguien abre ERPNext, un reclamo espera a la
+    # mañana siguiente —eso dice el docstring de avisar_escalamiento, que estaba
+    # escrito, traducido y probado, y que nadie llamaba— así que un cliente que
+    # pedía una persona podía no llegar a ninguna. Su resultado es además lo
+    # único que autoriza a decirle al cliente que el equipo ya se enteró.
+    try:
+        avisado = bool(
+            avisar_escalamiento(motivo, actor.actor_phone, account, tarea)
+        )
+    except Exception as exc:  # es un aviso: no puede tumbar la derivación
+        print(f"[orders] alerta de derivación falló ({type(exc).__name__})")
+        avisado = False
+
+    if not tarea and not avisado:
+        # Nadie se enteró y no quedó registro. Decirle que avisamos al equipo
+        # sería la mentira que la regla 6 del prompt prohíbe.
+        return (
+            "NO pude derivarlo: no quedó registrado y no pude avisarle a nadie. "
+            "NO le digas al cliente que avisaste al equipo. Pedile perdón UNA vez "
+            "y decile que lo vuelva a escribir en un rato."
+        )
+    if avisado:
+        return (
+            f"Derivado al equipo y avisado{f' (tarea {tarea})' if tarea else ''}. "
+            "Al cliente decile en UNA línea que eso lo ve el encargado y que ya le "
+            "avisaste; no le menciones la tarea ni su número."
+        )
+    return (
+        f"Derivado al equipo (tarea {tarea}), pero el aviso no salió: lo van a ver "
+        "cuando abran el sistema. Decile al cliente en UNA línea que eso lo ve el "
+        "encargado y que le van a responder; no digas que ya le avisaste."
+    )
 
 
 @tool
 def pedir_excepcion_de_entrega(
-    numero_de_pedido: str,
-    lo_que_pidio_el_cliente: str,
+    numero_de_pedido: Annotated[
+        str,
+        Field(description="El número real del pedido que YA está creado. No lo "
+                          "inventes: si no lo tenés, pedíselo."),
+    ],
+    lo_que_pidio_el_cliente: Annotated[
+        str,
+        Field(description="Sus palabras, tal cual. No las interpretes, no "
+                          "conviertas la fecha y no propongas condiciones: eso "
+                          "lo decide el encargado."),
+    ],
     config: RunnableConfig,
 ) -> str:
     """Pide una entrega fuera de los días de reparto para un pedido ya creado.

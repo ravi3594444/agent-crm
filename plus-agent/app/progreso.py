@@ -14,10 +14,23 @@ Es un callback de LangChain (``BaseCallbackHandler``), el punto de extensión
 documentado para observar lo que hace un agente, y viaja en la config de la
 invocación (app/graph.py). El agente lo llama cuando de verdad EMPIEZA una
 herramienta (``on_tool_start``). Recién ahí se programa UN aviso, que sale sólo
-si el turno sigue abierto pasados ``demora`` segundos. Si la herramienta
-contesta rápido y el modelo cierra el turno, el aviso se cancela y la persona
-recibe una sola respuesta. Una segunda o tercera herramienta en el mismo turno
-—en serie o en paralelo— no programa nada más.
+si pasados ``demora`` segundos el turno sigue abierto Y TODAVÍA hay una
+herramienta corriendo. Si la herramienta contesta rápido, el aviso no sale: no
+importa cuánto tarde después el modelo. Una segunda o tercera herramienta en el
+mismo turno —en serie o en paralelo— no programa nada más mientras haya un
+plazo esperando.
+
+LA ESPERA DEL MODELO NO ES UNA CONSULTA
+El aviso arrancaba con la primera herramienta y nada lo cancelaba cuando ésa
+terminaba, así que un turno de una herramienta de 0,1 s y una segunda llamada
+al modelo de diez segundos —el caso normal de un pedido, y lo que el log de
+producción mostraba: ``modelo=2x10.3s herramientas=1x0.1s progreso=si``— le
+mandaba a la persona «estoy consultando el sistema» cuando ya no se estaba
+consultando nada. Ahora el plazo mira si el trabajo sigue en vuelo: la latencia
+del modelo se mide y se escribe en el log, y no se le cuenta a nadie como si
+fuera una consulta. Un plazo que vence sin trabajo en vuelo no gasta el único
+aviso del turno: si más adelante otra herramienta tarda de verdad, se arma de
+nuevo.
 
 Un turno en que el modelo contesta directo, sin herramientas, no produce
 ningún aviso, tarde lo que tarde el proveedor. Eso no esconde la latencia: la
@@ -67,9 +80,17 @@ class Progreso(BaseCallbackHandler):
         # Dos candados a propósito. El de envío ordena «aviso» y «final»; el de
         # métricas es barato y no espera a Meta: una herramienta que termina
         # mientras el aviso está en vuelo no tiene por qué quedarse esperando.
+        # El orden de toma es SIEMPRE _candado_envio -> _candado, y no se
+        # invierte en ningún camino: terminar() los toma uno después del otro,
+        # nunca anidados, así que no hay ciclo posible.
         self._candado_envio = threading.Lock()
         self._candado = threading.Lock()
         self._timer: threading.Timer | None = None
+        # Cuántas herramientas están corriendo AHORA, y si hay un temporizador
+        # esperando su plazo. Las dos cosas juntas son lo que distingue «se
+        # está consultando algo» de «estamos esperando al modelo».
+        self._en_vuelo = 0
+        self._pendiente = False
         self._terminado = False
         self._intentado = False
         self._enviado = False
@@ -118,10 +139,22 @@ class Progreso(BaseCallbackHandler):
         with self._candado:
             self.herramientas.append(nombre)
             self._inicio_herramienta[run_id] = time.monotonic()
-            if self._timer is not None or self._terminado or self._demora < 0:
+            self._en_vuelo += 1
+            # `_pendiente` dice que ya hay un plazo corriendo: una segunda o
+            # tercera herramienta —en serie o en paralelo— no programa nada más.
+            if (
+                self._terminado
+                or self._demora < 0
+                or self._intentado
+                or self._pendiente
+            ):
                 return
-            # LA PRIMERA herramienta del turno, y ninguna más: acá y sólo acá
-            # nace el aviso. Daemon: un proceso que se apaga no espera por él.
+            # Acá nace el aviso: empezó a haber trabajo y no hay ningún plazo
+            # esperando. Sólo puede haber UNO PENDIENTE, porque `_pendiente` se
+            # limpia recién cuando el anterior disparó —el que ya disparó puede
+            # seguir mandando, y cancelarlo no haría nada—. Daemon: un proceso
+            # que se apaga no espera por él.
+            self._pendiente = True
             self._timer = threading.Timer(self._demora, self._disparar)
             self._timer.daemon = True
             self._timer.start()
@@ -137,6 +170,7 @@ class Progreso(BaseCallbackHandler):
             inicio = self._inicio_herramienta.pop(run_id, None)
             if inicio is not None:
                 self.segundos_herramientas += time.monotonic() - inicio
+                self._en_vuelo = max(0, self._en_vuelo - 1)
 
     # ------------------------------------------------------------- el aviso
 
@@ -148,6 +182,18 @@ class Progreso(BaseCallbackHandler):
         """
         with self._candado_envio:
             if self._terminado or self._intentado:
+                return
+            with self._candado:
+                self._pendiente = False
+                hay_trabajo = self._en_vuelo > 0
+            if not hay_trabajo:
+                # La herramienta contestó antes del plazo y lo que falta es el
+                # modelo. Eso NO es «estoy consultando el sistema»: era el aviso
+                # que salía igual en un turno de una herramienta de 0,1 s y una
+                # segunda llamada al modelo de diez segundos, describiendo una
+                # consulta que ya había terminado.
+                # No se marca intentado: si otra herramienta de ESTE turno tarda
+                # de verdad, ese aviso sí corresponde y vuelve a armarse.
                 return
             self._intentado = True
             try:
@@ -164,7 +210,9 @@ class Progreso(BaseCallbackHandler):
         """
         with self._candado:
             timer = self._timer
-        if timer is not None:
+        if timer:
+            # Cancelar uno que ya disparó no hace nada, así que no hace falta
+            # distinguir.
             timer.cancel()
         with self._candado_envio:
             self._terminado = True

@@ -22,15 +22,25 @@ Cada herramienta vuelve a verificar que quien habla sea del equipo
 """
 from __future__ import annotations
 
+from typing import Annotated
+
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
+from pydantic import Field
 
 from app import acciones
 from app.runtime_context import SIN_PERMISO, RuntimeContextError, require_management
 
 
 @tool
-def detalle_de_pedido(pedido: str, config: RunnableConfig) -> str:
+def detalle_de_pedido(
+    pedido: Annotated[
+        str,
+        Field(description="El número real del pedido. Si el dueño no lo dijo, "
+                          "preguntáselo: no lo inventes."),
+    ],
+    config: RunnableConfig,
+) -> str:
     """Muestra un pedido completo: renglones, total, entrega y su solicitud abierta.
 
     Es de sólo lectura y se hace en el momento. Usala cuando el dueño pregunta
@@ -51,7 +61,26 @@ def detalle_de_pedido(pedido: str, config: RunnableConfig) -> str:
 
 
 @tool
-def proponer_accion(accion: str, pedido: str, config: RunnableConfig, detalle: str = "") -> str:
+def proponer_accion(
+    accion: Annotated[
+        str,
+        Field(description="UNA de éstas, escrita así: confirmar, rechazar, preparar, "
+                          "despachar, despreparar, cancelar, contraoferta, retiro. No hay "
+                          "otras y no se inventan."),
+    ],
+    pedido: Annotated[
+        str,
+        Field(description="El número real del pedido. Si el dueño no lo dijo, "
+                          "preguntáselo: no lo inventes."),
+    ],
+    config: RunnableConfig,
+    detalle: Annotated[
+        str,
+        Field(description="El motivo, o los términos, TAL COMO los dijo el dueño. No "
+                          "interpretes la fecha, la hora ni la plata: las valida Python. "
+                          "Si falta, preguntale en vez de completarlo vos."),
+    ] = "",
+) -> str:
     """Prepara UNA acción sobre UN pedido y pide confirmación. NO la ejecuta.
 
     Las acciones que existen, y nada más que éstas:

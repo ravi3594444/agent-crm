@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import erpnext, policy, whatsapp
+from app.runtime_context import SIN_PERMISO
 from app.tools import captura, pedidos
 
 
@@ -319,3 +320,123 @@ def test_es_permanente_matrix() -> None:
     assert whatsapp.es_permanente(400, 130429) is False
     assert whatsapp.es_permanente(429, None) is False
     assert whatsapp.es_permanente(502, None) is False
+
+
+# ------------------------------------------ ficha_cliente: el código o el nombre
+# El parámetro promete las dos formas («el nombre del cliente …, o su código de
+# ERPNext. Cualquiera de los dos sirve») y la herramienta buscaba sólo por
+# `customer_name`. Andaba de casualidad mientras cada cliente del banco de
+# pruebas se llamaba igual que su código; el primero que los tiene separados
+# —CUST-0009 / «Panaderia Santa Rita»— devolvía «No encontré».
+
+_FICHA = {
+    "name": "CUST-0009",
+    "customer_name": "Panaderia Santa Rita",
+    "customer_group": "Comercios",
+    "mobile_no": "5493516667777",
+}
+
+
+_GERENTE = "5493511234567"
+
+
+def _config_gerencia() -> dict:
+    return {
+        "configurable": {
+            "thread_id": "ger:t",
+            "actor_scope": "management",
+            "actor_phone": _GERENTE,
+            "inbound_message_id": "wamid.ficha-001",
+        }
+    }
+
+
+def _erpnext_con_un_cliente(monkeypatch: pytest.MonkeyPatch) -> list[list]:
+    """Un ERPNext que sólo conoce a _FICHA. Devuelve los filtros que recibió."""
+    vistos: list[list] = []
+
+    def get_list(doctype, filters=None, fields=None, limit=None, **kw):
+        vistos.append([doctype, filters])
+        if doctype != "Customer":
+            return []
+        for campo, operador, valor in filters or []:
+            if campo == "name" and operador == "=" and valor == _FICHA["name"]:
+                return [dict(_FICHA)]
+            if campo == "customer_name" and operador == "like":
+                aguja = str(valor).strip("%").casefold()
+                if aguja and aguja in _FICHA["customer_name"].casefold():
+                    return [dict(_FICHA)]
+        return []
+
+    # El segundo portón vuelve a leer la lista del equipo, así que el número
+    # tiene que estar de verdad: sin esto la herramienta contesta SIN_PERMISO y
+    # el test no probaría la búsqueda. Se pone la lista y no la variable, que
+    # `router` lee una sola vez al importar.
+    from app import router, telefono
+
+    monkeypatch.setattr(router, "STAFF", [telefono.normalizar(_GERENTE)])
+    monkeypatch.setattr(erpnext, "get_list", get_list)
+    return vistos
+
+
+def test_ficha_cliente_encuentra_por_codigo_exacto(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.tools.gerencia import ficha_cliente
+
+    vistos = _erpnext_con_un_cliente(monkeypatch)
+
+    salida = ficha_cliente.invoke(
+        {"nombre_o_codigo": "CUST-0009"}, config=_config_gerencia()
+    )
+
+    assert "No encontré" not in salida
+    assert "Panaderia Santa Rita" in salida
+    # El código exacto se prueba PRIMERO, así que el `like` por nombre no corre.
+    clientes = [f for d, f in vistos if d == "Customer"]
+    assert clientes[0] == [["name", "=", "CUST-0009"]]
+    assert len(clientes) == 1
+
+
+def test_ficha_cliente_sigue_encontrando_por_nombre(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.tools.gerencia import ficha_cliente
+
+    vistos = _erpnext_con_un_cliente(monkeypatch)
+
+    salida = ficha_cliente.invoke(
+        {"nombre_o_codigo": "Panaderia Santa Rita"}, config=_config_gerencia()
+    )
+
+    assert "No encontré" not in salida
+    assert "Panaderia Santa Rita" in salida
+    # Primero el código (sin resultado) y después el nombre, como antes.
+    clientes = [f for d, f in vistos if d == "Customer"]
+    assert clientes[0] == [["name", "=", "Panaderia Santa Rita"]]
+    assert clientes[1] == [["customer_name", "like", "%Panaderia Santa Rita%"]]
+
+
+def test_ficha_cliente_no_inventa_un_cliente_que_no_existe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.tools.gerencia import ficha_cliente
+
+    _erpnext_con_un_cliente(monkeypatch)
+
+    salida = ficha_cliente.invoke(
+        {"nombre_o_codigo": "CUST-9999"}, config=_config_gerencia()
+    )
+
+    assert "No encontré" in salida
+    assert "Panaderia Santa Rita" not in salida
+
+
+def test_ficha_cliente_sigue_pidiendo_gerencia(monkeypatch: pytest.MonkeyPatch) -> None:
+    """El portón no se movió: un cliente no llega a la ficha ni con el código."""
+    from app.tools.gerencia import ficha_cliente
+
+    vistos = _erpnext_con_un_cliente(monkeypatch)
+
+    salida = ficha_cliente.invoke(
+        {"nombre_o_codigo": "CUST-0009"}, config=_unregistered_config()
+    )
+
+    assert salida == SIN_PERMISO
+    assert vistos == [], "no se consultó ERPNext sin permiso"

@@ -37,8 +37,14 @@ def test_el_aviso_de_avance_sale_en_el_idioma_del_destinatario(lengua):
     assert texto.strip()
     if lengua == EN:
         assert restos_en_espanol(texto) == []
-    else:
-        assert "consultando" in texto
+    # Cada idioma tiene su texto escrito a mano: no se le manda el mismo a los dos.
+    assert webhook.texto_progreso(ES) != webhook.texto_progreso(EN)
+    # Y ninguno de los dos narra lo que pasa por dentro. Antes decía «Estoy
+    # consultando el sistema, dame un momento»: quien está esperando no tiene por
+    # qué enterarse de que existe un sistema, y en la mitad de los turnos en que
+    # ese aviso salía ya no se estaba consultando nada (app/progreso.py).
+    assert "sistema" not in texto.lower()
+    assert "system" not in texto.lower()
 
 
 @pytest.mark.parametrize("lengua", IDIOMAS)
@@ -173,9 +179,11 @@ def test_el_rechazo_al_cliente_sale_en_un_solo_idioma(lengua):
     assert PEDIDO in texto and MOTIVO in texto
     if lengua == EN:
         assert restos_en_espanol(texto, (MOTIVO,)) == []
-        assert "Hola" not in texto
     else:
-        assert "Hola" in texto and "Hi!" not in texto
+        assert "we won't be able" not in texto
+    # Y no saluda: este mensaje llega cuando ya se estuvo hablando, y el saludo
+    # va una sola vez por conversación.
+    assert not texto.startswith(("Hola", "Hi"))
 
 
 @pytest.mark.parametrize("lengua", IDIOMAS)
@@ -189,6 +197,7 @@ def test_la_cancelacion_al_cliente_sale_en_un_solo_idioma(lengua):
         assert "cancelado" not in texto
     else:
         assert "cancelado" in texto and "cancelled" not in texto
+    assert not texto.startswith(("Hola", "Hi"))
 
 
 @pytest.mark.parametrize("lengua", IDIOMAS)
@@ -478,3 +487,75 @@ def test_los_avisos_de_stock_salen_en_el_idioma(lengua):
         assert "Whole Milk 1 L" in texto, "el producto es un dato, no se traduce"
         if lengua == EN:
             assert restos_en_espanol(texto, ("Whole Milk 1 L",)) == []
+
+
+# ------------------------------- la oferta de entrega, del lado del cliente
+# Tres de estos textos salían en los DOS idiomas pegados con un salto de línea
+# —el parche que este catálogo existe para no tener— y el resto sólo en
+# español, así que un cliente que había pedido inglés escribía «accept» y
+# recibía español. Los manda Python, antes de que ningún modelo vea el mensaje.
+
+# Del catálogo, no a mano: una clave nueva de oferta entra sola a este test.
+CLAVES_OFERTA = tuple(k for k in idioma.CATALOGO if k.startswith("oferta."))
+
+
+@pytest.mark.parametrize("clave", CLAVES_OFERTA)
+def test_los_textos_de_la_oferta_salen_en_un_solo_idioma(clave):
+    es = idioma.t(clave, ES, pedido=PEDIDO, terminos="x")
+    en = idioma.t(clave, EN, pedido=PEDIDO, terminos="x")
+    assert es != en, f"{clave} no está traducida"
+    assert restos_en_espanol(en) == [], f"{clave} dejó español en la versión inglesa"
+    # Ni el inglés adentro del español ni al revés: eran textos pegados.
+    assert "Thanks for confirming" not in es
+    assert "Gracias por confirmar" not in en
+    # El dato no se traduce: si la clave lleva el número, está en las dos.
+    assert (PEDIDO in es) == (PEDIDO in en)
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_los_terminos_acordados_salen_en_el_idioma_del_cliente(lengua):
+    """`terminos_texto` interpolaba «retiro en el local» y «cargo de envío» en
+    español adentro de un mensaje en inglés. Los tests no lo veían porque la
+    oferta de prueba no traía ni fecha, ni cargo, ni descuento."""
+    from app import solicitudes
+
+    sol = _solicitud(
+        ofrecido={
+            "metodo": "retiro",
+            "fecha": "2026-09-08",
+            "hora": "10:00",
+            "cargo": 1500.0,
+            "descuento_pct": 5,
+        }
+    )
+    texto = solicitudes.texto_oferta_cliente(sol, lengua)
+    # Los datos son idénticos en los dos idiomas.
+    assert "2026-09-08" in texto and "10:00" in texto and "5%" in texto
+    if lengua == EN:
+        assert restos_en_espanol(texto, ("Demo Bakery", "ARS", "acepto", "no acepto")) == []
+        for resto in ("retiro en el local", "cargo de envío", "descuento", "a las"):
+            assert resto not in texto, f"quedó «{resto}» en el texto en inglés"
+    else:
+        assert "retiro en el local" in texto and "a las 10:00" in texto
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_sin_terminos_el_texto_dice_sin_cambios_en_su_idioma(lengua):
+    from app import solicitudes
+
+    texto = solicitudes.terminos_texto({}, "ARS", lengua)
+    assert texto == idioma.t("terminos.sin_cambios", lengua)
+    if lengua == EN:
+        assert restos_en_espanol(texto) == []
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_la_oferta_no_le_pide_apretar_un_boton_que_no_existe(lengua):
+    """Al cliente la oferta le llega como texto o plantilla (app/avisos.py).
+    Los botones son del aviso al EQUIPO (app/notificar.py)."""
+    from app import solicitudes
+
+    texto = solicitudes.texto_oferta_cliente(_solicitud(), lengua)
+    assert "botón" not in texto and "button" not in texto
+    # Y sigue diciendo, en su idioma, las palabras exactas que el router parsea.
+    assert ("acepto" in texto) or ("accept" in texto)
