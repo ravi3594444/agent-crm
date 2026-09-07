@@ -4,7 +4,7 @@ Corre los escenarios de release contra **la imagen real del agente**, sin
 tocar ERPNext, ni Meta, ni WhatsApp, ni el Redis de staging.
 
 ```bash
-make demo          # 17 escenarios, determinístico, sin ninguna red
+make demo          # 20 escenarios, determinístico, sin ninguna red
 make demo-gemini   # los mismos, con Gemini de verdad (consume cuota)
 ```
 
@@ -61,7 +61,7 @@ estado de documentos (`documentos`). No pesan igual en los dos modos:
 - **`prohibe` falla siempre.** Que el modelo prometa un descuento o diga
   "confirmado" cuando no lo está es exactamente lo que hay que cazar.
 - **El tono falla siempre, y del lado del cliente.** `piloto._revisar_tono`
-  revisa TODA respuesta a un cliente, en los 17 escenarios y en los que vengan:
+  revisa TODA respuesta a un cliente, en los 20 escenarios y en los que vengan:
   que no aparezca vocabulario interno (`borrador`, `pendiente de revisión`,
   `el sistema`, `por configuración`, `estoy consultando`, en los dos idiomas) y
   que no se salude dos veces en la misma conversación. No opina de la
@@ -182,7 +182,7 @@ autorizada no escribió.
 
 - **El modo gemini no cabe en el tier gratuito.** Son 20 pedidos por día y por
   modelo (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), y un turno de
-  cliente gasta dos o más. Los 17 escenarios necesitan ~95. Con `--modelo` se
+  cliente gasta dos o más. Los 20 escenarios necesitan ~105. Con `--modelo` se
   puede usar otro modelo de Gemini, que tiene su propia cuota diaria, para
   probar un subconjunto.
 - El reloj no se controla: los escenarios que dependen de un vencimiento

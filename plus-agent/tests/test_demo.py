@@ -1015,7 +1015,7 @@ def test_limit_page_length_zero_means_no_limit_like_frappe(almacen: fe.Almacen) 
 
 # ------------------------------------------------------------ el guarda de tono
 # El producto se vende por cómo se lee, así que el tono se verifica como el
-# estado de un documento: en los 17 escenarios y en los dos modos. Estas son las
+# estado de un documento: en los 20 escenarios y en los dos modos. Estas son las
 # dos afirmaciones que sí se pueden hacer sin opinar de la redacción.
 
 
@@ -1046,3 +1046,50 @@ def test_la_jerga_que_no_puede_salirle_a_un_cliente() -> None:
                     "por configuración", "estoy consultando"):
         assert palabra in jerga, f"{palabra!r} tiene que estar prohibida"
         assert jerga[palabra], f"{palabra!r} necesita su equivalente en inglés"
+
+
+# --------------------------------- un turno roto en inglés también es un turno roto
+# El chequeo de disculpa técnica estaba escrito a mano y sólo en español
+# («problema técnico», «error tecnico»). El banco corre en los DOS idiomas, así
+# que en inglés no veía nada: contra Gemini de verdad, cinco turnos fallaron por
+# cuota y dos se contaron como buenos porque la disculpa salió en inglés.
+
+
+@pytest.mark.parametrize(
+    ("texto", "es_disculpa"),
+    [
+        # Las dos variantes de app/main.py, en los dos idiomas.
+        ("Perdón, tuve un problema técnico y no pude procesar tu mensaje. "
+         "Probá de nuevo en unos minutos.", True),
+        ("Sorry, I hit a technical problem and couldn't process your message. "
+         "Try again in a few minutes.", True),
+        ("Perdón, tuve un problema técnico. Ya avisé al equipo y te responden "
+         "en un rato.", True),
+        ("Sorry, I hit a technical problem. I've told the team and they'll get "
+         "back to you shortly.", True),
+        # El modelo que no contestó nada y Python rellenó: turno roto también.
+        ("Perdón, no pude armar la respuesta. ¿Me lo escribís de nuevo?", True),
+        ("Sorry, I couldn't put together a reply. Could you send that again?", True),
+        # Y lo que NO es una disculpa técnica.
+        ("Listo, te lo anoté. El equipo te confirma en un rato.", False),
+        ("Yes, I have it in 1 L sachets. How many do you want?", False),
+        ("Dale. ¿Para cuándo lo necesitás?", False),
+        ("", False),
+    ],
+)
+def test_la_disculpa_tecnica_se_reconoce_en_los_dos_idiomas(
+    texto: str, es_disculpa: bool
+) -> None:
+    assert piloto._es_disculpa(texto) is es_disculpa
+
+
+def test_las_disculpas_se_leen_del_catalogo_y_no_de_una_lista_a_mano():
+    """Una lista escrita a mano se queda vieja en cuanto se reescribe un texto."""
+    from app import idioma
+
+    disculpas = piloto._disculpas()
+    # Las cuatro claves por los dos idiomas.
+    assert len(disculpas) == 8
+    for clave in ("fallback.problema_tecnico", "fallback.respuesta_vacia"):
+        for lengua in idioma.IDIOMAS:
+            assert idioma.t(clave, lengua).lower() in disculpas

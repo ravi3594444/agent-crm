@@ -158,7 +158,7 @@ _EQUIVALENTES = {
 
 # --------------------------------------------------------------------- el tono
 # Lo que el producto vende es cómo se lee, así que el tono se verifica igual que
-# el estado de un documento: en los 17 escenarios y en los que vengan, y en los
+# el estado de un documento: en los 20 escenarios y en los que vengan, y en los
 # DOS modos. Contra el guión prueba que el SISTEMA no mete jerga por su cuenta
 # —los avisos que escribe Python, lo que la herramienta le dicta al modelo—; y
 # contra Gemini de verdad prueba lo único que no se puede probar sin un modelo,
@@ -227,6 +227,44 @@ def _es_acuse(texto: str) -> bool:
     """¿Es el aviso de avance, y no la respuesta?"""
     limpio = str(texto or "").strip().lower()
     return any(limpio.startswith(a[:20]) for a in _acuses())
+
+
+def _disculpas() -> tuple[str, ...]:
+    """Las disculpas técnicas que manda Python, en TODOS los idiomas.
+
+    Estaban escritas a mano y sólo en español —«problema técnico», «error
+    tecnico»— así que un turno ROTO en inglés («Sorry, I hit a technical
+    problem») pasaba como OK. El banco corre en los dos idiomas, así que en uno
+    de los dos este chequeo no veía nada: cinco turnos contra Gemini de verdad
+    fallaron por cuota y dos se contaron como buenos. Se resuelven del catálogo,
+    igual que el aviso de avance, y así no hay una lista que se quede vieja.
+
+    La respuesta vacía entra acá a propósito: el modelo no contestó nada y
+    Python rellenó, que es un turno roto y no una redacción.
+    """
+    from app import idioma
+
+    claves = (
+        "fallback.problema_tecnico",
+        "fallback.problema_tecnico_avisado",
+        "fallback.error_tecnico",
+        "fallback.respuesta_vacia",
+    )
+    return tuple(
+        idioma.t(clave, lengua).lower()
+        for clave in claves
+        for lengua in idioma.IDIOMAS
+    )
+
+
+def _es_disculpa(texto: str) -> bool:
+    """¿Es una disculpa técnica de Python, en cualquiera de los dos idiomas?
+
+    Se compara por el ARRANQUE del texto: la disculpa ES la respuesta entera,
+    así que un modelo que apenas menciona un problema no cuenta como turno roto.
+    """
+    limpio = str(texto or "").strip().lower()
+    return any(limpio.startswith(d[:24]) for d in _disculpas() if d)
 
 
 def _idioma_demo() -> str:
@@ -508,12 +546,9 @@ class Piloto:
         # el paso. app/main.py convierte cualquier excepción en una disculpa,
         # así que sin este chequeo un escenario cuyas condiciones son sólo
         # "prohibe" pasaría con el agente completamente roto.
-        for disculpa in ("problema técnico", "problema tecnico",
-                         "error tecnico", "error técnico"):
-            if disculpa in todo:
-                problemas.append(
-                    "el agente contestó con una disculpa técnica: se rompió algo")
-                break
+        if any(_es_disculpa(t) for t in turno.respuestas):
+            problemas.append(
+                "el agente contestó con una disculpa técnica: se rompió algo")
         # Los fragmentos de texto son EXACTOS contra un guión y sólo
         # orientativos contra un modelo libre: "tengo leche entera" es una
         # respuesta correcta que no contiene "LECHE-ENT-1L". Así que en modo
