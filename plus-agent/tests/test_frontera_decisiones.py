@@ -229,9 +229,20 @@ def test_los_dos_agentes_tienen_instalado_el_nodo_que_no_enumera() -> None:
     """
     from app import graph
 
-    for nombre in ("agente_clientes", "agente_gerencia"):
+    for nombre, registro in (
+        ("agente_clientes", graph.TOOLS_CLIENTES),
+        ("agente_gerencia", graph.TOOLS_GERENCIA),
+    ):
         instalado = getattr(graph, nombre).nodes["tools"].bound
         # isinstance contra la SUBCLASE: un ToolNode pelado no la satisface.
         assert isinstance(instalado, graph.ToolNodeSinInventario), (
             f"{nombre}: quedó instalado {type(instalado).__name__}"
         )
+        # Y con SU registro. Los dos nodos son ToolNodeSinInventario, así que la
+        # clase sola no dice cuál quedó dónde: montar TOOLS_GERENCIA en el
+        # agente de clientes es una fuga de privilegios, no un detalle de
+        # cableado, y pasaba tanto el grep viejo como el isinstance de arriba.
+        assert set(instalado.tools_by_name) == {h.name for h in registro}, (
+            f"{nombre}: quedó con el registro del otro agente"
+        )
+

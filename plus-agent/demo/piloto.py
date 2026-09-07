@@ -385,6 +385,9 @@ class Piloto:
         self.ip_servicios = ""
         self.ip_agente = ""
         self.entorno_cambiado = False
+        # Se reinicia por escenario (correr()); acá arranca vacío para que
+        # revisar un turno suelto —como hacen los tests— no explote.
+        self.saludos: dict[str, int] = {}
         self._cert_de_esta_corrida: tuple[pathlib.Path, pathlib.Path] | None = None
 
     # -- infraestructura

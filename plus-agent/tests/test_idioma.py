@@ -62,6 +62,9 @@ def test_el_catalogo_no_esta_vacio_y_cubre_las_categorias_pedidas():
     for esperada in (
         "ack", "pedido", "gerencia", "entrega", "codigo",
         "accion", "sistema", "stock", "precio", "fallback", "idioma",
+        # «oferta» no estaba, y es la categoría que el cliente lee cuando
+        # contesta «acepto»: sin esto, borrar esas claves no rompía ningún test.
+        "oferta", "terminos",
     ):
         assert esperada in categorias, f"falta la categoría {esperada}"
 
@@ -444,6 +447,16 @@ def test_el_orden_del_texto_decide_y_no_el_de_la_lista(
         "my friend speaks spanish",
         "mi socio habla en ingles",
         "su hijo escribe en ingles",
+        # Sin posesivo: el español nombra al tercero por su oficio, y esto es
+        # lo que se rompe si se saca la lista de oficios de _TERCEROS.
+        "la contadora necesita hablar en ingles",
+        "el encargado quiere hablar en ingles",
+        "the boss needs to talk in english",
+        # Ofrecer los dos idiomas tampoco elige: es una duda, y esto se guarda
+        # un año. El segundo está escrito EN español, así que el espejo ya
+        # contestaba en español y guardar inglés sería peor que no guardar nada.
+        "answer in english or spanish",
+        "respondeme en ingles o espanol",
     ],
 )
 def test_una_descripcion_o_una_duda_no_cambian_la_preferencia(

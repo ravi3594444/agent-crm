@@ -150,9 +150,10 @@ class Progreso(BaseCallbackHandler):
             ):
                 return
             # Acá nace el aviso: empezó a haber trabajo y no hay ningún plazo
-            # esperando. Sólo puede haber UNO vivo, porque `_pendiente` se limpia
-            # recién cuando el anterior disparó. Daemon: un proceso que se apaga
-            # no espera por él.
+            # esperando. Sólo puede haber UNO PENDIENTE, porque `_pendiente` se
+            # limpia recién cuando el anterior disparó —el que ya disparó puede
+            # seguir mandando, y cancelarlo no haría nada—. Daemon: un proceso
+            # que se apaga no espera por él.
             self._pendiente = True
             self._timer = threading.Timer(self._demora, self._disparar)
             self._timer.daemon = True

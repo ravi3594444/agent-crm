@@ -1095,6 +1095,51 @@ def test_las_disculpas_se_leen_del_catalogo_y_no_de_una_lista_a_mano():
             assert idioma.t(clave, lengua).lower() in disculpas
 
 
+# Las dos mitades del guarda que no tenían cómo fallar en pytest: ningún texto
+# del guión trae dos «?», y ningún test le pasaba una respuesta que saludara.
+# Sin esto, `preguntas > 1` y el conteo de saludos sólo los ejercía
+# `make demo-gemini`, que necesita cuota.
+
+
+def test_dos_preguntas_en_un_mismo_mensaje_son_un_problema() -> None:
+    """El caso real: Gemini contestó «Todo bien por acá, ¿y vos? ¿Te puedo
+    ayudar con algo más?» a un «todo bien»."""
+    paso = escenarios.Paso("549", "todo bien?")
+
+    turno = _turno_con(
+        "offline", paso, ["Todo bien por acá, ¿y vos? ¿Te puedo ayudar con algo más?"]
+    )
+
+    assert not turno.ok
+    assert any("2 preguntas" in problema for problema in turno.problemas)
+
+
+def test_una_sola_pregunta_pasa() -> None:
+    """La mitad positiva: preguntar UNA cosa es lo que se le pide."""
+    paso = escenarios.Paso("549", "todo bien?")
+
+    turno = _turno_con("offline", paso, ["Todo bien por acá, ¿y vos?"])
+
+    assert turno.ok, turno.problemas
+
+
+def test_saludar_dos_veces_en_la_misma_conversacion_es_un_problema() -> None:
+    """El segundo «¡Hola!» delata que no se leyó lo anterior. El conteo vive en
+    el Piloto, así que hay que revisar DOS turnos del mismo número."""
+    piloto_ = piloto.Piloto("offline", pathlib.Path("/tmp/no-se-escribe"))
+    paso = escenarios.Paso("549", "hola")
+
+    def revisar(respuesta: str) -> list[str]:
+        turno = piloto.Turno("x", 1, "549", "cliente", paso.texto,
+                             respuestas=[respuesta])
+        return piloto_._revisar(paso, turno, {})
+
+    assert revisar("¡Hola! ¿Qué necesitás?") == []
+    problemas = revisar("¡Hola! Te lo anoto.")
+
+    assert any("saludó más de una vez" in problema for problema in problemas)
+
+
 def test_el_prompt_le_pide_contar_los_signos_de_pregunta():
     """La regla estaba y el modelo la rompió igual, así que ahora es concreta."""
     from app.prompts import SYSTEM_ES_AR
