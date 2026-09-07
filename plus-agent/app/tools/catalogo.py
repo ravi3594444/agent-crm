@@ -20,7 +20,10 @@ def buscar_producto(consulta: str) -> str:
         limit=8,
     )
     if not items:
-        return f"No se encontraron productos para '{consulta}'."
+        return (
+            f"No encontré nada parecido a '{consulta}' en el catálogo. "
+            "Preguntale cómo lo llama él, u ofrecele lo más cercano que tengas."
+        )
 
     price_list = os.getenv("AUTO_CONFIRM_PRICE_LIST", "").strip()
     currency = os.getenv("AUTO_CONFIRM_CURRENCY", "").strip()
@@ -73,8 +76,10 @@ def buscar_producto(consulta: str) -> str:
             if matching
             else idioma.t("precio.a_confirmar")
         )
+        # Sin viñeta: si el modelo copia la lista tal cual, app/formato.py
+        # convierte el guión en «•» y el cliente recibe una lista de sistema.
         out.append(
-            f"- {item['item_name']} ({item['item_code']}) — {price_text} "
+            f"{item['item_name']} ({item['item_code']}) — {price_text} "
             f"por {item['stock_uom']}"
         )
     return "\n".join(out)
@@ -125,8 +130,9 @@ def consultar_stock(item_code: str) -> str:
     fresco, sin_confianza = inventario.confiable(item_code, warehouse)
     if not fresco:
         return (
-            f"{item_code}: {sin_confianza}. No confirmes disponibilidad; "
-            "el pedido solo puede quedar pendiente de revisión."
+            f"{item_code}: {sin_confianza}. No confirmes disponibilidad. Si lo "
+            "pide igual, tomale el pedido y decile que el equipo se lo confirma "
+            "en un rato; no le hables de revisiones ni de estados."
         )
     try:
         bins = erpnext.get_list(
@@ -169,15 +175,20 @@ def consultar_stock(item_code: str) -> str:
         return f"{item_code}: configuración de stock inválida. No confirmes disponibilidad."
     safe = available * (1 - buffer)
     if safe <= 0:
-        return f"{item_code}: SIN STOCK. Ofrecé una alternativa."
+        return (
+            f"{item_code}: SIN STOCK. Decile que de eso no tenés ahora y "
+            "ofrecele una alternativa concreta del catálogo."
+        )
     if safe < float(os.getenv("STOCK_POCO", "20")):
         return (
-            f"{item_code}: POCO STOCK. El pedido requiere validación de cantidad "
-            "y puede quedar pendiente."
+            f"{item_code}: POCO STOCK. Tomale el pedido sin prometer la cantidad: "
+            "decile que te confirmás cuánto hay y que el equipo se lo cierra en "
+            "un rato."
         )
     return (
         f"{item_code}: stock registrado. La cantidad exacta se vuelve a validar "
-        "al crear y antes de confirmar el pedido."
+        "al crear y antes de confirmar el pedido, así que no se la prometas: "
+        "seguí con el pedido sin anunciar cuánto hay."
     )
 
 
@@ -202,7 +213,8 @@ def estado_pedido(numero_pedido: str, config: RunnableConfig) -> str:
         # enumeration across customer accounts.
         return f"No encontré el pedido {numero_pedido}."
     states = {
-        0: "borrador (pendiente de confirmación)",
+        0: "anotado, todavía sin confirmar: lo confirma el equipo (al cliente "
+           "decíselo así, sin la palabra borrador)",
         1: "confirmado",
         2: "cancelado",
     }
@@ -210,7 +222,9 @@ def estado_pedido(numero_pedido: str, config: RunnableConfig) -> str:
         f"Pedido {order['name']}: "
         f"{states.get(order.get('docstatus'), 'desconocido')}. "
         f"Total: {order.get('currency', '')} {order.get('grand_total', 0)}. "
-        f"Entrega estimada: {order.get('delivery_date', 'a confirmar')}."
+        f"Fecha pedida: {order.get('delivery_date', 'a confirmar')}"
+        " (es la que pidió, no una promesa: no la des por cierta si el pedido "
+        "todavía no está confirmado)."
     )
 
 
@@ -237,6 +251,7 @@ def pedido_habitual(config: RunnableConfig) -> str:
     )
     return (
         f"Último pedido ({order['name']}, {order.get('transaction_date')}):\n{lines}\n"
-        f"Total {pesos(order.get('grand_total', 0))}. Confirmá productos, cantidades, "
-        "unidades y una nueva fecha de entrega antes de crear otro pedido."
+        f"Total {pesos(order.get('grand_total', 0))}. Preguntale en UNA sola frase "
+        "si quiere lo mismo y para qué día; no le repitas la lista salvo que la "
+        "pida. Con esa respuesta ya tenés los cuatro datos para crear_pedido."
     )

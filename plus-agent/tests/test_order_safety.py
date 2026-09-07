@@ -1033,3 +1033,78 @@ def test_policy_delivery_limit_uses_business_date_not_host_date(
 
     assert decision.auto is False
     assert "fecha de entrega muy lejana" in decision.motivos
+
+
+# --------------------------- lo que la herramienta le enseña a decir al modelo
+# El resultado de una herramienta es lo único que el modelo tiene para armar la
+# frase, y le copia el vocabulario. Decía «Estado: borrador pendiente de
+# revisión» y «el pedido quedó RECIBIDO», así que el cliente —un almacén que no
+# sabe qué es un borrador— recibía eso. Los TOKENS y «Número real:» no se tocan:
+# son el contrato que el prompt lee para saber qué es verdad.
+
+
+def test_el_pendiente_le_prohibe_al_modelo_la_jerga_interna() -> None:
+    resultado = pedidos._order_result(_order(), [], "2026-08-30")
+
+    # El contrato, intacto.
+    assert resultado.startswith("PEDIDO_PENDIENTE. Número real: SO-0001")
+    assert "Estado: borrador pendiente de revisión" in resultado
+    # Y la instrucción de cómo decirlo.
+    assert "NO le digas «borrador» ni «pendiente de revisión»" in resultado
+    assert "se lo anotaste" in resultado
+    assert "Nunca «confirmado»" in resultado
+    assert "no le prometas día ni hora" in resultado
+
+
+def test_el_confirmado_no_pide_repetir_el_detalle_que_ya_sale_solo() -> None:
+    """Python encola su propio aviso con ✅, items y total (app/avisos.py)."""
+    resultado = pedidos._order_result(_order(docstatus=1), [], "2026-08-30")
+
+    assert resultado.startswith("PEDIDO_CONFIRMADO. Número real: SO-0001")
+    assert "UNA línea" in resultado
+    assert "no lo repitas" in resultado
+
+
+def test_el_resumen_usa_el_nombre_del_producto_y_no_su_codigo() -> None:
+    """«10 Unidad de LECHE-ENT-1L» terminaba en la frase que lee el cliente."""
+    orden = {
+        "items": [
+            {"item_code": "LECHE-ENT-1L", "item_name": "Leche entera sachet 1 L",
+             "qty": 10, "uom": "Unidad"}
+        ]
+    }
+
+    resumen = pedidos._summary(orden, [])
+
+    assert "Leche entera sachet 1 L" in resumen
+    assert "LECHE-ENT-1L" not in resumen
+    # Sin nombre cargado se cae al código, que es mejor que no decir nada.
+    solo_codigo = pedidos._summary(
+        {"items": [{"item_code": "QUE-MUZ", "qty": 2, "uom": "kg"}]}, []
+    )
+    assert "QUE-MUZ" in solo_codigo
+
+
+def test_el_stock_no_le_hace_hablar_de_revisiones_ni_de_estados(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _catalogo_erp(monkeypatch, fisico=30, prometido=25)
+
+    poco = catalogo.consultar_stock.invoke({"item_code": "LECHE-1L"})
+
+    # El token que lee la política sigue ahí.
+    assert "POCO STOCK" in poco
+    # La prosa que copia el modelo, en criollo.
+    assert "sin prometer la cantidad" in poco
+    assert "pendiente" not in poco
+    assert "validación" not in poco
+
+
+def test_el_error_de_una_herramienta_pide_una_sola_disculpa() -> None:
+    """Python ya manda su propia disculpa técnica: dos seguidas eran dos."""
+    from app import graph
+
+    assert "UNA sola disculpa" in graph._ERROR_MSG
+    assert "escalar_a_humano" in graph._ERROR_MSG
+    assert "No inventes un resultado" in graph._ERROR_MSG
+    assert "No le hables de herramientas" in graph._ERROR_MSG

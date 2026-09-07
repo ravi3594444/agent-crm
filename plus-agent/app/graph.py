@@ -133,8 +133,10 @@ _modelo_gerencia = modelos.construir("gerencia")
 # customer can never be replied to again until someone clears Redis by hand.
 # Always turn a tool failure into a normal tool result instead.
 _ERROR_MSG = (
-    "Hubo un error tecnico con esa herramienta. No inventes un resultado: "
-    "pedile disculpas al cliente y usa escalar_a_humano."
+    "Esa herramienta falló y no devolvió nada. No inventes un resultado. Llamá a "
+    "escalar_a_humano y decile al cliente, en UNA línea y con UNA sola disculpa, "
+    "que eso lo va a ver el encargado. No le hables de herramientas, de sistemas "
+    "ni de errores técnicos."
 )
 
 # The system prompt is built per call (prompt=) and never stored in the

@@ -306,11 +306,13 @@ def _summary(order: dict, fallback: list[dict]) -> str:
             qty = float(item.get("qty") or 0)
         except (TypeError, ValueError):
             qty = 0
+        # El NOMBRE antes que el código: este resumen termina en la frase que
+        # lee el cliente, y «10 Unidad de LECHE-ENT-1L» no lo dice nadie.
         parts.append(
             f"{qty:g} {item.get('uom') or item.get('stock_uom') or 'unidad'} "
-            f"de {item.get('item_code') or 'producto'}"
+            f"de {item.get('item_name') or item.get('item_code') or 'producto'}"
         )
-    return ", ".join(parts) or "detalle disponible en ERPNext"
+    return ", ".join(parts) or "(sin detalle de renglones)"
 
 
 def _order_result(order: dict, fallback: list[dict], fallback_date: str) -> str:
@@ -326,17 +328,24 @@ def _order_result(order: dict, fallback: list[dict], fallback_date: str) -> str:
     if status == 1:
         return (
             f"PEDIDO_CONFIRMADO. Número real: {name}. Resumen: {detail}. "
-            f"Entrega: {delivery}. Estado: confirmado."
+            f"Entrega: {delivery}. Estado: confirmado. "
+            "Al cliente: UNA línea con el número real y qué quedó confirmado. El "
+            "detalle completo le llega aparte y solo, así que no lo repitas "
+            "renglón por renglón y no le pongas el ✅."
         )
     if status == 2:
         return (
             f"PEDIDO_CANCELADO. Número real: {name}. Resumen: {detail}. "
             f"Entrega: {delivery}. Estado: cancelado; no crees otro pedido "
-            "sin una nueva solicitud del cliente."
+            "sin una nueva solicitud del cliente. Decile que ese pedido quedó "
+            "cancelado y preguntale en una frase si quiere que lo armes de nuevo."
         )
     return (
         f"PEDIDO_PENDIENTE. Número real: {name}. Resumen: {detail}. "
-        f"Entrega: {delivery}. Estado: borrador pendiente de revisión."
+        f"Entrega: {delivery}. Estado: borrador pendiente de revisión. "
+        "Al cliente NO le digas «borrador» ni «pendiente de revisión»: en UNA "
+        "línea, que se lo anotaste —con el número real— y que el equipo se lo "
+        "confirma en un rato. Nunca «confirmado», y no le prometas día ni hora."
     )
 
 
@@ -445,9 +454,11 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
         # que la instrucción viaja con el resultado en vez de confiar en que el
         # modelo lo deduzca.
         resultado += (
-            " ENTREGA EN REVISIÓN: decile al cliente que el pedido quedó "
-            "RECIBIDO y que estamos revisando la entrega a esa dirección. "
-            "NO le digas que está confirmado, y no prometas día ni hora."
+            " ENTREGA EN REVISIÓN: decile al cliente, en UNA línea y con el "
+            "número real, que se lo anotaste y que estamos revisando la entrega "
+            "a esa dirección, y que le avisás. No uses las palabras RECIBIDO ni "
+            "«pendiente». NO le digas que está confirmado, y no prometas día ni "
+            "hora."
         )
     return resultado
 
@@ -502,7 +513,10 @@ def crear_lead(
     except erpnext.ERPNextError:
         return "No pude registrar el contacto. Derivá el caso al equipo."
     erpnext.add_comment("Lead", doc["name"], "Creado por Agente IA vía WhatsApp.")
-    return f"Contacto registrado como {doc['name']}."
+    return (
+        f"Contacto registrado como {doc['name']}. Ese código es interno: no se lo "
+        "muestres. Decile que ya lo tenés anotado y seguí con lo que pidió."
+    )
 
 
 @tool
@@ -692,7 +706,9 @@ def crear_cliente(
     if en_zona:
         return (
             f"Cuenta lista: {cuenta}{ya_estaba}. Entregamos en esa zona. "
-            "Ya podés tomarle el pedido con crear_pedido."
+            "Ya podés tomarle el pedido con crear_pedido. Ese código de cuenta "
+            "es interno: no se lo muestres. Decile que ya lo tenés anotado y "
+            "seguí con lo que pidió."
         )
     return (
         f"Cuenta lista: {cuenta}{ya_estaba}. ATENCIÓN: {motivo_zona}. Podés "
