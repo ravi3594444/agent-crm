@@ -133,6 +133,13 @@ def _creacion(fila: dict) -> datetime | None:
     ERPNext guarda sin zona, en la hora de su propio sistema. `edad_horas` ya
     lo lee así para decidir la edad de un borrador; leerlo como UTC acá hacía
     que los dos módulos discreparan por el offset sobre el MISMO campo.
+
+    Las dos comparten la misma suposición —que la zona de ERPNext y
+    BUSINESS_TIMEZONE son la misma— y las dos dependen de que alguien la
+    verifique: la compara `readiness.chequear_zona_erpnext`, que bloquea el
+    despliegue si difieren. Acá, si difirieran, la ventana del resumen se
+    correría por el offset y los comentarios del borde entrarían o saldrían
+    sin que nada lo diga.
     """
     from app import pendientes
 

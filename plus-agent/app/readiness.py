@@ -582,6 +582,83 @@ def chequear_erpnext(env: Mapping[str, str], reporte: Reporte, http: Http | None
         else:
             reporte.ok("ERPNEXT_WAREHOUSE", "existe, habilitado, de la compañía configurada")
 
+    chequear_zona_erpnext(env, reporte, http, url, pares["politica"])
+
+
+def chequear_zona_erpnext(
+    env: Mapping[str, str],
+    reporte: Reporte,
+    http: Http,
+    url: str,
+    par: tuple[str, str],
+) -> None:
+    """Que ERPNext y el agente estén en la MISMA zona, porque se supone y no se mira.
+
+    ERPNext guarda `creation` SIN zona, en la hora de su propio sistema —
+    `System Settings.time_zone`, que el asistente de instalación pone según el
+    país elegido—. Y `pendientes.edad_horas` y `autonomia._creacion`
+    interpretan ese campo en BUSINESS_TIMEZONE, porque es el único reloj con el
+    que decide todo el resto del código. Son DOS zonas configuradas por
+    separado y supuestas iguales, y hasta acá nada las comparaba.
+
+    Cuando no coinciden, TODA edad sale corrida por el offset, en silencio, y
+    ningún test lo puede ver porque los tests comparten la suposición del
+    código. Medido con un borrador creado hace 2 h:
+
+        ERPNext en la zona del negocio ->  2.00 h   (bien)
+        ERPNext en UTC                 -> -1.00 h   (error -3 h)
+        ERPNext en Asia/Kolkata        -> -6.50 h   (error -8.5 h)
+
+    Y en la dirección de un cliente configurado sin cuidado no es «tarde» sino
+    «nunca, hasta más tarde»: la edad sale NEGATIVA, el borrador se lee como
+    creado en el futuro, y no empieza a envejecer hacia las 48 h del
+    recordatorio ni hacia las 168 h del cierre hasta que pasa el offset.
+
+    POR QUÉ BLOQUEA
+    El criterio de este archivo es el de `chequear_solicitudes`: FALTA bloquea
+    cuando el sistema haría algo MAL. Estas edades gatean el recordatorio al
+    cliente y el cierre que le suelta el stock, así que una zona distinta es el
+    sistema mandando esos dos a la hora equivocada. Y se arregla con una línea
+    en ERPNext, así que bloquear no deja a nadie trabado sin salida.
+
+    POR QUÉ NO BLOQUEA CUANDO NO SE PUDO LEER
+    Mismo motivo que las plantillas opcionales de más arriba: `--sin-red` es la
+    puerta de `deploy.yml` y no puede verificar nada remoto, y `System
+    Settings` es un Single que puede necesitar un permiso que la credencial de
+    política no tenga. Bloquear por algo que no se pudo mirar deja el check en
+    rojo para siempre, que es peor que no tenerlo. AVISO, con el motivo y qué
+    permiso falta.
+    """
+    from app import pendientes
+
+    # El default sale de `pendientes`, que es quien lo usa para decidir: dos
+    # copias del nombre de la zona es exactamente la clase de deriva que este
+    # chequeo vino a cerrar.
+    esperada = _valor(env, "BUSINESS_TIMEZONE") or pendientes._ZONA_DEFAULT
+    # `System Settings` es un Single: el nombre del doc es el del doctype, y
+    # lleva un espacio que hay que escapar.
+    unico = quote("System Settings", safe="")
+    estado, cuerpo = http(f"{url}/api/resource/{unico}/{unico}", headers=_auth(par))
+    datos = (cuerpo or {}).get("data") if isinstance(cuerpo, dict) else None
+    declarada = str((datos or {}).get("time_zone") or "").strip() if isinstance(datos, dict) else ""
+    if not declarada:
+        reporte.aviso(
+            "ERPNext zona",
+            f"no pude leer System Settings.time_zone (HTTP {estado}): sin eso no puedo "
+            f"confirmar que ERPNext esté en {esperada}, y una zona distinta corre TODA "
+            "edad por el offset. Dar lectura de System Settings a la credencial de política.",
+        )
+    elif declarada != esperada:
+        reporte.falta(
+            "ERPNext zona",
+            f"ERPNext dice {declarada} y BUSINESS_TIMEZONE dice {esperada}: `creation` "
+            "viene sin zona y se interpreta en la del negocio, así que toda edad sale "
+            "corrida por el offset — el recordatorio y el cierre salen a la hora "
+            f"equivocada. Poner System Settings.time_zone en {esperada}.",
+        )
+    else:
+        reporte.ok("ERPNext zona", f"{declarada}, igual que BUSINESS_TIMEZONE")
+
 
 def _auth(par: tuple[str, str]) -> dict:
     return {"Authorization": f"token {par[0]}:{par[1]}", "Accept": "application/json"}

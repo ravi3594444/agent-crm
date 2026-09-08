@@ -122,6 +122,17 @@ def edad_horas(fila: dict, ahora: datetime | None = None) -> float | None:
     if creado.tzinfo is None:
         # ERPNext guarda sin zona, en la hora de su propio sistema; la del
         # negocio es la que usa todo el resto del código para decidir.
+        #
+        # O sea que esto SUPONE que las dos zonas son la misma, y son dos
+        # cosas configuradas por separado: `System Settings.time_zone` de
+        # ERPNext y BUSINESS_TIMEZONE de acá. Ya no es una suposición muda:
+        # `readiness.chequear_zona_erpnext` las compara y BLOQUEA el
+        # despliegue si difieren, justamente porque acá no hay forma de
+        # notarlo — toda edad saldría corrida por el offset, en silencio, y
+        # los tests comparten esta misma suposición. Con ERPNext en UTC y el
+        # negocio en Argentina, un borrador de hace 2 h informa -1.00 h: se
+        # lee como creado en el futuro y no empieza a envejecer hacia las 48 h
+        # del recordatorio hasta que pasa el offset.
         creado = creado.replace(tzinfo=zona)
     momento = ahora or _ahora()
     return (momento - creado).total_seconds() / 3600.0
