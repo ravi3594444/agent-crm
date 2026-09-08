@@ -479,6 +479,25 @@ CATALOGO: dict[str, dict[str, str]] = {
             "them in full."
         ),
     },
+    # El desglose de frenos se arma sumando DOS fuentes (los registros de
+    # sombra y la prosa de las revisiones humanas). Si una no se pudo leer, lo
+    # que queda es real pero incompleto, y un desglose corto se lee como
+    # «quedan menos frenos de los que creía» — la dirección que hace subir un
+    # límite sobre evidencia que no está. Necesita su propia frase: reusar
+    # «no pude leer» dejaría al dueño leyendo un desglose sin saber que le
+    # falta la mitad.
+    "gerencia.autonomia_frenos_incompletos": {
+        ES: (
+            "⚠️ No pude leer todas las fuentes de frenos, así que el desglose "
+            "de «frenados por reglas» está incompleto: puede haber frenos que "
+            "no figuran ahí."
+        ),
+        EN: (
+            "⚠️ I could not read every source of blockers, so the \"held back "
+            "by rules\" breakdown is incomplete: there may be blockers it "
+            "does not list."
+        ),
+    },
     "gerencia.autonomia": {
         ES: (
             "📈 Autonomía · últimos {dias} días\n"

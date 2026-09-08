@@ -42,6 +42,7 @@ dueño baja un límite que no hacía falta bajar.
 from __future__ import annotations
 
 import re
+from collections.abc import Collection
 from datetime import datetime, timedelta
 
 from app import entrega, erpnext, idioma, policy
@@ -253,15 +254,17 @@ def sombras(dias: int = DIAS_DEFAULT) -> dict | None:
             vistos[pedido] = datos
     pasan = 0
     ilegibles = 0
+    contados: set[str] = set()
     postura: dict[str, int] = {}
     reglas: dict[str, int] = {}
-    for datos in vistos.values():
+    for pedido, datos in vistos.items():
         # Un registro que no pudo leer los límites no decidió nada: no cuenta
         # como frenado por la postura, porque la postura es lo que el dueño
         # eligió y esto es una caída.
         if datos.get("ilegible"):
             ilegibles += 1
             continue
+        contados.add(pedido)
         if datos.get("pasa_reglas"):
             pasan += 1
         for motivo in datos.get("motivos_postura") or []:
@@ -274,6 +277,11 @@ def sombras(dias: int = DIAS_DEFAULT) -> dict | None:
     decididos = len(vistos) - ilegibles
     return {
         "con_registro": len(vistos),
+        # Los pedidos cuyos frenos QUEDARON CONTADOS acá. No es lo mismo que
+        # `con_registro`: los registros ilegibles no aportaron a ninguna
+        # cubeta, así que no están. Ése es justo el conjunto que `revisiones`
+        # tiene que saltar, y por eso se devuelve el conjunto y no la cuenta.
+        "contados": frozenset(contados),
         "pasan": pasan,
         "frenados": decididos - pasan,
         "ilegibles": ilegibles,
@@ -283,34 +291,57 @@ def sombras(dias: int = DIAS_DEFAULT) -> dict | None:
     }
 
 
-def revisiones(dias: int = DIAS_DEFAULT) -> dict | None:
+def revisiones(
+    dias: int = DIAS_DEFAULT, *, excluir: Collection[str] | None = None
+) -> dict | None:
     """Los frenos que dejó `_after_create`, agrupados por fragmentos.
 
-    Prosa interpolada: menos preciso que `sombras`, y la única fuente cuando el
-    modo sombra está apagado.
+    Prosa interpolada: menos preciso que `sombras`, así que cubre los pedidos
+    que la sombra NO contó — los de antes de encender el modo sombra, los que
+    el barrido todavía no alcanzó, y todos si el modo está apagado.
 
-    OJO, y es un bug abierto: esto NO excluye los pedidos que sí tienen
-    registro de sombra, y `texto` elige una fuente O la otra con un `or`. Así,
-    un solo freno de sombra en la ventana tapa TODOS los frenos que sólo
-    figuran acá. El desglose de motivos todavía no es confiable para decidir
-    subir un límite; los conteos de confirmados, rechazos y sombra sí lo son.
-    Se arregla en el PR siguiente, antes de que haya datos de sombra que mirar.
+    `excluir` es el conjunto que devuelve `sombras()["contados"]`. Saltarlos
+    acá es lo que permite que `texto` SUME las dos fuentes en vez de elegir
+    una: sin la exclusión, un pedido con registro de sombra aportaría a la
+    misma cubeta dos veces, y sumar diría más frenos que pedidos.
+
+    Con `excluir=None` cuenta todo, que es lo que corresponde cuando `sombras`
+    no se pudo leer: sin saber qué contó la otra fuente, la única opción
+    honesta es contar de más y no de menos. Un desglose inflado hace mirar un
+    freno que ya no está; uno recortado hace subir un límite que no había que
+    subir.
     """
     leido = _comentarios(MARCA_REVISION, _desde(dias))
     if leido is None:
         return None
     filas, truncado = leido
+    saltar = {str(p).strip() for p in (excluir or ())}
+    saltados: set[str] = set()
     por_pedido: dict[str, str] = {}
     for fila in filas:
         pedido = str(fila.get("reference_name") or "").strip()
-        if pedido and pedido not in por_pedido:
-            por_pedido[pedido] = str(fila.get("content") or "")
+        if not pedido or pedido in por_pedido:
+            continue
+        if pedido in saltar:
+            saltados.add(pedido)
+            continue
+        por_pedido[pedido] = str(fila.get("content") or "")
     grupos: dict[str, int] = {}
     for contenido in por_pedido.values():
         cuerpo = contenido.split(MARCA_REVISION, 1)[-1]
         for nombre in {grupo(m) for m in cuerpo.split(";") if m.strip()}:
             grupos[nombre] = grupos.get(nombre, 0) + 1
-    return {"pedidos": len(por_pedido), "grupos": grupos, "truncado": truncado}
+    return {
+        "pedidos": len(por_pedido),
+        "grupos": grupos,
+        # Los pedidos que ESTA ventana tenía y se saltaron porque los contó la
+        # sombra. No es `len(excluir)`: el conjunto que entra son todos los
+        # pedidos con registro de sombra, y la mayoría no dejó comentario de
+        # revisión acá. Informar el tamaño del conjunto que entró sería
+        # informar un número que no es el que su nombre dice.
+        "excluidos": len(saltados),
+        "truncado": truncado,
+    }
 
 
 def borradores_vivos() -> dict | None:
@@ -396,13 +427,20 @@ def resumen(dias: int = DIAS_DEFAULT) -> dict:
     """Todos los números de la ventana. Cada uno puede faltar por separado.
 
     Nunca levanta: una sección que no se pudo leer vale None y el texto lo dice.
+
+    El ORDEN de las dos lecturas de frenos es parte del resultado: `revisiones`
+    necesita saber qué pedidos contó `sombras` para no contarlos otra vez, así
+    que la sombra se lee primero y su conjunto se pasa. Si la sombra no se pudo
+    leer, `excluir` queda vacío y las revisiones cuentan todo — de más, nunca
+    de menos.
     """
+    som = sombras(dias)
     return {
         "dias": max(1, int(dias or DIAS_DEFAULT)),
         "confirmaciones": confirmaciones(dias),
         "rechazos": rechazos(dias),
-        "sombras": sombras(dias),
-        "revisiones": revisiones(dias),
+        "sombras": som,
+        "revisiones": revisiones(dias, excluir=(som or {}).get("contados")),
         "borradores": borradores_vivos(),
         "conteos": conteos(dias),
     }
@@ -413,6 +451,25 @@ def _linea_grupos(grupos: dict[str, int] | None) -> str:
         return ""
     ordenados = sorted(grupos.items(), key=lambda kv: (-kv[1], kv[0]))
     return ", ".join(f"{nombre} {cuenta}" for nombre, cuenta in ordenados[:6])
+
+
+def _sumar(*fuentes: dict[str, int] | None) -> dict[str, int]:
+    """Las cubetas de varias fuentes, sumadas cubeta por cubeta.
+
+    Sumar sólo es correcto porque las fuentes vienen DEDUPLICADAS POR PEDIDO:
+    `revisiones` salta los pedidos que `sombras` ya contó. Sin esa exclusión
+    esto contaría dos veces el mismo pedido y el desglose diría más frenos que
+    pedidos frenados.
+
+    Antes acá había un `or` que elegía una fuente y descartaba la otra entera,
+    así que un solo freno de sombra en la ventana tapaba todos los frenos que
+    sólo figuraban en las revisiones.
+    """
+    total: dict[str, int] = {}
+    for fuente in fuentes:
+        for nombre, cuenta in (fuente or {}).items():
+            total[str(nombre)] = total.get(str(nombre), 0) + int(cuenta or 0)
+    return total
 
 
 def texto(datos: dict, lengua: str | None = None) -> str:
@@ -428,9 +485,15 @@ def texto(datos: dict, lengua: str | None = None) -> str:
     def numero(valor: object) -> str:
         return ilegible if valor is None else str(valor)
 
-    frenos = _linea_grupos((som or {}).get("reglas")) or _linea_grupos(
-        (rev or {}).get("grupos")
-    )
+    # Las dos fuentes se SUMAN, no se elige una. Y si ninguna de las dos se
+    # pudo leer, el desglose vale «no pude leer» y no «—»: un guión acá se
+    # lee como «ningún freno», que es la respuesta que hace subir un límite.
+    if som is None and rev is None:
+        frenos = ilegible
+    else:
+        frenos = _linea_grupos(
+            _sumar((som or {}).get("reglas"), (rev or {}).get("grupos"))
+        )
     cuerpo = idioma.t(
         "gerencia.autonomia",
         lengua,
@@ -457,6 +520,11 @@ def texto(datos: dict, lengua: str | None = None) -> str:
     # total. Decirlo es la diferencia entre un número y un número engañoso.
     if any((fuente or {}).get("truncado") for fuente in (conf, rec, som, rev)):
         cuerpo += "\n" + idioma.t("gerencia.autonomia_truncado", lengua)
+    # El desglose se arma sumando las dos fuentes, así que si falta una lo que
+    # queda es real pero corto — y un desglose corto se lee como «hay menos
+    # frenos de los que creía», que es la dirección peligrosa.
+    if som is None or rev is None:
+        cuerpo += "\n" + idioma.t("gerencia.autonomia_frenos_incompletos", lengua)
     return cuerpo
 
 
