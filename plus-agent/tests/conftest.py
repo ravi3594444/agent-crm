@@ -58,9 +58,36 @@ _DUMMY = {
     "QWEN_SALES_MODEL": "qwen3.7-plus-2026-05-26",
     "QWEN_MANAGER_MODEL": "qwen3.8-max",
     # opcionales que cambian comportamiento: valores deterministas para tests
+    # LA QUE DECIDE QUÉ MOMENTO ES. Va FIJA, no setdefault: media suite compara
+    # fechas fijas —`tests/test_pendientes.py::epoch` arma sus momentos con esta
+    # zona escrita a mano— contra el reloj del negocio, que sale de esta
+    # variable. Con BUSINESS_TIMEZONE=Asia/Kolkata exportada en el shell se caen
+    # 26 tests con EXACTAMENTE los mismos assert que el PR #12 arregló
+    # (`assert 13 == 3` en test_the_round_is_capped), porque el borrador del
+    # fixture envejece 8:30 h de golpe. Ése PR fijó el reloj y dejó la zona
+    # abierta: son las dos mitades del mismo momento.
     "BUSINESS_TIMEZONE": "America/Argentina/Buenos_Aires",
     "ERPNEXT_COMPANY": "Lacteos Test SA",
     "ERPNEXT_WAREHOUSE": "Principal - LT",
+    # EL IDIOMA VA CON setdefault, NO FIJO, y ésa es la diferencia entera.
+    # Fijarlo hacía pasar la suite, pero por la razón equivocada: con
+    # IDIOMA_DEFAULT=en exportado se caían 160 tests con el código funcionando
+    # bien, porque afirmaban la salida española sin decir que la esperaban. Un
+    # pin tapa eso — y con él la suite no puede probar el segundo idioma, que
+    # es el muro contra el que va todo el plan bilingüe.
+    #
+    # El arreglo es que cada test que afirma texto DIGA su idioma
+    # (`pytestmark = pytest.mark.idioma("es")` + el fixture
+    # `_idioma_declarado`), y con eso el entorno puede decir lo que quiera: la
+    # suite da el mismo resultado con IDIOMA_DEFAULT=en y con IDIOMA_GERENCIA=en.
+    # El setdefault se queda para que un checkout limpio sin .env pruebe en el
+    # idioma de fábrica, no para impedir el otro.
+    "IDIOMA_DEFAULT": "es",
+    "IDIOMA_GERENCIA": "",
+    # DIGEST_ACTIVO sí se queda FIJA (abajo): no elige un idioma equivalente,
+    # apaga la sección entera, y con DIGEST_ACTIVO=0 el test que prueba que el
+    # resumen sale una vez por día no prueba nada.
+    "DIGEST_ACTIVO": "true",
     # LAS DOS QUE DECIDEN QUIÉN ES QUIÉN, y las dos que un .env real cambia.
     # app/telefono.py lee PAIS_TELEFONO AL IMPORTAR y app/router.py arma STAFF
     # igual, así que un .env con otro país o con el número real del dueño no
@@ -73,11 +100,28 @@ _DUMMY = {
     "TELEFONOS_EQUIPO": "",
 }
 # Casi todo es setdefault: un test o CI que ya fijó algo (REDIS_URL, sobre
-# todo) manda. Pero lo que decide QUIÉN ES QUIÉN y QUÉ PROVEEDOR se prueba se
-# fija sin condición: con setdefault, un shell que exporta LLM_PROVIDER=gemini o
-# un TELEFONOS_EQUIPO cargado llegaba a la suite, que es justo la fuga que el
-# docstring de arriba describe.
-_FIJAS = {"LLM_PROVIDER", "QWEN_SALES_MODEL", "QWEN_MANAGER_MODEL", "PAIS_TELEFONO", "TELEFONOS_EQUIPO"}
+# todo) manda. Pero lo que decide QUIÉN ES QUIÉN, QUÉ PROVEEDOR y QUÉ MOMENTO
+# se prueba se fija sin condición: con setdefault, un shell que exporta
+# LLM_PROVIDER=gemini, BUSINESS_TIMEZONE=Asia/Kolkata o un TELEFONOS_EQUIPO
+# cargado llegaba a la suite, que es justo la fuga que el docstring de arriba
+# describe.
+#
+# EL IDIOMA NO ESTÁ EN ESTA LISTA, a propósito. Fijar una zona horaria ES el
+# arreglo —`epoch()` tiene Buenos Aires escrito a mano y el reloj del negocio
+# tiene que ser el mismo—, pero fijar el idioma es lo contrario: el catálogo
+# tiene 129 claves escritas en los dos idiomas para que el producto pueda
+# hablar los dos, y un pin le saca a la suite la capacidad de probar el
+# segundo. Ahí el arreglo es que el test lo declare, no que el conftest lo
+# imponga.
+_FIJAS = {
+    "LLM_PROVIDER",
+    "QWEN_SALES_MODEL",
+    "QWEN_MANAGER_MODEL",
+    "PAIS_TELEFONO",
+    "TELEFONOS_EQUIPO",
+    "BUSINESS_TIMEZONE",
+    "DIGEST_ACTIVO",
+}
 for _k, _v in _DUMMY.items():
     if _k in _FIJAS:
         os.environ[_k] = _v
@@ -410,3 +454,37 @@ def _idioma_declarado(request, monkeypatch):
         )
     monkeypatch.setenv("IDIOMA_DEFAULT", lengua)
     monkeypatch.setenv("IDIOMA_GERENCIA", lengua)
+
+
+@pytest.fixture(autouse=True)
+def el_barrido_no_lee_el_reloj_real(monkeypatch):
+    """`pendientes.tick()` sin `ahora=` explota, en CUALQUIER archivo.
+
+    Es la regla del PR #12 dejada de ser una convención de un archivo. Ahí, once
+    llamadas comparaban un `creation` fijo contra el reloj vivo del negocio y la
+    suite pasaba a la mañana y fallaba a la tarde; el guard que lo arregló vive
+    dentro de `tests/test_pendientes.py`, así que el mismo error escrito en
+    `tests/test_digest.py` o en un archivo nuevo vuelve a costar medio día de CI
+    rojo antes de que alguien lo reconozca.
+
+    Acá no hay que distinguir el uso coherente del incoherente: NINGÚN test de
+    la suite lee este reloj —las 51 llamadas a `tick()` pasan el momento, y las
+    otras funciones de `pendientes` que lo usan (`edad_horas`, `en_silencio`) lo
+    reciben de sus llamadores—, así que prohibirlo no le cuesta un test a nadie.
+    Un test que de verdad quiera el reloj de verdad lo dice en voz alta con su
+    propio `monkeypatch.setattr(pendientes, "_ahora", …)`, que corre después de
+    éste y manda.
+    """
+    from app import pendientes
+
+    def _prohibido():
+        # pytest.fail y no assert: `Failed` hereda de BaseException, así que el
+        # `except Exception` de la ronda no puede tragárselo y dejar el guard
+        # como una ronda que no hizo nada.
+        pytest.fail(
+            "este test leyó la hora REAL de app/pendientes.py. Pasale el "
+            "momento: `pendientes.tick(ahora=…)`, `edad_horas(fila, momento)`, "
+            "`en_silencio(momento)`. Ver el guard de tests/conftest.py."
+        )
+
+    monkeypatch.setattr(pendientes, "_ahora", _prohibido)
