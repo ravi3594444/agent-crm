@@ -24,6 +24,10 @@ from app import avisos, erpnext, modelos, outbound_status, solicitudes
 from app.tools import operaciones
 from tests.fakes import FakeMarcas
 
+# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
+# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.idioma("es")
+
 EQUIPO = "5493511111111"
 DESCONOCIDO_TEL = "5491199999999"
 CLIENTE_TEL = "5493512222222"

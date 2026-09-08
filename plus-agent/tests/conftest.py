@@ -364,3 +364,49 @@ def marcas_sin_redis(monkeypatch):
     marcas = FakeMarcas()
     monkeypatch.setattr(outbound_status, "_client", marcas)
     return marcas
+
+
+@pytest.fixture(autouse=True)
+def _idioma_declarado(request, monkeypatch):
+    """El idioma de un test lo declara el test, no el entorno.
+
+    Un archivo que afirma literales en un idioma lo dice en una línea:
+
+        pytestmark = pytest.mark.idioma("es")
+
+    y este fixture fija las dos variables que resuelven el idioma para esa
+    corrida. Sin eso el idioma sale del entorno, y la suite pasa sólo donde el
+    entorno diga lo mismo que el test supone: con `IDIOMA_DEFAULT=en`
+    exportado se caían 160 tests **con el código funcionando bien**, afirmando
+    «necesito revisarlo con una persona» contra un inglés correcto. El issue
+    #15 tiene la medición.
+
+    Es la misma forma que `tests/test_fechas_entrega.py`, que fija
+    `HOY = date(2026, 9, 1)` y lo pasa en vez de leer el reloj — y ese archivo
+    existe por un bug que se vio en producción. El test nombra el valor del
+    que depende en vez de heredarlo del mundo.
+
+    ESTO NO REEMPLAZA PASAR `lengua` DONDE EL CONSTRUCTOR LO TOMA. 42 firmas
+    del producto ya lo aceptan, y pasarlo es más fuerte: fija el idioma en la
+    llamada y no depende del entorno para nada. La marca cubre los caminos que
+    resuelven el idioma solos —por teléfono (`idioma.para_destinatario`) o por
+    el store del dueño (`idioma.gerencia`)— y que no reciben el idioma por
+    parámetro.
+
+    Un archivo SIN la marca queda como estaba: hereda el default. Eso es
+    correcto para los que no afirman texto en ningún idioma, y es la razón de
+    que la marca sea opt-in y no automática — `grep -rn "pytest.mark.idioma"
+    tests/` lista exactamente los archivos que dependen del idioma.
+    """
+    marca = request.node.get_closest_marker("idioma")
+    if marca is None:
+        return
+    from app import idioma
+
+    lengua = str(marca.args[0]) if marca.args else ""
+    if lengua not in idioma.IDIOMAS:
+        raise ValueError(
+            f"pytest.mark.idioma({lengua!r}): los idiomas son {idioma.IDIOMAS}"
+        )
+    monkeypatch.setenv("IDIOMA_DEFAULT", lengua)
+    monkeypatch.setenv("IDIOMA_GERENCIA", lengua)

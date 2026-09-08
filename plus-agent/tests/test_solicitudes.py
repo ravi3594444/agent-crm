@@ -43,6 +43,10 @@ from app import (
 )
 from tests.fakes import FakeMarcas, entrada_de_cola, listar
 
+# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
+# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.idioma("es")
+
 # Captured before the `mundo` fixture stubs it: the tests about the customer's
 # confirmation surviving a failed re-read need the REAL queue.
 _CONFIRMACION_CLIENTE_REAL = avisos.confirmacion_cliente
@@ -754,7 +758,7 @@ def test_only_the_orders_own_customer_can_accept(mundo) -> None:
 
     respuesta = solicitudes.aceptar_cliente(SO, "5493519999999")
 
-    assert respuesta == idioma.t("oferta.no_hay_tuya")
+    assert respuesta == idioma.t("oferta.no_hay_tuya", idioma.ES)
     assert mundo["submits"] == []
 
 
@@ -1076,7 +1080,7 @@ def test_a_late_acceptance_that_cannot_read_the_order_writes_nothing(mundo, monk
 
     # Contra la CLAVE del catálogo, no contra su redacción: lo que importa es
     # que eligió ese mensaje y no una confirmación.
-    assert respuesta == idioma.t("oferta.no_verificable")
+    assert respuesta == idioma.t("oferta.no_verificable", idioma.ES)
     assert len(mundo["durables"]) == escritos
     assert mundo["estados"] == []
     assert solicitudes.leer(SO).estado == solicitudes.ESPERANDO_CLIENTE
@@ -1793,7 +1797,7 @@ def test_only_the_orders_own_customer_can_accept_the_fallback(
 
     respuesta = solicitudes.aceptar_cliente(SO, OTRO)
 
-    assert respuesta == idioma.t("oferta.no_hay_tuya")
+    assert respuesta == idioma.t("oferta.no_hay_tuya", idioma.ES)
     assert mundo["submits"] == []
 
 
@@ -2121,7 +2125,13 @@ def _a_revision(mundo, monkeypatch, lunes):
     """Accept a fallback offer whose stock has gone. Returns the review."""
     _respaldo(mundo, monkeypatch)
     mundo["stock"] = False
-    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+    # `lengua` explícito y no sólo la marca del archivo: la firma lo toma
+    # (app/solicitudes.py::aceptar_cliente), así que acá el idioma no depende
+    # del entorno para nada. Este helper corre dentro del fixture `con_plazo`,
+    # y su aserción en español era el sitio más cargado de la suite: un solo
+    # `IDIOMA_DEFAULT=en` lo rompía y con él los 15 tests que piden el fixture,
+    # como errores de SETUP.
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE, idioma.ES)
     assert "necesito revisarlo con una persona" in respuesta
     revision = solicitudes.leer(SO)
     assert revision.estado == solicitudes.REVISION_HUMANA

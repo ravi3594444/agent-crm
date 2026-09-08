@@ -54,7 +54,18 @@ _RESTOS_DE_PLANTILLA = frozenset(
 # audit de ruido y dejarlo inservible.
 _FUNCIONALES_ES = frozenset(["de", "sin"])
 
-_PALABRAS_ES = _RESTOS_DE_PLANTILLA | _FUNCIONALES_ES
+# Los centinelas que el código emite EN MAYÚSCULAS, y que el detector no veía.
+# `app/tools/operaciones.py` devuelve `DESCONOCIDO` y `NO DISPONIBLE` cuando no
+# pudo leer un contador, y están en mayúsculas justamente porque son las
+# palabras que hay que entender: «no pude leer esto, no lo leas como cero». No
+# llevan acento y no eran parte de la lista, así que pasaban limpias — el audit
+# no podía ver el único caso donde la palabra importa más.
+#
+# Son seguras por lo mismo que `de` y `sin`: la comparación es por ficha entera
+# y el texto se pasa a minúsculas y se le quitan los acentos antes de cruzar.
+_CENTINELAS_ES = frozenset(["desconocido", "disponible"])
+
+_PALABRAS_ES = _RESTOS_DE_PLANTILLA | _FUNCIONALES_ES | _CENTINELAS_ES
 
 # Lo que SÍ puede aparecer en español aunque el idioma sea inglés, porque no es
 # prosa: nombres propios de ERPNext, estados canónicos, marcas de auditoría.

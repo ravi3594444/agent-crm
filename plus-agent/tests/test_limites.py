@@ -31,6 +31,10 @@ from conftest import FakeRedis, entrega_autorizada, inventario_confiable
 from app import limites, locks, main, policy, whatsapp
 from app.tools import configuracion
 
+# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
+# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.idioma("es")
+
 # Captured before the autouse fixture in conftest replaces it: the two tests
 # below are about the real ERPNext cross-check, not about a stub of it.
 _CONSULTA_DURABLE_REAL = limites._hubo_cambios_durables

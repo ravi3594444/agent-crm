@@ -7,10 +7,16 @@ Cada regla acá salió de un problema visto en vivo:
 """
 from __future__ import annotations
 
+import pytest
+
 from app import idioma
 from app.conversacion import prompt_clientes, prompt_gerencia
 from app.prompts import SYSTEM_ES_AR
 from app.prompts_gerencia import SYSTEM_GERENCIA
+
+# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
+# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.idioma("es")
 
 
 def _texto_cliente(config=None):

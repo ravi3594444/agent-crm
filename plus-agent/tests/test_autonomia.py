@@ -26,6 +26,10 @@ import pytest
 from app import autonomia, confirmacion, erpnext, inventario, policy, sombra
 from tests.fakes import listar
 
+# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
+# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.idioma("es")
+
 AHORA = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
 PO_AGENTE = "WA-" + "0123456789abcdef" * 2 + "01234567"
 

@@ -22,6 +22,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import aprobacion, confirmacion, decisiones, erpnext, outbound_status
 from tests.fakes import FakeMarcas, listar
 
+# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
+# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.idioma("es")
+
 
 def _fila_comentario(contenido: str, creation: str = "2026-09-03 10:00:00") -> dict:
     """One Comment row with the fields the ERPNext query filters and orders on."""

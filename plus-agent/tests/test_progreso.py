@@ -47,6 +47,10 @@ from app import graph as graph_real
 from app import idioma, policy
 from app.progreso import Progreso
 
+# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
+# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.idioma("es")
+
 GERENTE = "5493519999999"
 CLIENTE = "5493511234567"
 # The configurable progress delay, shortened for the suite — but not to the
