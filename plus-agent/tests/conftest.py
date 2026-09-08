@@ -321,6 +321,13 @@ def limites_sin_redis(monkeypatch):
         # Shadow mode: a developer .env with it on would make the shadow tests
         # pass for the wrong reason, and every other test read one more order.
         "AUTO_CONFIRM_SOMBRA",
+        # The plain-draft deadline, its closer and the quiet hours. Same leak
+        # as the two timeouts above: a developer .env that sets the closer
+        # would have the sweep closing drafts inside an unrelated test.
+        "PENDIENTE_AVISO_HORAS",
+        "PENDIENTE_CIERRE_HORAS",
+        "PENDIENTE_NOCHE_DESDE",
+        "PENDIENTE_NOCHE_HASTA",
     ):
         monkeypatch.delenv(nombre, raising=False)
     vacio = FakeRedis()

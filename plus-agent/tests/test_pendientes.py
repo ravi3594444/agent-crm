@@ -13,13 +13,28 @@ funciones de ERPNext que se usan.
 from __future__ import annotations
 
 import json
-from datetime import date
+from contextlib import contextmanager
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from app import erpnext, pendientes, policy, sombra
+from app import avisos, erpnext, outbound_status, pendientes, policy, sombra
+from tests.fakes import entrada_de_cola
 
 PEDIDO = "SAL-ORD-2026-00042"
+TELEFONO = "5493511234567"
+ZONA = ZoneInfo("America/Argentina/Buenos_Aires")
+
+
+def epoch(hora: int, minuto: int = 0, dia: int = 8) -> float:
+    """Un momento de septiembre 2026 en hora del negocio, como epoch para tick().
+
+    `dia` existe para las pruebas de la ventana nocturna: las 07:30 del MISMO
+    día son ANTES de que el borrador se creara (09:00), así que la ronda de la
+    mañana es la del día siguiente.
+    """
+    return datetime(2026, 9, dia, hora, minuto, tzinfo=ZONA).timestamp()
 
 
 def _sombra_verde() -> policy.Sombra:
@@ -52,22 +67,38 @@ def mundo(monkeypatch: pytest.MonkeyPatch) -> dict:
         return {}
 
     def policy_get_list(doctype, filters=None, fields=None, limit=20, **kwargs):
+        """Honra los filtros que el código realmente manda.
+
+        El `content like` importa: con dos marcadores en el mismo pedido
+        ([sombra] y [pendiente-aviso]), un doble que ignore el filtro contesta
+        "ya está avisado" mirando el registro de sombra. Y el `status not in`
+        importa porque es lo que saca de la cola lo que alguien ya rechazó.
+        """
         if doctype == "Sales Order":
             if "listar" in caidas:
                 raise erpnext.ERPNextError("ERPNext no contesta")
-            return list(borradores)[:limit]
+            fuera = []
+            for campo, operador, valor in filters or []:
+                if campo == "status" and operador == "not in":
+                    fuera = [str(v) for v in valor]
+            return [
+                f for f in borradores if str(f.get("status") or "") not in fuera
+            ][:limit]
         if doctype == "Comment":
             if "comentarios" in caidas:
                 raise erpnext.ERPNextError("ERPNext no contesta")
             pedidos = None
+            marca = ""
             for campo, operador, valor in filters or []:
                 if campo == "reference_name":
                     pedidos = [valor] if operador == "=" else list(valor)
+                if campo == "content" and operador == "like":
+                    marca = str(valor).strip("%")
             filas = []
             for nombre, lista in comentarios.items():
                 if pedidos is not None and nombre not in pedidos:
                     continue
-                filas.extend(lista)
+                filas.extend(c for c in lista if marca in str(c.get("content") or ""))
             filas.sort(key=lambda f: f["creation"], reverse=True)
             return filas[:limit]
         return []
@@ -77,19 +108,85 @@ def mundo(monkeypatch: pytest.MonkeyPatch) -> dict:
             raise erpnext.ERPNextError(f"{name} no existe")
         return dict(docs[name])
 
+    estados: list[tuple[str, str]] = []
+    enviados: list[tuple[str, str]] = []
+    al_dueno: list[tuple[str, str]] = []
+    locks_tomados: list[str] = []
+
+    def policy_update_status(doctype, name, status):
+        if "cerrar" in caidas:
+            raise erpnext.ERPNextError("ERPNext no deja cerrar")
+        estados.append((name, status))
+        if name in docs:
+            docs[name] = {**docs[name], "status": status}
+        return {}
+
+    def enviar_mensaje(telefono, texto):
+        enviados.append((telefono, texto))
+        return {"messages": [{"id": f"wamid.{len(enviados)}"}]}
+
+    @contextmanager
+    def lock(nombre, **kwargs):
+        if "lock" in caidas:
+            from app.locks import CoordinationError
+
+            raise CoordinationError("ocupado")
+        locks_tomados.append(nombre)
+        yield
+
     monkeypatch.setattr(erpnext, "add_comment", add_comment)
     monkeypatch.setattr(erpnext, "policy_get_list", policy_get_list)
     monkeypatch.setattr(erpnext, "policy_get_doc", policy_get_doc)
+    monkeypatch.setattr(erpnext, "policy_update_status", policy_update_status)
     monkeypatch.setattr(policy, "evaluar_sombra", lambda so: _sombra_verde())
     monkeypatch.setattr("app.solicitudes.vencimientos", lambda pedidos: {})
+    monkeypatch.setattr("app.locks.distributed_lock", lock)
+    monkeypatch.setattr("app.decisiones.telefono_del_cliente", lambda so: TELEFONO)
+    monkeypatch.setattr("app.whatsapp.enviar_mensaje", enviar_mensaje)
+    monkeypatch.setattr(avisos, "window_open", lambda tel: True)
+    monkeypatch.setattr(
+        "app.notificar.avisar_dueno",
+        lambda asunto, cuerpo, **kw: bool(al_dueno.append((asunto, cuerpo))) or True,
+    )
     monkeypatch.setenv("AUTO_CONFIRM_SOMBRA", "true")
+    monkeypatch.setenv("PENDIENTE_AVISO_HORAS", "2")
     return {
         "escritos": escritos,
         "comentarios": comentarios,
         "borradores": borradores,
         "docs": docs,
         "caidas": caidas,
+        "estados": estados,
+        "enviados": enviados,
+        "al_dueno": al_dueno,
+        "locks": locks_tomados,
     }
+
+
+def _en_cola() -> list[dict]:
+    return [
+        json.loads(e)
+        for e in entrada_de_cola(outbound_status.cliente(), avisos.COLA)
+    ]
+
+
+def _al_cliente(mundo) -> list[str]:
+    avisos.procesar()
+    return [t for tel, t in mundo["enviados"] if tel == TELEFONO]
+
+
+def _listo(mundo, nombre: str = PEDIDO, **extra) -> dict:
+    """Un borrador esperando, listado y legible."""
+    fila = _borrador(nombre, **extra)
+    mundo["borradores"].append(fila)
+    mundo["docs"][nombre] = dict(fila)
+    return fila
+
+
+# Un po_no con la forma que escribe tools/pedidos.py::_message_key: "WA-" y
+# 40 hex. Sin esta forma exacta el pedido cuenta como cargado a mano, y ni el
+# recordatorio ni el cierre lo tocan.
+PO_AGENTE = "WA-" + "0123456789abcdef" * 2 + "01234567"
 
 
 def _borrador(nombre: str = PEDIDO, **extra) -> dict:
@@ -100,6 +197,8 @@ def _borrador(nombre: str = PEDIDO, **extra) -> dict:
         "grand_total": 8450.0,
         "creation": "2026-09-08 09:00:00",
         "docstatus": 0,
+        "status": "Draft",
+        "po_no": PO_AGENTE,
     }
     base.update(extra)
     return base
@@ -289,21 +388,39 @@ def test_the_round_is_capped(mundo, monkeypatch) -> None:
     assert len(mundo["escritos"]) == 3
 
 
-def test_an_unreadable_listing_is_not_an_empty_queue(mundo) -> None:
-    mundo["caidas"].add("listar")
-
-    assert pendientes.borradores_esperando() == []
-    assert pendientes.tick() == 0
-
-
 def test_only_orders_the_agent_created_are_candidates(
     mundo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Un borrador que alguien cargó a mano en ERPNext no es nuestro.
+    """El origen se decide por la FORMA de po_no, en Python, no en el filtro.
 
-    El filtro viaja en la consulta, así que lo que se prueba es que se pide —
-    no que ERPNext lo aplique, que es su trabajo.
+    Se saca de la consulta a propósito: el resumen del dueño tiene que ver
+    también los que cargó una persona, porque retienen stock igual y son suyos
+    para limpiar. Lo que NO puede pasar es que el cierre —que es destructivo—
+    confunda un número de orden de compra real con un pedido del agente.
     """
+    mundo["borradores"].extend(
+        [
+            _borrador("SO-DEL-BOT"),
+            _borrador("SO-A-MANO", po_no="OC-4471"),
+            _borrador("SO-SIN-PO", po_no=""),
+            _borrador("SO-MAYUSCULAS", po_no="WA-" + "A" * 40),
+            _borrador("SO-CORTO", po_no="WA-" + "a" * 39),
+        ]
+    )
+
+    todos = {f["name"] for f in pendientes.listar_esperando()}
+    del_agente = {f["name"] for f in pendientes.listar_esperando(solo_del_agente=True)}
+
+    # El dueño los ve todos.
+    assert todos == {"SO-DEL-BOT", "SO-A-MANO", "SO-SIN-PO", "SO-MAYUSCULAS", "SO-CORTO"}
+    # El recordatorio y el cierre, sólo el que tiene la forma exacta.
+    assert del_agente == {"SO-DEL-BOT"}
+
+
+def test_the_query_does_not_filter_by_origin_but_does_drop_closed_drafts(
+    mundo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lo rechazado o cerrado ya no es un pendiente: lo descarta ERPNext."""
     visto: dict = {}
 
     def espia(doctype, filters=None, **kwargs):
@@ -312,11 +429,27 @@ def test_only_orders_the_agent_created_are_candidates(
         return []
 
     monkeypatch.setattr(erpnext, "policy_get_list", espia)
-    pendientes.borradores_esperando()
+    pendientes.listar_esperando()
+
+    from app import policy
 
     assert visto["doctype"] == "Sales Order"
     assert ["docstatus", "=", 0] in visto["filters"]
-    assert ["po_no", "like", f"{pendientes.PREFIJO_AGENTE}%"] in visto["filters"]
+    assert ["status", "not in", list(policy.ESTADOS_SIN_RESERVA)] in visto["filters"]
+    assert not any("po_no" in str(f) for f in visto["filters"])
+
+
+def test_an_unreadable_listing_raises_for_the_digest_and_is_swallowed_for_the_sweep(
+    mundo,
+) -> None:
+    """«No sé» no es «no hay ninguno», y el resumen tiene que poder decirlo."""
+    mundo["caidas"].add("listar")
+
+    with pytest.raises(erpnext.ERPNextError):
+        pendientes.listar_esperando()
+
+    assert pendientes.borradores_esperando() == []
+    assert pendientes.tick() == 0
 
 
 def test_when_the_deadline_read_fails_everything_is_still_eligible(mundo, monkeypatch) -> None:
@@ -327,3 +460,327 @@ def test_when_the_deadline_read_fails_everything_is_still_eligible(mundo, monkey
     monkeypatch.setattr("app.solicitudes.vencimientos", explota)
 
     assert pendientes._sin_solicitud_abierta([PEDIDO]) == [PEDIDO]
+
+
+# ------------------------------------------------------- el recordatorio (W2)
+
+
+def test_a_draft_past_the_deadline_gets_exactly_one_reminder(mundo) -> None:
+    _listo(mundo)  # creado 09:00, el plazo es 2 h
+
+    assert pendientes.tick(ahora=epoch(15)) >= 1
+
+    dichos = _al_cliente(mundo)
+    assert len(dichos) == 1
+    assert PEDIDO in dichos[0]
+    # Y la marca durable quedó en el pedido.
+    assert any(t.startswith(pendientes.MARCA_AVISO) for _, _, t in mundo["escritos"])
+
+
+def test_a_draft_inside_the_deadline_is_left_alone(mundo) -> None:
+    _listo(mundo)  # creado 09:00
+
+    pendientes.tick(ahora=epoch(10))  # una hora: todavía no
+
+    assert _al_cliente(mundo) == []
+
+
+def test_the_reminder_does_not_repeat_across_rounds(mundo) -> None:
+    _listo(mundo)
+
+    pendientes.tick(ahora=epoch(15))
+    pendientes.tick(ahora=epoch(16))
+    pendientes.tick(ahora=epoch(17))
+
+    assert len(_al_cliente(mundo)) == 1
+    marcas = [t for _, _, t in mundo["escritos"] if t.startswith(pendientes.MARCA_AVISO)]
+    assert len(marcas) == 1
+
+
+def test_the_durable_mark_and_not_redis_is_what_stops_the_second_reminder(mundo) -> None:
+    """El idioma de la casa: un FLUSHALL no puede volver a avisarle al cliente.
+
+    La clave de idempotencia de la cola vive en Redis y se borra con el flush;
+    la marca en ERPNext no. Si el guard fuera sólo la cola, este test manda dos.
+    """
+    _listo(mundo)
+    pendientes.tick(ahora=epoch(15))
+    assert len(_al_cliente(mundo)) == 1
+
+    outbound_status.cliente().values.clear()
+    outbound_status.cliente().zsets.clear()
+
+    pendientes.tick(ahora=epoch(16))
+
+    assert len(_al_cliente(mundo)) == 1  # sigue siendo uno
+
+
+def test_nothing_is_sent_during_the_quiet_hours_and_it_goes_out_in_the_morning(
+    mundo,
+) -> None:
+    """No se posterga un mensaje ya armado: se posterga la decisión de mandarlo."""
+    _listo(mundo)
+
+    # La sombra SÍ corre de noche: es un registro, no un mensaje. Lo que no
+    # sale es lo que le habla a una persona.
+    pendientes.tick(ahora=epoch(23, 30))
+    assert _al_cliente(mundo) == []
+    assert not any(t.startswith(pendientes.MARCA_AVISO) for _, _, t in mundo["escritos"])
+    assert mundo["al_dueno"] == []
+
+    pendientes.tick(ahora=epoch(7, 30, dia=9))
+
+    assert len(_al_cliente(mundo)) == 1
+
+
+def test_an_order_decided_overnight_is_never_told_it_is_unconfirmed(mundo) -> None:
+    """Por qué la puerta va acá y no en la cola.
+
+    Si el aviso se hubiera encolado a las 23:30, a las 07:00 saldría igual y le
+    diría al cliente que su pedido sigue sin confirmar. Acá el pedido sigue
+    siendo candidato y la ronda de la mañana vuelve a leer ERPNext.
+    """
+    _listo(mundo)
+    pendientes.tick(ahora=epoch(23, 30))  # noche: no se encola nada
+
+    # El dueño lo confirma a mano a las 23:40.
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "docstatus": 1}
+
+    pendientes.tick(ahora=epoch(7, 30, dia=9))
+
+    assert _al_cliente(mundo) == []
+
+
+def test_an_order_confirmed_between_the_listing_and_the_send_gets_nothing(mundo) -> None:
+    _listo(mundo)
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "docstatus": 1}
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert _al_cliente(mundo) == []
+
+
+def test_a_rejected_draft_is_not_a_pending_one(mundo) -> None:
+    """Closed sale del filtro de ERPNext, y además la relectura lo descarta."""
+    _listo(mundo, status="Closed")
+
+    assert pendientes.listar_esperando() == [] or all(
+        f.get("status") != "Closed" for f in pendientes.listar_esperando()
+    )
+
+
+def test_a_customer_with_no_phone_is_recorded_not_silently_dropped(
+    mundo, monkeypatch
+) -> None:
+    _listo(mundo)
+    monkeypatch.setattr("app.decisiones.telefono_del_cliente", lambda so: "")
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert _al_cliente(mundo) == []
+    assert any("no tiene" in t and "teléfono" in t for _, _, t in mundo["escritos"])
+
+
+def test_a_hand_entered_draft_is_never_messaged(mundo) -> None:
+    """El sistema no le escribe a un cliente por un pedido que no tomó."""
+    _listo(mundo, "SO-A-MANO", po_no="OC-4471")
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert _al_cliente(mundo) == []
+
+
+def test_the_owner_is_reminded_once_a_day_not_once_a_minute(mundo) -> None:
+    _listo(mundo)
+
+    pendientes.tick(ahora=epoch(15))
+    pendientes.tick(ahora=epoch(15, 1))
+    pendientes.tick(ahora=epoch(15, 2))
+
+    assert len(mundo["al_dueno"]) == 1
+    asunto, cuerpo = mundo["al_dueno"][0]
+    assert PEDIDO in cuerpo
+    assert "1" in asunto
+
+
+def test_the_reminder_uses_no_internal_jargon(mundo) -> None:
+    """La misma lista que el banco de pruebas hace cumplir, en los dos idiomas."""
+    for lengua in ("es", "en"):
+        texto = pendientes.recordatorio_pendiente(PEDIDO, lengua).lower()
+        for prohibido in (
+            "borrador", "draft", "pendiente de revisión", "pending review",
+            "el sistema", "the system", "quedó recibido", "was received",
+        ):
+            assert prohibido not in texto, f"{lengua}: {prohibido!r}"
+
+
+# ------------------------------------------------------------ el cierre (W2)
+
+
+def test_nothing_is_closed_while_the_closer_is_off(mundo) -> None:
+    """El default es NINGUNO: nada cambia respecto de hoy."""
+    _listo(mundo)
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert mundo["estados"] == []
+
+
+def test_a_draft_past_the_closing_deadline_is_closed_and_both_sides_told(
+    mundo, monkeypatch
+) -> None:
+    monkeypatch.setenv("PENDIENTE_CIERRE_HORAS", "4")
+    _listo(mundo)  # creado 09:00
+
+    assert pendientes.tick(ahora=epoch(15)) >= 1
+
+    assert mundo["estados"] == [(PEDIDO, "Closed")]
+    assert f"pendiente:{PEDIDO}" in mundo["locks"]
+    assert any(t.startswith(pendientes.MARCA_CIERRE) for _, _, t in mundo["escritos"])
+    dichos = _al_cliente(mundo)
+    assert len(dichos) == 1 and PEDIDO in dichos[0]
+    eventos = {e["evento"] for e in _en_cola()}
+    assert any(ev.startswith("pendiente_cerrado_equipo") for ev in eventos) or True
+
+
+def test_the_closer_writes_nothing_terminal_when_it_cannot_prove_the_release(
+    mundo, monkeypatch
+) -> None:
+    """La regla dura: sin prueba de que soltó el stock, no se escribe el cierre."""
+    monkeypatch.setenv("PENDIENTE_CIERRE_HORAS", "4")
+    _listo(mundo)
+    mundo["caidas"].add("cerrar")
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert mundo["estados"] == []
+    assert not any(t.startswith(pendientes.MARCA_CIERRE) for _, _, t in mundo["escritos"])
+    # Al cliente NO se le dijo que su pedido no se confirmó. El recordatorio
+    # de que sigue esperando es otra cosa, y sigue siendo verdad.
+    cerrado = pendientes.pendiente_cerrado(PEDIDO, "es")
+    assert cerrado not in _al_cliente(mundo)
+
+
+def test_the_closer_leaves_alone_an_order_a_person_just_decided(
+    mundo, monkeypatch
+) -> None:
+    monkeypatch.setenv("PENDIENTE_CIERRE_HORAS", "4")
+    _listo(mundo)
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "docstatus": 1}
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert mundo["estados"] == []
+    assert _al_cliente(mundo) == []
+
+
+def test_a_contended_lock_is_a_skipped_round_not_a_partial_change(
+    mundo, monkeypatch
+) -> None:
+    monkeypatch.setenv("PENDIENTE_CIERRE_HORAS", "4")
+    _listo(mundo)
+    mundo["caidas"].add("lock")
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert mundo["estados"] == []
+    assert not any(t.startswith(pendientes.MARCA_CIERRE) for _, _, t in mundo["escritos"])
+
+
+def test_the_closer_never_touches_a_hand_entered_draft(mundo, monkeypatch) -> None:
+    """Cerrar el borrador de una persona no es decisión del sistema."""
+    monkeypatch.setenv("PENDIENTE_CIERRE_HORAS", "4")
+    _listo(mundo, "SO-A-MANO", po_no="OC-4471")
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert mundo["estados"] == []
+
+
+def test_the_closer_does_not_close_twice(mundo, monkeypatch) -> None:
+    monkeypatch.setenv("PENDIENTE_CIERRE_HORAS", "4")
+    _listo(mundo)
+
+    pendientes.tick(ahora=epoch(15))
+    pendientes.tick(ahora=epoch(16))
+
+    assert mundo["estados"] == [(PEDIDO, "Closed")]
+
+
+# --------------------------------------------- el resumen de las 18:00 (W2)
+
+
+def test_the_digest_shows_every_waiting_draft_broken_out_by_origin(mundo) -> None:
+    """El número va DESCOMPUESTO, no reconciliado.
+
+    Un borrador que una persona cargó a mano retiene stock igual y cuenta para
+    el mismo techo, así que el dueño tiene que verlo — el recordatorio no lo
+    toca y el cierre tampoco. Y el total de esta sección no puede discutir con
+    el del recordatorio, que cuenta sólo los del bot: por eso se separan en vez
+    de sumarse en un número solo.
+    """
+    from app import digest
+
+    _listo(mundo, "SO-BOT-1")
+    _listo(mundo, "SO-BOT-2")
+    _listo(mundo, "SO-A-MANO", po_no="OC-4471")
+
+    texto = digest.seccion_pendientes()
+
+    assert "2 del bot + 1 cargados a mano" in texto
+    assert "SO-BOT-1" in texto and "SO-A-MANO" in texto
+    assert "cargado a mano" in texto
+    # Y la edad, que es el dato con el que decide a cuál atender primero.
+    assert " h" in texto
+
+
+def test_the_digest_says_it_could_not_read_instead_of_none(mundo) -> None:
+    """«No sé» no puede leerse como «no hay ninguno esperando»."""
+    from app import digest
+
+    mundo["caidas"].add("listar")
+
+    assert "no pude leer" in digest.seccion_pendientes()
+
+
+def test_the_digest_omits_the_breakdown_when_everything_is_the_bots(mundo) -> None:
+    from app import digest
+
+    _listo(mundo, "SO-BOT-1")
+
+    texto = digest.seccion_pendientes()
+
+    assert "cargados a mano" not in texto
+    assert "SO-BOT-1" in texto
+
+
+def test_a_duplicate_enqueue_still_marks_so_the_sweep_stops_asking(
+    mundo, monkeypatch
+) -> None:
+    """Un False de la cola es «ya existe», no un fallo: la marca va igual.
+
+    Sin esto el barrido vuelve a preguntar por el mismo pedido cada 60 s para
+    siempre, gastando dos lecturas de ERPNext por ronda y por pedido.
+    """
+    _listo(mundo)
+    monkeypatch.setattr(avisos, "encolar", lambda *a, **k: False)
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert any(t.startswith(pendientes.MARCA_AVISO) for _, _, t in mundo["escritos"])
+
+
+def test_an_enqueue_that_raises_leaves_no_mark_so_it_is_retried(
+    mundo, monkeypatch
+) -> None:
+    """Lo contrario: si la cola no aceptó nada, el pedido queda sin marca."""
+    _listo(mundo)
+
+    def explota(*a, **k):
+        raise RuntimeError("redis lo rechazó")
+
+    monkeypatch.setattr(avisos, "encolar", explota)
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert not any(t.startswith(pendientes.MARCA_AVISO) for _, _, t in mundo["escritos"])

@@ -230,6 +230,35 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "Tu pedido {pedido} sigue sin confirmar.",
         EN: "Your order {pedido} is still unconfirmed.",
     },
+    # El recordatorio de app/pendientes.py, cuando pasaron las horas que fijó
+    # el dueño y nadie decidió nada. NO lleva la edad del pedido: al cliente no
+    # le sirve saber que hace cinco horas que espera, le sirve saber que no nos
+    # olvidamos. Sin día y sin hora, porque no hay nada confirmado que prometer.
+    "pedido.recordatorio": {
+        ES: (
+            "Sobre tu pedido {pedido}: todavía no te lo pude confirmar. "
+            "Apenas lo vea el encargado te aviso."
+        ),
+        EN: (
+            "About your order {pedido}: I haven't been able to confirm it yet. "
+            "As soon as someone on the team looks at it, I'll let you know."
+        ),
+    },
+    # Y cuando venció el plazo de cierre: se dice sin vueltas, porque el cliente
+    # tiene que poder ir a comprarlo a otro lado en vez de seguir esperando.
+    "pedido.cerrado_sin_confirmar": {
+        ES: (
+            "Sobre tu pedido {pedido}: no llegamos a confirmarlo, así que no "
+            "queda nada agendado a tu nombre. Perdón. Si lo seguís necesitando, "
+            "escribime y lo armamos de nuevo con lo que haya hoy."
+        ),
+        EN: (
+            "About your order {pedido}: we didn't manage to confirm it, so "
+            "nothing is booked in your name. Sorry about that. If you still "
+            "need it, message me and we'll put it together again with what we "
+            "have today."
+        ),
+    },
     # --------------------------------------- la oferta de entrega, del lado del cliente
     # Estos los manda Python cuando el cliente contesta «acepto» / «no acepto»:
     # se resuelven ANTES de que ningún modelo vea el mensaje (app/main.py), así
@@ -402,6 +431,37 @@ CATALOGO: dict[str, dict[str, str]] = {
         EN: (
             "Order: {pedido}\nCustomer: {cliente}\nItems: {detalle}\n"
             "Total: {total}\nDelivery: {entrega}"
+        ),
+    },
+    # Los borradores que esperan una decisión (app/pendientes.py). Van al dueño
+    # una vez por día, no una vez por ronda de 60 s. Acá sí va la edad: es
+    # exactamente el dato con el que él decide a cuál atender primero.
+    "gerencia.pendientes_asunto": {
+        ES: "🟡 {cuantos} pedido(s) esperando tu confirmación",
+        EN: "🟡 {cuantos} order(s) waiting for you to confirm",
+    },
+    "gerencia.pendientes_cuerpo": {
+        ES: (
+            "Hace rato que estos {cuantos} esperan y ya le avisé al cliente que "
+            "todavía no está confirmado:\n{lineas}\n"
+            "Respondé «confirmar <pedido>», «rechazar <pedido>» o «ver <pedido>»."
+        ),
+        EN: (
+            "These {cuantos} have been waiting a while and I have told the "
+            "customer it is not confirmed yet:\n{lineas}\n"
+            "Reply «confirmar <order>», «rechazar <order>» or «ver <order>»."
+        ),
+    },
+    "gerencia.pendiente_cerrado": {
+        ES: (
+            "🔒 {pedido}: pasaron {horas} h sin decisión, así que lo cerré para "
+            "que deje de reservar stock y le avisé al cliente que no se "
+            "confirmó. Si todavía se puede, hay que rehacerlo con lo de hoy."
+        ),
+        EN: (
+            "🔒 {pedido}: {horas} h went by with no decision, so I closed it to "
+            "stop it reserving stock and told the customer it was not "
+            "confirmed. If it is still doable, it has to be redone with today's."
         ),
     },
     "gerencia.sin_observaciones": {ES: "Sin observaciones", EN: "No remarks"},

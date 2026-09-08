@@ -64,7 +64,7 @@ def _solicitud(**extra):
 
 def _todos_los_constructores(lengua):
     """(nombre, texto) de CADA mensaje determinista migrado, en `lengua`."""
-    from app import avisos, decisiones, main, notificar, solicitudes
+    from app import avisos, decisiones, main, notificar, pendientes, solicitudes
 
     sol = _solicitud(motivo=MOTIVO)
     salida = [
@@ -96,6 +96,18 @@ def _todos_los_constructores(lengua):
               "cargo": 1500.0, "descuento_pct": 5}, "ARS", lengua)),
         ("solicitudes.texto_pendiente_cliente",
          solicitudes.texto_pendiente_cliente(sol, lengua)),
+        # El borrador que espera a una persona (app/pendientes.py). El texto al
+        # cliente NO lleva la edad del pedido a propósito: este audit llama cada
+        # constructor una vez por idioma y compara, así que un dato que cambia
+        # con el reloj lo rompería — y de paso el cliente no la necesita.
+        ("pendientes.recordatorio_pendiente",
+         pendientes.recordatorio_pendiente(PEDIDO, lengua)),
+        ("pendientes.pendiente_cerrado",
+         pendientes.pendiente_cerrado(PEDIDO, lengua)),
+        ("pendientes.recordatorio_dueno",
+         "\n".join(pendientes.recordatorio_dueno(3, f"· {PEDIDO} — 5 h", lengua))),
+        ("pendientes.pendiente_cerrado_equipo",
+         pendientes.pendiente_cerrado_equipo(PEDIDO, 48.0, lengua)),
         # 3. avisos a la gerencia
         ("notificar._texto_libre(pendiente)",
          notificar._texto_libre(PEDIDO, _SO, False, "over the limit",

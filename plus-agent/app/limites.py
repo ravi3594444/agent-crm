@@ -268,6 +268,61 @@ LIMITES: dict[str, Definicion] = {
         default="true",
         tipo=BOOLEANO,
     ),
+    "PENDIENTE_AVISO_HORAS": Definicion(
+        nombre="PENDIENTE_AVISO_HORAS",
+        alias=(
+            "aviso de pendiente",
+            "horas para avisar",
+            "recordatorio de pendiente",
+        ),
+        significado=(
+            "Cuánto espera un pedido sin decisión antes de que se le avise al "
+            "cliente que todavía no está confirmado, y de que te lo recuerde a "
+            "vos. No confirma ni cancela nada: sólo deja de haber silencio"
+        ),
+        unidad="h",
+        default="2",
+        # Más de dos días no es un recordatorio: el cliente ya se fue a otro
+        # proveedor y el aviso llega para confirmárselo.
+        maximo=48.0,
+    ),
+    "PENDIENTE_CIERRE_HORAS": Definicion(
+        nombre="PENDIENTE_CIERRE_HORAS",
+        alias=(
+            "cierre de pendiente",
+            "horas para cerrar",
+            "cerrar pendientes",
+        ),
+        significado=(
+            "Después de cuántas horas sin decisión se cierra un pedido que "
+            "nadie miró, para que deje de retener stock que otro cliente podía "
+            "llevarse. Al cliente se le dice, sin vueltas, que no se confirmó. "
+            "En NINGUNO no se cierra nada y el borrador espera para siempre"
+        ),
+        unidad="h",
+        default=NINGUNO,
+        maximo=720.0,
+        opcional=True,
+    ),
+    # Las horas de silencio. Sólo frenan el recordatorio NO SOLICITADO de
+    # arriba: la confirmación de un pedido sale cuando el pedido se confirma,
+    # sean las 22:10 o las 6 de la mañana, porque el cliente la está esperando.
+    "PENDIENTE_NOCHE_DESDE": Definicion(
+        nombre="PENDIENTE_NOCHE_DESDE",
+        alias=("no molestar desde", "silencio desde", "noche desde"),
+        significado="Desde qué hora no se le manda un recordatorio a un cliente",
+        unidad="hh:mm",
+        default="22:00",
+        tipo=HORA,
+    ),
+    "PENDIENTE_NOCHE_HASTA": Definicion(
+        nombre="PENDIENTE_NOCHE_HASTA",
+        alias=("no molestar hasta", "silencio hasta", "noche hasta"),
+        significado="Hasta qué hora no se le manda un recordatorio a un cliente",
+        unidad="hh:mm",
+        default="07:00",
+        tipo=HORA,
+    ),
     "AUTO_CONFIRM_SOMBRA": Definicion(
         nombre="AUTO_CONFIRM_SOMBRA",
         alias=("modo sombra", "sombra"),

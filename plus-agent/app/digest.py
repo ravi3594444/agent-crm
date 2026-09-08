@@ -35,7 +35,7 @@ import uuid
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app import erpnext, inventario, locks, notificar, outbound_status, policy
+from app import erpnext, inventario, locks, notificar, outbound_status
 from app.formato import pesos
 
 HORA_DEFAULT = "18:00"
@@ -149,11 +149,23 @@ def _pedidos(filtros: list, orden: str) -> list[dict]:
     )
 
 
-def _linea_pedido(so: dict) -> str:
-    return (
+def _linea_pedido(
+    so: dict, *, edad: float | None = None, a_mano: bool = False
+) -> str:
+    """Una línea de pedido. `edad` y `a_mano` son sólo para los pendientes.
+
+    Compartida con seccion_despacho, que no pasa ninguno de los dos y sigue
+    imprimiendo exactamente lo que imprimía.
+    """
+    linea = (
         f"· {so.get('name')} — {so.get('customer_name') or so.get('customer')} — "
         f"{pesos(so.get('grand_total'))} — entrega {so.get('delivery_date') or 's/f'}"
     )
+    if edad is not None:
+        linea += f" — hace {edad:.0f} h"
+    if a_mano:
+        linea += " — cargado a mano"
+    return linea
 
 
 def _seccion(titulo: str, lineas: list[str], vacio: str) -> str:
@@ -184,18 +196,41 @@ def seccion_despacho() -> str:
 
 
 def seccion_pendientes() -> str:
+    """Los borradores que esperan, con su edad y de dónde vienen.
+
+    Muestra TODOS, no sólo los del agente: un borrador que una persona cargó a
+    mano en ERPNext retiene el stock que promete exactamente igual
+    (`policy._borradores_que_reservan` filtra por `docstatus` y `status`, no por
+    origen), cuenta para el mismo techo de borradores, y es de los que el dueño
+    tiene que ir a limpiar — el recordatorio automático no los toca y el cierre
+    tampoco. Esconderlos acá los dejaría invisibles y sin dueño.
+
+    Por eso el número va DESCOMPUESTO: «11 del bot + 3 cargados a mano». Así el
+    total de esta sección nunca discute con el del recordatorio ni con los de
+    autonomía, que cuentan sólo los del bot; el número se separa en vez de
+    reconciliarse.
+    """
+    from app import pendientes
+
     try:
-        filas = _pedidos(
-            [["docstatus", "=", 0], ["status", "not in", list(policy.ESTADOS_SIN_RESERVA)]],
-            "creation asc",
-        )
+        filas = pendientes.listar_esperando(limite=200)
     except Exception as exc:
         print(f"[digest] pendientes: {type(exc).__name__}")
         return "🟡 Esperan tu decisión: no pude leer ERPNext"
-    lineas = [_linea_pedido(f) for f in filas]
+    ahora = _ahora()
+    del_bot = [f for f in filas if pendientes.del_agente(f)]
+    a_mano = [f for f in filas if not pendientes.del_agente(f)]
+    lineas = [_linea_pedido(f, edad=pendientes.edad_horas(f, ahora)) for f in del_bot]
+    lineas += [
+        _linea_pedido(f, edad=pendientes.edad_horas(f, ahora), a_mano=True)
+        for f in a_mano
+    ]
     if lineas:
         lineas.append("Respondé 'confirmar <pedido>', 'rechazar <pedido>' o 'ver <pedido>'.")
-    return _seccion("🟡 Esperan tu decisión", lineas, "ninguno")
+    titulo = "🟡 Esperan tu decisión"
+    if a_mano:
+        titulo = f"{titulo} · {len(del_bot)} del bot + {len(a_mano)} cargados a mano"
+    return _seccion(titulo, lineas, "ninguno")
 
 
 def seccion_conteos() -> str:
