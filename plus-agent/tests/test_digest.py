@@ -59,6 +59,10 @@ def mundo(monkeypatch):
     monkeypatch.setattr(digest, "resumen", lambda dia=None: f"📋 Resumen del {HOY.isoformat()}\n(prueba)")
     monkeypatch.setenv("DIGEST_ACTIVO", "true")
     monkeypatch.setenv("DIGEST_HORA", "18:00")
+    # Pinned, not inherited: alertar_excepcion's routing IS this flag, and a
+    # deployment that legitimately notifies the whole team (false) turned
+    # test_exception_alerts_keep_their_own_routing red from a .env alone.
+    monkeypatch.setenv("NOTIFICAR_SOLO_PRIMERO", "true")
     monkeypatch.delenv("WHATSAPP_STAFF_ALERT_TEMPLATE", raising=False)
     monkeypatch.setattr(router, "STAFF", [DUENO, EMPLEADO])
     monkeypatch.setenv("TELEFONO_DUENO", DUENO)
