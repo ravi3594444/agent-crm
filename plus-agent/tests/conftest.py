@@ -120,6 +120,13 @@ class FakeRedis:
         self._vivo()
         self.hashes.setdefault(key, {})[field] = value
 
+    def hincrby(self, key, field, amount=1):
+        """Para el contador por día de app/sombra.py."""
+        self._vivo()
+        campos = self.hashes.setdefault(key, {})
+        campos[field] = int(campos.get(field, 0)) + int(amount)
+        return campos[field]
+
     def get(self, key):
         self._vivo()
         return self.strings.get(key)
@@ -311,6 +318,16 @@ def limites_sin_redis(monkeypatch):
         # conftest's docstring exists to describe.
         "APROBACION_TIMEOUT_HORAS",
         "REVISION_TIMEOUT_HORAS",
+        # Shadow mode: a developer .env with it on would make the shadow tests
+        # pass for the wrong reason, and every other test read one more order.
+        "AUTO_CONFIRM_SOMBRA",
+        # The plain-draft deadline, its closer and the quiet hours. Same leak
+        # as the two timeouts above: a developer .env that sets the closer
+        # would have the sweep closing drafts inside an unrelated test.
+        "PENDIENTE_AVISO_HORAS",
+        "PENDIENTE_CIERRE_HORAS",
+        "PENDIENTE_NOCHE_DESDE",
+        "PENDIENTE_NOCHE_HASTA",
     ):
         monkeypatch.delenv(nombre, raising=False)
     vacio = FakeRedis()

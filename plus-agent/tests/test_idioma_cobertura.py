@@ -37,6 +37,22 @@ PEDIDO = "SAL-ORD-2026-00042"
 MOTIVO = "no stock"
 DATOS = ("Demo Bakery", "Whole Milk 1 L", "ARS", "manual", MOTIVO, "over the limit")
 
+# Un resumen fijo para la auditoría de idiomas: sin reloj y sin red, así que
+# las dos llamadas (una por idioma) dan exactamente el mismo texto.
+_AUTONOMIA = {
+    "dias": 7,
+    "confirmaciones": {"total": 61, "solos": 0, "por_vos": 58, "acepto_el_cliente": 3,
+                       "sin_fuente": 0, "truncado": False},
+    "rechazos": {"total": 3, "truncado": False},
+    "sombras": {"con_registro": 58, "pasan": 44, "frenados": 14,
+                "postura": {"tope": 44}, "reglas": {"sin stock": 3},
+                "truncado": False},
+    "revisiones": None,
+    "borradores": {"vivos": 12, "del_bot": 11, "a_mano": 1, "tope": 500,
+                   "pasado": False, "pct": 2.4},
+    "conteos": {"mirados": 6, "frescos": 5, "faltan": ["QUE-MUZ"]},
+}
+
 _SO = {
     "name": PEDIDO,
     "customer_name": "Demo Bakery",
@@ -64,7 +80,7 @@ def _solicitud(**extra):
 
 def _todos_los_constructores(lengua):
     """(nombre, texto) de CADA mensaje determinista migrado, en `lengua`."""
-    from app import avisos, decisiones, main, notificar, solicitudes
+    from app import autonomia, avisos, decisiones, main, notificar, pendientes, solicitudes
 
     sol = _solicitud(motivo=MOTIVO)
     salida = [
@@ -96,6 +112,21 @@ def _todos_los_constructores(lengua):
               "cargo": 1500.0, "descuento_pct": 5}, "ARS", lengua)),
         ("solicitudes.texto_pendiente_cliente",
          solicitudes.texto_pendiente_cliente(sol, lengua)),
+        # El borrador que espera a una persona (app/pendientes.py). El texto al
+        # cliente NO lleva la edad del pedido a propósito: este audit llama cada
+        # constructor una vez por idioma y compara, así que un dato que cambia
+        # con el reloj lo rompería — y de paso el cliente no la necesita.
+        ("pendientes.recordatorio_pendiente",
+         pendientes.recordatorio_pendiente(PEDIDO, lengua)),
+        ("pendientes.pendiente_cerrado",
+         pendientes.pendiente_cerrado(PEDIDO, lengua)),
+        ("pendientes.recordatorio_dueno",
+         "\n".join(pendientes.recordatorio_dueno(3, f"· {PEDIDO} — 5 h", lengua))),
+        ("pendientes.pendiente_cerrado_equipo",
+         pendientes.pendiente_cerrado_equipo(PEDIDO, 48.0, lengua)),
+        # El resumen de autonomía. Determinista: `resumen` es la parte que
+        # lee ERPNext, `texto` es el constructor puro sobre sus datos.
+        ("autonomia.texto", autonomia.texto(_AUTONOMIA, lengua)),
         # 3. avisos a la gerencia
         ("notificar._texto_libre(pendiente)",
          notificar._texto_libre(PEDIDO, _SO, False, "over the limit",

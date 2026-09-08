@@ -2216,3 +2216,12 @@ def test_a_customer_cannot_change_a_delivery_zone(almacen: FakeRedis) -> None:
 
     assert limites.vigente("ZONAS_ENTREGA_LOCALIDADES") == limites.NINGUNO
     assert entrega.zonas_configuradas() == (frozenset(), frozenset())
+
+
+def test_the_closer_caps_at_one_week_not_thirty_days():
+    """Treinta días no es un plazo, es un borrador olvidado con stock retenido.
+
+    Que es exactamente lo que este límite existe para evitar, así que un techo
+    de 720 h se contradecía a sí mismo.
+    """
+    assert limites.LIMITES["PENDIENTE_CIERRE_HORAS"].maximo == 168.0

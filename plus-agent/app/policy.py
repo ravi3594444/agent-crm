@@ -56,6 +56,41 @@ class Decision:
         return "auto-confirmado" if self.auto else "; ".join(self.motivos)
 
 
+# The two posture gates, as short stable tokens. They get counted and grouped,
+# never shown to a customer, so they must NOT be the interpolated prose the
+# real reasons use: "monto $8.450 supera el tope de $0" is a different string
+# for every order and cannot be bucketed.
+POSTURA_TOPE = "tope"
+POSTURA_STOCK = "stock apagado"
+
+
+@dataclass
+class Sombra:
+    """What the rules would have said, and what the posture said, kept apart.
+
+    ``pasa_reglas`` answers only "did every BUSINESS rule pass?". It is never a
+    permission to confirm anything — the posture reasons are listed precisely
+    because they are what is still stopping the order, and they are the owner's
+    to lift, one limit at a time, with a code.
+
+    ``habitual`` stays None until W5 gives the policy a notion of "the usual".
+    None is not False: it means the question was not asked.
+
+    ``ilegible`` is its own field and NOT a posture reason. The report renders
+    the posture list as "held back only by the posture you chose", so putting a
+    limits outage in there would tell the owner he decided something he did not.
+    A failure is never a decision.
+    """
+
+    pasa_reglas: bool
+    motivos_reglas: list[str] = field(default_factory=list)
+    motivos_postura: list[str] = field(default_factory=list)
+    ilegible: str = ""
+    total: float = 0.0
+    habitual: bool | None = None
+    tope_vigente: float = 0.0
+
+
 def _hoy_del_negocio() -> date:
     zone_name = os.getenv(
         "BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires"
@@ -212,12 +247,43 @@ def evaluar(sales_order: dict) -> Decision:
     if cfg.tope <= 0:
         return Decision(False, ["auto-confirmación desactivada"])
 
+    # With ignorar_postura=False nothing is ever routed to the posture list:
+    # every reason lands in `motivos`, at the same index it always did.
+    motivos, _postura = _evaluar(sales_order, cfg, ignorar_postura=False)
+    return Decision(not motivos, motivos)
+
+
+def _evaluar(
+    sales_order: dict,
+    cfg: limites.Configuracion,
+    *,
+    ignorar_postura: bool,
+) -> tuple[list[str], list[str]]:
+    """(motivos_reglas, motivos_postura). The rules, once, for both callers.
+
+    ``ignorar_postura`` sets aside the two gates that are a POSTURE the owner
+    chose rather than a fact about the order — his ceiling and the stock master
+    switch — and reports them apart, so ``evaluar_sombra`` can answer "would
+    this have passed the business rules?" while the system still sits at
+    AUTO_CONFIRM_MAX=0.
+
+    Everything else is evaluated identically for both callers, including the
+    per-(product, warehouse) stock trust of app/inventario.py: trust earned by
+    counting is a fact about the product, not a posture. That is deliberate —
+    at level 1 the "failed only because nobody counted it" bucket is precisely
+    the argument for starting the morning counts.
+    """
     motivos: list[str] = []
+    motivos_postura: list[str] = []
     # Trust in the inventory is earned per product and expires — see
     # app/inventario.py. The deployment switch is only the outer gate.
     inventario_habilitado = inventario.maestra_encendida()
     if not inventario_habilitado:
-        motivos.append("inventario no marcado como confiable")
+        if ignorar_postura:
+            motivos_postura.append(POSTURA_STOCK)
+            inventario_habilitado = True
+        else:
+            motivos.append("inventario no marcado como confiable")
     if not PRICE_LIST:
         motivos.append("lista estándar de auto-confirmación no configurada")
     if not CURRENCY:
@@ -235,7 +301,12 @@ def evaluar(sales_order: dict) -> Decision:
     if total <= 0:
         motivos.append("total no positivo")
     elif total > cfg.tope:
-        motivos.append(f"monto {pesos(total)} supera el tope de {pesos(cfg.tope)}")
+        if ignorar_postura:
+            motivos_postura.append(POSTURA_TOPE)
+        else:
+            motivos.append(
+                f"monto {pesos(total)} supera el tope de {pesos(cfg.tope)}"
+            )
 
     if PRICE_LIST and str(sales_order.get("selling_price_list") or "") != PRICE_LIST:
         motivos.append("lista de precios distinta de la autorizada")
@@ -437,7 +508,54 @@ def evaluar(sales_order: dict) -> Decision:
     except (ValueError, TypeError, erpnext.ERPNextError):
         motivos.append("fecha de entrega inválida")
 
-    return Decision(not motivos, motivos)
+    return motivos, motivos_postura
+
+
+def evaluar_sombra(sales_order: dict) -> Sombra:
+    """What the rules WOULD have said, with the posture gates set aside.
+
+    Exists because at AUTO_CONFIRM_MAX=0 evaluar returns on its second line
+    having read nothing, so the system records the same sentence for every
+    order and the owner has no evidence to raise anything. This runs the real
+    rules and reports which reasons are the rules' and which are the posture's.
+
+    It is a PURE READ. It never takes auto_submit_lock and never submits: the
+    only thing that may confirm an order is evaluar, inside _after_create's
+    lock. A shadow evaluation that could submit would be the posture quietly
+    turning itself off.
+    """
+    try:
+        cfg = limites.configuracion()
+    except limites.LimiteError as exc:
+        # Same direction as evaluar: unreadable limits decide nothing. The
+        # order is not judged, and the record says why it could not be.
+        return Sombra(
+            pasa_reglas=False,
+            ilegible=f"límites sin verificar: {exc}",
+            total=_total_o_cero(sales_order),
+        )
+
+    motivos, motivos_postura = _evaluar(sales_order, cfg, ignorar_postura=True)
+    return Sombra(
+        pasa_reglas=not motivos,
+        motivos_reglas=motivos,
+        motivos_postura=motivos_postura,
+        total=_total_o_cero(sales_order),
+        tope_vigente=cfg.tope,
+    )
+
+
+def _total_o_cero(sales_order: dict) -> float:
+    """The order's total for the RECORD, never for a decision.
+
+    _evaluar already refuses an unreadable total with "total inválido"; this is
+    only so the shadow record carries a number instead of raising while it
+    writes down that the order failed.
+    """
+    try:
+        return _float(sales_order.get("grand_total"))
+    except erpnext.ERPNextError:
+        return 0.0
 
 
 def _order_day(sales_order: dict, motivos: list[str]) -> date | None:

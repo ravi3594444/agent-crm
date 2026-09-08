@@ -35,11 +35,15 @@ import uuid
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app import erpnext, inventario, locks, notificar, outbound_status, policy
+from app import erpnext, inventario, locks, notificar, outbound_status
+from app import idioma as idioma_mod
 from app.formato import pesos
 
 HORA_DEFAULT = "18:00"
 MAX_LINEAS = 15
+# Desde qué porcentaje del techo de borradores el resumen avisa. Antes de
+# esto la fuga es normal; pasado el techo la auto-confirmación muere entera.
+UMBRAL_BORRADORES_PCT = 80.0
 MARCA_TTL_SEGUNDOS = 36 * 60 * 60
 ESTADOS_ESPERANDO_DESPACHO = ("To Deliver and Bill", "To Deliver")
 
@@ -149,11 +153,23 @@ def _pedidos(filtros: list, orden: str) -> list[dict]:
     )
 
 
-def _linea_pedido(so: dict) -> str:
-    return (
+def _linea_pedido(
+    so: dict, *, edad: float | None = None, a_mano: bool = False
+) -> str:
+    """Una línea de pedido. `edad` y `a_mano` son sólo para los pendientes.
+
+    Compartida con seccion_despacho, que no pasa ninguno de los dos y sigue
+    imprimiendo exactamente lo que imprimía.
+    """
+    linea = (
         f"· {so.get('name')} — {so.get('customer_name') or so.get('customer')} — "
         f"{pesos(so.get('grand_total'))} — entrega {so.get('delivery_date') or 's/f'}"
     )
+    if edad is not None:
+        linea += f" — hace {edad:.0f} h"
+    if a_mano:
+        linea += " — cargado a mano"
+    return linea
 
 
 def _seccion(titulo: str, lineas: list[str], vacio: str) -> str:
@@ -184,18 +200,46 @@ def seccion_despacho() -> str:
 
 
 def seccion_pendientes() -> str:
+    """Los borradores que esperan, con su edad y de dónde vienen.
+
+    Muestra TODOS, no sólo los del agente: un borrador que una persona cargó a
+    mano en ERPNext retiene el stock que promete exactamente igual
+    (`policy._borradores_que_reservan` filtra por `docstatus` y `status`, no por
+    origen), cuenta para el mismo techo de borradores, y es de los que el dueño
+    tiene que ir a limpiar — el recordatorio automático no los toca y el cierre
+    tampoco. Esconderlos acá los dejaría invisibles y sin dueño.
+
+    Por eso el número va DESCOMPUESTO: «11 del bot + 3 cargados a mano». Así el
+    total de esta sección nunca discute con el del recordatorio ni con los de
+    autonomía, que cuentan sólo los del bot; el número se separa en vez de
+    reconciliarse.
+    """
+    from app import pendientes
+
     try:
-        filas = _pedidos(
-            [["docstatus", "=", 0], ["status", "not in", list(policy.ESTADOS_SIN_RESERVA)]],
-            "creation asc",
-        )
+        filas = pendientes.listar_esperando(limite=200)
     except Exception as exc:
         print(f"[digest] pendientes: {type(exc).__name__}")
         return "🟡 Esperan tu decisión: no pude leer ERPNext"
-    lineas = [_linea_pedido(f) for f in filas]
+    ahora = _ahora()
+    del_bot = [f for f in filas if pendientes.del_agente(f)]
+    a_mano = [f for f in filas if not pendientes.del_agente(f)]
+    lineas = [_linea_pedido(f, edad=pendientes.edad_horas(f, ahora)) for f in del_bot]
+    lineas += [
+        _linea_pedido(f, edad=pendientes.edad_horas(f, ahora), a_mano=True)
+        for f in a_mano
+    ]
+    titulo = "🟡 Esperan tu decisión"
+    if a_mano:
+        titulo = f"{titulo} · {len(del_bot)} del bot + {len(a_mano)} cargados a mano"
+    # La instrucción va DESPUÉS de armar la sección, no dentro de `lineas`:
+    # `_seccion` usa len(lineas) como el total entre paréntesis, así que
+    # meterla ahí hacía que el encabezado dijera uno más que los pedidos que
+    # lista — justo lo que el docstring promete que no puede pasar.
+    cuerpo = _seccion(titulo, lineas, "ninguno")
     if lineas:
-        lineas.append("Respondé 'confirmar <pedido>', 'rechazar <pedido>' o 'ver <pedido>'.")
-    return _seccion("🟡 Esperan tu decisión", lineas, "ninguno")
+        cuerpo += "\nRespondé 'confirmar <pedido>', 'rechazar <pedido>' o 'ver <pedido>'."
+    return cuerpo
 
 
 def seccion_conteos() -> str:
@@ -281,7 +325,40 @@ _SECCIONES: tuple[tuple[str, str], ...] = (
     ("seccion_conteos", "📦 Conteos: no pude armar esta sección"),
     ("seccion_trabadas", "🔒 Borradores trabados: no pude armar esta sección"),
     ("seccion_fallos", "⚠️ Comunicación: no pude armar esta sección"),
+    ("seccion_autonomia", "📈 Autonomía: no pude armar esta sección"),
 )
+
+
+def seccion_autonomia() -> str:
+    """Cuánto se confirma solo, y qué lo frena. Y el techo de borradores.
+
+    El techo va acá porque es la falla más grande que este sistema puede tener
+    y hoy no se ve en ninguna parte: pasados policy.MAX_BORRADORES borradores
+    vivos, `_borradores_que_reservan` levanta y no se auto-confirma NADA, de
+    ningún producto, con un motivo que se lee igual que una caída de ERPNext.
+    """
+    from app import autonomia
+
+    try:
+        datos = autonomia.resumen()
+        cuerpo = autonomia.texto(datos, idioma_mod.gerencia())
+    except Exception as exc:
+        print(f"[digest] autonomia: {type(exc).__name__}")
+        return "📈 Autonomía: no pude armar esta sección"
+    borradores = datos.get("borradores")
+    if borradores and borradores.get("pasado"):
+        cuerpo += (
+            f"\n🚨 PASASTE EL TECHO de {borradores['tope']} borradores: hasta que "
+            "bajen, NINGÚN pedido se confirma solo y el motivo se parece a una "
+            "caída de ERPNext. Cerrá o confirmá los que sobran."
+        )
+    elif borradores and borradores.get("pct", 0) >= UMBRAL_BORRADORES_PCT:
+        cuerpo += (
+            f"\n⚠️ {borradores['vivos']} de {borradores['tope']} borradores "
+            f"({borradores['pct']:.0f} %). Pasado el techo no se confirma solo "
+            "nada, de ningún producto."
+        )
+    return cuerpo
 
 
 def _seccion_segura(nombre: str, respaldo: str) -> str:

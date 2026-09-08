@@ -268,6 +268,86 @@ LIMITES: dict[str, Definicion] = {
         default="true",
         tipo=BOOLEANO,
     ),
+    "PENDIENTE_AVISO_HORAS": Definicion(
+        nombre="PENDIENTE_AVISO_HORAS",
+        alias=(
+            "aviso de pendiente",
+            "horas para avisar",
+            "recordatorio de pendiente",
+        ),
+        significado=(
+            "Cuánto espera un pedido sin decisión antes de que se le avise al "
+            "cliente que todavía no está confirmado, y de que te lo recuerde a "
+            "vos. No confirma ni cancela nada: sólo deja de haber silencio. "
+            "En NINGUNO no se avisa nada"
+        ),
+        unidad="h",
+        # NINGUNO, como el cierre. Las dos mitades las enciende el dueño cuando
+        # lo decide, con su código: desplegar esto no puede cambiar una sola
+        # palabra de lo que recibe un cliente. Un default de 2 h significaba que
+        # entre el deploy y el mensaje que lo apagaba había clientes recibiendo
+        # WhatsApps de una función que nadie armó — y que quedaba encendida si
+        # nadie se acordaba de mandarlo. Un valor razonable para arrancar es 2.
+        default=NINGUNO,
+        # Más de dos días no es un recordatorio: el cliente ya se fue a otro
+        # proveedor y el aviso llega para confirmárselo.
+        maximo=48.0,
+        opcional=True,
+    ),
+    "PENDIENTE_CIERRE_HORAS": Definicion(
+        nombre="PENDIENTE_CIERRE_HORAS",
+        alias=(
+            "cierre de pendiente",
+            "horas para cerrar",
+            "cerrar pendientes",
+        ),
+        significado=(
+            "Después de cuántas horas sin decisión se cierra un pedido que "
+            "nadie miró, para que deje de retener stock que otro cliente podía "
+            "llevarse. Al cliente se le dice, sin vueltas, que no se confirmó. "
+            "En NINGUNO no se cierra nada y el borrador espera para siempre"
+        ),
+        unidad="h",
+        default=NINGUNO,
+        # Una semana. Treinta días no es un plazo, es un borrador olvidado
+        # reteniendo stock que otro cliente podía llevarse — que es justo lo
+        # que este límite existe para evitar.
+        maximo=168.0,
+        opcional=True,
+    ),
+    # Las horas de silencio. Frenan lo que el barrido le diría a un cliente sin
+    # que lo haya pedido: el recordatorio de arriba y el cierre automático, que
+    # también le habla. NO frenan la confirmación de un pedido, que sale cuando
+    # el pedido se confirma, sean las 22:10 o las 6 de la mañana, porque el
+    # cliente la está esperando.
+    "PENDIENTE_NOCHE_DESDE": Definicion(
+        nombre="PENDIENTE_NOCHE_DESDE",
+        alias=("no molestar desde", "silencio desde", "noche desde"),
+        significado="Desde qué hora no se le manda un recordatorio a un cliente",
+        unidad="hh:mm",
+        default="22:00",
+        tipo=HORA,
+    ),
+    "PENDIENTE_NOCHE_HASTA": Definicion(
+        nombre="PENDIENTE_NOCHE_HASTA",
+        alias=("no molestar hasta", "silencio hasta", "noche hasta"),
+        significado="Hasta qué hora no se le manda un recordatorio a un cliente",
+        unidad="hh:mm",
+        default="07:00",
+        tipo=HORA,
+    ),
+    "AUTO_CONFIRM_SOMBRA": Definicion(
+        nombre="AUTO_CONFIRM_SOMBRA",
+        alias=("modo sombra", "sombra"),
+        significado=(
+            "Si está en sí, cada pedido que queda esperando anota qué habrían "
+            "dicho las reglas si el tope y el stock estuvieran encendidos. No "
+            "confirma nada: sólo deja el número para poder decidir con datos"
+        ),
+        unidad="sí/no",
+        default="false",
+        tipo=BOOLEANO,
+    ),
 }
 
 _VERDADEROS = frozenset({"true", "si", "sí", "1", "on", "yes", "y"})
@@ -521,6 +601,10 @@ class Configuracion:
     # Sin plazo, ese borrador retendría stock para siempre: es la única salida
     # del flujo que no la tenía.
     timeout_revision: float = 24.0
+    # ¿Se anota lo que las reglas habrían dicho? No decide nada: es el registro
+    # con el que el dueño después mueve un límite. Default false, así que un
+    # .env que no la nombra se comporta exactamente como hoy.
+    sombra: bool = False
 
 
 def _texto(valor: object) -> str:
@@ -982,6 +1066,10 @@ def configuracion() -> Configuracion:
         ),
         timeout_revision=_timeout(
             _num("REVISION_TIMEOUT_HORAS"), "REVISION_TIMEOUT_HORAS"
+        ),
+        sombra=_bool(
+            LIMITES["AUTO_CONFIRM_SOMBRA"],
+            crudos["AUTO_CONFIRM_SOMBRA"][0],
         ),
     )
 

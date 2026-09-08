@@ -1568,13 +1568,20 @@ def _solicitudes_scheduler(stop: threading.Event) -> None:
     writing in, and the sweep must not sit in front of the inbound FIFO. A
     failure only skips one round.
     """
-    from app import solicitudes
+    from app import pendientes, solicitudes
 
     while not stop.wait(_SOLICITUDES_TICK_SECONDS):
         try:
             solicitudes.tick()
         except Exception as error:
             print(f"[solicitudes] tick type={_error_name(error)}")
+        # Su propio try/except, no el de arriba: un vencimiento que falla no
+        # puede saltear el registro de sombra, ni al revés. Es un no-op salvo
+        # que el dueño haya encendido «modo sombra».
+        try:
+            pendientes.tick()
+        except Exception as error:
+            print(f"[pendientes] tick type={_error_name(error)}")
 
 
 def _digest_scheduler(stop: threading.Event) -> None:

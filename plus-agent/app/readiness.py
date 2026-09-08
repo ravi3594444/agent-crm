@@ -29,6 +29,8 @@ OK, AVISO, FALTA, ERROR = "OK", "AVISO", "FALTA", "ERROR"
 # (status, body-json-o-None). Inyectable para los tests.
 Http = Callable[..., tuple[int, object]]
 
+UMBRAL_BORRADORES_PCT = 80.0
+
 PLANTILLAS = (
     "WHATSAPP_STAFF_PENDING_TEMPLATE",
     "WHATSAPP_STAFF_CONFIRMED_TEMPLATE",
@@ -36,6 +38,43 @@ PLANTILLAS = (
     "WHATSAPP_CUSTOMER_REJECTED_TEMPLATE",
     "WHATSAPP_CUSTOMER_CANCELLED_TEMPLATE",
     "WHATSAPP_STAFF_ALERT_TEMPLATE",
+    # Los dos del barrido de vencimientos (app/solicitudes.py). Se chequean acá
+    # para que una plantilla que falta o está mal escrita se vea en el
+    # preflight y no en el primer vencimiento — que es cuando el cliente se
+    # queda sin enterarse de que su solicitud venció.
+    "WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE",
+    "WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE",
+    "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE",
+    "WHATSAPP_CUSTOMER_PENDING_TEMPLATE",
+    "WHATSAPP_CUSTOMER_PENDING_CLOSED_TEMPLATE",
+)
+# Las que NO pueden contar con la ventana de 24 h, porque las dispara un barrido
+# y no una respuesta a un mensaje del cliente. El resto son opcionales en el
+# piloto de verdad; estas no.
+#
+# Y se parten en dos, porque el NIVEL que corresponde no es el mismo. El
+# criterio de este archivo es el de `chequear_solicitudes`: FALTA bloquea
+# cuando el sistema haría algo MAL, no cuando es menos útil.
+#
+# Estas tres las dispara `solicitudes.tick()`, que corre en el hilo del barrido
+# SIEMPRE, sin límite que lo apague. Si falta la plantilla, el aviso se aparca y
+# el cliente nunca se entera de que su solicitud venció — con readiness diciendo
+# «LISTO para probar en vivo». Eso es el sistema haciendo algo mal, así que
+# bloquea.
+PLANTILLAS_BARRIDO_SIEMPRE = (
+    "WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE",
+    "WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE",
+    "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE",
+)
+# Estas dos sólo salen si el dueño encendió el límite que las gatea, y los dos
+# arrancan en NINGUNO. Apagado el flujo, no se manda nada y no hay nada mal:
+# AVISO. Encendido, es exactamente el mismo problema que arriba: FALTA.
+PLANTILLAS_BARRIDO_OPCIONAL = {
+    "WHATSAPP_CUSTOMER_PENDING_TEMPLATE": "PENDIENTE_AVISO_HORAS",
+    "WHATSAPP_CUSTOMER_PENDING_CLOSED_TEMPLATE": "PENDIENTE_CIERRE_HORAS",
+}
+PLANTILLAS_FUERA_DE_VENTANA = PLANTILLAS_BARRIDO_SIEMPRE + tuple(
+    PLANTILLAS_BARRIDO_OPCIONAL
 )
 ROLES_SUBMIT_PROHIBIDOS = ("agente", "gerencia")
 # El mismo default que app/whatsapp.py, repetido a propósito: readiness no
@@ -333,10 +372,79 @@ def chequear_whatsapp(env: Mapping[str, str], reporte: Reporte, http: Http | Non
     return waba
 
 
-def chequear_plantillas(env: Mapping[str, str], reporte: Reporte, http: Http | None, waba: str) -> None:
+def _limite_encendido(
+    nombre: str, resumen_limites: Callable[[], list[dict]] | None
+) -> bool | None:
+    """¿El dueño encendió este límite? None = no se pudo saber.
+
+    Tres estados y no dos: aplastar el «no sé» en False diría que el flujo está
+    apagado sin haberlo mirado, que es la clase de afirmación que este archivo
+    existe para no hacer.
+    """
+    if resumen_limites is None:
+        return None
+    from app import limites
+
+    try:
+        filas = {str(f.get("nombre")): f for f in resumen_limites()}
+    except Exception:
+        return None
+    fila = filas.get(nombre)
+    if fila is None or fila.get("problema"):
+        return None
+    if str(fila.get("origen")) == limites.PERDIDO:
+        return None
+    return str(fila.get("valor") or "") not in ("", limites.NINGUNO)
+
+
+def chequear_plantillas(
+    env: Mapping[str, str],
+    reporte: Reporte,
+    http: Http | None,
+    waba: str,
+    resumen_limites: Callable[[], list[dict]] | None = None,
+) -> None:
+    _FUERA = (
+        "vacía, y este aviso lo dispara un barrido HORAS después del último "
+        "mensaje del cliente: la ventana de 24 h ya está cerrada, no hay texto "
+        "libre posible, y el aviso se aparca sin que el cliente se entere. "
+        "Registrá la plantilla en Meta"
+    )
     configuradas = {p: _valor(env, p) for p in PLANTILLAS}
     for variable, nombre in configuradas.items():
-        if not nombre:
+        if nombre:
+            continue
+        if variable in PLANTILLAS_BARRIDO_SIEMPRE:
+            # BLOQUEA. El barrido de vencimientos corre siempre, así que sin
+            # esta plantilla el despliegue no está listo para una prueba en
+            # vivo: se le va a vencer la solicitud a alguien y no se le va a
+            # poder decir. Decir «LISTO» ahí sería el informe mintiendo.
+            reporte.falta(variable, _FUERA)
+        elif variable in PLANTILLAS_BARRIDO_OPCIONAL:
+            limite = PLANTILLAS_BARRIDO_OPCIONAL[variable]
+            encendido = _limite_encendido(limite, resumen_limites)
+            if encendido is True:
+                reporte.falta(variable, f"{_FUERA} (el dueño encendió {limite})")
+            elif encendido is None:
+                # Ni sí ni no: no se pudo leer el límite. AVISO y no FALTA,
+                # porque `--sin-red` es la puerta de `deploy.yml` y tampoco
+                # puede verificar la aprobación en Meta — bloquear el
+                # despliegue por algo que no se pudo mirar deja el check en
+                # rojo para siempre, que es peor que no tenerlo.
+                reporte.aviso(
+                    variable,
+                    f"vacía, y no pude leer {limite} para saber si el flujo está "
+                    f"encendido. Si lo está, este aviso sale fuera de la ventana "
+                    f"de 24 h y no le llega a nadie",
+                )
+            else:
+                reporte.aviso(
+                    variable,
+                    f"vacía (el flujo está apagado: {limite} en NINGUNO). Antes "
+                    f"de encenderlo, registrá la plantilla en Meta: el aviso sale "
+                    f"fuera de la ventana de 24 h y sin plantilla no llega",
+                )
+        else:
             reporte.aviso(
                 variable,
                 "vacía (opcional en el piloto): ese aviso sale como texto libre mientras el "
@@ -830,6 +938,70 @@ def chequear_entrega(
     chequear_cuenta_cargo(env, reporte, http, con_cargo=reporte_con_cargo)
 
 
+def chequear_borradores(reporte: Reporte, *, con_red: bool = True) -> None:
+    """Cuántos borradores compiten por stock, contra el techo de app/policy.py.
+
+    Es la falla más grande que este sistema puede tener y la que menos se ve:
+    pasados policy.MAX_BORRADORES borradores vivos,
+    `_borradores_que_reservan` LEVANTA y no se auto-confirma nada, de ningún
+    producto — con un motivo («no se pudo verificar stock de X») que se lee
+    exactamente igual que una caída de ERPNext. Sin este chequeo el número no
+    existe en ninguna parte hasta después de que la auto-confirmación murió.
+
+    SIEMPRE AVISO, NUNCA BLOQUEA, aunque ya se haya pasado el techo. Mismo
+    criterio que `chequear_solicitudes`: en este archivo FALTA/ERROR significa
+    que el sistema haría algo MAL. Pasado el techo no se hace nada mal — deja
+    de auto-confirmar y todo pedido espera a una persona, que es exactamente la
+    postura de lanzamiento: nada se sobrevende, a nadie se le promete de más.
+    Es el sistema siendo menos útil, en la dirección segura, y eso no es un eje
+    que estos niveles midan.
+
+    La urgencia creciente va en el resumen de las 18:00, que el dueño lee todos
+    los días; esto lo lee un desarrollador de vez en cuando. Pero es el AVISO
+    más fuerte del archivo, y la consecuencia va en la línea misma.
+
+    Necesita ERPNext, así que se auto-protege con `con_red`: `deploy.yml` corre
+    `make check-env-offline` como puerta de despliegue y `main()` sale 1 con
+    cualquier bloqueante, así que un chequeo que saliera a la red bajo
+    `--sin-red` podría frenar justamente el despliegue que trae la limpieza.
+
+    Cuenta los cargados a mano también, porque ocupan lugar en el mismo techo:
+    `_borradores_que_reservan` filtra por docstatus y status, no por origen.
+    """
+    if not con_red:
+        # La regla de la casa (ver el docstring del módulo): lo que no se pudo
+        # verificar se reporta como no verificado, no se calla ni se inventa.
+        reporte.aviso("Borradores vivos", "sin red: no se verificó el techo")
+        return
+
+    from app import autonomia
+
+    datos = autonomia.borradores_vivos()
+    if datos is None:
+        reporte.aviso("Borradores vivos", "no pude contarlos en ERPNext")
+        return
+    detalle = (
+        f"{datos['vivos']} de {datos['tope']} "
+        f"({datos['del_bot']} del bot + {datos['a_mano']} cargados a mano)"
+    )
+    if datos["pasado"]:
+        reporte.aviso(
+            "Borradores vivos",
+            f"{detalle}: PASASTE EL TECHO — auto-confirmación apagada para "
+            f"TODOS los productos hasta bajar de {datos['tope']}, y el motivo "
+            "que ve el equipo se lee igual que una caída de ERPNext. Cerrá o "
+            "confirmá los que sobran",
+        )
+    elif datos["pct"] >= UMBRAL_BORRADORES_PCT:
+        reporte.aviso(
+            "Borradores vivos",
+            f"{detalle}, {datos['pct']:.0f} % del techo: pasado el techo queda "
+            "la auto-confirmación apagada para todos los productos",
+        )
+    else:
+        reporte.ok("Borradores vivos", detalle)
+
+
 def chequear_solicitudes(reporte: Reporte) -> None:
     """Drafts the sweep could not get ERPNext to stop reserving.
 
@@ -864,8 +1036,8 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
     chequear_modelos(env, reporte)
     chequear_equipo(env, reporte)
     waba = chequear_whatsapp(env, reporte, http)
-    chequear_plantillas(env, reporte, http, waba)
-    chequear_erpnext(env, reporte, http)
+    # El resumen de límites se resuelve ANTES de las plantillas: dos de ellas
+    # sólo bloquean si el dueño encendió el límite que las gatea.
     resumen = None
     if _valor(env, "REDIS_URL"):
         try:
@@ -874,10 +1046,15 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
             resumen = limites.resumen
         except Exception as exc:  # pragma: no cover - import-time env problems
             reporte.aviso("Límites", f"módulo de límites no disponible ({type(exc).__name__})")
+    chequear_plantillas(env, reporte, http, waba, resumen)
+    chequear_erpnext(env, reporte, http)
     chequear_stock_y_limites(env, reporte, resumen)
     chequear_entrega(env, reporte, resumen, http)
     if _valor(env, "REDIS_URL"):
         chequear_solicitudes(reporte)
+    # Se pasa con_red en vez de gatear acá: la función se auto-protege y
+    # reporta «no verificado», que es la regla del módulo.
+    chequear_borradores(reporte, con_red=con_red)
     return reporte
 
 

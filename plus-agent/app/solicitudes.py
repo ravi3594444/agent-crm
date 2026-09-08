@@ -1175,7 +1175,11 @@ def _vencer_revision(solicitud: Solicitud, ahora: float) -> bool:
     if cerrada is None:
         return False
     _encolar_cliente(
-        cerrada, "revision_vencida", lambda i: texto_revision_vencida_cliente(cerrada, i)
+        cerrada,
+        "revision_vencida",
+        lambda i: texto_revision_vencida_cliente(cerrada, i),
+        plantilla_env=PLANTILLA_REVISION_VENCIDA,
+        parametros=[cerrada.pedido],
     )
     _avisar_equipo(
         cerrada,
@@ -1762,12 +1766,27 @@ def _telefono_cliente(pedido: str) -> str:
     return telefonos.normalizar(cliente.get("mobile_no")) or ""
 
 
-def _encolar_cliente(solicitud: Solicitud, evento: str, texto) -> bool:
+def _encolar_cliente(
+    solicitud: Solicitud,
+    evento: str,
+    texto,
+    *,
+    plantilla_env: str = "",
+    parametros: list[str] | None = None,
+) -> bool:
     """`texto` puede ser el texto ya armado o una función que toma el idioma.
 
     Pasar la función es lo correcto: el teléfono —y por lo tanto el idioma— se
     resuelve ACÁ, así que el llamador no tiene que adivinarlo ni repetir la
     búsqueda.
+
+    ``plantilla_env`` NO es opcional para los avisos que dispara el barrido de
+    vencimientos. Un aviso de vencimiento se manda horas después del último
+    mensaje del cliente, así que la ventana de 24 h de Meta suele estar cerrada;
+    sin plantilla `avisos._enviar` devuelve "" en cada intento, se queman los 8
+    y el aviso queda aparcado — y el cliente NUNCA se entera de que su solicitud
+    venció, que es exactamente el peor final que describe el docstring de este
+    módulo. Una plantilla aprobada es lo único que llega fuera de la ventana.
     """
     from app import avisos
 
@@ -1786,10 +1805,30 @@ def _encolar_cliente(solicitud: Solicitud, evento: str, texto) -> bool:
     if callable(texto):
         texto = texto(idioma.para_destinatario(tel))
     try:
-        return avisos.encolar(f"{evento}:{solicitud.id}", solicitud.pedido, tel, texto)
+        return avisos.encolar(
+            f"{evento}:{solicitud.id}",
+            solicitud.pedido,
+            tel,
+            texto,
+            plantilla_env=plantilla_env,
+            parametros=parametros,
+        )
     except Exception as exc:
         print(f"[solicitudes] {solicitud.pedido}: aviso no encolado ({type(exc).__name__})")
         return False
+
+
+# Las plantillas de los dos avisos que dispara el barrido. Los nombres siguen
+# la convención que ya usa app/decisiones.py
+# (WHATSAPP_CUSTOMER_REJECTED_TEMPLATE). Los parámetros son DATOS y no prosa:
+# una plantilla vive registrada en UN idioma en Meta, así que meterle una frase
+# traducida no la traduce, y un dato sí sobrevive igual.
+#   EXPIRED  → 1 parámetro:  {{1}} número de pedido
+#   FALLBACK → 2 parámetros: {{1}} número de pedido, {{2}} fecha ofrecida
+#   REVIEW_EXPIRED → 1 parámetro: {{1}} número de pedido
+PLANTILLA_VENCIDA = "WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE"
+PLANTILLA_RESPALDO = "WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE"
+PLANTILLA_REVISION_VENCIDA = "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE"
 
 
 def _avisar_cliente_vencida(solicitud: Solicitud, liberado: bool) -> bool:
@@ -1800,15 +1839,34 @@ def _avisar_cliente_vencida(solicitud: Solicitud, liberado: bool) -> bool:
         else texto_vencida_cliente
     )
     return _encolar_cliente(
-        solicitud, "solicitud_vencida", lambda i: constructor(solicitud, i)
+        solicitud,
+        "solicitud_vencida",
+        lambda i: constructor(solicitud, i),
+        plantilla_env=PLANTILLA_VENCIDA,
+        parametros=[solicitud.pedido],
     )
 
 
 def _avisar_cliente_respaldo(solicitud: Solicitud) -> bool:
     """The concrete second offer. Keyed on the NEW id, so it is sent once."""
     return _encolar_cliente(
-        solicitud, "solicitud_respaldo", lambda i: texto_respaldo_cliente(solicitud, i)
+        solicitud,
+        "solicitud_respaldo",
+        lambda i: texto_respaldo_cliente(solicitud, i),
+        plantilla_env=PLANTILLA_RESPALDO,
+        parametros=[solicitud.pedido, _fecha_ofrecida(solicitud)],
     )
+
+
+def _fecha_ofrecida(solicitud: Solicitud) -> str:
+    """La fecha del respaldo como parámetro de plantilla. Nunca vacía.
+
+    Meta rechaza un parámetro vacío, así que un respaldo sin fecha —que no
+    debería existir, `evaluar_respaldo` no ofrece nada que no pueda cumplir—
+    manda el texto de «a coordinar» en vez de romper el envío.
+    """
+    fecha = str((solicitud.ofrecido or {}).get("fecha") or "").strip()
+    return fecha or idioma.t("gerencia.a_coordinar", idioma.gerencia())
 
 
 def _avisar_equipo(solicitud: Solicitud, texto: str, *, evento: str = "") -> bool:

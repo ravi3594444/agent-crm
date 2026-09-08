@@ -29,6 +29,14 @@ BASE = {
     "META_APP_SECRET": "b" * 32,
     "META_VERIFY_TOKEN": "plus-verify-secret",
     "WHATSAPP_STAFF_PENDING_TEMPLATE": "pedido_pendiente_equipo",
+    # Las tres del barrido de vencimientos son parte de lo que significa «bien
+    # configurado»: `solicitudes.tick()` corre siempre, así que sin ellas se le
+    # vence la solicitud a alguien y no se le puede decir. readiness las trata
+    # como FALTA, y por eso están acá — el fixture es un despliegue que SÍ está
+    # listo, y estas dejaron de ser opcionales para estarlo.
+    "WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE": "solicitud_vencida_cliente",
+    "WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE": "solicitud_respaldo_cliente",
+    "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE": "revision_vencida_cliente",
     "ERPNEXT_URL": "http://backend:8000",
     "ERPNEXT_COMPANY": "Lacteos Test SA",
     "ERPNEXT_WAREHOUSE": "Principal - LT",
@@ -933,3 +941,103 @@ def test_zero_and_unreadable_are_different_answers() -> None:
     assert readiness._es_cero("0,00") and readiness._es_cero(0.0)
     assert not readiness._es_cero("abc")
     assert not readiness._es_cero("-1") and not readiness._es_cero("0.1")
+
+
+# ---------------- el nivel de las plantillas del barrido depende del flujo
+
+
+def _sin(env: dict, *claves: str) -> dict:
+    return {k: v for k, v in env.items() if k not in claves}
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE",
+        "WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE",
+        "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE",
+    ],
+)
+def test_a_missing_always_on_sweep_template_blocks_readiness(variable):
+    """`solicitudes.tick()` corre SIEMPRE: no hay límite que lo apague.
+
+    Sin la plantilla el aviso se aparca y al cliente no se le puede decir que
+    su solicitud venció. Informar «LISTO para probar en vivo» ahí es el informe
+    afirmando algo que no es cierto, y ése es el eje que FALTA mide.
+    """
+    reporte = readiness.Reporte()
+    readiness.chequear_plantillas(_sin(BASE, variable), reporte, None, "")
+
+    assert reporte.listo is False
+    nivel, _, _ = next(ln for ln in reporte.lineas if ln[1] == variable)
+    assert nivel == readiness.FALTA
+
+
+@pytest.mark.parametrize(
+    "variable,limite",
+    sorted(readiness.PLANTILLAS_BARRIDO_OPCIONAL.items()),
+)
+def test_an_optional_sweep_template_only_warns_while_its_flow_is_off(variable, limite):
+    """Apagado el flujo no se manda nada, así que nada está mal: AVISO."""
+    def resumen():
+        return [{"nombre": limite, "valor": limites.NINGUNO, "origen": "env"}]
+
+    reporte = readiness.Reporte()
+    readiness.chequear_plantillas(_sin(BASE, variable), reporte, None, "", resumen)
+
+    assert reporte.listo is True
+    nivel, _, mensaje = next(ln for ln in reporte.lineas if ln[1] == variable)
+    assert nivel == readiness.AVISO
+    assert "apagado" in mensaje
+
+
+@pytest.mark.parametrize(
+    "variable,limite",
+    sorted(readiness.PLANTILLAS_BARRIDO_OPCIONAL.items()),
+)
+def test_an_optional_sweep_template_blocks_once_the_owner_turns_it_on(variable, limite):
+    """Encendido, es exactamente el mismo problema que las de siempre."""
+    def resumen():
+        return [{"nombre": limite, "valor": "48", "origen": "redis"}]
+
+    reporte = readiness.Reporte()
+    readiness.chequear_plantillas(_sin(BASE, variable), reporte, None, "", resumen)
+
+    assert reporte.listo is False
+    nivel, _, mensaje = next(ln for ln in reporte.lineas if ln[1] == variable)
+    assert nivel == readiness.FALTA
+    assert limite in mensaje
+
+
+def test_an_unreadable_limit_warns_instead_of_blocking_the_deploy_gate():
+    """Sin poder leer el límite no se afirma ni que está encendido ni que no.
+
+    AVISO y no FALTA: `--sin-red` es la puerta de deploy.yml y tampoco puede
+    verificar la aprobación en Meta, así que bloquear por algo que no se pudo
+    mirar deja el check en rojo para siempre.
+    """
+    reporte = readiness.Reporte()
+    readiness.chequear_plantillas(
+        _sin(BASE, "WHATSAPP_CUSTOMER_PENDING_TEMPLATE"), reporte, None, "", None
+    )
+
+    assert reporte.listo is True
+    nivel, _, mensaje = next(
+        ln for ln in reporte.lineas if ln[1] == "WHATSAPP_CUSTOMER_PENDING_TEMPLATE"
+    )
+    assert nivel == readiness.AVISO
+    assert "no pude leer" in mensaje
+
+
+def test_the_two_sweep_groups_partition_the_out_of_window_set():
+    """Una sexta plantilla de esta clase no puede caer en ninguno de los dos.
+
+    El conjunto de «sale fuera de la ventana» se parte en las que bloquean
+    siempre y las que dependen de un límite. Si alguien agrega una y no la pone
+    en ninguna, este test se pone rojo en vez de dejarla sin nivel.
+    """
+    siempre = set(readiness.PLANTILLAS_BARRIDO_SIEMPRE)
+    opcional = set(readiness.PLANTILLAS_BARRIDO_OPCIONAL)
+
+    assert siempre & opcional == set()
+    assert siempre | opcional == set(readiness.PLANTILLAS_FUERA_DE_VENTANA)

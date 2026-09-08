@@ -187,7 +187,7 @@ def escenarios() -> list[Escenario]:
                 # Con fecha concreta: 'ok' aprueba lo que el cliente pidió
                 # EN SUS PALABRAS, y esas palabras no traen una fecha que el
                 # sistema pueda escribir (ver escenario ok_sin_terminos).
-                Paso(DUENO, "contraoferta " + ULTIMO_PEDIDO + " 2026-09-07 10:00 0"),
+                Paso(DUENO, "contraoferta " + ULTIMO_PEDIDO + " mañana 10:00 0"),
                 Paso(CLIENTE, "acepto",
                      documentos={"Sales Order/*": {"docstatus": 1}}),
             ],
@@ -220,7 +220,7 @@ def escenarios() -> list[Escenario]:
                      prohibe=["registré"],
                      documentos={"Sales Order/*": {"docstatus": 0}}),
                 # Los términos completos sí deciden, y el cliente puede cerrar.
-                Paso(DUENO, "contraoferta " + ULTIMO_PEDIDO + " 2026-09-07 10:00 0",
+                Paso(DUENO, "contraoferta " + ULTIMO_PEDIDO + " mañana 10:00 0",
                      espera=["registré"]),
                 Paso(CLIENTE, "acepto",
                      documentos={"Sales Order/*": {"docstatus": 1}}),

@@ -65,6 +65,30 @@ def ejecutar_reporte(
 
 
 @tool
+def resumen_autonomia(
+    config: RunnableConfig,
+    dias: Annotated[int, Field(description="Cuántos días atrás mirar. 7 si no dijo otra cosa.")] = 7,
+) -> str:
+    """Cuánto se confirma solo, cuánto lo confirma una persona y qué lo frena.
+
+    Sólo lectura: cuenta hechos que ya están escritos en ERPNext. Informá los
+    números tal como vienen y NO recomiendes subir ni bajar un límite — esa
+    frase es del dueño, no tuya. Si un número dice «no pude leer», decilo así.
+    """
+    try:
+        require_management(config)
+    except RuntimeContextError:
+        return SIN_PERMISO
+    from app import autonomia, idioma
+
+    try:
+        datos = autonomia.resumen(int(dias or autonomia.DIAS_DEFAULT))
+        return autonomia.texto(datos, idioma.gerencia())
+    except Exception as exc:
+        return f"No pude armar el resumen de autonomía: {type(exc).__name__}."
+
+
+@tool
 def pedidos_pendientes(config: RunnableConfig) -> str:
     """Pedidos en borrador esperando confirmación del equipo.
     Esto es lo primero que debería revisar el dueño cada mañana."""
@@ -75,15 +99,34 @@ def pedidos_pendientes(config: RunnableConfig) -> str:
     sos = erpnext.get_list(
         "Sales Order",
         filters=[["docstatus", "=", 0]],
-        fields=["name", "customer", "grand_total", "delivery_date", "creation"],
+        fields=[
+            "name",
+            "customer",
+            "customer_name",
+            "grand_total",
+            "delivery_date",
+            "creation",
+        ],
         limit=50,
     )
     if not sos:
         return "No hay pedidos pendientes de confirmación."
-    lineas = [
-        f"- {s['name']} · {s['customer']} · {pesos(s['grand_total'])} · entrega {s['delivery_date']}"
-        for s in sos
-    ]
+    # customer_name, no customer: `customer` es el CÓDIGO de ERPNext
+    # («CUST-0009»), y el dueño dice «el de la panadería». Con el código en
+    # pantalla sus propias palabras no coinciden con nada. Y la antigüedad, que
+    # ya se pedía en `creation` y no se mostraba, es con lo que decide a cuál
+    # atender primero.
+    from app import pendientes
+
+    lineas = []
+    for s in sos:
+        edad = pendientes.edad_horas(s)
+        antiguedad = f" · hace {edad:.0f} h" if edad is not None else ""
+        quien = s.get("customer_name") or s.get("customer")
+        lineas.append(
+            f"- {s['name']} · {quien} · {pesos(s['grand_total'])} "
+            f"· entrega {s['delivery_date']}{antiguedad}"
+        )
     return f"{len(sos)} pedidos pendientes de confirmar:\n" + "\n".join(lineas)
 
 
