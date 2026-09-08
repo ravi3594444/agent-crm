@@ -74,7 +74,6 @@ MARCA_CIERRE = "[pendiente-cerrado]"
 _ZONA_DEFAULT = "America/Argentina/Buenos_Aires"
 _NOCHE_DESDE_DEFAULT = "22:00"
 _NOCHE_HASTA_DEFAULT = "07:00"
-_HORAS_AVISO_DEFAULT = 2.0
 
 _RE_HORA = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
@@ -357,7 +356,9 @@ def _avisar(filas: list[dict], momento: datetime) -> int:
     """Un recordatorio por pedido, una vez, y un resumen al dueño por día."""
     from app import avisos, decisiones
 
-    horas = _horas("PENDIENTE_AVISO_HORAS", _HORAS_AVISO_DEFAULT)
+    # None = NINGUNO (nadie lo armó) o ilegible. Las dos veces, silencio: un
+    # recordatorio que el dueño no encendió no puede salirle a un cliente.
+    horas = _horas("PENDIENTE_AVISO_HORAS", None)
     if horas is None:
         return 0
 

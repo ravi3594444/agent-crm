@@ -278,13 +278,21 @@ LIMITES: dict[str, Definicion] = {
         significado=(
             "Cuánto espera un pedido sin decisión antes de que se le avise al "
             "cliente que todavía no está confirmado, y de que te lo recuerde a "
-            "vos. No confirma ni cancela nada: sólo deja de haber silencio"
+            "vos. No confirma ni cancela nada: sólo deja de haber silencio. "
+            "En NINGUNO no se avisa nada"
         ),
         unidad="h",
-        default="2",
+        # NINGUNO, como el cierre. Las dos mitades las enciende el dueño cuando
+        # lo decide, con su código: desplegar esto no puede cambiar una sola
+        # palabra de lo que recibe un cliente. Un default de 2 h significaba que
+        # entre el deploy y el mensaje que lo apagaba había clientes recibiendo
+        # WhatsApps de una función que nadie armó — y que quedaba encendida si
+        # nadie se acordaba de mandarlo. Un valor razonable para arrancar es 2.
+        default=NINGUNO,
         # Más de dos días no es un recordatorio: el cliente ya se fue a otro
         # proveedor y el aviso llega para confirmárselo.
         maximo=48.0,
+        opcional=True,
     ),
     "PENDIENTE_CIERRE_HORAS": Definicion(
         nombre="PENDIENTE_CIERRE_HORAS",

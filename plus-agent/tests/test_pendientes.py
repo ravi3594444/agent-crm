@@ -784,3 +784,32 @@ def test_an_enqueue_that_raises_leaves_no_mark_so_it_is_retried(
     pendientes.tick(ahora=epoch(15))
 
     assert not any(t.startswith(pendientes.MARCA_AVISO) for _, _, t in mundo["escritos"])
+
+
+def test_nothing_is_sent_while_the_reminder_is_off(mundo, monkeypatch) -> None:
+    """El default es NINGUNO: desplegar W2 no le habla a ningún cliente.
+
+    Las dos mitades —recordatorio y cierre— arrancan apagadas y las enciende el
+    dueño con su código. Un default de 2 h significaba que entre el deploy y el
+    mensaje que lo apagara había clientes recibiendo avisos de una función que
+    nadie armó, y que quedaba encendida si nadie se acordaba de mandarlo.
+    """
+    monkeypatch.delenv("PENDIENTE_AVISO_HORAS")  # el fixture lo arma; acá no
+    _listo(mundo)
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert _al_cliente(mundo) == []
+    assert mundo["al_dueno"] == []
+    assert not any(t.startswith(pendientes.MARCA_AVISO) for _, _, t in mundo["escritos"])
+
+
+def test_both_halves_are_off_by_default(mundo, monkeypatch) -> None:
+    """Ni aviso ni cierre sin que el dueño los haya fijado."""
+    monkeypatch.delenv("PENDIENTE_AVISO_HORAS")
+    _listo(mundo)
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert _al_cliente(mundo) == []
+    assert mundo["estados"] == []
