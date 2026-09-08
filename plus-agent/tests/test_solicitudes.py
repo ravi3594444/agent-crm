@@ -3867,21 +3867,24 @@ def test_the_expired_review_notice_carries_a_template_too(
     assert entrada["parametros"] == [SO]
 
 
-def test_readiness_watches_exactly_the_three_notices_the_sweep_fires() -> None:
-    """El conjunto, no cada miembro: un cuarto aviso de esta clase se olvida.
+def test_readiness_watches_exactly_the_notices_a_sweep_fires() -> None:
+    """El conjunto, no cada miembro: un aviso más de esta clase se olvida.
 
     Los otros dos avisos al cliente (`solicitud_oferta`, `solicitud_rechazo`)
     salen en la misma vuelta en que el cliente escribió, así que su ventana
-    está abierta y no necesitan plantilla. Estos tres los dispara el barrido
-    horas después, y son los únicos así. Si mañana aparece un cuarto, este
-    test se pone rojo en vez de dejarlo sin plantilla y sin aviso.
+    está abierta y no necesitan plantilla. Estos cinco los dispara un barrido
+    horas después, y son los únicos así. Este test ya hizo su trabajo una vez:
+    se puso rojo cuando `app/pendientes.py` agregó sus dos, que era justo lo
+    que había que no dejar pasar.
     """
-    from app import readiness
+    from app import pendientes, readiness
 
     assert set(readiness.PLANTILLAS_FUERA_DE_VENTANA) == {
         solicitudes.PLANTILLA_VENCIDA,
         solicitudes.PLANTILLA_RESPALDO,
         solicitudes.PLANTILLA_REVISION_VENCIDA,
+        pendientes.PLANTILLA_RECORDATORIO,
+        pendientes.PLANTILLA_CERRADO,
     }
     # Y todas están en la lista que readiness recorre.
     assert set(readiness.PLANTILLAS_FUERA_DE_VENTANA) <= set(readiness.PLANTILLAS)

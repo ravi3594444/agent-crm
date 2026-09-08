@@ -459,14 +459,39 @@ def test_an_unreadable_listing_raises_for_the_digest_and_is_swallowed_for_the_sw
     assert pendientes.tick() == 0
 
 
-def test_when_the_deadline_read_fails_everything_is_still_eligible(mundo, monkeypatch) -> None:
-    """De los dos errores posibles, anotar uno de más no le hace nada a nadie."""
+def test_when_the_deadline_read_fails_nothing_is_eligible(mundo, monkeypatch) -> None:
+    """Falla cerrado: una lectura ilegible no habilita NINGÚN borrador.
+
+    Antes devolvía todos, y eso dejaba que el cierre le soltara el stock y le
+    dijera «no se confirmó» a un cliente que TIENE una oferta viva con plazo:
+    `_sigue_esperando` mira `docstatus` y `status`, no si hay una solicitud
+    abierta, así que era la única puerta y estaba abierta.
+
+    «No sé si hay un cliente esperando por este pedido» no es «ninguno tiene
+    plazo». Una ronda salteada no le cuesta nada a nadie; ese mensaje sí.
+    """
     def explota(pedidos):
         raise erpnext.ERPNextError("no contesta")
 
     monkeypatch.setattr("app.solicitudes.vencimientos", explota)
 
-    assert pendientes._sin_solicitud_abierta([PEDIDO]) == [PEDIDO]
+    assert pendientes._sin_solicitud_abierta([PEDIDO]) == []
+
+
+def test_an_unreadable_deadline_read_stops_the_whole_round(mundo, monkeypatch) -> None:
+    """Y de punta a punta: la ronda no anota, no avisa y no cierra."""
+    monkeypatch.setenv("PENDIENTE_CIERRE_HORAS", "4")
+    _listo(mundo)
+    monkeypatch.setattr(
+        "app.solicitudes.vencimientos",
+        lambda pedidos: (_ for _ in ()).throw(erpnext.ERPNextError("no contesta")),
+    )
+
+    assert pendientes.tick(ahora=epoch(15)) == 0
+
+    assert mundo["estados"] == []
+    assert _al_cliente(mundo) == []
+    assert not any(t.startswith(pendientes.MARCA_CIERRE) for _, _, t in mundo["escritos"])
 
 
 # ------------------------------------------------------- el recordatorio (W2)
@@ -901,3 +926,42 @@ def test_the_closure_notices_go_out_even_if_the_marker_write_fails(
     eventos = {e["evento"] for e in _en_cola()}
     assert any(ev.startswith("pendiente_cerrado_equipo") for ev in eventos), eventos
     assert any(ev.startswith("pendiente_cerrado:") or ev == "pendiente_cerrado" for ev in eventos), eventos
+
+
+# ------------- los dos avisos al cliente salen SIEMPRE fuera de la ventana
+
+
+def test_the_reminder_carries_a_template_because_it_always_leaves_the_window(
+    mundo,
+) -> None:
+    """Las horas se cuentan desde que se creó el borrador.
+
+    O sea desde el último mensaje del cliente: con el `aviso de pendiente 48`
+    recomendado, esto sale un día entero después de que la ventana de 24 h se
+    cerró. Sin plantilla no falla a veces, falla SIEMPRE — y el dueño recibe un
+    «no se pudo entregar» en vez de que el cliente reciba el aviso.
+    """
+    _listo(mundo)  # PENDIENTE_AVISO_HORAS=2
+
+    pendientes.tick(ahora=epoch(15))
+
+    avisados = [e for e in _en_cola() if e["evento"].startswith("pendiente_aviso")]
+    assert len(avisados) == 1
+    assert avisados[0]["plantilla_env"] == pendientes.PLANTILLA_RECORDATORIO
+    assert avisados[0]["parametros"] == [PEDIDO]
+
+
+def test_the_closure_notice_carries_its_template_too(mundo, monkeypatch) -> None:
+    """Y este es peor: hasta 168 h después, y el stock ya se soltó."""
+    monkeypatch.setenv("PENDIENTE_CIERRE_HORAS", "4")
+    _listo(mundo)
+
+    pendientes.tick(ahora=epoch(15))
+
+    cerrados = [
+        e for e in _en_cola() if e["evento"].startswith("pendiente_cerrado")
+        and not e["evento"].startswith("pendiente_cerrado_equipo")
+    ]
+    assert len(cerrados) == 1
+    assert cerrados[0]["plantilla_env"] == pendientes.PLANTILLA_CERRADO
+    assert cerrados[0]["parametros"] == [PEDIDO]

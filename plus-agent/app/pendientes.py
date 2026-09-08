@@ -68,6 +68,17 @@ MAX_CANDIDATOS = 100
 # llamadas a ERPNext, y el barrido comparte su hilo con los vencimientos.
 POR_RONDA = 10
 
+# Los dos avisos al cliente de este módulo salen SIEMPRE fuera de la ventana de
+# 24 h de Meta: el recordatorio a las PENDIENTE_AVISO_HORAS (hasta 48) y el
+# cierre a las PENDIENTE_CIERRE_HORAS (hasta 168) contadas desde que se creó el
+# borrador, o sea desde el último mensaje del cliente. Con el 48 recomendado el
+# recordatorio sale un día entero después de que la ventana se cerró: sin
+# plantilla no hay canal, `_enviar` devuelve "" en cada intento y el aviso se
+# aparca — el dueño recibe un "no se pudo entregar" y el cliente, nada. Un
+# parámetro cada una: el número de pedido. Los parámetros son DATOS, no prosa,
+# porque una plantilla vive registrada en UN idioma en Meta.
+PLANTILLA_RECORDATORIO = "WHATSAPP_CUSTOMER_PENDING_TEMPLATE"
+PLANTILLA_CERRADO = "WHATSAPP_CUSTOMER_PENDING_CLOSED_TEMPLATE"
 MARCA_AVISO = "[pendiente-aviso]"
 MARCA_CIERRE = "[pendiente-cerrado]"
 
@@ -255,9 +266,16 @@ def _sin_solicitud_abierta(pedidos: list[str]) -> list[str]:
     les avisa al cliente y les ofrece un respaldo cuando vencen. Anotarlos,
     empujarlos o cerrarlos desde acá sería el segundo aviso por el mismo pedido.
 
-    Si la lectura falla se devuelven TODOS para la sombra —un registro de más no
-    le hace nada a nadie— pero el aviso y el cierre vuelven a preguntar antes de
-    tocar algo, porque ahí un error sí se le nota al cliente.
+    FALLA CERRADO: si la lectura no se puede hacer, no se devuelve NINGUNO.
+    Una respuesta ilegible acá no significa «ninguno tiene plazo», significa «no
+    sé si hay un cliente esperando por este pedido», y lo único seguro que se
+    puede hacer con eso es no tocar ningún borrador esta ronda.
+
+    Devolverlos todos —como hacía antes— dejaba que el cierre le soltara el
+    stock y le dijera «no se confirmó» a un cliente que TIENE una oferta viva
+    con plazo, porque `_sigue_esperando` mira `docstatus` y `status` y no si hay
+    una solicitud abierta. Una ronda salteada no le cuesta nada a nadie; ese
+    mensaje sí.
     """
     if not pedidos:
         return []
@@ -266,8 +284,11 @@ def _sin_solicitud_abierta(pedidos: list[str]) -> list[str]:
     try:
         con_plazo = solicitudes.vencimientos(pedidos)
     except Exception as exc:
-        print(f"[pendientes] no pude ver qué borradores ya tienen plazo: {type(exc).__name__}")
-        return list(pedidos)
+        print(
+            f"[pendientes] no pude ver qué borradores ya tienen plazo "
+            f"({type(exc).__name__}); esta ronda no toca ninguno"
+        )
+        return []
     return [p for p in pedidos if p not in con_plazo]
 
 
@@ -401,7 +422,14 @@ def _avisar(filas: list[dict], momento: datetime) -> int:
             # la marca va igual. Si no fuera así el barrido volvería a preguntar
             # por este pedido cada 60 s para siempre. Sólo un encolar que LEVANTA
             # deja el pedido sin marca, y ahí sí hay que reintentar.
-            nuevo = avisos.encolar("pendiente_aviso", pedido, telefono, texto)
+            nuevo = avisos.encolar(
+                "pendiente_aviso",
+                pedido,
+                telefono,
+                texto,
+                plantilla_env=PLANTILLA_RECORDATORIO,
+                parametros=[pedido],
+            )
             erpnext.add_comment(
                 "Sales Order", pedido, f"{MARCA_AVISO} {_sello(momento)}"
             )
@@ -525,6 +553,8 @@ def _cerrar(filas: list[dict], momento: datetime) -> int:
                     pedido,
                     telefono,
                     pendiente_cerrado(pedido, idioma.para_destinatario(telefono)),
+                    plantilla_env=PLANTILLA_CERRADO,
+                    parametros=[pedido],
                 )
         except Exception as exc:
             print(f"[pendientes] {pedido}: aviso de cierre no encolado ({type(exc).__name__})")

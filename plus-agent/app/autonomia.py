@@ -268,10 +268,17 @@ def sombras(dias: int = DIAS_DEFAULT) -> dict | None:
 
 
 def revisiones(dias: int = DIAS_DEFAULT) -> dict | None:
-    """Los frenos que dejó `_after_create`, para los pedidos sin sombra.
+    """Los frenos que dejó `_after_create`, agrupados por fragmentos.
 
-    Prosa interpolada, agrupada por fragmentos: menos preciso que `sombras`, y
-    la única fuente cuando el modo sombra está apagado.
+    Prosa interpolada: menos preciso que `sombras`, y la única fuente cuando el
+    modo sombra está apagado.
+
+    OJO, y es un bug abierto: esto NO excluye los pedidos que sí tienen
+    registro de sombra, y `texto` elige una fuente O la otra con un `or`. Así,
+    un solo freno de sombra en la ventana tapa TODOS los frenos que sólo
+    figuran acá. El desglose de motivos todavía no es confiable para decidir
+    subir un límite; los conteos de confirmados, rechazos y sombra sí lo son.
+    Se arregla en el PR siguiente, antes de que haya datos de sombra que mirar.
     """
     leido = _comentarios(MARCA_REVISION, _desde(dias))
     if leido is None:

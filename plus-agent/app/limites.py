@@ -309,12 +309,17 @@ LIMITES: dict[str, Definicion] = {
         ),
         unidad="h",
         default=NINGUNO,
-        maximo=720.0,
+        # Una semana. Treinta días no es un plazo, es un borrador olvidado
+        # reteniendo stock que otro cliente podía llevarse — que es justo lo
+        # que este límite existe para evitar.
+        maximo=168.0,
         opcional=True,
     ),
-    # Las horas de silencio. Sólo frenan el recordatorio NO SOLICITADO de
-    # arriba: la confirmación de un pedido sale cuando el pedido se confirma,
-    # sean las 22:10 o las 6 de la mañana, porque el cliente la está esperando.
+    # Las horas de silencio. Frenan lo que el barrido le diría a un cliente sin
+    # que lo haya pedido: el recordatorio de arriba y el cierre automático, que
+    # también le habla. NO frenan la confirmación de un pedido, que sale cuando
+    # el pedido se confirma, sean las 22:10 o las 6 de la mañana, porque el
+    # cliente la está esperando.
     "PENDIENTE_NOCHE_DESDE": Definicion(
         nombre="PENDIENTE_NOCHE_DESDE",
         alias=("no molestar desde", "silencio desde", "noche desde"),
