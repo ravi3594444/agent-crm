@@ -309,3 +309,43 @@ def test_the_window_is_read_on_every_call_not_at_import(
         assert inventario.horas_de_validez() == 6.0
     finally:
         os.environ.pop("STOCK_CONFIABLE_HORAS", None)
+
+
+def test_a_count_from_an_erpnext_in_another_timezone_is_trusted_when_it_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Por qué `readiness.chequear_zona_erpnext` BLOQUEA en vez de avisar.
+
+    `posting_date` y `posting_time` vienen SIN zona, en la hora del sistema de
+    ERPNext, y `_momento` los lee en BUSINESS_TIMEZONE. Con ERPNext al ESTE
+    del negocio el sello se lee como más nuevo de lo que es, la ventana de
+    STOCK_CONFIABLE_HORAS se ensancha por el offset entero, y un conteo
+    VENCIDO pasa como fresco. Ahí `confiable` deja de ser un freno de
+    `policy.evaluar`: el pedido se auto-confirma sobre stock que nadie contó
+    recién.
+
+    Es el mismo defecto que corre las edades de `pendientes`, pero acá el
+    número decide, no informa — y por eso una zona distinta bloquea el
+    despliegue en vez de quedar en aviso.
+
+    Este test DOCUMENTA el defecto, no lo arregla: el arreglo es exigir que
+    las dos zonas coincidan. Quien lo cambie por una conversión en runtime
+    tiene que hacerlo fallar a propósito, y ahí es cuando hay que releer por
+    qué se eligió exigir en vez de convertir.
+    """
+    # Un conteo de hace 30 h, con la ventana en 24: vencido, sin discusión.
+    real = AHORA - timedelta(hours=30)
+    en_erpnext = real.astimezone(ZoneInfo("Asia/Kolkata"))
+    _conteos(
+        monkeypatch,
+        posting=(en_erpnext.date().isoformat(), en_erpnext.strftime("%H:%M:%S")),
+    )
+
+    # 30 h reales menos las 8:30 de offset = 21.5 h, que entra en la ventana.
+    assert inventario.confiable("LECHE-1L", DEPOSITO) == (True, "")
+
+    # El MISMO conteo, con las dos zonas iguales, se rechaza como vencido.
+    _conteos(monkeypatch, hace_horas=30)
+    confiable, motivo = inventario.confiable("LECHE-1L", DEPOSITO)
+    assert confiable is False
+    assert "el último conteo" in motivo

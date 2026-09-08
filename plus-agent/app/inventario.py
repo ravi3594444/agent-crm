@@ -61,7 +61,29 @@ def _ahora() -> datetime:
 
 
 def _momento(fila: dict) -> datetime | None:
-    """Cuándo dice ERPNext que se hizo el conteo, en hora del negocio."""
+    """Cuándo dice ERPNext que se hizo el conteo, en hora del negocio.
+
+    TERCER LUGAR QUE LEE UN SELLO SIN ZONA DE ERPNEXT, y el de más peso.
+    `posting_date` + `posting_time` vienen sin zona, en la hora del sistema de
+    ERPNext (`System Settings.time_zone`), y acá se interpretan en
+    BUSINESS_TIMEZONE — la misma suposición que `pendientes.edad_horas` y
+    `autonomia._creacion`, y ya no muda:
+    `readiness.chequear_zona_erpnext` compara las dos zonas y BLOQUEA el
+    despliegue si difieren. Una comparación cubre los tres.
+
+    La diferencia con los otros dos es a dónde va el número. Éste alimenta
+    `confiable`, que es un freno de `policy.evaluar`: si la zona del agente
+    está al OESTE de la de ERPNext, las edades salen más chicas, la ventana de
+    confianza se ensancha por el offset en silencio, y un conteo de hace 30 h
+    pasa como fresco con STOCK_CONFIABLE_HORAS=24. Eso no es una edad mal
+    informada: es un pedido auto-confirmado sobre stock que nadie contó
+    recién. Al este falla al revés —la confianza vence temprano y un conteo
+    fechado en el futuro se acepta—, que es la dirección barata.
+
+    Y ningún test de este archivo lo puede ver: `tests/test_inventario.py`
+    arma el sello naive a partir de su propio `AHORA` en Buenos Aires, así que
+    comparte la suposición del código, igual que los de `pendientes`.
+    """
     fecha = str(fila.get("posting_date") or "").strip()
     hora = str(fila.get("posting_time") or "00:00:00").strip()
     if not fecha:

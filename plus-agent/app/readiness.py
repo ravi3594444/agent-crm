@@ -596,10 +596,12 @@ def chequear_zona_erpnext(
 
     ERPNext guarda `creation` SIN zona, en la hora de su propio sistema —
     `System Settings.time_zone`, que el asistente de instalación pone según el
-    país elegido—. Y `pendientes.edad_horas` y `autonomia._creacion`
-    interpretan ese campo en BUSINESS_TIMEZONE, porque es el único reloj con el
-    que decide todo el resto del código. Son DOS zonas configuradas por
-    separado y supuestas iguales, y hasta acá nada las comparaba.
+    país elegido—. Y TRES lugares interpretan un sello así en
+    BUSINESS_TIMEZONE, porque es el único reloj con el que decide todo el resto
+    del código: `pendientes.edad_horas`, `autonomia._creacion` y
+    `inventario._momento` (que lee `posting_date` + `posting_time` de la Stock
+    Reconciliation). Son DOS zonas configuradas por separado y supuestas
+    iguales, y hasta acá nada las comparaba. Una comparación cubre los tres.
 
     Cuando no coinciden, TODA edad sale corrida por el offset, en silencio, y
     ningún test lo puede ver porque los tests comparten la suposición del
@@ -620,6 +622,13 @@ def chequear_zona_erpnext(
     cliente y el cierre que le suelta el stock, así que una zona distinta es el
     sistema mandando esos dos a la hora equivocada. Y se arregla con una línea
     en ERPNext, así que bloquear no deja a nadie trabado sin salida.
+
+    El tercer lugar sube la apuesta: la edad que calcula `inventario._momento`
+    decide `confiable`, que es un freno de `policy.evaluar`. Con la zona del
+    agente al OESTE de la de ERPNext las edades salen más chicas, la ventana de
+    STOCK_CONFIABLE_HORAS se ensancha por el offset y un conteo de hace 30 h
+    pasa como fresco con la ventana en 24. Ahí una zona mal puesta no informa
+    mal: auto-confirma un pedido sobre stock que nadie contó recién.
 
     POR QUÉ NO BLOQUEA CUANDO NO SE PUDO LEER
     Mismo motivo que las plantillas opcionales de más arriba: `--sin-red` es la
