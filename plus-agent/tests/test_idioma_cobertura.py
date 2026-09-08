@@ -274,12 +274,60 @@ def test_los_datos_sobreviven_identicos_a_los_dos_idiomas(dato):
 
 # ------------------------------------------------------- auditoría estática
 
-_SINKS = {"enviar_mensaje", "enviar_botones", "enviar_plantilla"}
+# Los puntos de salida, y los ENVOLTORIOS que llegan a ellos. Los tres
+# primeros son las funciones de `app/whatsapp.py` que hablan con Meta; los
+# otros cinco son las que el resto de `app/` llama de verdad, y son las que
+# reciben la prosa.
+#
+# Mirar sólo los tres de abajo era la razón por la que esta auditoría no
+# auditaba nada: hay 18 llamadas a esos tres en todo `app/`, y NINGUNA recibe
+# un literal — la prosa entra por los envoltorios, o ya viene resuelta del
+# catálogo. Con esos tres solos, `test_ningun_punto_de_salida_recibe_un_literal_en_espanol`
+# no podía fallar nunca, y el registro escrito a mano de
+# `_todos_los_constructores` quedaba como el único audit vivo.
+_SINKS = {
+    # Las tres puertas reales a Meta.
+    "enviar_mensaje",
+    "enviar_botones",
+    "enviar_plantilla",
+    # Los envoltorios por los que entra la prosa. `app/notificar.py` y
+    # `app/avisos.py` los exponen, y el resto de la app llama a éstos.
+    "pedir_confirmacion_conteo",
+    "pedir_codigo_de_ajuste",
+    "encolar_equipo",
+    "alertar_excepcion",
+    "avisar_escalamiento",
+}
 _APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 
 
+def _texto_del_nodo(nodo: ast.AST) -> str | None:
+    """El texto de un literal, incluidas las f-strings.
+
+    Una f-string es un `ast.JoinedStr` y no un `ast.Constant`, así que mirar
+    sólo constantes dejaba afuera justo la forma en que se escribe la prosa
+    interpolada — que es casi toda. De la f-string se juntan sus partes
+    constantes: los `{...}` son DATOS, y un dato no tiene idioma.
+    """
+    if isinstance(nodo, ast.Constant) and isinstance(nodo.value, str):
+        return nodo.value
+    if isinstance(nodo, ast.JoinedStr):
+        partes = [
+            t.value
+            for t in nodo.values
+            if isinstance(t, ast.Constant) and isinstance(t.value, str)
+        ]
+        return " ".join(partes) if partes else None
+    return None
+
+
 def _literales_en_sinks() -> list[tuple[str, int, str]]:
-    """Literales en español pasados DIRECTO a un punto de salida."""
+    """Literales en español pasados DIRECTO a un punto de salida.
+
+    Mira los argumentos posicionales Y los nombrados, y las f-strings además
+    de las constantes. Las cuatro cosas hacen falta: `enviar_plantilla` recibe
+    el cuerpo por `texto=`, y la prosa interpolada se escribe con f-strings.
+    """
     hallados = []
     for archivo in sorted(_APP.rglob("*.py")):
         if "__pycache__" in str(archivo):
@@ -291,17 +339,57 @@ def _literales_en_sinks() -> list[tuple[str, int, str]]:
             nombre = getattr(nodo.func, "attr", None) or getattr(nodo.func, "id", None)
             if nombre not in _SINKS:
                 continue
-            for arg in nodo.args:
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    restos = restos_en_espanol(
-                        arg.value, PERMITIDO_EN_SALIDA_INGLESA
+            candidatos = list(nodo.args) + [kw.value for kw in nodo.keywords]
+            for arg in candidatos:
+                texto = _texto_del_nodo(arg)
+                if texto is None:
+                    continue
+                if restos_en_espanol(texto, PERMITIDO_EN_SALIDA_INGLESA):
+                    hallados.append(
+                        (str(archivo.relative_to(_APP.parent)), nodo.lineno, texto[:70])
                     )
-                    if restos:
-                        hallados.append(
-                            (str(archivo.relative_to(_APP.parent)), nodo.lineno,
-                             arg.value[:70])
-                        )
     return hallados
+
+
+def _alcance_de_la_auditoria_estatica() -> tuple[int, int]:
+    """(llamadas a un sink, textos que se inspeccionaron de verdad)."""
+    llamadas = textos = 0
+    for archivo in sorted(_APP.rglob("*.py")):
+        if "__pycache__" in str(archivo):
+            continue
+        for nodo in ast.walk(ast.parse(archivo.read_text())):
+            if not isinstance(nodo, ast.Call):
+                continue
+            nombre = getattr(nodo.func, "attr", None) or getattr(nodo.func, "id", None)
+            if nombre not in _SINKS:
+                continue
+            llamadas += 1
+            for arg in list(nodo.args) + [kw.value for kw in nodo.keywords]:
+                if _texto_del_nodo(arg) is not None:
+                    textos += 1
+    return llamadas, textos
+
+
+def test_la_auditoria_estatica_inspecciona_algo():
+    """El guard del guard: una auditoría vacía no es una auditoría limpia.
+
+    Mirando sólo `enviar_mensaje`/`enviar_botones`/`enviar_plantilla` y sólo
+    `ast.Constant`, esta auditoría encontraba 18 llamadas y **0** textos, así
+    que `test_ningun_punto_de_salida_recibe_un_literal_en_espanol` no podía
+    fallar nunca — pasaba por vacía, y su docstring prometía cubrir «los
+    caminos que la de ejecución no alcanza». El registro escrito a mano de
+    `_todos_los_constructores` quedaba como el único audit vivo, y por eso una
+    filtración en `app/tools/captura.py` vivía en el árbol con la suite verde.
+
+    Un cero acá no es una buena noticia: es la auditoría avisando que no está
+    mirando. Por eso el número es una aserción y no un comentario.
+    """
+    llamadas, textos = _alcance_de_la_auditoria_estatica()
+    assert llamadas >= 18, f"se perdieron puntos de salida: {llamadas}"
+    assert textos > 0, (
+        "la auditoría estática no inspeccionó NINGÚN texto: mira los "
+        "envoltorios correctos y las f-strings, o no está auditando nada"
+    )
 
 
 def test_ningun_punto_de_salida_recibe_un_literal_en_espanol():

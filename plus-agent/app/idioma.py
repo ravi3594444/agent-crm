@@ -936,6 +936,67 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "No me alcanza el stock de {producto} para esa cantidad.",
         EN: "I don't have enough stock of {producto} for that quantity.",
     },
+    # El conteo físico que el dueño manda por WhatsApp. Va en DOS filas
+    # enteras y no en una con un fragmento «faltan»/«sobran» pegado: en
+    # inglés la diferencia va del otro lado del número («2 short», no
+    # «short 2»), y armar la oración con pedazos es cómo se produce el
+    # español a medio traducir que este catálogo existe para no tener.
+    "stock.conteo_faltan": {
+        ES: (
+            "Conteo de {producto} ({ajuste}): el sistema decía {sistema}, "
+            "vos contaste {contado} — faltan {diferencia}."
+        ),
+        EN: (
+            "Count of {producto} ({ajuste}): the system said {sistema}, "
+            "you counted {contado} — {diferencia} short."
+        ),
+    },
+    "stock.conteo_sobran": {
+        ES: (
+            "Conteo de {producto} ({ajuste}): el sistema decía {sistema}, "
+            "vos contaste {contado} — sobran {diferencia}."
+        ),
+        EN: (
+            "Count of {producto} ({ajuste}): the system said {sistema}, "
+            "you counted {contado} — {diferencia} over."
+        ),
+    },
+    # El cuerpo del botón. Éste es el que le llega al dueño por WhatsApp, así
+    # que es el que la auditoría estática marcaba.
+    "stock.conteo_confirmar": {
+        ES: "¿Confirmo el ajuste?",
+        EN: "Shall I apply the adjustment?",
+    },
+    # Las dos respuestas al modelo. El NOMBRE del botón queda en español en
+    # las dos versiones a propósito: es la etiqueta que Meta tiene registrada
+    # y que el dueño va a ver literalmente en la pantalla, así que decirle
+    # «tap *Confirm count*» sería mandarlo a buscar un botón que no existe.
+    # Traducir la etiqueta es del PR de inglés; hasta entonces, esto dice la
+    # verdad sobre lo que hay en la pantalla.
+    "stock.conteo_boton_enviado": {
+        ES: (
+            "{resumen} Le mandé el botón *Confirmar conteo*. Hasta que lo "
+            "toque, el conteo es un borrador y el bot no promete stock de "
+            "{producto}."
+        ),
+        EN: (
+            "{resumen} I sent them the *Confirmar conteo* button. Until they "
+            "tap it the count is a draft and the bot promises no stock of "
+            "{producto}."
+        ),
+    },
+    "stock.conteo_sin_boton": {
+        ES: (
+            "{resumen} No pude mandarle el botón de confirmación: tiene que "
+            "confirmar {ajuste} en ERPNext. Hasta entonces el bot no promete "
+            "stock de {producto}."
+        ),
+        EN: (
+            "{resumen} I could not send them the confirmation button: they "
+            "have to confirm {ajuste} in ERPNext. Until then the bot promises "
+            "no stock of {producto}."
+        ),
+    },
     "precio.a_confirmar": {
         ES: "precio a confirmar",
         EN: "price to be confirmed",
