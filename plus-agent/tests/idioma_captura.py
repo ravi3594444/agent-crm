@@ -155,7 +155,24 @@ def restos_en_espanol(texto: object, permitido: tuple[str, ...] = ()) -> list[st
     # `<pedido>`, que nunca se reducía a `pedido`. Lo mismo tapaba justo la
     # filtración que este PR vino a poder ver: `«sin stock»` daba limpio
     # mientras `sin stock` daba `sin`.
-    _BORDES = ".,;:!?()[]'\"*·—-…«»<>“”‘’"
+    #
+    # Y los signos de apertura van PRIMEROS porque eran el peor caso de todos:
+    # son los más españoles que hay, y pegados a la palabra la escondían.
+    # `¿sin conteo de stock?` reportaba `['¿', 'de']` — el `de` del medio sí,
+    # y el `sin` pegado al `¿` no. El texto quedaba marcado por el acento, así
+    # que no era ceguera, pero la lista de palabras mentía sobre cuáles se
+    # filtraron, y es esa lista la que compara por igualdad el guard del
+    # handoff.
+    #
+    # LO QUE NO VA ACÁ, Y NO ES UN OLVIDO: las llaves. `{}` es la sintaxis de
+    # los placeholders, y los nombres de esos placeholders son ARGUMENTOS de
+    # Python, deliberadamente en español en las dos versiones — la plantilla
+    # inglesa de `pedido.confirmado_cliente` dice `Order {pedido} confirmed`.
+    # Recortarlas convertiría `{pedido}` en la ficha `pedido` y marcaría 41 de
+    # las 129 claves inglesas del catálogo: el audit se volvería ruido puro,
+    # que es exactamente lo que este archivo existe para no ser. Medido, no
+    # supuesto. Un nombre de variable no tiene idioma.
+    _BORDES = "¿¡.,;:!?()[]'\"*·—-…«»<>“”‘’•–"
     fichas = {f.strip(_BORDES) for f in plano.split()}
     hallados.extend(sorted(fichas & _PALABRAS_ES))
     return hallados

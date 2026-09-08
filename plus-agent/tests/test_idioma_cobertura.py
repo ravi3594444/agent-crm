@@ -419,6 +419,14 @@ _ENVUELTO_EN_SIGNOS = [
     ("Reply «confirmar <pedido>», «rechazar <pedido>».", "pedido"),
     ("placeholder <motivo> never got migrated", "motivo"),
     ("Blocked by «tope del pedido».", "del"),
+    # Los signos de apertura eran el peor caso: son los más españoles que hay
+    # y aun así escondían la palabra que envolvían. El texto quedaba marcado
+    # por el acento —`¿` está en `_ACENTOS`— así que no era ceguera, pero la
+    # lista de palabras mentía: `¿sin conteo de stock?` reportaba el `de` del
+    # medio y no el `sin` pegado al signo.
+    ("¿sin stock?", "sin"),
+    ("¡de!", "de"),
+    ("¿sin conteo de stock?", "sin"),
 ]
 
 
@@ -426,6 +434,34 @@ _ENVUELTO_EN_SIGNOS = [
 def test_los_signos_de_los_bordes_no_esconden_la_palabra(texto, palabra):
     """Una palabra entre guillemets o entre `<>` sigue siendo esa palabra."""
     assert palabra in restos_en_espanol(texto, DATOS + PERMITIDO_EN_SALIDA_INGLESA)
+
+
+def test_las_llaves_de_los_placeholders_no_se_recortan():
+    """Un nombre de placeholder no es prosa, y no tiene idioma.
+
+    `{}` es sintaxis de `str.format` y los nombres que van adentro son
+    argumentos de Python, deliberadamente en español en las DOS versiones: la
+    plantilla inglesa de `pedido.confirmado_cliente` dice
+    `Order {pedido} confirmed`. Si `_BORDES` recortara las llaves, `{pedido}`
+    daría la ficha `pedido` y el audit marcaría 41 de las 129 claves inglesas
+    del catálogo — ruido puro, que es lo que vuelve inservible a un audit.
+
+    Es la contracara del arreglo de `«»` y `<>`: ahí el signo escondía una
+    palabra que SÍ era prosa. Acá el signo dice que lo de adentro no lo es.
+    Este test es lo que impide que alguien «complete» el conjunto de signos.
+    """
+    assert restos_en_espanol("Order {pedido} confirmed") == []
+    assert restos_en_espanol("Delivery: {entrega} · waiting {horas}") == []
+    # Y el catálogo inglés entero, que es de donde salen esas plantillas.
+    sucias = {
+        clave
+        for clave, valores in idioma.CATALOGO.items()
+        for texto in (
+            valores[EN] if isinstance(valores.get(EN), (list, tuple)) else [valores.get(EN)]
+        )
+        if texto and restos_en_espanol(texto, PERMITIDO_EN_SALIDA_INGLESA)
+    }
+    assert sucias == set(), f"el catálogo inglés no puede filtrar: {sorted(sucias)}"
 
 
 def test_lo_permitido_no_se_recorta_en_el_medio_de_una_palabra():
