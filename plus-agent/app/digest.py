@@ -229,12 +229,17 @@ def seccion_pendientes() -> str:
         _linea_pedido(f, edad=pendientes.edad_horas(f, ahora), a_mano=True)
         for f in a_mano
     ]
-    if lineas:
-        lineas.append("Respondé 'confirmar <pedido>', 'rechazar <pedido>' o 'ver <pedido>'.")
     titulo = "🟡 Esperan tu decisión"
     if a_mano:
         titulo = f"{titulo} · {len(del_bot)} del bot + {len(a_mano)} cargados a mano"
-    return _seccion(titulo, lineas, "ninguno")
+    # La instrucción va DESPUÉS de armar la sección, no dentro de `lineas`:
+    # `_seccion` usa len(lineas) como el total entre paréntesis, así que
+    # meterla ahí hacía que el encabezado dijera uno más que los pedidos que
+    # lista — justo lo que el docstring promete que no puede pasar.
+    cuerpo = _seccion(titulo, lineas, "ninguno")
+    if lineas:
+        cuerpo += "\nRespondé 'confirmar <pedido>', 'rechazar <pedido>' o 'ver <pedido>'."
+    return cuerpo
 
 
 def seccion_conteos() -> str:

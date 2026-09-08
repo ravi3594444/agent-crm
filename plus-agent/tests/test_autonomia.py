@@ -698,3 +698,39 @@ def test_the_sweep_templates_do_not_get_the_misleading_optional_message() -> Non
         assert "opcional en el piloto" not in por_clave[variable]
     # Y las otras conservan su mensaje, que para ellas sí es cierto.
     assert "opcional en el piloto" in por_clave["WHATSAPP_STAFF_PENDING_TEMPLATE"]
+
+
+# ------------------------------------- la zona con la que se lee ERPNext
+
+
+def test_erpnext_timestamps_are_read_in_the_business_zone_not_utc(monkeypatch):
+    """El MISMO campo no puede significar dos horas distintas.
+
+    ERPNext guarda `creation` sin zona, en la hora de su propio sistema — la
+    del negocio. `pendientes.edad_horas` ya lo lee así para decidir la edad de
+    un borrador. Leerlo como UTC acá movía la ventana del informe el offset
+    entero (tres horas en Buenos Aires), así que un comentario del borde
+    entraba o salía por error.
+    """
+    from app import autonomia, pendientes
+
+    monkeypatch.setenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires")
+
+    momento = autonomia._creacion({"creation": "2026-09-08 09:00:00"})
+
+    assert momento is not None
+    assert momento.tzinfo is not None
+    assert momento.utcoffset() == pendientes._zona().utcoffset(momento.replace(tzinfo=None))
+    # Y el corte de la ventana se calcula en la misma zona, porque el string
+    # que se le manda a ERPNext se compara contra esos mismos `creation`.
+    assert autonomia._desde(7).utcoffset() == momento.utcoffset()
+
+
+def test_a_timestamp_that_already_carries_a_zone_is_left_alone(monkeypatch):
+    from app import autonomia
+
+    monkeypatch.setenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires")
+
+    momento = autonomia._creacion({"creation": "2026-09-08T09:00:00+00:00"})
+
+    assert momento is not None and momento.utcoffset().total_seconds() == 0

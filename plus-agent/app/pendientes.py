@@ -417,11 +417,12 @@ def _avisar(filas: list[dict], momento: datetime) -> int:
 def _recordar_al_dueno(vencidos: list[tuple[dict, float]], momento: datetime) -> None:
     """Un resumen al dueño, una vez por día, no una vez por ronda de 60 s."""
     from app import notificar
-    from app.outbound_status import claim_once
+    from app.outbound_status import claim_once, release_claim
 
     dia = momento.date().isoformat()
+    clave = f"pendientes-dueno:{dia}"
     try:
-        if not claim_once(f"pendientes-dueno:{dia}", 24 * 60 * 60):
+        if not claim_once(clave, 24 * 60 * 60):
             return
     except Exception as exc:
         print(f"[pendientes] no pude reclamar el recordatorio del día ({type(exc).__name__})")
@@ -433,12 +434,24 @@ def _recordar_al_dueno(vencidos: list[tuple[dict, float]], momento: datetime) ->
         for f, edad in vencidos[:15]
     )
     asunto, cuerpo = recordatorio_dueno(len(vencidos), lineas, lengua)
+    # La reclamación se DEVUELVE si el aviso no salió. Quedársela igual gastaba
+    # el día entero por un fallo transitorio: `avisar_dueno` no levanta, avisa
+    # con un False (sin destinatario, o Meta que rechaza sin plantilla), y el
+    # dueño se quedaba sin el recordatorio hasta mañana con borradores vivos.
+    entregado = False
     try:
-        notificar.avisar_dueno(
-            asunto, cuerpo, plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE"
+        entregado = bool(
+            notificar.avisar_dueno(
+                asunto, cuerpo, plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE"
+            )
         )
     except Exception as exc:
         print(f"[pendientes] recordatorio al dueño falló ({type(exc).__name__})")
+    if not entregado:
+        try:
+            release_claim(clave)
+        except Exception as exc:
+            print(f"[pendientes] no pude devolver la reclamación ({type(exc).__name__})")
 
 
 # --------------------------------------------------------------- el cierre
@@ -479,12 +492,22 @@ def _cerrar(filas: list[dict], momento: datetime) -> int:
                     # terminal: la próxima ronda vuelve a preguntar.
                     print(f"[pendientes] {pedido}: no pude cerrarlo ({detalle})")
                     continue
-                erpnext.add_comment(
-                    "Sales Order",
-                    pedido,
-                    f"{MARCA_CIERRE} {_sello(momento)} sin decisión en "
-                    f"{horas:g} h; {detalle}",
-                )
+                try:
+                    erpnext.add_comment(
+                        "Sales Order",
+                        pedido,
+                        f"{MARCA_CIERRE} {_sello(momento)} sin decisión en "
+                        f"{horas:g} h; {detalle}",
+                    )
+                except Exception as exc:
+                    # Su propio try: el cierre YA pasó y la próxima ronda no lo
+                    # vuelve a mirar (`_sigue_esperando` lo ve cerrado), así que
+                    # si este fallo cayera en el except de afuera se saltearían
+                    # los dos avisos y nadie se enteraría nunca del cierre.
+                    print(
+                        f"[pendientes] {pedido}: cerrado, pero la marca no quedó "
+                        f"({type(exc).__name__})"
+                    )
         except CoordinationError:
             continue  # ronda salteada, nunca un cambio a medias
         except Exception as exc:

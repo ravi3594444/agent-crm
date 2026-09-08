@@ -42,7 +42,7 @@ dueño baja un límite que no hacía falta bajar.
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from app import entrega, erpnext, idioma, policy
 
@@ -112,10 +112,29 @@ def grupo(motivo: object) -> str:
 
 
 def _desde(dias: int) -> datetime:
-    return datetime.now(UTC) - timedelta(days=max(1, int(dias or DIAS_DEFAULT)))
+    """El corte de la ventana, en la hora del NEGOCIO.
+
+    No en UTC: el string que se le manda a ERPNext se compara contra sus
+    `creation` sin zona, que están en la hora de su propio sistema — la del
+    negocio. Un corte en UTC movía la ventana el offset entero (tres horas
+    acá), así que los comentarios del borde entraban o salían por error.
+    """
+    from app import pendientes
+
+    return datetime.now(pendientes._zona()) - timedelta(
+        days=max(1, int(dias or DIAS_DEFAULT))
+    )
 
 
 def _creacion(fila: dict) -> datetime | None:
+    """El `creation` de un comentario, interpretado como lo hace `pendientes`.
+
+    ERPNext guarda sin zona, en la hora de su propio sistema. `edad_horas` ya
+    lo lee así para decidir la edad de un borrador; leerlo como UTC acá hacía
+    que los dos módulos discreparan por el offset sobre el MISMO campo.
+    """
+    from app import pendientes
+
     crudo = str(fila.get("creation") or "").strip()
     if not crudo:
         return None
@@ -123,7 +142,9 @@ def _creacion(fila: dict) -> datetime | None:
         momento = datetime.fromisoformat(crudo)
     except (TypeError, ValueError):
         return None
-    return momento.replace(tzinfo=UTC) if momento.tzinfo is None else momento
+    if momento.tzinfo is None:
+        return momento.replace(tzinfo=pendientes._zona())
+    return momento
 
 
 def _comentarios(marca: str, desde: datetime) -> tuple[list[dict], bool] | None:

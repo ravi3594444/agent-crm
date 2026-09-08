@@ -262,3 +262,33 @@ def test_exception_alerts_keep_their_own_routing(mundo):
     """Only the digest changed recipient; alertar_excepcion is untouched."""
     assert notificar.alertar_excepcion("⚠️ prueba", "cuerpo") is True
     assert [p for p, _ in mundo["enviados"]] == [sorted([DUENO, EMPLEADO])[0]]
+
+
+# --------------------------------- el total de la sección no cuenta la orden
+
+
+def test_the_pending_section_header_counts_orders_not_the_instruction_line(
+    mundo, monkeypatch
+):
+    """El docstring promete que el total nunca discute con el desglose.
+
+    `_seccion` usa len(lineas) como el número entre paréntesis, así que meter
+    la línea de instrucciones dentro de `lineas` hacía que el encabezado dijera
+    uno más que los pedidos listados: «2 del bot + 1 cargados a mano (4)».
+    """
+    from app import pendientes
+
+    filas = [
+        {"name": "SO-1", "po_no": "WA-" + "a" * 40, "creation": "2026-09-06 09:00:00"},
+        {"name": "SO-2", "po_no": "WA-" + "b" * 40, "creation": "2026-09-06 09:00:00"},
+        {"name": "SO-3", "po_no": "OC-4471", "creation": "2026-09-06 09:00:00"},
+    ]
+    monkeypatch.setattr(pendientes, "listar_esperando", lambda **k: filas)
+    monkeypatch.setattr(pendientes, "edad_horas", lambda f, ahora=None: 3.0)
+
+    salida = digest.seccion_pendientes()
+
+    assert "2 del bot + 1 cargados a mano (3):" in salida
+    assert "(4)" not in salida
+    # Y la instrucción sigue estando, sólo que fuera de la cuenta.
+    assert "Respondé 'confirmar <pedido>'" in salida

@@ -182,9 +182,16 @@ def anotar(pedido: str, sales_order: dict) -> bool:
         "ts": _ahora().isoformat(),
     }
     texto = f"{MARCA} {json.dumps(carga, ensure_ascii=False, sort_keys=True)}"
+    # `registrar_comentario` LEVANTA y `add_comment` se lo traga. Acá hace
+    # falta el que levanta, y el try/except lo vuelve best-effort igual: sigue
+    # sin cambiar una palabra de lo que se le dice a un cliente. La diferencia
+    # es que ahora "no hubo excepción" sí significa "quedó escrito", así que el
+    # contador y el True que devuelve esta función no cuentan un registro que
+    # ERPNext rechazó. Contarlo de más es el error caro: infla la evidencia
+    # sobre la que el dueño decide subir un límite.
     try:
-        erpnext.add_comment("Sales Order", pedido, texto)
-    except Exception as exc:  # add_comment ya se lo traga; por si acaso
+        erpnext.registrar_comentario("Sales Order", pedido, texto)
+    except Exception as exc:
         print(f"[sombra] {pedido}: no pude anotar el registro: {type(exc).__name__}")
         return False
 

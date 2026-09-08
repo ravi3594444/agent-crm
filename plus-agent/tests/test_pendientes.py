@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app import avisos, erpnext, outbound_status, pendientes, policy, sombra
+from app import avisos, erpnext, outbound_status, pendientes, policy, router, sombra
 from tests.fakes import entrada_de_cola
 
 PEDIDO = "SAL-ORD-2026-00042"
@@ -58,6 +58,12 @@ def mundo(monkeypatch: pytest.MonkeyPatch) -> dict:
     caidas: set[str] = set()
 
     def add_comment(doctype, name, texto):
+        # Se ata a los DOS primitivos de comentario, porque el código usa los
+        # dos a propósito: `add_comment` para lo que es best-effort y
+        # `registrar_comentario` para el registro durable del que depende un
+        # contador (la sombra). La clave "add_comment" en `caidas` significa
+        # "ERPNext rechaza las escrituras de comentario", sin importar por
+        # cuál de los dos entró.
         if "add_comment" in caidas:
             raise erpnext.ERPNextError("ERPNext no acepta comentarios")
         escritos.append((doctype, name, texto))
@@ -135,6 +141,7 @@ def mundo(monkeypatch: pytest.MonkeyPatch) -> dict:
         yield
 
     monkeypatch.setattr(erpnext, "add_comment", add_comment)
+    monkeypatch.setattr(erpnext, "registrar_comentario", add_comment)
     monkeypatch.setattr(erpnext, "policy_get_list", policy_get_list)
     monkeypatch.setattr(erpnext, "policy_get_doc", policy_get_doc)
     monkeypatch.setattr(erpnext, "policy_update_status", policy_update_status)
@@ -630,6 +637,16 @@ def test_a_draft_past_the_closing_deadline_is_closed_and_both_sides_told(
     mundo, monkeypatch
 ) -> None:
     monkeypatch.setenv("PENDIENTE_CIERRE_HORAS", "4")
+    # Dos cosas que el `or True` que estaba acá tapaba:
+    #   1. conftest fija TELEFONOS_EQUIPO="" a propósito, y `router.STAFF` se
+    #      arma al importar, así que hay que recargarlo o `encolar_equipo` no
+    #      le manda a nadie.
+    #   2. `_al_cliente` llama a `avisos.procesar()`, que VACÍA la cola, así
+    #      que la cola se lee ANTES de drenarla.
+    # setattr y no setenv+recargar(): `recargar()` deja el global STAFF pisado
+    # para toda la sesión, y esa es justo la fuga que conftest evita fijando
+    # TELEFONOS_EQUIPO="". monkeypatch lo restaura al terminar el test.
+    monkeypatch.setattr(router, "STAFF", ["5493510000001"])
     _listo(mundo)  # creado 09:00
 
     assert pendientes.tick(ahora=epoch(15)) >= 1
@@ -637,10 +654,10 @@ def test_a_draft_past_the_closing_deadline_is_closed_and_both_sides_told(
     assert mundo["estados"] == [(PEDIDO, "Closed")]
     assert f"pendiente:{PEDIDO}" in mundo["locks"]
     assert any(t.startswith(pendientes.MARCA_CIERRE) for _, _, t in mundo["escritos"])
+    eventos = {e["evento"] for e in _en_cola()}
+    assert any(ev.startswith("pendiente_cerrado_equipo") for ev in eventos), eventos
     dichos = _al_cliente(mundo)
     assert len(dichos) == 1 and PEDIDO in dichos[0]
-    eventos = {e["evento"] for e in _en_cola()}
-    assert any(ev.startswith("pendiente_cerrado_equipo") for ev in eventos) or True
 
 
 def test_the_closer_writes_nothing_terminal_when_it_cannot_prove_the_release(
@@ -813,3 +830,74 @@ def test_both_halves_are_off_by_default(mundo, monkeypatch) -> None:
 
     assert _al_cliente(mundo) == []
     assert mundo["estados"] == []
+
+
+# ------------------- la reclamación del día se devuelve si el aviso no salió
+
+
+def test_a_failed_owner_reminder_does_not_burn_the_whole_day(mundo, monkeypatch):
+    """`avisar_dueno` no levanta: avisa con un False, y hay que escucharlo.
+
+    Quedándose la reclamación de 24 h igual, un fallo transitorio (sin
+    TELEFONO_DUENO, o Meta que rechaza sin plantilla) dejaba al dueño sin el
+    recordatorio hasta el día siguiente, con borradores vivos retenidos.
+    """
+    intentos: list[str] = []
+
+    def falla(asunto, cuerpo, **kw):
+        intentos.append(asunto)
+        return False
+
+    monkeypatch.setattr("app.notificar.avisar_dueno", falla)
+    _listo(mundo)  # creado 09:00, con PENDIENTE_AVISO_HORAS=2
+
+    pendientes.tick(ahora=epoch(15))
+    assert len(intentos) == 1
+
+    # La siguiente ronda del MISMO día vuelve a intentarlo, porque la
+    # reclamación se devolvió.
+    pendientes.tick(ahora=epoch(16))
+    assert len(intentos) == 2
+
+
+def test_a_delivered_owner_reminder_still_goes_out_once_a_day(mundo):
+    """El otro lado de lo mismo: entregado, la reclamación se queda."""
+    _listo(mundo)
+
+    pendientes.tick(ahora=epoch(15))
+    pendientes.tick(ahora=epoch(16))
+
+    assert len(mundo["al_dueno"]) == 1
+
+
+# ------------- el cierre avisa aunque la marca de auditoría no haya quedado
+
+
+def test_the_closure_notices_go_out_even_if_the_marker_write_fails(
+    mundo, monkeypatch
+):
+    """El cierre ya pasó, así que callarse es el peor final posible.
+
+    La próxima ronda no vuelve a mirar este pedido (`_sigue_esperando` lo ve
+    cerrado), así que si el fallo de la marca se comiera los avisos, el cliente
+    y el equipo no se enterarían NUNCA de que el borrador se cerró.
+    """
+    monkeypatch.setenv("PENDIENTE_CIERRE_HORAS", "4")
+    monkeypatch.setattr(router, "STAFF", ["5493510000001"])
+    _listo(mundo)
+
+    real = erpnext.registrar_comentario
+
+    def falla_solo_la_marca(doctype, name, texto):
+        if texto.startswith(pendientes.MARCA_CIERRE):
+            raise erpnext.ERPNextError("ERPNext no acepta este comentario")
+        return real(doctype, name, texto)
+
+    monkeypatch.setattr(erpnext, "add_comment", falla_solo_la_marca)
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert mundo["estados"] == [(PEDIDO, "Closed")]
+    eventos = {e["evento"] for e in _en_cola()}
+    assert any(ev.startswith("pendiente_cerrado_equipo") for ev in eventos), eventos
+    assert any(ev.startswith("pendiente_cerrado:") or ev == "pendiente_cerrado" for ev in eventos), eventos
