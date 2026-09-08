@@ -11,9 +11,24 @@ Alcanza porque los datos de prueba están escritos en inglés a propósito —el
 cliente se llama "Demo Bakery" y el producto "Whole Milk 1 L"— así que
 cualquier palabra en español que aparezca en la salida vino de una plantilla
 sin migrar, que es exactamente lo que se busca.
+
+LA COMPARACIÓN ES POR FICHA ENTERA, Y DE ESO DEPENDE TODO LO DEMÁS
+`restos_en_espanol` parte el texto en fichas y las cruza contra un conjunto:
+nunca busca una palabra como substring de otra. Ésa es la única razón por la
+que la lista puede tener palabras de dos y tres letras. Con comparación por
+substring, `sin` matchearía `business` y `de` matchearía `order`, y el audit se
+volvería ruido puro — o sea, inservible, que es peor que no tenerlo.
+
+El recorte de `permitido` sigue la misma regla: recorta en los bordes de la
+ficha, no en cualquier parte de una palabra. Recortando substrings, el comando
+`ver` convertía `Delivered` en `Deli ed` y fabricaba fichas que nadie escribió.
+
+Si algún día hay que volver a tocar esto: primero mirar cómo se tokeniza,
+después agregar palabras. Nunca al revés.
 """
 from __future__ import annotations
 
+import functools
 import re
 import unicodedata
 
@@ -22,9 +37,24 @@ _ACENTOS = re.compile(r"[áéíóúüñ¿¡]", re.IGNORECASE)
 
 # Palabras que en inglés no significan nada. Deliberadamente cortas y comunes:
 # lo que se busca es el resto de una plantilla, no una traducción perfecta.
-_PALABRAS_ES = frozenset(
+_RESTOS_DE_PLANTILLA = frozenset(
     ["pedido", "pedidos", "cliente", "clientes", "entrega", "entregas", "codigo", "codigos", "confirmado", "confirmada", "confirmar", "confirma", "pendiente", "pendientes", "revision", "rechazado", "rechazada", "rechazar", "cancelado", "cancelada", "cancelar", "motivo", "motivos", "origen", "informativo", "respondé", "responde", "contesta", "contestá", "los", "las", "del", "una", "unas", "unos", "cuando", "donde", "esto", "estan", "estos", "estas", "hace", "falta", "queda", "quedan", "quedo", "dias", "horas", "fecha", "fechas", "monto", "montos", "deposito", "precio", "precios", "equipo", "dueño", "gerencia", "aviso", "avisos", "alerta", "alertas", "pero", "porque", "tambien", "ahora", "despues", "antes", "tuve", "problema", "tecnico", "disculpa", "disculpas"]
 )
+
+# Las funcionales cortas. `los`, `las`, `del`, `una`, `unos` y `unas` ya estaban
+# en la lista de arriba; faltaban `de` y `sin`, que son las DOS MÁS COMUNES del
+# idioma. Sin ellas, el audit que existe para agarrar español filtrándose a un
+# mensaje en inglés no podía agarrar justamente los dos casos más frecuentes:
+# el separador de un conteo (`5 de 6`) y una etiqueta de cubeta (`sin stock 3`).
+#
+# Son seguras SÓLO porque la comparación es por ficha entera (ver el docstring
+# del módulo y `restos_en_espanol`): `business` no matchea `sin`, `order` no
+# matchea `de`, y `Panadería López` no matchea nada. Si esa comparación alguna
+# vez se volviera de substring, estas dos palabras solas alcanzan para llenar el
+# audit de ruido y dejarlo inservible.
+_FUNCIONALES_ES = frozenset(["de", "sin"])
+
+_PALABRAS_ES = _RESTOS_DE_PLANTILLA | _FUNCIONALES_ES
 
 # Lo que SÍ puede aparecer en español aunque el idioma sea inglés, porque no es
 # prosa: nombres propios de ERPNext, estados canónicos, marcas de auditoría.
@@ -47,21 +77,103 @@ def _sin_tildes(texto: str) -> str:
     )
 
 
+@functools.cache
+def _patron_permitido(dato: str) -> re.Pattern[str]:
+    r"""El dato permitido, anclado a los bordes de la ficha.
+
+    Recortar substrings fabricaba fichas que nadie escribió: con el comando
+    `ver` en la lista, `Delivered` quedaba como `Deli ed` y `server` como
+    `ser`. Cada pedazo así es una ficha inventada, y una ficha inventada puede
+    coincidir con una palabra corta de la lista — el ruido que hace inservible
+    a un audit.
+
+    El ancla NO es `\b` justamente por las marcas de auditoría: `\b\[limite\]`
+    exige un caracter de palabra pegado al `[` y entonces no coincide nunca.
+    `(?<!\w)` es una mirada NEGATIVA, así que la satisface un espacio, un
+    salto de línea, el borde del texto o cualquier signo — coincide con
+    `[limite]` en todas sus formas reales y se niega sólo donde hay que
+    negarse, que es en el medio de una palabra. Por eso van las dos, siempre:
+    dejar sin anclar a las entradas que no empiezan en letra las volvía a
+    convertir en recortes por substring, y `nothing[limite]confirma` fabricaba
+    la ficha `confirma`.
+
+    Insensible a mayúsculas porque los constructores RE-CAPITALIZAN los datos
+    que interpolan (`detalle.capitalize()` en app/decisiones.py y en
+    app/solicitudes.py), así que un permitido pasado en minúscula tiene que
+    seguir recortándose cuando el mensaje lo escribió en mayúscula. Recortar
+    nunca agrega hallazgos, sólo saca texto, así que ampliar el recorte no
+    puede inventar un resto. Y es lo que ya hace `_ACENTOS`.
+
+    Cacheado porque el audit llama a `restos_en_espanol` miles de veces con la
+    misma lista de permitidos: sin caché son ~66 patrones recompilados por
+    llamada.
+    """
+    return re.compile(r"(?<!\w)" + re.escape(dato) + r"(?!\w)", re.IGNORECASE)
+
+
 def restos_en_espanol(texto: object, permitido: tuple[str, ...] = ()) -> list[str]:
     """Las marcas de español que quedan en ese texto. Vacío = limpio.
 
     ``permitido`` son los datos de la prueba que legítimamente vienen en
     español (el nombre de un producto, el de un cliente). Se recortan del texto
     antes de mirar, para que un dato no se lea como una plantilla sin migrar.
+
+    El recorte y la búsqueda trabajan los dos por FICHA ENTERA. Eso es lo que
+    deja que la lista tenga `de` y `sin` sin ahogar el audit en falsos
+    positivos; leer el docstring del módulo antes de cambiarlo.
     """
     crudo = str(texto or "")
-    for dato in tuple(permitido) + PERMITIDO:
-        crudo = crudo.replace(str(dato), " ")
+    # De más largo a más corto, y el orden NO es cosmético: cada recorte muta
+    # el texto, así que un permitido corto recortado primero puede destruir el
+    # match de uno más largo que lo contiene, y dejar el resto del largo
+    # suelto para que lo marque el detector. Con `confirmar` en la lista, la
+    # cita permitida «tengo un pedido sin confirmar» dejaba `['pedido', 'sin']`
+    # — y `confirmar` va antes que cualquier dato que agregue un test, porque
+    # el guard pasa el allowlist adelante. Ordenar por largo hace que el orden
+    # de la lista deje de importar.
+    # Sin repetidos: los dos permitidos se solapan en varias entradas, así que
+    # esto ahorra 17 pasadas idénticas. El desempate por texto mantiene el
+    # recorrido determinístico.
+    lista = sorted({str(d) for d in tuple(permitido) + PERMITIDO}, key=lambda d: (-len(d), d))
+    for dato in lista:
+        # Un permitido vacío recortaba entre CADA letra del texto y dejaba el
+        # mensaje entero partido en fichas de un caracter — o sea, dejaba al
+        # detector CIEGO: `restos_en_espanol("5 de 6", ("",))` no encontraba
+        # nada.
+        if not dato:
+            continue
+        crudo = _patron_permitido(dato).sub(" ", crudo)
     hallados = []
     if _ACENTOS.search(crudo):
         hallados.extend(sorted(set(_ACENTOS.findall(crudo))))
     plano = _sin_tildes(crudo).lower()
-    fichas = {f.strip(".,;:!?()[]'\"*·—-…") for f in plano.split()}
+    # Los signos que se recortan de los BORDES de cada ficha. Los guillemets y
+    # los `<>` estaban afuera, y no es un detalle: el catálogo inglés los usa
+    # de verdad («gerencia.pendientes_cuerpo» dice `Reply «confirmar
+    # <order>»`), así que la falla más probable de una migración a medias —
+    # dejar el nombre del placeholder en español — producía la ficha
+    # `<pedido>`, que nunca se reducía a `pedido`. Lo mismo tapaba justo la
+    # filtración que este PR vino a poder ver: `«sin stock»` daba limpio
+    # mientras `sin stock` daba `sin`.
+    #
+    # Y los signos de apertura van PRIMEROS porque eran el peor caso de todos:
+    # son los más españoles que hay, y pegados a la palabra la escondían.
+    # `¿sin conteo de stock?` reportaba `['¿', 'de']` — el `de` del medio sí,
+    # y el `sin` pegado al `¿` no. El texto quedaba marcado por el acento, así
+    # que no era ceguera, pero la lista de palabras mentía sobre cuáles se
+    # filtraron, y es esa lista la que compara por igualdad el guard del
+    # handoff.
+    #
+    # LO QUE NO VA ACÁ, Y NO ES UN OLVIDO: las llaves. `{}` es la sintaxis de
+    # los placeholders, y los nombres de esos placeholders son ARGUMENTOS de
+    # Python, deliberadamente en español en las dos versiones — la plantilla
+    # inglesa de `pedido.confirmado_cliente` dice `Order {pedido} confirmed`.
+    # Recortarlas convertiría `{pedido}` en la ficha `pedido` y marcaría 41 de
+    # las 129 claves inglesas del catálogo: el audit se volvería ruido puro,
+    # que es exactamente lo que este archivo existe para no ser. Medido, no
+    # supuesto. Un nombre de variable no tiene idioma.
+    _BORDES = "¿¡.,;:!?()[]'\"*·—-…«»<>“”‘’•–"
+    fichas = {f.strip(_BORDES) for f in plano.split()}
     hallados.extend(sorted(fichas & _PALABRAS_ES))
     return hallados
 
