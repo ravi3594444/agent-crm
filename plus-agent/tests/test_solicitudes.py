@@ -3844,6 +3844,49 @@ def test_the_fallback_offer_carries_its_own_template_with_two_parameters(
     assert entrada["parametros"][1]  # nunca vacío: Meta lo rechazaría
 
 
+def test_the_expired_review_notice_carries_a_template_too(
+    mundo, monkeypatch, lunes
+) -> None:
+    """El mismo agujero que los otros dos, y el peor de los tres.
+
+    Al cliente se le dijo que una persona iba a mirar su pedido. Cuando esa
+    revisión vence sin respuesta, el aviso sale horas después del último
+    mensaje suyo: sin plantilla no hay canal, y el cliente se queda esperando
+    a alguien que ya decidió no contestarle.
+    """
+    revision = _a_revision(mundo, monkeypatch, lunes)
+
+    solicitudes.tick(ahora=revision.vence_en + 1)
+
+    vencidas = [
+        e for e in _entradas_en_cola() if e["evento"].startswith("revision_vencida")
+    ]
+    assert len(vencidas) == 1
+    entrada = vencidas[0]
+    assert entrada["plantilla_env"] == solicitudes.PLANTILLA_REVISION_VENCIDA
+    assert entrada["parametros"] == [SO]
+
+
+def test_readiness_watches_exactly_the_three_notices_the_sweep_fires() -> None:
+    """El conjunto, no cada miembro: un cuarto aviso de esta clase se olvida.
+
+    Los otros dos avisos al cliente (`solicitud_oferta`, `solicitud_rechazo`)
+    salen en la misma vuelta en que el cliente escribió, así que su ventana
+    está abierta y no necesitan plantilla. Estos tres los dispara el barrido
+    horas después, y son los únicos así. Si mañana aparece un cuarto, este
+    test se pone rojo en vez de dejarlo sin plantilla y sin aviso.
+    """
+    from app import readiness
+
+    assert set(readiness.PLANTILLAS_FUERA_DE_VENTANA) == {
+        solicitudes.PLANTILLA_VENCIDA,
+        solicitudes.PLANTILLA_RESPALDO,
+        solicitudes.PLANTILLA_REVISION_VENCIDA,
+    }
+    # Y todas están en la lista que readiness recorre.
+    assert set(readiness.PLANTILLAS_FUERA_DE_VENTANA) <= set(readiness.PLANTILLAS)
+
+
 def test_a_fallback_without_a_date_still_sends_a_non_empty_parameter(mundo) -> None:
     """Meta rechaza un parámetro vacío, así que nunca se manda uno."""
     solicitud = _abrir(mundo)

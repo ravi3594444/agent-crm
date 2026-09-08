@@ -460,6 +460,7 @@ def _sin_ventana(canal, monkeypatch) -> None:
     [
         ("solicitud_vencida", "WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE", 1),
         ("solicitud_respaldo", "WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE", 2),
+        ("revision_vencida", "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE", 1),
     ],
 )
 def test_the_sweep_notices_reach_a_customer_whose_window_closed(

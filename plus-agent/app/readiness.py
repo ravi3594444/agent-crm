@@ -44,13 +44,15 @@ PLANTILLAS = (
     # queda sin enterarse de que su solicitud venció.
     "WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE",
     "WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE",
+    "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE",
 )
-# Las dos que NO pueden contar con la ventana de 24 h, porque las dispara el
+# Las tres que NO pueden contar con la ventana de 24 h, porque las dispara el
 # barrido y no una respuesta a un mensaje del cliente. El resto son opcionales
-# en el piloto de verdad; estas dos no.
+# en el piloto de verdad; estas tres no.
 PLANTILLAS_FUERA_DE_VENTANA = (
     "WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE",
     "WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE",
+    "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE",
 )
 ROLES_SUBMIT_PROHIBIDOS = ("agente", "gerencia")
 # El mismo default que app/whatsapp.py, repetido a propósito: readiness no
@@ -354,7 +356,7 @@ def chequear_plantillas(env: Mapping[str, str], reporte: Reporte, http: Http | N
         if nombre:
             continue
         if variable in PLANTILLAS_FUERA_DE_VENTANA:
-            # Para estas dos el mensaje genérico diría exactamente lo contrario
+            # Para estas tres el mensaje genérico diría exactamente lo contrario
             # de la verdad: son las ÚNICAS que salen horas después del último
             # mensaje del cliente, así que son las únicas que NO pueden contar
             # con la ventana de 24 h.

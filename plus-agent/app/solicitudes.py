@@ -1175,7 +1175,11 @@ def _vencer_revision(solicitud: Solicitud, ahora: float) -> bool:
     if cerrada is None:
         return False
     _encolar_cliente(
-        cerrada, "revision_vencida", lambda i: texto_revision_vencida_cliente(cerrada, i)
+        cerrada,
+        "revision_vencida",
+        lambda i: texto_revision_vencida_cliente(cerrada, i),
+        plantilla_env=PLANTILLA_REVISION_VENCIDA,
+        parametros=[cerrada.pedido],
     )
     _avisar_equipo(
         cerrada,
@@ -1821,8 +1825,10 @@ def _encolar_cliente(
 # traducida no la traduce, y un dato sí sobrevive igual.
 #   EXPIRED  → 1 parámetro:  {{1}} número de pedido
 #   FALLBACK → 2 parámetros: {{1}} número de pedido, {{2}} fecha ofrecida
+#   REVIEW_EXPIRED → 1 parámetro: {{1}} número de pedido
 PLANTILLA_VENCIDA = "WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE"
 PLANTILLA_RESPALDO = "WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE"
+PLANTILLA_REVISION_VENCIDA = "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE"
 
 
 def _avisar_cliente_vencida(solicitud: Solicitud, liberado: bool) -> bool:

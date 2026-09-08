@@ -680,7 +680,7 @@ def test_nothing_is_flagged_as_truncated_when_it_fits(mundo) -> None:
 
 
 def test_the_sweep_templates_do_not_get_the_misleading_optional_message() -> None:
-    """El mensaje genérico diría lo contrario de la verdad para estas dos.
+    """El mensaje genérico diría lo contrario de la verdad para estas tres.
 
     «sale como texto libre mientras el destinatario haya escrito en las últimas
     24 h» es cierto para las demás plantillas y FALSO para éstas: son las únicas
