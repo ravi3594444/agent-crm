@@ -46,6 +46,7 @@ SOLO_GERENCIA = {t.name: t for t in TOOLS_GERENCIA if t.name not in _COMPARTIDAS
 # exactamente SOLO_GERENCIA — lo verifica el primer test.
 ARGUMENTOS: dict[str, dict] = {
     "pedidos_pendientes": {},
+    "resumen_autonomia": {},
     "ventas_del_periodo": {},
     "stock_bajo": {},
     "cobranzas_vencidas": {},
@@ -188,8 +189,8 @@ def test_every_management_only_tool_is_covered_by_this_file() -> None:
         "una herramienta sólo-de-gerencia sin caso de prueba: agregala a "
         "ARGUMENTOS con sus argumentos mínimos"
     )
-    # 18 hoy. El número está acá para que un cambio de superficie se note.
-    assert len(SOLO_GERENCIA) == 18
+    # 19 hoy. El número está acá para que un cambio de superficie se note.
+    assert len(SOLO_GERENCIA) == 19
 
 
 def test_no_management_tool_accepts_a_phone_or_an_identity_argument() -> None:

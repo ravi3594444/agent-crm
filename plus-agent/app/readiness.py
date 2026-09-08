@@ -29,6 +29,8 @@ OK, AVISO, FALTA, ERROR = "OK", "AVISO", "FALTA", "ERROR"
 # (status, body-json-o-None). Inyectable para los tests.
 Http = Callable[..., tuple[int, object]]
 
+UMBRAL_BORRADORES_PCT = 80.0
+
 PLANTILLAS = (
     "WHATSAPP_STAFF_PENDING_TEMPLATE",
     "WHATSAPP_STAFF_CONFIRMED_TEMPLATE",
@@ -830,6 +832,49 @@ def chequear_entrega(
     chequear_cuenta_cargo(env, reporte, http, con_cargo=reporte_con_cargo)
 
 
+def chequear_borradores(reporte: Reporte) -> None:
+    """Cuántos borradores compiten por stock, contra el techo de app/policy.py.
+
+    Es la falla más grande que este sistema puede tener y la que menos se ve:
+    pasados policy.MAX_BORRADORES borradores vivos,
+    `_borradores_que_reservan` LEVANTA y no se auto-confirma nada, de ningún
+    producto — con un motivo («no se pudo verificar stock de X») que se lee
+    exactamente igual que una caída de ERPNext. Sin este chequeo el número no
+    existe en ninguna parte hasta después de que la auto-confirmación murió.
+
+    Un AVISO desde el 80 %, y un ERROR que bloquea sólo cuando ya se pasó: a
+    esa altura la postura del dueño no es la que está decidiendo.
+
+    Cuenta los cargados a mano también, porque ocupan lugar en el mismo techo:
+    `_borradores_que_reservan` filtra por docstatus y status, no por origen.
+    """
+    from app import autonomia
+
+    datos = autonomia.borradores_vivos()
+    if datos is None:
+        reporte.aviso("Borradores vivos", "no pude contarlos en ERPNext")
+        return
+    detalle = (
+        f"{datos['vivos']} de {datos['tope']} "
+        f"({datos['del_bot']} del bot + {datos['a_mano']} cargados a mano)"
+    )
+    if datos["pasado"]:
+        reporte.error(
+            "Borradores vivos",
+            f"{detalle}: PASASTE EL TECHO, así que la verificación de stock "
+            "falla y NINGÚN pedido se confirma solo. Cerrá o confirmá los que "
+            "sobran",
+        )
+    elif datos["pct"] >= UMBRAL_BORRADORES_PCT:
+        reporte.aviso(
+            "Borradores vivos",
+            f"{detalle}, {datos['pct']:.0f} % del techo: pasado el techo no se "
+            "auto-confirma nada, de ningún producto",
+        )
+    else:
+        reporte.ok("Borradores vivos", detalle)
+
+
 def chequear_solicitudes(reporte: Reporte) -> None:
     """Drafts the sweep could not get ERPNext to stop reserving.
 
@@ -878,6 +923,10 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
     chequear_entrega(env, reporte, resumen, http)
     if _valor(env, "REDIS_URL"):
         chequear_solicitudes(reporte)
+    # Necesita ERPNext: sin red no se puede contar, y un cero inventado
+    # sería justamente la lectura peligrosa.
+    if con_red:
+        chequear_borradores(reporte)
     return reporte
 
 

@@ -53,6 +53,10 @@ Son los números que deciden qué pedidos se confirman solos: el monto máximo,
 la cantidad máxima por producto, el colchón de stock, el tope para clientes
 nuevos, la deuda tolerada y si los descuentos siempre pasan por una persona.
 - Para mostrarlos: ver_limites.
+- Para saber cuánto se está confirmando solo y qué lo frena:
+  resumen_autonomia. Informá los números tal como vienen. NO le
+  recomiendes subir ni bajar un límite: esa decisión es suya, y con qué
+  número la toma también.
 - Para cambiar uno: proponer_limite con el límite y el valor tal como los dijo
   (no conviertas ni redondees). NO se aplica: el sistema le manda un código de
   cuatro dígitos por separado, vos no lo ves.

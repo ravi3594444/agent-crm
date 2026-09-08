@@ -464,6 +464,46 @@ CATALOGO: dict[str, dict[str, str]] = {
             "confirmed. If it is still doable, it has to be redone with today's."
         ),
     },
+    # El resumen de autonomía (app/autonomia.py). Cada número puede ser «no
+    # pude leer»: informar una autonomía de cero que nadie midió es peor, porque
+    # con eso el dueño baja un límite que no hacía falta bajar.
+    "gerencia.autonomia_ilegible": {ES: "no pude leer", EN: "could not read"},
+    "gerencia.autonomia_truncado": {
+        ES: (
+            "⚠️ Hubo más movimiento del que pude leer de una vez: estos números "
+            "son un piso, no el total. Pedí menos días para verlos completos."
+        ),
+        EN: (
+            "⚠️ There was more activity than I could read in one go: these "
+            "numbers are a floor, not the total. Ask for fewer days to see "
+            "them in full."
+        ),
+    },
+    "gerencia.autonomia": {
+        ES: (
+            "📈 Autonomía · últimos {dias} días\n"
+            "confirmados: {confirmados} · solos: {solos} · por vos: {por_vos} "
+            "· los aceptó el cliente: {acepto} · rechazados: {rechazados}\n"
+            "sombra: {sombra_pasan} habrían pasado todas las reglas, "
+            "{sombra_frenados} no\n"
+            "frenados sólo por la postura que elegiste: {postura}\n"
+            "frenados por reglas: {frenos}\n"
+            "borradores compitiendo por stock: {borradores} de {tope}\n"
+            "conteos frescos: {conteos} · faltó: {falto}"
+        ),
+        EN: (
+            "📈 Autonomy · last {dias} days\n"
+            "confirmed: {confirmados} · on their own: {solos} · by you: "
+            "{por_vos} · accepted by the customer: {acepto} · rejected: "
+            "{rechazados}\n"
+            "shadow: {sombra_pasan} would have passed every rule, "
+            "{sombra_frenados} would not\n"
+            "held back only by the posture you chose: {postura}\n"
+            "held back by rules: {frenos}\n"
+            "drafts competing for stock: {borradores} of {tope}\n"
+            "fresh counts: {conteos} · missing: {falto}"
+        ),
+    },
     "gerencia.sin_observaciones": {ES: "Sin observaciones", EN: "No remarks"},
     "gerencia.sin_fecha": {ES: "Sin fecha", EN: "No date"},
     "gerencia.a_coordinar": {ES: "a coordinar", EN: "to be arranged"},

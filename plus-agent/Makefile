@@ -6,7 +6,7 @@ PY     := $(VENV)/bin/python
 PIP    := $(VENV)/bin/pip
 PUERTO ?= 8081
 
-.PHONY: help install test lint fmt check check-env check-env-offline verificar-modelos build up down logs decisiones briefing demo demo-gemini seed
+.PHONY: help install test lint fmt check check-env check-env-offline verificar-modelos build up down logs autonomia decisiones briefing demo demo-gemini seed
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -57,7 +57,10 @@ down: ## Bajar
 logs: ## Ver los logs
 	docker compose logs -f agente
 
-decisiones: ## Ver qué hizo la política y los avisos en cada pedido
+autonomia: install ## Cuánto se confirma solo, qué lo frena, y el techo de borradores
+	$(PY) -m app.autonomia
+
+decisiones: ## (viejo) El grep de los logs. Preferí `make autonomia`: esto se borra al recrear el contenedor
 	docker compose logs agente | grep -E "\[orders\]|\[approval\]|\[staff-notify\]|\[customer-notify\]|auto-confirm|política"
 
 briefing: ## Mandar el briefing ahora (sin esperar al cron)
