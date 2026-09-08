@@ -268,6 +268,18 @@ LIMITES: dict[str, Definicion] = {
         default="true",
         tipo=BOOLEANO,
     ),
+    "AUTO_CONFIRM_SOMBRA": Definicion(
+        nombre="AUTO_CONFIRM_SOMBRA",
+        alias=("modo sombra", "sombra"),
+        significado=(
+            "Si está en sí, cada pedido que queda esperando anota qué habrían "
+            "dicho las reglas si el tope y el stock estuvieran encendidos. No "
+            "confirma nada: sólo deja el número para poder decidir con datos"
+        ),
+        unidad="sí/no",
+        default="false",
+        tipo=BOOLEANO,
+    ),
 }
 
 _VERDADEROS = frozenset({"true", "si", "sí", "1", "on", "yes", "y"})
@@ -521,6 +533,10 @@ class Configuracion:
     # Sin plazo, ese borrador retendría stock para siempre: es la única salida
     # del flujo que no la tenía.
     timeout_revision: float = 24.0
+    # ¿Se anota lo que las reglas habrían dicho? No decide nada: es el registro
+    # con el que el dueño después mueve un límite. Default false, así que un
+    # .env que no la nombra se comporta exactamente como hoy.
+    sombra: bool = False
 
 
 def _texto(valor: object) -> str:
@@ -982,6 +998,10 @@ def configuracion() -> Configuracion:
         ),
         timeout_revision=_timeout(
             _num("REVISION_TIMEOUT_HORAS"), "REVISION_TIMEOUT_HORAS"
+        ),
+        sombra=_bool(
+            LIMITES["AUTO_CONFIRM_SOMBRA"],
+            crudos["AUTO_CONFIRM_SOMBRA"][0],
         ),
     )
 
