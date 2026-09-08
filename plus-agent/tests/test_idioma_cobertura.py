@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from idioma_allowlist import PERMITIDO_EN_SALIDA_INGLESA
+from idioma_allowlist import FILTRACIONES_EN_HANDOFF, PERMITIDO_EN_SALIDA_INGLESA
 from idioma_captura import restos_en_espanol
 
 from app import idioma
@@ -159,14 +159,85 @@ def _todos_los_constructores(lengua):
 # ---------------------------------------------------- auditoría de ejecución
 
 
+def _restos(nombre: str, texto: str) -> list[str]:
+    """Los restos de ese constructor, menos los que están en handoff.
+
+    El descuento es por CONSTRUCTOR y por PALABRA: una filtración anotada en
+    `autonomia.texto` no permite nada en ningún otro constructor, y no permite
+    ninguna otra palabra en ése. Ver la sección 10 de idioma_allowlist.py.
+    """
+    en_handoff = FILTRACIONES_EN_HANDOFF.get(nombre, {}).get("palabras", ())
+    return [
+        resto
+        for resto in restos_en_espanol(texto, DATOS + PERMITIDO_EN_SALIDA_INGLESA)
+        if resto not in en_handoff
+    ]
+
+
 def test_la_auditoria_final_no_encuentra_espanol_con_el_idioma_en_ingles():
     """LA prueba. Si esto falla, quedó un mensaje sin migrar."""
     sucios = {}
     for nombre, texto in _todos_los_constructores(EN):
-        restos = restos_en_espanol(texto, DATOS + PERMITIDO_EN_SALIDA_INGLESA)
+        restos = _restos(nombre, texto)
         if restos:
             sucios[nombre] = restos
     assert sucios == {}, f"mensajes con español sin justificar: {sucios}"
+
+
+def test_las_filtraciones_en_handoff_siguen_filtrando():
+    """Cada entrada del handoff tiene que seguir HACIENDO FALTA.
+
+    Es la fecha de vencimiento de la sección 10 del allowlist. Cuando la rama
+    que tiene el archivo arregle la filtración, este test se cae y obliga a
+    borrar la entrada. Sin esto, un permiso escrito «hasta que otro lo
+    arregle» se queda para siempre y el audit vuelve a estar ciego en ese
+    constructor, esta vez con la bendición de un comentario.
+
+    La comparación es por igualdad y no por contención a propósito: si en ese
+    constructor aparece una palabra NUEVA, el handoff no la cubre y esto
+    también se cae.
+    """
+    textos = dict(_todos_los_constructores(EN))
+    for nombre, entrada in FILTRACIONES_EN_HANDOFF.items():
+        assert nombre in textos, (
+            f"{nombre} está en el handoff pero ya no está en el registro de "
+            "constructores: sacar el constructor del audit no es arreglar la "
+            "filtración"
+        )
+        restos = set(restos_en_espanol(textos[nombre], DATOS + PERMITIDO_EN_SALIDA_INGLESA))
+        esperadas = set(entrada["palabras"])
+        assert restos == esperadas, (
+            f"el handoff de {nombre} dice {sorted(esperadas)} y el detector "
+            f"encuentra {sorted(restos)}. Si ya no filtra, borrar la entrada de "
+            f"idioma_allowlist.py::FILTRACIONES_EN_HANDOFF ({entrada['issue']})"
+        )
+
+
+def test_cada_filtracion_en_handoff_dice_quien_la_arregla():
+    """Un handoff sin motivo es el mismo bug que un detector con hueco.
+
+    En los dos casos la próxima persona no puede distinguir una razón de una
+    pereza. Así que el motivo, el archivo y el issue son obligatorios, y el
+    motivo tiene que ser una explicación y no una etiqueta.
+    """
+    assert FILTRACIONES_EN_HANDOFF, (
+        "si no queda ninguna filtración en handoff, borrar la sección 10 del "
+        "allowlist y este test con ella"
+    )
+    for nombre, entrada in FILTRACIONES_EN_HANDOFF.items():
+        assert entrada.get("palabras"), f"{nombre}: sin palabras, no permite nada"
+        assert entrada.get("arregla", "").endswith(".py"), (
+            f"{nombre}: falta el archivo que hay que tocar"
+        )
+        assert entrada.get("issue", "").startswith("https://"), (
+            f"{nombre}: falta el issue donde se sigue"
+        )
+        motivo = entrada.get("motivo", "")
+        assert len(motivo) > 120, f"{nombre}: el motivo tiene que explicar, no etiquetar"
+        # El motivo tiene que decir DÓNDE, no sólo que existe.
+        assert entrada["arregla"] in motivo, (
+            f"{nombre}: el motivo no nombra el archivo que hay que tocar"
+        )
 
 
 def test_cada_constructor_dice_algo_distinto_en_cada_idioma():
@@ -260,3 +331,84 @@ def test_la_lista_de_intencionalmente_sin_traducir_esta_documentada():
     # Los comandos en inglés se AGREGARON; los de siempre siguen.
     assert "acepto" in permitido.COMANDOS_ES
     assert "accept" in permitido.COMANDOS_EN_QUE_TAMBIEN_PARSEAN
+
+
+# ----------------------------------------------- el detector, probado a mano
+#
+# Los tests de arriba usan el detector; éstos lo PRUEBAN. Hacen falta porque un
+# detector que no se puede romper no está detectando: si mañana alguien saca
+# `de` del conjunto o vuelve la comparación a substrings, algo tiene que
+# morirse acá. Y tienen que ser tests de COMPORTAMIENTO — `assert "de" in
+# _PALABRAS_ES` se muere con la mutación pero no prueba que el detector
+# detecte nada.
+
+
+# Texto que un cliente en inglés recibió de verdad, o casi. Cada uno murió sin
+# `de` o sin `sin` en el conjunto, que es el bug que arregla este PR.
+_FILTRA = [
+    ("fresh counts: 5 de 6 · missing: QUE-MUZ", "de"),
+    ("drafts competing for stock: 12 de 500", "de"),
+    ("5 de 6", "de"),
+    ("held back by rules: sin stock 3", "sin"),
+    ("held back by rules: sin conteo de stock 2", "sin"),
+]
+
+
+@pytest.mark.parametrize("texto,palabra", _FILTRA)
+def test_el_detector_agarra_las_dos_palabras_mas_comunes_del_idioma(texto, palabra):
+    """`de` y `sin` son las que más se filtran, así que son las que más importan."""
+    assert palabra in restos_en_espanol(texto, DATOS + PERMITIDO_EN_SALIDA_INGLESA)
+
+
+# Lo contrario, y es la mitad que sostiene a la otra: con `de` y `sin` en el
+# conjunto, un detector que compare substrings marca medio diccionario inglés y
+# se vuelve inservible por ruido. Estos textos son el piso de esa propiedad.
+_INGLES_LIMPIO = [
+    "business as usual",
+    "using a single order",
+    "we decided to consider the wide side of the model",
+    "order 5 of 6 · missing: QUE-MUZ",
+    "insinuate, sincere, sine, index, inside, resin, basin",
+    "Delivered to the server, see the overview",
+    "Panaderia Lopez · SAL-ORD-2026-00042 · QUE-MUZ",
+    "drafts competing for stock: 12 of 500",
+]
+
+
+@pytest.mark.parametrize("texto", _INGLES_LIMPIO)
+def test_el_detector_no_marca_ingles_que_contiene_las_letras(texto):
+    """Comparación por ficha entera: `business` no es `sin`, `order` no es `de`."""
+    assert restos_en_espanol(texto, DATOS + PERMITIDO_EN_SALIDA_INGLESA) == []
+
+
+# El recorte de `permitido` es la otra mitad de la tokenización, y era la que
+# de verdad comparaba substrings. Con `ver` permitido como comando, recortarlo
+# en cualquier parte de una palabra fabricaba fichas que nadie escribió:
+# `versin` quedaba en `sin`, `paloverde` y `verde` en `de`, `delver` en `del`.
+# Sobre un diccionario de 370.105 palabras inglesas eso son 17 falsos positivos
+# que no existen recortando por ficha.
+_PARTIDAS_POR_EL_RECORTE_VIEJO = ["versin", "paloverde", "verde", "delver", "estovers"]
+
+
+@pytest.mark.parametrize("palabra", _PARTIDAS_POR_EL_RECORTE_VIEJO)
+def test_el_recorte_de_lo_permitido_no_fabrica_fichas(palabra):
+    """Recortar un permitido no puede partir en dos la palabra que lo contiene."""
+    assert restos_en_espanol(palabra, DATOS + PERMITIDO_EN_SALIDA_INGLESA) == []
+
+
+def test_lo_permitido_se_sigue_recortando_donde_tiene_que_recortarse():
+    """El arreglo del recorte no puede haber apagado el recorte."""
+    # Un comando en español dentro de un mensaje en inglés: permitido.
+    assert restos_en_espanol("Reply confirmar to accept, rechazar to decline") == []
+    # Una marca de auditoría: empieza con `[`, así que el ancla no se aplica.
+    assert restos_en_espanol("[limite] · [confirmado-por-agente]") == []
+    # Un estado canónico de ERPNext.
+    assert restos_en_espanol("status: To Deliver and Bill") == []
+    # Y un dato del test que viene en español de verdad.
+    assert restos_en_espanol("Order for Panadería López", ("Panadería López",)) == []
+
+
+def test_el_detector_sigue_agarrando_acentos_y_signos_de_apertura():
+    """La otra pata del detector, que este PR no toca: que siga viva."""
+    assert restos_en_espanol("¿Confirmás el pedido?") != []
+    assert restos_en_espanol("Órdenes") != []
