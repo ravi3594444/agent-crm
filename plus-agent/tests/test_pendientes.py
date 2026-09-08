@@ -37,6 +37,38 @@ def epoch(hora: int, minuto: int = 0, dia: int = 8) -> float:
     return datetime(2026, 9, dia, hora, minuto, tzinfo=ZONA).timestamp()
 
 
+@pytest.fixture(autouse=True)
+def _el_reloj_de_verdad_no_entra(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ningún test de este archivo lee la hora real, y es a propósito.
+
+    Los borradores del fixture se crean a una hora FIJA —`_borrador` dice las
+    09:00 del 8/9/2026— y `tick()` compara esa fecha contra el reloj del
+    negocio. Con el reloj de verdad, el borrador envejece solo con el día: las
+    patas de aviso y de cierre se prenden solas y entran en el conteo que
+    devuelve `tick()`, así que los mismos tests pasan a la mañana y fallan a
+    la tarde sin que nadie toque una línea.
+
+    No es hipotético: cinco tests de este archivo se pusieron rojos en `main`
+    a las 11 de la mañana del 8/9/2026, con la suite verde a las 10:41. Y el
+    conteo dependía de DOS cosas del reloj a la vez —la edad del borrador y la
+    ventana nocturna— así que también pasaban de madrugada y fallaban de día.
+
+    El resto del archivo ya hacía lo correcto: pasar el momento con
+    `epoch(...)`. Esto lo vuelve obligatorio, y hace que leer el reloj real
+    explote acá con el motivo escrito en vez de seis horas más tarde en el CI
+    de otra persona.
+    """
+
+    def _prohibido() -> None:
+        raise AssertionError(
+            "un test de test_pendientes.py leyó la hora REAL. Pasale el momento: "
+            "`pendientes.tick(ahora=epoch(9))`. Ver el docstring de "
+            "_el_reloj_de_verdad_no_entra."
+        )
+
+    monkeypatch.setattr(pendientes, "_ahora", _prohibido)
+
+
 def _sombra_verde() -> policy.Sombra:
     return policy.Sombra(
         pasa_reglas=True,
@@ -321,7 +353,7 @@ def test_the_sweep_does_nothing_while_shadow_is_off(mundo, monkeypatch) -> None:
     mundo["borradores"].append(_borrador())
     mundo["docs"][PEDIDO] = _borrador()
 
-    assert pendientes.tick() == 0
+    assert pendientes.tick(ahora=epoch(9)) == 0
     assert mundo["escritos"] == []
 
 
@@ -329,7 +361,7 @@ def test_the_sweep_annotates_a_waiting_draft(mundo) -> None:
     mundo["borradores"].append(_borrador())
     mundo["docs"][PEDIDO] = _borrador()
 
-    assert pendientes.tick() == 1
+    assert pendientes.tick(ahora=epoch(9)) == 1
     assert sombra.leer(PEDIDO)["pasa_reglas"] is True
 
 
@@ -338,9 +370,9 @@ def test_the_sweep_is_idempotent_across_rounds(mundo) -> None:
     mundo["borradores"].append(_borrador())
     mundo["docs"][PEDIDO] = _borrador()
 
-    assert pendientes.tick() == 1
-    assert pendientes.tick() == 0
-    assert pendientes.tick() == 0
+    assert pendientes.tick(ahora=epoch(9)) == 1
+    assert pendientes.tick(ahora=epoch(9)) == 0
+    assert pendientes.tick(ahora=epoch(9)) == 0
     assert len(mundo["escritos"]) == 1
 
 
@@ -350,7 +382,7 @@ def test_the_sweep_does_not_annotate_blind_when_erpnext_will_not_say(mundo) -> N
     mundo["docs"][PEDIDO] = _borrador()
     mundo["caidas"].add("comentarios")
 
-    assert pendientes.tick() == 0
+    assert pendientes.tick(ahora=epoch(9)) == 0
     assert mundo["escritos"] == []
 
 
@@ -359,7 +391,7 @@ def test_an_order_decided_between_the_listing_and_the_write_is_left_alone(mundo)
     mundo["borradores"].append(_borrador())
     mundo["docs"][PEDIDO] = _borrador(docstatus=1)
 
-    assert pendientes.tick() == 0
+    assert pendientes.tick(ahora=epoch(9)) == 0
     assert mundo["escritos"] == []
 
 
@@ -369,7 +401,7 @@ def test_a_draft_with_a_live_decision_request_is_skipped(mundo, monkeypatch) -> 
     mundo["docs"][PEDIDO] = _borrador()
     monkeypatch.setattr("app.solicitudes.vencimientos", lambda pedidos: {PEDIDO: 1.0})
 
-    assert pendientes.tick() == 0
+    assert pendientes.tick(ahora=epoch(9)) == 0
     assert mundo["escritos"] == []
 
 
@@ -379,7 +411,7 @@ def test_one_bad_order_does_not_lose_the_round(mundo) -> None:
     mundo["docs"][PEDIDO] = _borrador()
     # SO-ROTO no está en docs: policy_get_doc levanta.
 
-    assert pendientes.tick() == 1
+    assert pendientes.tick(ahora=epoch(9)) == 1
     assert [n for _, n, _ in mundo["escritos"]] == [PEDIDO]
 
 
@@ -391,7 +423,7 @@ def test_the_round_is_capped(mundo, monkeypatch) -> None:
         mundo["borradores"].append(_borrador(nombre))
         mundo["docs"][nombre] = _borrador(nombre)
 
-    assert pendientes.tick() == 3
+    assert pendientes.tick(ahora=epoch(9)) == 3
     assert len(mundo["escritos"]) == 3
 
 
@@ -456,7 +488,7 @@ def test_an_unreadable_listing_raises_for_the_digest_and_is_swallowed_for_the_sw
         pendientes.listar_esperando()
 
     assert pendientes.borradores_esperando() == []
-    assert pendientes.tick() == 0
+    assert pendientes.tick(ahora=epoch(9)) == 0
 
 
 def test_when_the_deadline_read_fails_nothing_is_eligible(mundo, monkeypatch) -> None:
