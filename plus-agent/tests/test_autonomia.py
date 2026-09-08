@@ -798,3 +798,188 @@ def test_a_capped_rejection_read_is_reported_as_a_floor(mundo, monkeypatch) -> N
     assert datos["truncado"] is True
     # Y el aviso de la última línea lo dice, no sólo para conf/sombra/revisión.
     assert "son un piso" in autonomia.texto({"dias": 7, "rechazos": datos}, "es")
+
+
+# ----------------------------- las dos fuentes de frenos, sumadas de verdad
+
+
+def _json_ilegible() -> str:
+    """Un registro de sombra que no pudo leer los límites: no decidió nada."""
+    import json
+
+    return json.dumps(
+        {
+            "pasa_reglas": False,
+            "motivos_reglas": [],
+            "motivos_postura": [],
+            "ilegible": "límites sin verificar: Redis no contesta",
+            "total": 8450.0,
+            "habitual": None,
+            "tope_vigente": 0.0,
+            "ts": _sello(0),
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_a_shadow_blocker_no_longer_hides_the_review_only_blockers(mundo) -> None:
+    """El bug del issue #7, en su forma mínima.
+
+    Un solo freno de sombra hacía que `som["reglas"]` no estuviera vacío, el
+    `or` cortaba ahí, y TODOS los frenos que sólo figuraban en las revisiones
+    desaparecían del informe. Con dos pedidos y dos fuentes alcanza para
+    verlo: el que sólo está en la revisión tiene que seguir en el desglose.
+    """
+    mundo["comentarios"].extend(
+        [
+            _comentario("SO-1", f"{sombra.MARCA} " + _json_sombra(False, ["stock insuficiente de X"])),
+            _comentario("SO-2", f"{autonomia.MARCA_REVISION} tiene $12.000 vencidos"),
+        ]
+    )
+
+    texto = autonomia.texto(autonomia.resumen(), "es")
+
+    assert "sin stock 1" in texto  # el de la sombra
+    assert "deuda vencida 1" in texto  # el que sólo está en la revisión
+
+
+def test_an_order_in_both_sources_is_counted_once(mundo) -> None:
+    """La deduplicación es lo que hace que sumar sea correcto.
+
+    Un pedido con registro de sombra deja TAMBIÉN su comentario de revisión
+    humana — los dos los escribe el mismo paso. Si las revisiones no lo
+    saltaran, su cubeta sumaría dos y el desglose diría más frenos que pedidos
+    frenados.
+    """
+    mundo["comentarios"].extend(
+        [
+            _comentario("SO-1", f"{sombra.MARCA} " + _json_sombra(False, ["stock insuficiente de X"])),
+            _comentario("SO-1", f"{autonomia.MARCA_REVISION} stock insuficiente de X"),
+        ]
+    )
+
+    datos = autonomia.resumen()
+
+    assert datos["sombras"]["reglas"] == {"sin stock": 1}
+    assert datos["revisiones"]["grupos"] == {}  # saltado: ya lo contó la sombra
+    assert datos["revisiones"]["excluidos"] == 1
+    assert "sin stock 1" in autonomia.texto(datos, "es")
+
+
+def test_the_counted_set_leaves_out_records_that_could_not_decide(mundo) -> None:
+    """Un registro ilegible no aportó a ninguna cubeta, así que no se excluye.
+
+    Si `contados` fuera «todos los que tienen registro», el pedido cuya sombra
+    no pudo leer los límites quedaría fuera de las DOS fuentes y su freno
+    desaparecería del informe — el mismo bug que este PR arregla, entrando por
+    la otra puerta.
+    """
+    mundo["comentarios"].extend(
+        [
+            _comentario("SO-1", f"{sombra.MARCA} " + _json_ilegible()),
+            _comentario("SO-1", f"{autonomia.MARCA_REVISION} tiene $12.000 vencidos"),
+        ]
+    )
+
+    datos = autonomia.resumen()
+
+    assert datos["sombras"]["con_registro"] == 1
+    assert datos["sombras"]["contados"] == frozenset()
+    # El freno se cuenta por la prosa, que es la única fuente que sí lo sabe.
+    assert datos["revisiones"]["grupos"] == {"deuda vencida": 1}
+    assert "deuda vencida 1" in autonomia.texto(datos, "es")
+
+
+def test_the_buckets_of_both_sources_add_up(mundo) -> None:
+    """Misma cubeta en las dos fuentes, pedidos distintos: tiene que sumar 2."""
+    mundo["comentarios"].extend(
+        [
+            _comentario("SO-1", f"{sombra.MARCA} " + _json_sombra(False, ["stock insuficiente de X"])),
+            _comentario("SO-2", f"{autonomia.MARCA_REVISION} no se pudo verificar stock de Y"),
+        ]
+    )
+
+    assert "sin stock 2" in autonomia.texto(autonomia.resumen(), "es")
+
+
+def test_reviews_count_everything_when_the_shadow_read_is_down(mundo) -> None:
+    """Sin saber qué contó la otra fuente, contar de más es la única opción.
+
+    Un desglose inflado hace mirar un freno que ya no está. Uno recortado hace
+    subir un límite que no había que subir, que es la dirección peligrosa.
+    """
+    mundo["comentarios"].append(
+        _comentario("SO-1", f"{autonomia.MARCA_REVISION} tiene $12.000 vencidos")
+    )
+
+    assert autonomia.revisiones(excluir=None)["grupos"] == {"deuda vencida": 1}
+    assert autonomia.revisiones(excluir=frozenset())["grupos"] == {"deuda vencida": 1}
+    assert autonomia.revisiones(excluir={"SO-1"})["grupos"] == {}
+
+
+def test_an_unreadable_breakdown_says_so_instead_of_showing_a_dash(mundo) -> None:
+    """Un «—» en el desglose se lee como «ningún freno».
+
+    Que es exactamente la respuesta que hace subir un límite, así que cuando
+    ninguna de las dos fuentes se pudo leer el desglose tiene que decir que no
+    se pudo leer.
+    """
+    mundo["caidas"].add("Comment")
+
+    texto = autonomia.texto(autonomia.resumen(), "es")
+
+    assert "frenados por reglas: no pude leer" in texto
+    assert "el desglose" in texto and "está incompleto" in texto
+
+
+def test_no_blockers_at_all_still_shows_a_dash(mundo) -> None:
+    """La contracara: leído y vacío no es lo mismo que no leído."""
+    texto = autonomia.texto(autonomia.resumen(), "es")
+
+    assert "frenados por reglas: —" in texto
+    assert "está incompleto" not in texto  # las dos fuentes se leyeron bien
+
+
+@pytest.mark.parametrize("caida", ["sombras", "revisiones"])
+def test_half_a_breakdown_says_it_is_half(caida) -> None:
+    """Una fuente caída deja un desglose REAL pero corto, y hay que decirlo.
+
+    Se arma el dict a mano porque el doble hace caer las dos lecturas juntas
+    (las dos son «Comment»), y lo que hay que probar es justo la mitad. `texto`
+    es un constructor puro sobre estos datos, así que ése es el borde.
+    """
+    datos = {
+        "dias": 7,
+        "sombras": {"con_registro": 1, "pasan": 0, "frenados": 1, "ilegibles": 0,
+                    "contados": frozenset({"SO-1"}), "postura": {},
+                    "reglas": {"sin stock": 1}, "truncado": False},
+        "revisiones": {"pedidos": 1, "grupos": {"deuda vencida": 1},
+                       "excluidos": 1, "truncado": False},
+    }
+    datos[caida] = None
+
+    texto = autonomia.texto(datos, "es")
+
+    assert "está incompleto" in texto
+    # Y lo que SÍ se pudo leer se sigue mostrando: media respuesta es mejor
+    # que ninguna, siempre que diga que es media.
+    esperado = "deuda vencida 1" if caida == "sombras" else "sin stock 1"
+    assert esperado in texto
+
+
+def test_the_skipped_count_is_what_this_window_skipped(mundo) -> None:
+    """`excluidos` no es el tamaño del conjunto que entró.
+
+    Lo que entra son TODOS los pedidos con registro de sombra, y la mayoría no
+    dejó comentario de revisión en esta ventana. Informar `len(excluir)` sería
+    informar un número que no es el que su nombre dice — el mismo error que
+    este módulo ya arregló dos veces en otros contadores.
+    """
+    mundo["comentarios"].append(
+        _comentario("SO-1", f"{autonomia.MARCA_REVISION} tiene $12.000 vencidos")
+    )
+
+    datos = autonomia.revisiones(excluir={"SO-1", "SO-2", "SO-3"})
+
+    assert datos["excluidos"] == 1  # sólo SO-1 estaba acá para saltar
+    assert datos["grupos"] == {}
