@@ -87,18 +87,28 @@ def _patron_permitido(dato: str) -> re.Pattern[str]:
     coincidir con una palabra corta de la lista — el ruido que hace inservible
     a un audit.
 
-    El ancla es condicional porque no todo lo permitido empieza y termina en
-    letra: `[limite]` y las otras marcas de auditoría arrancan con `[`, y ahí
-    un `\b` no coincide nunca. Se ancla el borde sólo cuando ese borde es
-    alfanumérico.
+    El ancla NO es `\b` justamente por las marcas de auditoría: `\b\[limite\]`
+    exige un caracter de palabra pegado al `[` y entonces no coincide nunca.
+    `(?<!\w)` es una mirada NEGATIVA, así que la satisface un espacio, un
+    salto de línea, el borde del texto o cualquier signo — coincide con
+    `[limite]` en todas sus formas reales y se niega sólo donde hay que
+    negarse, que es en el medio de una palabra. Por eso van las dos, siempre:
+    dejar sin anclar a las entradas que no empiezan en letra las volvía a
+    convertir en recortes por substring, y `nothing[limite]confirma` fabricaba
+    la ficha `confirma`.
+
+    Insensible a mayúsculas porque los constructores RE-CAPITALIZAN los datos
+    que interpolan (`detalle.capitalize()` en app/decisiones.py y en
+    app/solicitudes.py), así que un permitido pasado en minúscula tiene que
+    seguir recortándose cuando el mensaje lo escribió en mayúscula. Recortar
+    nunca agrega hallazgos, sólo saca texto, así que ampliar el recorte no
+    puede inventar un resto. Y es lo que ya hace `_ACENTOS`.
 
     Cacheado porque el audit llama a `restos_en_espanol` miles de veces con la
     misma lista de permitidos: sin caché son ~66 patrones recompilados por
     llamada.
     """
-    izquierda = r"(?<!\w)" if dato[:1].isalnum() or dato[:1] == "_" else ""
-    derecha = r"(?!\w)" if dato[-1:].isalnum() or dato[-1:] == "_" else ""
-    return re.compile(izquierda + re.escape(dato) + derecha)
+    return re.compile(r"(?<!\w)" + re.escape(dato) + r"(?!\w)", re.IGNORECASE)
 
 
 def restos_en_espanol(texto: object, permitido: tuple[str, ...] = ()) -> list[str]:
@@ -113,19 +123,40 @@ def restos_en_espanol(texto: object, permitido: tuple[str, ...] = ()) -> list[st
     positivos; leer el docstring del módulo antes de cambiarlo.
     """
     crudo = str(texto or "")
-    for dato in tuple(permitido) + PERMITIDO:
+    # De más largo a más corto, y el orden NO es cosmético: cada recorte muta
+    # el texto, así que un permitido corto recortado primero puede destruir el
+    # match de uno más largo que lo contiene, y dejar el resto del largo
+    # suelto para que lo marque el detector. Con `confirmar` en la lista, la
+    # cita permitida «tengo un pedido sin confirmar» dejaba `['pedido', 'sin']`
+    # — y `confirmar` va antes que cualquier dato que agregue un test, porque
+    # el guard pasa el allowlist adelante. Ordenar por largo hace que el orden
+    # de la lista deje de importar.
+    # Sin repetidos: los dos permitidos se solapan en varias entradas, así que
+    # esto ahorra 17 pasadas idénticas. El desempate por texto mantiene el
+    # recorrido determinístico.
+    lista = sorted({str(d) for d in tuple(permitido) + PERMITIDO}, key=lambda d: (-len(d), d))
+    for dato in lista:
         # Un permitido vacío recortaba entre CADA letra del texto y dejaba el
         # mensaje entero partido en fichas de un caracter — o sea, dejaba al
         # detector CIEGO: `restos_en_espanol("5 de 6", ("",))` no encontraba
         # nada.
-        if not (limpio := str(dato)):
+        if not dato:
             continue
-        crudo = _patron_permitido(limpio).sub(" ", crudo)
+        crudo = _patron_permitido(dato).sub(" ", crudo)
     hallados = []
     if _ACENTOS.search(crudo):
         hallados.extend(sorted(set(_ACENTOS.findall(crudo))))
     plano = _sin_tildes(crudo).lower()
-    fichas = {f.strip(".,;:!?()[]'\"*·—-…") for f in plano.split()}
+    # Los signos que se recortan de los BORDES de cada ficha. Los guillemets y
+    # los `<>` estaban afuera, y no es un detalle: el catálogo inglés los usa
+    # de verdad («gerencia.pendientes_cuerpo» dice `Reply «confirmar
+    # <order>»`), así que la falla más probable de una migración a medias —
+    # dejar el nombre del placeholder en español — producía la ficha
+    # `<pedido>`, que nunca se reducía a `pedido`. Lo mismo tapaba justo la
+    # filtración que este PR vino a poder ver: `«sin stock»` daba limpio
+    # mientras `sin stock` daba `sin`.
+    _BORDES = ".,;:!?()[]'\"*·—-…«»<>“”‘’"
+    fichas = {f.strip(_BORDES) for f in plano.split()}
     hallados.extend(sorted(fichas & _PALABRAS_ES))
     return hallados
 

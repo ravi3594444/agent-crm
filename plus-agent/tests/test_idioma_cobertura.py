@@ -408,7 +408,87 @@ def test_lo_permitido_se_sigue_recortando_donde_tiene_que_recortarse():
     assert restos_en_espanol("Order for Panadería López", ("Panadería López",)) == []
 
 
+# El catálogo inglés usa guillemets y `<>` de verdad: `gerencia.pendientes_cuerpo`
+# dice `Reply «confirmar <order>», «rechazar <order>»`. Así que la falla más
+# probable de una migración a medias —traducir la prosa y dejar el nombre del
+# placeholder en español— produce una ficha `<pedido>`, y ésa no se reducía a
+# `pedido`. Lo mismo tapaba justo lo que este PR vino a poder ver.
+_ENVUELTO_EN_SIGNOS = [
+    ("The rule «sin stock» blocked 3 orders.", "sin"),
+    ("fresh counts: «5 de 6»", "de"),
+    ("Reply «confirmar <pedido>», «rechazar <pedido>».", "pedido"),
+    ("placeholder <motivo> never got migrated", "motivo"),
+    ("Blocked by «tope del pedido».", "del"),
+]
+
+
+@pytest.mark.parametrize("texto,palabra", _ENVUELTO_EN_SIGNOS)
+def test_los_signos_de_los_bordes_no_esconden_la_palabra(texto, palabra):
+    """Una palabra entre guillemets o entre `<>` sigue siendo esa palabra."""
+    assert palabra in restos_en_espanol(texto, DATOS + PERMITIDO_EN_SALIDA_INGLESA)
+
+
+def test_lo_permitido_no_se_recorta_en_el_medio_de_una_palabra():
+    """Las anclas van SIEMPRE, incluso en lo que no empieza con letra.
+
+    Sin ancla, las cuatro marcas de auditoría volvían a ser recortes por
+    substring y fabricaban fichas: `nothing[limite]confirma` quedaba en
+    `nothing confirma` y el detector marcaba `confirma`.
+    """
+    assert restos_en_espanol("nothing[limite]confirma") == []
+    assert restos_en_espanol("audit[entrega]pedidos here") == []
+    # Y donde la marca aparece de verdad, se recorta igual.
+    assert restos_en_espanol("[limite] · [confirmado-por-agente]") == []
+    assert restos_en_espanol("note [limite] here") == []
+
+
+def test_un_permitido_vacio_no_deja_ciego_al_detector():
+    """Recortar la cadena vacía partía el texto entre CADA letra.
+
+    Y un texto en fichas de un caracter no tiene ninguna palabra, así que el
+    detector devolvía «limpio» sobre cualquier cosa. Latente —hoy ningún test
+    pasa un permitido vacío— pero es la forma de ceguera más fácil de
+    introducir sin querer, porque basta con un dato que resultó ser "".
+    """
+    assert "de" in restos_en_espanol("5 de 6", ("",))
+    assert "sin" in restos_en_espanol("sin stock 3", ("", "", ""))
+
+
 def test_el_detector_sigue_agarrando_acentos_y_signos_de_apertura():
     """La otra pata del detector, que este PR no toca: que siga viva."""
     assert restos_en_espanol("¿Confirmás el pedido?") != []
     assert restos_en_espanol("Órdenes") != []
+
+
+def test_el_orden_de_lo_permitido_no_cambia_el_resultado():
+    """Cada recorte muta el texto, así que el orden podía destruir un match.
+
+    `notificar.texto_falla_tecnica` está en el registro y cita el mensaje del
+    cliente tal cual, así que la forma es real: un test que pase esa cita como
+    permitido la pone DESPUÉS del allowlist, que ya trae `confirmar`. Con el
+    recorte en orden de lista, `confirmar` se comía un pedazo de la cita, el
+    resto quedaba suelto y el detector marcaba `['pedido', 'sin']` sobre un
+    texto enteramente permitido.
+    """
+    texto = "Message:\n> tengo un pedido sin confirmar\nError: RateLimit"
+    cita = "tengo un pedido sin confirmar"
+    for orden in (("confirmar", cita), (cita, "confirmar")):
+        assert restos_en_espanol(texto, orden) == [], orden
+    # Lo mismo entre dos permitidos donde uno contiene al otro.
+    for orden in (("To Deliver", "To Deliver and Bill"),
+                  ("To Deliver and Bill", "To Deliver")):
+        assert restos_en_espanol("status: To Deliver and Bill", orden) == [], orden
+
+
+def test_lo_permitido_se_recorta_aunque_el_mensaje_lo_haya_re_capitalizado():
+    """Los constructores hacen `detalle.capitalize()` sobre lo que interpolan.
+
+    Así que un dato permitido en minúscula puede llegar al texto en mayúscula
+    (app/decisiones.py y app/solicitudes.py lo hacen en seis lugares). Si el
+    recorte fuera sensible a mayúsculas, ese dato quedaría sin recortar y un
+    nombre o motivo legítimamente español daría un rojo falso.
+    """
+    assert restos_en_espanol("Held back: Sin stock 3", ("sin stock",)) == []
+    assert restos_en_espanol("Reason: No hay stock.", ("no hay stock",)) == []
+    # Y ampliar el recorte no puede tapar un resto: sin el permitido, se marca.
+    assert "sin" in restos_en_espanol("Held back: Sin stock 3")
