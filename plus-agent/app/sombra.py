@@ -176,6 +176,7 @@ def anotar(pedido: str, sales_order: dict) -> bool:
         "pasa_reglas": sombra.pasa_reglas,
         "motivos_reglas": sombra.motivos_reglas,
         "motivos_postura": sombra.motivos_postura,
+        "ilegible": sombra.ilegible,
         "total": sombra.total,
         "habitual": sombra.habitual,
         "tope_vigente": sombra.tope_vigente,

@@ -243,9 +243,13 @@ def test_unreadable_limits_judge_nothing(green, monkeypatch: pytest.MonkeyPatch)
 
     assert sombra.pasa_reglas is False
     assert sombra.motivos_reglas == []
-    assert sombra.motivos_postura == [
+    # Y NO en motivos_postura: el informe rinde esa lista como «frenados sólo
+    # por la postura que elegiste», así que una caída ahí le diría al dueño que
+    # decidió algo que no decidió. Una falla nunca es una decisión.
+    assert sombra.motivos_postura == []
+    assert sombra.ilegible == (
         "límites sin verificar: no pude leer los límites configurados"
-    ]
+    )
 
 
 def test_an_unreadable_total_still_produces_a_record(

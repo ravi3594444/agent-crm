@@ -214,13 +214,20 @@ def confirmaciones(dias: int = DIAS_DEFAULT) -> dict | None:
     return cuenta
 
 
-def rechazos(dias: int = DIAS_DEFAULT) -> int | None:
-    """Pedidos que una persona rechazó a mano en la ventana."""
+def rechazos(dias: int = DIAS_DEFAULT) -> dict | None:
+    """Pedidos que una persona rechazó a mano en la ventana.
+
+    Devuelve `truncado` como los demás: si se llenó el techo de lectura, el
+    número es un PISO y no el total, y el aviso de la última línea tiene que
+    decirlo. Nombrar la bandera y tirarla dejaba el único número de este módulo
+    que se informaba como exacto sin poder saberlo.
+    """
     leido = _comentarios(MARCA_RECHAZO, _desde(dias))
     if leido is None:
         return None
-    filas, _truncado = leido
-    return len({str(f.get("reference_name") or "") for f in filas if f.get("reference_name")})
+    filas, truncado = leido
+    pedidos = {str(f.get("reference_name") or "") for f in filas if f.get("reference_name")}
+    return {"total": len(pedidos), "truncado": truncado}
 
 
 def sombras(dias: int = DIAS_DEFAULT) -> dict | None:
@@ -245,9 +252,16 @@ def sombras(dias: int = DIAS_DEFAULT) -> dict | None:
         if datos is not None:
             vistos[pedido] = datos
     pasan = 0
+    ilegibles = 0
     postura: dict[str, int] = {}
     reglas: dict[str, int] = {}
     for datos in vistos.values():
+        # Un registro que no pudo leer los límites no decidió nada: no cuenta
+        # como frenado por la postura, porque la postura es lo que el dueño
+        # eligió y esto es una caída.
+        if datos.get("ilegible"):
+            ilegibles += 1
+            continue
         if datos.get("pasa_reglas"):
             pasan += 1
         for motivo in datos.get("motivos_postura") or []:
@@ -257,10 +271,12 @@ def sombras(dias: int = DIAS_DEFAULT) -> dict | None:
         # más frenos que pedidos.
         for nombre in {grupo(m) for m in (datos.get("motivos_reglas") or [])}:
             reglas[nombre] = reglas.get(nombre, 0) + 1
+    decididos = len(vistos) - ilegibles
     return {
         "con_registro": len(vistos),
         "pasan": pasan,
-        "frenados": len(vistos) - pasan,
+        "frenados": decididos - pasan,
+        "ilegibles": ilegibles,
         "postura": postura,
         "reglas": reglas,
         "truncado": truncado,
@@ -402,6 +418,7 @@ def _linea_grupos(grupos: dict[str, int] | None) -> str:
 def texto(datos: dict, lengua: str | None = None) -> str:
     """El resumen como lo lee el dueño. Constructor puro: sin reloj y sin red."""
     conf = datos.get("confirmaciones")
+    rec = datos.get("rechazos")
     som = datos.get("sombras")
     rev = datos.get("revisiones")
     bor = datos.get("borradores")
@@ -422,7 +439,7 @@ def texto(datos: dict, lengua: str | None = None) -> str:
         solos=numero(None if conf is None else conf.get("solos")),
         por_vos=numero(None if conf is None else conf.get("por_vos")),
         acepto=numero(None if conf is None else conf.get("acepto_el_cliente")),
-        rechazados=numero(datos.get("rechazos")),
+        rechazados=numero(None if rec is None else rec.get("total")),
         sombra_pasan=numero(None if som is None else som.get("pasan")),
         sombra_frenados=numero(None if som is None else som.get("frenados")),
         postura=_linea_grupos((som or {}).get("postura")) or "—",
@@ -438,7 +455,7 @@ def texto(datos: dict, lengua: str | None = None) -> str:
     )
     # Un techo de lectura lleno significa que estos números son un PISO, no el
     # total. Decirlo es la diferencia entre un número y un número engañoso.
-    if any((fuente or {}).get("truncado") for fuente in (conf, som, rev)):
+    if any((fuente or {}).get("truncado") for fuente in (conf, rec, som, rev)):
         cuerpo += "\n" + idioma.t("gerencia.autonomia_truncado", lengua)
     return cuerpo
 

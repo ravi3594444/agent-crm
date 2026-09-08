@@ -232,7 +232,7 @@ def test_a_marker_query_does_not_pick_up_another_marker(mundo) -> None:
     assert autonomia.confirmaciones()["total"] == 1
     assert autonomia.sombras()["con_registro"] == 1
     assert autonomia.revisiones()["pedidos"] == 1
-    assert autonomia.rechazos() == 1
+    assert autonomia.rechazos()["total"] == 1
 
 
 def test_unreadable_confirmations_are_none_not_zero(mundo) -> None:
@@ -734,3 +734,62 @@ def test_a_timestamp_that_already_carries_a_zone_is_left_alone(monkeypatch):
     momento = autonomia._creacion({"creation": "2026-09-08T09:00:00+00:00"})
 
     assert momento is not None and momento.utcoffset().total_seconds() == 0
+
+
+# ------------------- una caída no es una postura que el dueño eligió
+
+
+def test_an_unreadable_shadow_record_is_not_counted_as_a_posture_choice(mundo) -> None:
+    """El informe rinde la postura como «frenados sólo por la postura que elegiste».
+
+    Meter ahí un «límites sin verificar» le diría al dueño que decidió algo que
+    no decidió, y encima lo contaría como un pedido frenado a propósito.
+    """
+    import json
+
+    caido = json.dumps(
+        {
+            "pasa_reglas": False,
+            "motivos_reglas": [],
+            "motivos_postura": [],
+            "ilegible": "límites sin verificar: Redis no contesta",
+            "total": 8450.0,
+            "habitual": None,
+            "tope_vigente": 0.0,
+            "ts": _sello(0),
+        },
+        ensure_ascii=False,
+    )
+    mundo["comentarios"].extend(
+        [
+            _comentario("SO-1", f"{sombra.MARCA} " + _json_sombra(True, [])),
+            _comentario("SO-2", f"{sombra.MARCA} {caido}"),
+        ]
+    )
+
+    datos = autonomia.sombras()
+
+    assert datos["con_registro"] == 2  # los dos tienen registro durable
+    assert datos["ilegibles"] == 1
+    assert datos["pasan"] == 1
+    # Y NO cuenta como frenado: de los DECIDIDOS, uno pasó y ninguno se frenó.
+    assert datos["frenados"] == 0
+    assert datos["postura"] == {"tope": 1}  # sólo el que sí decidió
+
+
+# ------------------------- el techo de lectura de los rechazos también avisa
+
+
+def test_a_capped_rejection_read_is_reported_as_a_floor(mundo, monkeypatch) -> None:
+    """Era el único número del módulo que se informaba como exacto sin saberlo."""
+    monkeypatch.setattr(autonomia, "MAX_COMENTARIOS", 2)
+    for n in range(4):
+        mundo["comentarios"].append(
+            _comentario(f"SO-{n}", f"{autonomia.MARCA_RECHAZO} un integrante")
+        )
+
+    datos = autonomia.rechazos()
+
+    assert datos["truncado"] is True
+    # Y el aviso de la última línea lo dice, no sólo para conf/sombra/revisión.
+    assert "son un piso" in autonomia.texto({"dias": 7, "rechazos": datos}, "es")

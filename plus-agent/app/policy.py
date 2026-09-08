@@ -75,11 +75,17 @@ class Sombra:
 
     ``habitual`` stays None until W5 gives the policy a notion of "the usual".
     None is not False: it means the question was not asked.
+
+    ``ilegible`` is its own field and NOT a posture reason. The report renders
+    the posture list as "held back only by the posture you chose", so putting a
+    limits outage in there would tell the owner he decided something he did not.
+    A failure is never a decision.
     """
 
     pasa_reglas: bool
     motivos_reglas: list[str] = field(default_factory=list)
     motivos_postura: list[str] = field(default_factory=list)
+    ilegible: str = ""
     total: float = 0.0
     habitual: bool | None = None
     tope_vigente: float = 0.0
@@ -525,7 +531,7 @@ def evaluar_sombra(sales_order: dict) -> Sombra:
         # order is not judged, and the record says why it could not be.
         return Sombra(
             pasa_reglas=False,
-            motivos_postura=[f"límites sin verificar: {exc}"],
+            ilegible=f"límites sin verificar: {exc}",
             total=_total_o_cero(sales_order),
         )
 

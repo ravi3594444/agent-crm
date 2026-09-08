@@ -43,7 +43,7 @@ _AUTONOMIA = {
     "dias": 7,
     "confirmaciones": {"total": 61, "solos": 0, "por_vos": 58, "acepto_el_cliente": 3,
                        "sin_fuente": 0, "truncado": False},
-    "rechazos": 3,
+    "rechazos": {"total": 3, "truncado": False},
     "sombras": {"con_registro": 58, "pasan": 44, "frenados": 14,
                 "postura": {"tope": 44}, "reglas": {"sin stock": 3},
                 "truncado": False},
