@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -37,6 +37,17 @@ def epoch(hora: int, minuto: int = 0, dia: int = 8) -> float:
     return datetime(2026, 9, dia, hora, minuto, tzinfo=ZONA).timestamp()
 
 
+def momento(hora: int, minuto: int = 0, dia: int = 8) -> datetime:
+    """El mismo calendario que `epoch`, para los módulos que piden un datetime.
+
+    `tick(ahora=…)` toma un epoch y todo el resto (`edad_horas`, `en_silencio`,
+    `sombra._ahora`, `digest._ahora`) toma un datetime. Una sola fuente para los
+    dos, así que no pueden separarse: `momento(9)` y `epoch(9)` son el mismo
+    instante escrito de dos maneras.
+    """
+    return datetime(2026, 9, dia, hora, minuto, tzinfo=ZONA)
+
+
 @pytest.fixture(autouse=True)
 def _el_reloj_de_verdad_no_entra(monkeypatch: pytest.MonkeyPatch) -> None:
     """Ningún test de este archivo lee la hora real, y es a propósito.
@@ -57,16 +68,58 @@ def _el_reloj_de_verdad_no_entra(monkeypatch: pytest.MonkeyPatch) -> None:
     `epoch(...)`. Esto lo vuelve obligatorio, y hace que leer el reloj real
     explote acá con el motivo escrito en vez de seis horas más tarde en el CI
     de otra persona.
+
+    Y `pendientes` no es el único reloj que este archivo hace correr. Doce
+    tests de acá leían la hora real por otros dos módulos, sin pasar por
+    `tick()`:
+
+      * `sombra._ahora()` (diez) — `anotar` sella el registro con `datetime.now(UTC)`
+        y `contar()` lee el contador del día que ese mismo reloj diga. Es
+        coherente sólo mientras las dos llamadas caigan en el MISMO día UTC:
+        `test_the_daily_counter_separates_passes_from_blocks` anota dos veces y
+        cuenta, y si la medianoche UTC cae en el medio el contador se parte y
+        `contar()` devuelve None. Un reloj fijo lo hace imposible en vez de
+        improbable;
+      * `digest._ahora()` (dos) — `seccion_pendientes` calcula «hace N h» contra
+        el `creation` fijo del fixture. Es EL bug de este archivo, en otro
+        módulo: hoy no se ve porque el test sólo mira `" h"`, que es verdad con
+        cualquier número.
+
+    Los tres relojes quedan FIJOS, y no todos en el mismo instante: `sombra` en
+    el momento en que el borrador se crea —las 09:00, el mismo `epoch(9)` que
+    pasan los tests del barrido— y `digest` a las 15:00, que es cuando alguien
+    lee el resumen. De esa diferencia sale el «hace 6 h» que ahora afirma
+    `test_the_digest_shows_every_waiting_draft_broken_out_by_origin`, en vez del
+    `" h"` de antes, que era verdad con cualquier número. Lo que importa no es
+    que sean el mismo número sino que sean números ESCRITOS: la edad que ve el
+    barrido, la que imprime el resumen y el día del contador salen de acá y no
+    del día en que corra el CI.
+
+    La prohibición de `pendientes._ahora` también vive en `tests/conftest.py`,
+    para toda la suite: la regla no puede ser algo que sólo sepa este archivo.
+    Ésta la deja acá igual, con el mensaje que nombra a `epoch()`.
     """
 
     def _prohibido() -> None:
-        raise AssertionError(
+        # pytest.fail y no assert: `Failed` hereda de BaseException, así que un
+        # `except Exception` del camino de producción no puede tragárselo y
+        # convertir el guard en una ronda que no hizo nada.
+        pytest.fail(
             "un test de test_pendientes.py leyó la hora REAL. Pasale el momento: "
             "`pendientes.tick(ahora=epoch(9))`. Ver el docstring de "
             "_el_reloj_de_verdad_no_entra."
         )
 
     monkeypatch.setattr(pendientes, "_ahora", _prohibido)
+    # Estos dos NO se prohíben: `sombra.anotar` y `digest.seccion_pendientes`
+    # necesitan un reloj y no lo reciben por parámetro. Se FIJAN, cada uno en el
+    # momento que le corresponde: la sombra anota cuando el borrador se crea
+    # (09:00, el `epoch(9)` del barrido) y el resumen se lee a las 15:00 —de esa
+    # diferencia salen las 6 h que el test del digest ahora afirma.
+    monkeypatch.setattr(sombra, "_ahora", lambda: momento(9).astimezone(UTC))
+    from app import digest
+
+    monkeypatch.setattr(digest, "_ahora", lambda: momento(15))
 
 
 def _sombra_verde() -> policy.Sombra:
@@ -804,8 +857,10 @@ def test_the_digest_shows_every_waiting_draft_broken_out_by_origin(mundo) -> Non
     assert "2 del bot + 1 cargados a mano" in texto
     assert "SO-BOT-1" in texto and "SO-A-MANO" in texto
     assert "cargado a mano" in texto
-    # Y la edad, que es el dato con el que decide a cuál atender primero.
-    assert " h" in texto
+    # Y la edad, que es el dato con el que decide a cuál atender primero. El
+    # NÚMERO, no `" h"`: con el reloj real ese `in` era verdad con cualquier
+    # edad, y con el reloj fijo el 6 sale de las 09:00 del fixture a las 15:00.
+    assert "hace 6 h" in texto
 
 
 def test_the_digest_says_it_could_not_read_instead_of_none(mundo) -> None:

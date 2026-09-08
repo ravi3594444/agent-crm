@@ -58,9 +58,26 @@ _DUMMY = {
     "QWEN_SALES_MODEL": "qwen3.7-plus-2026-05-26",
     "QWEN_MANAGER_MODEL": "qwen3.8-max",
     # opcionales que cambian comportamiento: valores deterministas para tests
+    # LA QUE DECIDE QUÉ MOMENTO ES. Va FIJA, no setdefault: media suite compara
+    # fechas fijas —`tests/test_pendientes.py::epoch` arma sus momentos con esta
+    # zona escrita a mano— contra el reloj del negocio, que sale de esta
+    # variable. Con BUSINESS_TIMEZONE=Asia/Kolkata exportada en el shell se caen
+    # 26 tests con EXACTAMENTE los mismos assert que el PR #12 arregló
+    # (`assert 13 == 3` en test_the_round_is_capped), porque el borrador del
+    # fixture envejece 8:30 h de golpe. Ése PR fijó el reloj y dejó la zona
+    # abierta: son las dos mitades del mismo momento.
     "BUSINESS_TIMEZONE": "America/Argentina/Buenos_Aires",
     "ERPNEXT_COMPANY": "Lacteos Test SA",
     "ERPNEXT_WAREHOUSE": "Principal - LT",
+    # LAS QUE DECIDEN EN QUÉ IDIOMA SE PRUEBA, y las tres que un .env real
+    # cambia. Con IDIOMA_DEFAULT=en se caen 154 tests y 15 archivos ni colectan;
+    # con IDIOMA_GERENCIA=en, 69; con DIGEST_ACTIVO=0, el que prueba que el
+    # resumen sale una vez por día. Los valores son los de fábrica
+    # (`app/idioma.py::ES`, `app/digest.py::activo`), así que esto no configura
+    # nada nuevo: sólo impide que el entorno lo configure por su cuenta.
+    "IDIOMA_DEFAULT": "es",
+    "IDIOMA_GERENCIA": "",
+    "DIGEST_ACTIVO": "true",
     # LAS DOS QUE DECIDEN QUIÉN ES QUIÉN, y las dos que un .env real cambia.
     # app/telefono.py lee PAIS_TELEFONO AL IMPORTAR y app/router.py arma STAFF
     # igual, así que un .env con otro país o con el número real del dueño no
@@ -73,11 +90,22 @@ _DUMMY = {
     "TELEFONOS_EQUIPO": "",
 }
 # Casi todo es setdefault: un test o CI que ya fijó algo (REDIS_URL, sobre
-# todo) manda. Pero lo que decide QUIÉN ES QUIÉN y QUÉ PROVEEDOR se prueba se
-# fija sin condición: con setdefault, un shell que exporta LLM_PROVIDER=gemini o
-# un TELEFONOS_EQUIPO cargado llegaba a la suite, que es justo la fuga que el
+# todo) manda. Pero lo que decide QUIÉN ES QUIÉN, QUÉ PROVEEDOR, QUÉ MOMENTO y
+# QUÉ IDIOMA se prueba se fija sin condición: con setdefault, un shell que
+# exporta LLM_PROVIDER=gemini, BUSINESS_TIMEZONE=Asia/Kolkata o un
+# TELEFONOS_EQUIPO cargado llegaba a la suite, que es justo la fuga que el
 # docstring de arriba describe.
-_FIJAS = {"LLM_PROVIDER", "QWEN_SALES_MODEL", "QWEN_MANAGER_MODEL", "PAIS_TELEFONO", "TELEFONOS_EQUIPO"}
+_FIJAS = {
+    "LLM_PROVIDER",
+    "QWEN_SALES_MODEL",
+    "QWEN_MANAGER_MODEL",
+    "PAIS_TELEFONO",
+    "TELEFONOS_EQUIPO",
+    "BUSINESS_TIMEZONE",
+    "IDIOMA_DEFAULT",
+    "IDIOMA_GERENCIA",
+    "DIGEST_ACTIVO",
+}
 for _k, _v in _DUMMY.items():
     if _k in _FIJAS:
         os.environ[_k] = _v
@@ -364,3 +392,37 @@ def marcas_sin_redis(monkeypatch):
     marcas = FakeMarcas()
     monkeypatch.setattr(outbound_status, "_client", marcas)
     return marcas
+
+
+@pytest.fixture(autouse=True)
+def el_barrido_no_lee_el_reloj_real(monkeypatch):
+    """`pendientes.tick()` sin `ahora=` explota, en CUALQUIER archivo.
+
+    Es la regla del PR #12 dejada de ser una convención de un archivo. Ahí, once
+    llamadas comparaban un `creation` fijo contra el reloj vivo del negocio y la
+    suite pasaba a la mañana y fallaba a la tarde; el guard que lo arregló vive
+    dentro de `tests/test_pendientes.py`, así que el mismo error escrito en
+    `tests/test_digest.py` o en un archivo nuevo vuelve a costar medio día de CI
+    rojo antes de que alguien lo reconozca.
+
+    Acá no hay que distinguir el uso coherente del incoherente: NINGÚN test de
+    la suite lee este reloj —las 51 llamadas a `tick()` pasan el momento, y las
+    otras funciones de `pendientes` que lo usan (`edad_horas`, `en_silencio`) lo
+    reciben de sus llamadores—, así que prohibirlo no le cuesta un test a nadie.
+    Un test que de verdad quiera el reloj de verdad lo dice en voz alta con su
+    propio `monkeypatch.setattr(pendientes, "_ahora", …)`, que corre después de
+    éste y manda.
+    """
+    from app import pendientes
+
+    def _prohibido():
+        # pytest.fail y no assert: `Failed` hereda de BaseException, así que el
+        # `except Exception` de la ronda no puede tragárselo y dejar el guard
+        # como una ronda que no hizo nada.
+        pytest.fail(
+            "este test leyó la hora REAL de app/pendientes.py. Pasale el "
+            "momento: `pendientes.tick(ahora=…)`, `edad_horas(fila, momento)`, "
+            "`en_silencio(momento)`. Ver el guard de tests/conftest.py."
+        )
+
+    monkeypatch.setattr(pendientes, "_ahora", _prohibido)
