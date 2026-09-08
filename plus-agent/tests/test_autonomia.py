@@ -559,8 +559,15 @@ def test_readiness_warns_above_eighty_percent(mundo, monkeypatch) -> None:
     assert reporte.listo is True  # un aviso no bloquea
 
 
-def test_readiness_blocks_only_once_the_cap_is_past(mundo, monkeypatch) -> None:
-    """A esa altura la postura del dueño no es la que está decidiendo."""
+def test_past_the_cap_is_still_only_a_warning(mundo, monkeypatch) -> None:
+    """Nunca bloquea, ni pasado el techo. Mismo criterio que chequear_solicitudes.
+
+    En este archivo FALTA/ERROR significa que el sistema haría algo MAL.
+    Pasado el techo deja de auto-confirmar y todo pedido espera a una persona:
+    la postura de lanzamiento. Nada se sobrevende y a nadie se le promete de
+    más — es menos útil, en la dirección segura, y eso no es lo que estos
+    niveles miden.
+    """
     from app import readiness
 
     monkeypatch.setattr(policy, "MAX_BORRADORES", 3)
@@ -569,8 +576,52 @@ def test_readiness_blocks_only_once_the_cap_is_past(mundo, monkeypatch) -> None:
 
     readiness.chequear_borradores(reporte)
 
-    assert reporte.listo is False
-    assert "NINGÚN pedido se confirma solo" in reporte.texto()
+    niveles = {clave: nivel for nivel, clave, _ in reporte.lineas}
+    assert niveles["Borradores vivos"] == readiness.AVISO
+    assert reporte.listo is True  # no bloquea el despliegue de la limpieza
+    # Pero es el aviso más fuerte del archivo, con la consecuencia en la línea.
+    texto = reporte.texto()
+    assert "PASASTE EL TECHO" in texto
+    assert "auto-confirmación apagada para TODOS los productos" in texto
+    assert "hasta bajar de 3" in texto
+
+
+def test_without_network_the_cap_check_makes_no_erpnext_call(monkeypatch) -> None:
+    """`deploy.yml` corre check-env-offline como puerta: no puede salir a la red.
+
+    Y no se calla: dice que no lo verificó, que es la regla del módulo.
+    """
+    from app import erpnext, readiness
+
+    def explota(*a, **k):
+        raise AssertionError("chequear_borradores salió a ERPNext sin red")
+
+    monkeypatch.setattr(erpnext, "policy_get_list", explota)
+    monkeypatch.setattr(erpnext, "policy_get_doc", explota)
+    reporte = readiness.Reporte()
+
+    readiness.chequear_borradores(reporte, con_red=False)
+
+    niveles = {clave: nivel for nivel, clave, _ in reporte.lineas}
+    assert niveles["Borradores vivos"] == readiness.AVISO
+    assert "sin red" in reporte.texto()
+    assert reporte.listo is True
+
+
+def test_the_offline_preflight_never_blocks_on_the_cap(monkeypatch) -> None:
+    """De punta a punta: `--sin-red` no puede frenar el despliegue por el techo."""
+    from app import erpnext, readiness
+
+    monkeypatch.setattr(
+        erpnext,
+        "policy_get_list",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("salió a la red")),
+    )
+
+    reporte = readiness.ejecutar({"REDIS_URL": ""}, con_red=False)
+
+    culpables = [c for n, c, _ in reporte.lineas if n in (readiness.FALTA, readiness.ERROR)]
+    assert "Borradores vivos" not in culpables
 
 
 def test_readiness_is_ok_when_there_is_room(mundo, monkeypatch) -> None:
@@ -626,3 +677,24 @@ def test_nothing_is_flagged_as_truncated_when_it_fits(mundo) -> None:
 
     assert autonomia.confirmaciones()["truncado"] is False
     assert "son un piso" not in autonomia.texto(autonomia.resumen(), "es")
+
+
+def test_the_sweep_templates_do_not_get_the_misleading_optional_message() -> None:
+    """El mensaje genérico diría lo contrario de la verdad para estas dos.
+
+    «sale como texto libre mientras el destinatario haya escrito en las últimas
+    24 h» es cierto para las demás plantillas y FALSO para éstas: son las únicas
+    que se disparan horas después del último mensaje del cliente, cuando la
+    ventana ya está cerrada.
+    """
+    from app import readiness
+
+    reporte = readiness.Reporte()
+    readiness.chequear_plantillas({}, reporte, None, "")
+
+    por_clave = {clave: mensaje for _, clave, mensaje in reporte.lineas}
+    for variable in readiness.PLANTILLAS_FUERA_DE_VENTANA:
+        assert "ya está cerrada" in por_clave[variable]
+        assert "opcional en el piloto" not in por_clave[variable]
+    # Y las otras conservan su mensaje, que para ellas sí es cierto.
+    assert "opcional en el piloto" in por_clave["WHATSAPP_STAFF_PENDING_TEMPLATE"]

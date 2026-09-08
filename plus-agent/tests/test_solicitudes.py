@@ -3785,3 +3785,68 @@ def test_a_refused_approval_repeated_still_changes_nothing(mundo) -> None:
     assert solicitud.estado == solicitudes.PENDIENTE
     assert solicitud.decision == ""
     assert mundo["submits"] == []
+
+
+# ------------------- las plantillas de los avisos que dispara el barrido
+
+
+def _entradas_en_cola() -> list[dict]:
+    return [
+        json.loads(e)
+        for e in entrada_de_cola(outbound_status._client, avisos.COLA)
+    ]
+
+
+def test_the_expiry_notice_carries_a_template_so_it_can_leave_the_window(
+    mundo,
+) -> None:
+    """Este aviso sale HORAS después del último mensaje del cliente.
+
+    Para entonces la ventana de 24 h de Meta suele estar cerrada, y sin
+    plantilla `avisos._enviar` no tiene canal: devuelve "" en cada intento, se
+    queman los 8 y el cliente nunca se entera de que su solicitud venció — el
+    peor final que describe el docstring de este módulo.
+    """
+    solicitud = _abrir(mundo)
+
+    solicitudes.tick(ahora=solicitud.vence_en + 1)
+
+    avisos_cliente = [
+        e for e in _entradas_en_cola() if e["evento"].startswith("solicitud_vencida")
+    ]
+    assert len(avisos_cliente) == 1
+    entrada = avisos_cliente[0]
+    assert entrada["plantilla_env"] == solicitudes.PLANTILLA_VENCIDA
+    # Un parámetro, el número de pedido: el conteo tiene que coincidir con la
+    # plantilla registrada en Meta.
+    assert entrada["parametros"] == [SO]
+
+
+def test_the_fallback_offer_carries_its_own_template_with_two_parameters(
+    mundo, monkeypatch, lunes
+) -> None:
+    from conftest import entrega_autorizada
+
+    entrega_autorizada(monkeypatch)
+    _reparto(monkeypatch)
+    solicitud = _abrir(mundo)
+
+    solicitudes.tick(ahora=solicitud.vence_en + 1)
+
+    respaldos = [
+        e for e in _entradas_en_cola() if e["evento"].startswith("solicitud_respaldo")
+    ]
+    assert len(respaldos) == 1
+    entrada = respaldos[0]
+    assert entrada["plantilla_env"] == solicitudes.PLANTILLA_RESPALDO
+    assert len(entrada["parametros"]) == 2
+    assert entrada["parametros"][0] == SO
+    assert entrada["parametros"][1]  # nunca vacío: Meta lo rechazaría
+
+
+def test_a_fallback_without_a_date_still_sends_a_non_empty_parameter(mundo) -> None:
+    """Meta rechaza un parámetro vacío, así que nunca se manda uno."""
+    solicitud = _abrir(mundo)
+    sin_fecha = solicitudes.registrar(solicitud, "prueba", ofrecido={"metodo": "entrega"})
+
+    assert solicitudes._fecha_ofrecida(sin_fecha).strip()

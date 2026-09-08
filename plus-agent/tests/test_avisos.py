@@ -442,3 +442,60 @@ def test_the_attempt_counter_expires_with_the_notice(marcas_sin_redis) -> None:
     assert avisos._sumar_intento("confirmacion_cliente", "SAL-ORD-2026-00001") == 1
     clave = avisos._clave_intentos("confirmacion_cliente", "SAL-ORD-2026-00001")
     assert marcas_sin_redis.ttls[clave] == avisos.ENCOLADO_TTL_SEGUNDOS
+
+
+# ------------------------------- los dos avisos del barrido de vencimientos
+# Son los únicos que se mandan HORAS después del último mensaje del cliente,
+# así que son los únicos que encuentran la ventana de 24 h cerrada. Sin
+# plantilla no tienen canal, y el cliente nunca se entera de que su solicitud
+# venció — el peor final que describe el docstring de app/solicitudes.py.
+
+
+def _sin_ventana(canal, monkeypatch) -> None:
+    monkeypatch.setattr(avisos, "window_open", lambda tel: False)
+
+
+@pytest.mark.parametrize(
+    "evento,variable,cuantos",
+    [
+        ("solicitud_vencida", "WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE", 1),
+        ("solicitud_respaldo", "WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE", 2),
+    ],
+)
+def test_the_sweep_notices_reach_a_customer_whose_window_closed(
+    canal, monkeypatch, evento, variable, cuantos
+) -> None:
+    _sin_ventana(canal, monkeypatch)
+    monkeypatch.setenv(variable, "plantilla_registrada")
+    parametros = ["SAL-ORD-2026-00042", "2026-09-10"][:cuantos]
+
+    assert avisos.encolar(
+        evento, "SAL-ORD-2026-00042", CUSTOMER_PHONE, "texto libre",
+        plantilla_env=variable, parametros=parametros,
+    )
+    avisos.procesar()
+
+    assert canal["enviados"] == []  # la ventana estaba cerrada
+    assert len(canal["plantillas"]) == 1
+    telefono, nombre, _lengua, enviados = canal["plantillas"][0]
+    assert (telefono, nombre) == (CUSTOMER_PHONE, "plantilla_registrada")
+    assert enviados == parametros  # el conteo tiene que coincidir con Meta
+
+
+def test_without_a_template_the_sweep_notice_dies_and_nobody_is_told(
+    canal, monkeypatch
+) -> None:
+    """El bug que esto arregla, escrito como test para que no vuelva."""
+    _sin_ventana(canal, monkeypatch)
+    monkeypatch.setenv("AVISOS_MAX_INTENTOS", "2")
+    monkeypatch.setenv("AVISOS_REINTENTO_SEGUNDOS", "1")
+
+    avisos.encolar("solicitud_vencida", "SAL-ORD-2026-00042", CUSTOMER_PHONE, "texto")
+    for _ in range(4):
+        avisos.procesar()
+        for entrada in canal["marcas"].zsets.get(avisos.COLA, {}):
+            canal["marcas"].zsets[avisos.COLA][entrada] = 0.0
+
+    assert canal["enviados"] == []
+    assert canal["plantillas"] == []
+    assert any("NO entregado" in c for c in canal["comentarios"])
