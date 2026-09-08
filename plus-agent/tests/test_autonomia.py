@@ -680,12 +680,17 @@ def test_nothing_is_flagged_as_truncated_when_it_fits(mundo) -> None:
 
 
 def test_the_sweep_templates_do_not_get_the_misleading_optional_message() -> None:
-    """El mensaje genérico diría lo contrario de la verdad para estas tres.
+    """El mensaje genérico diría lo contrario de la verdad para estas cinco.
 
     «sale como texto libre mientras el destinatario haya escrito en las últimas
     24 h» es cierto para las demás plantillas y FALSO para éstas: son las únicas
     que se disparan horas después del último mensaje del cliente, cuando la
     ventana ya está cerrada.
+
+    El nivel de cada una lo decide `test_readiness.py` —tres bloquean siempre y
+    dos dependen de su límite—, así que acá se afirma lo que vale para las cinco
+    sin importar el nivel: que ninguna recibe el mensaje genérico, y que todas
+    nombran la ventana.
     """
     from app import readiness
 
@@ -694,8 +699,8 @@ def test_the_sweep_templates_do_not_get_the_misleading_optional_message() -> Non
 
     por_clave = {clave: mensaje for _, clave, mensaje in reporte.lineas}
     for variable in readiness.PLANTILLAS_FUERA_DE_VENTANA:
-        assert "ya está cerrada" in por_clave[variable]
-        assert "opcional en el piloto" not in por_clave[variable]
+        assert "ventana" in por_clave[variable], variable
+        assert "opcional en el piloto" not in por_clave[variable], variable
     # Y las otras conservan su mensaje, que para ellas sí es cierto.
     assert "opcional en el piloto" in por_clave["WHATSAPP_STAFF_PENDING_TEMPLATE"]
 

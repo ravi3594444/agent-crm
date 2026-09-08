@@ -48,15 +48,33 @@ PLANTILLAS = (
     "WHATSAPP_CUSTOMER_PENDING_TEMPLATE",
     "WHATSAPP_CUSTOMER_PENDING_CLOSED_TEMPLATE",
 )
-# Las cinco que NO pueden contar con la ventana de 24 h, porque las dispara un
-# barrido y no una respuesta a un mensaje del cliente. El resto son opcionales
-# en el piloto de verdad; estas cinco no.
-PLANTILLAS_FUERA_DE_VENTANA = (
+# Las que NO pueden contar con la ventana de 24 h, porque las dispara un barrido
+# y no una respuesta a un mensaje del cliente. El resto son opcionales en el
+# piloto de verdad; estas no.
+#
+# Y se parten en dos, porque el NIVEL que corresponde no es el mismo. El
+# criterio de este archivo es el de `chequear_solicitudes`: FALTA bloquea
+# cuando el sistema haría algo MAL, no cuando es menos útil.
+#
+# Estas tres las dispara `solicitudes.tick()`, que corre en el hilo del barrido
+# SIEMPRE, sin límite que lo apague. Si falta la plantilla, el aviso se aparca y
+# el cliente nunca se entera de que su solicitud venció — con readiness diciendo
+# «LISTO para probar en vivo». Eso es el sistema haciendo algo mal, así que
+# bloquea.
+PLANTILLAS_BARRIDO_SIEMPRE = (
     "WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE",
     "WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE",
     "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE",
-    "WHATSAPP_CUSTOMER_PENDING_TEMPLATE",
-    "WHATSAPP_CUSTOMER_PENDING_CLOSED_TEMPLATE",
+)
+# Estas dos sólo salen si el dueño encendió el límite que las gatea, y los dos
+# arrancan en NINGUNO. Apagado el flujo, no se manda nada y no hay nada mal:
+# AVISO. Encendido, es exactamente el mismo problema que arriba: FALTA.
+PLANTILLAS_BARRIDO_OPCIONAL = {
+    "WHATSAPP_CUSTOMER_PENDING_TEMPLATE": "PENDIENTE_AVISO_HORAS",
+    "WHATSAPP_CUSTOMER_PENDING_CLOSED_TEMPLATE": "PENDIENTE_CIERRE_HORAS",
+}
+PLANTILLAS_FUERA_DE_VENTANA = PLANTILLAS_BARRIDO_SIEMPRE + tuple(
+    PLANTILLAS_BARRIDO_OPCIONAL
 )
 ROLES_SUBMIT_PROHIBIDOS = ("agente", "gerencia")
 # El mismo default que app/whatsapp.py, repetido a propósito: readiness no
@@ -354,24 +372,78 @@ def chequear_whatsapp(env: Mapping[str, str], reporte: Reporte, http: Http | Non
     return waba
 
 
-def chequear_plantillas(env: Mapping[str, str], reporte: Reporte, http: Http | None, waba: str) -> None:
+def _limite_encendido(
+    nombre: str, resumen_limites: Callable[[], list[dict]] | None
+) -> bool | None:
+    """¿El dueño encendió este límite? None = no se pudo saber.
+
+    Tres estados y no dos: aplastar el «no sé» en False diría que el flujo está
+    apagado sin haberlo mirado, que es la clase de afirmación que este archivo
+    existe para no hacer.
+    """
+    if resumen_limites is None:
+        return None
+    from app import limites
+
+    try:
+        filas = {str(f.get("nombre")): f for f in resumen_limites()}
+    except Exception:
+        return None
+    fila = filas.get(nombre)
+    if fila is None or fila.get("problema"):
+        return None
+    if str(fila.get("origen")) == limites.PERDIDO:
+        return None
+    return str(fila.get("valor") or "") not in ("", limites.NINGUNO)
+
+
+def chequear_plantillas(
+    env: Mapping[str, str],
+    reporte: Reporte,
+    http: Http | None,
+    waba: str,
+    resumen_limites: Callable[[], list[dict]] | None = None,
+) -> None:
+    _FUERA = (
+        "vacía, y este aviso lo dispara un barrido HORAS después del último "
+        "mensaje del cliente: la ventana de 24 h ya está cerrada, no hay texto "
+        "libre posible, y el aviso se aparca sin que el cliente se entere. "
+        "Registrá la plantilla en Meta"
+    )
     configuradas = {p: _valor(env, p) for p in PLANTILLAS}
     for variable, nombre in configuradas.items():
         if nombre:
             continue
-        if variable in PLANTILLAS_FUERA_DE_VENTANA:
-            # Para estas cinco el mensaje genérico diría exactamente lo contrario
-            # de la verdad: son las ÚNICAS que salen horas después del último
-            # mensaje del cliente, así que son las únicas que NO pueden contar
-            # con la ventana de 24 h.
-            reporte.aviso(
-                variable,
-                "vacía, y este aviso lo dispara el barrido de vencimientos HORAS "
-                "después del último mensaje del cliente: la ventana de 24 h ya "
-                "está cerrada, no hay texto libre posible, y el aviso se aparca "
-                "sin que el cliente se entere de que su solicitud venció. "
-                "Registrá la plantilla en Meta",
-            )
+        if variable in PLANTILLAS_BARRIDO_SIEMPRE:
+            # BLOQUEA. El barrido de vencimientos corre siempre, así que sin
+            # esta plantilla el despliegue no está listo para una prueba en
+            # vivo: se le va a vencer la solicitud a alguien y no se le va a
+            # poder decir. Decir «LISTO» ahí sería el informe mintiendo.
+            reporte.falta(variable, _FUERA)
+        elif variable in PLANTILLAS_BARRIDO_OPCIONAL:
+            limite = PLANTILLAS_BARRIDO_OPCIONAL[variable]
+            encendido = _limite_encendido(limite, resumen_limites)
+            if encendido is True:
+                reporte.falta(variable, f"{_FUERA} (el dueño encendió {limite})")
+            elif encendido is None:
+                # Ni sí ni no: no se pudo leer el límite. AVISO y no FALTA,
+                # porque `--sin-red` es la puerta de `deploy.yml` y tampoco
+                # puede verificar la aprobación en Meta — bloquear el
+                # despliegue por algo que no se pudo mirar deja el check en
+                # rojo para siempre, que es peor que no tenerlo.
+                reporte.aviso(
+                    variable,
+                    f"vacía, y no pude leer {limite} para saber si el flujo está "
+                    f"encendido. Si lo está, este aviso sale fuera de la ventana "
+                    f"de 24 h y no le llega a nadie",
+                )
+            else:
+                reporte.aviso(
+                    variable,
+                    f"vacía (el flujo está apagado: {limite} en NINGUNO). Antes "
+                    f"de encenderlo, registrá la plantilla en Meta: el aviso sale "
+                    f"fuera de la ventana de 24 h y sin plantilla no llega",
+                )
         else:
             reporte.aviso(
                 variable,
@@ -964,8 +1036,8 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
     chequear_modelos(env, reporte)
     chequear_equipo(env, reporte)
     waba = chequear_whatsapp(env, reporte, http)
-    chequear_plantillas(env, reporte, http, waba)
-    chequear_erpnext(env, reporte, http)
+    # El resumen de límites se resuelve ANTES de las plantillas: dos de ellas
+    # sólo bloquean si el dueño encendió el límite que las gatea.
     resumen = None
     if _valor(env, "REDIS_URL"):
         try:
@@ -974,6 +1046,8 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
             resumen = limites.resumen
         except Exception as exc:  # pragma: no cover - import-time env problems
             reporte.aviso("Límites", f"módulo de límites no disponible ({type(exc).__name__})")
+    chequear_plantillas(env, reporte, http, waba, resumen)
+    chequear_erpnext(env, reporte, http)
     chequear_stock_y_limites(env, reporte, resumen)
     chequear_entrega(env, reporte, resumen, http)
     if _valor(env, "REDIS_URL"):
