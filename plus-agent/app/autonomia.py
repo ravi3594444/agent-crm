@@ -54,6 +54,10 @@ DIAS_DEFAULT = 7
 MAX_COMENTARIOS = 500
 # Cuántos (producto, depósito) se miran para la frescura de los conteos.
 MAX_PRODUCTOS = 20
+# Cuántas cubetas entran en una línea de desglose antes de resumir el resto.
+# Es un techo de LEGIBILIDAD, no de lectura: las cubetas están todas contadas
+# y el corte es al mostrar, así que se dice cuántas quedaron afuera.
+MAX_GRUPOS = 6
 
 MARCA_REVISION = "Requiere revisión humana:"
 MARCA_RECHAZO = "Rechazado manualmente por"
@@ -356,8 +360,14 @@ def borradores_vivos() -> dict | None:
     """
     from app import pendientes
 
+    # DOS filas de más, no una. Con una sola, `vivos` valía `MAX_BORRADORES + 1`
+    # tanto con 501 borradores como con 5000 y se informaba igual: el conteo
+    # estaba cortado y nada lo decía. `pasado` dice que se pasó el techo del
+    # negocio; `truncado` dice que el NÚMERO no se pudo medir completo, que es
+    # otra cosa — igual que en `_comentarios`.
+    limite = policy.MAX_BORRADORES + 2
     try:
-        filas = pendientes.listar_esperando(limite=policy.MAX_BORRADORES + 1)
+        filas = pendientes.listar_esperando(limite=limite)
     except Exception as exc:
         print(f"[autonomia] no pude contar los borradores: {type(exc).__name__}: {exc}")
         return None
@@ -370,6 +380,7 @@ def borradores_vivos() -> dict | None:
         "tope": policy.MAX_BORRADORES,
         "pasado": vivos > policy.MAX_BORRADORES,
         "pct": (vivos * 100.0 / policy.MAX_BORRADORES) if policy.MAX_BORRADORES else 0.0,
+        "truncado": vivos >= limite,
     }
 
 
@@ -446,11 +457,22 @@ def resumen(dias: int = DIAS_DEFAULT) -> dict:
     }
 
 
-def _linea_grupos(grupos: dict[str, int] | None) -> str:
+def _linea_grupos(grupos: dict[str, int] | None, lengua: str | None = None) -> str:
+    """Las cubetas más grandes en una línea, diciendo cuántas quedaron afuera.
+
+    El corte se lleva SIEMPRE las más chicas, así que el error está acotado —
+    pero va en la dirección peligrosa: un desglose de frenos recortado se lee
+    como «hay menos frenos de los que hay», y eso es lo que hace subir un
+    límite. Por eso el «+N sin mostrar» no es cosmético; es la mitad del dato.
+    """
     if not grupos:
         return ""
     ordenados = sorted(grupos.items(), key=lambda kv: (-kv[1], kv[0]))
-    return ", ".join(f"{nombre} {cuenta}" for nombre, cuenta in ordenados[:6])
+    linea = ", ".join(f"{nombre} {cuenta}" for nombre, cuenta in ordenados[:MAX_GRUPOS])
+    resto = len(ordenados) - MAX_GRUPOS
+    if resto > 0:
+        linea += ", " + idioma.t("gerencia.autonomia_grupos_mas", lengua, cuantos=resto)
+    return linea
 
 
 def _sumar(*fuentes: dict[str, int] | None) -> dict[str, int]:
@@ -492,7 +514,7 @@ def texto(datos: dict, lengua: str | None = None) -> str:
         frenos = ilegible
     else:
         frenos = _linea_grupos(
-            _sumar((som or {}).get("reglas"), (rev or {}).get("grupos"))
+            _sumar((som or {}).get("reglas"), (rev or {}).get("grupos")), lengua
         )
     cuerpo = idioma.t(
         "gerencia.autonomia",
@@ -505,7 +527,7 @@ def texto(datos: dict, lengua: str | None = None) -> str:
         rechazados=numero(None if rec is None else rec.get("total")),
         sombra_pasan=numero(None if som is None else som.get("pasan")),
         sombra_frenados=numero(None if som is None else som.get("frenados")),
-        postura=_linea_grupos((som or {}).get("postura")) or "—",
+        postura=_linea_grupos((som or {}).get("postura"), lengua) or "—",
         frenos=frenos or "—",
         borradores=numero(None if bor is None else bor.get("vivos")),
         tope=numero(None if bor is None else bor.get("tope")),
@@ -525,6 +547,11 @@ def texto(datos: dict, lengua: str | None = None) -> str:
     # frenos de los que creía», que es la dirección peligrosa.
     if som is None or rev is None:
         cuerpo += "\n" + idioma.t("gerencia.autonomia_frenos_incompletos", lengua)
+    # El techo de los borradores va aparte del de los comentarios: no depende
+    # de la ventana de días, así que «pedí menos días» no lo arregla y decirlo
+    # ahí mandaría al dueño a hacer algo que no cambia nada.
+    if (bor or {}).get("truncado"):
+        cuerpo += "\n" + idioma.t("gerencia.autonomia_borradores_truncado", lengua)
     return cuerpo
 
 

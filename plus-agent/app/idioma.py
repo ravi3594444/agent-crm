@@ -498,6 +498,31 @@ CATALOGO: dict[str, dict[str, str]] = {
             "does not list."
         ),
     },
+    # Y el desglose tiene además un techo de LEGIBILIDAD: entran las cubetas
+    # más grandes y el resto se resume. Las que se caen son siempre las más
+    # chicas, así que el error está acotado — pero informar menos frenos de
+    # los que hay es la misma dirección peligrosa, así que se dice cuántas
+    # quedaron afuera en vez de cortar en silencio.
+    # Sin plural en la frase a propósito: «y 1 más» y «y 3 más» necesitarían
+    # dos filas por idioma para no quedar mal escritas, y esto va en el medio
+    # de una línea que ya es densa.
+    "gerencia.autonomia_grupos_mas": {
+        ES: "+{cuantos} sin mostrar",
+        EN: "+{cuantos} not shown",
+    },
+    # El techo de la cuenta de borradores vivos es OTRO: no sale de la ventana
+    # de días, así que «pedí menos días» no lo arregla y mandar ahí al dueño
+    # sería mandarlo a hacer algo que no cambia el número.
+    "gerencia.autonomia_borradores_truncado": {
+        ES: (
+            "⚠️ Hay más borradores vivos de los que pude contar de una vez: "
+            "ese número es un piso, no el total."
+        ),
+        EN: (
+            "⚠️ There are more live drafts than I could count in one go: that "
+            "number is a floor, not the total."
+        ),
+    },
     "gerencia.autonomia": {
         ES: (
             "📈 Autonomía · últimos {dias} días\n"
