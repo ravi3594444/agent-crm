@@ -1571,9 +1571,13 @@ def _momento_del_negocio(fecha: str, hora: str) -> float:
     """
     if not fecha or not hora:
         return 0.0
+    # `reloj.zona()` ESTRICTA y adentro del try: una zona inválida tiene que
+    # caer en el 0.0 que esta función documenta, para que `_vence_respaldo` use
+    # el timeout configurado en vez de un vencimiento calculado en una zona
+    # adivinada — que le acortaría al cliente la ventana para aceptar.
     try:
         cuando = datetime.fromisoformat(f"{fecha}T{hora}").replace(
-            tzinfo=reloj.zona_con_respaldo("solicitudes")
+            tzinfo=reloj.zona()
         )
     except Exception as exc:
         print(f"[solicitudes] fecha/hora de respaldo no interpretable ({type(exc).__name__})")

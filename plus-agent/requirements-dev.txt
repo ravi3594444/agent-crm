@@ -3,3 +3,8 @@
 
 pytest==8.4.2
 ruff==0.15.4
+# Viaje en el tiempo para los tests que afirman una regla que depende del
+# reloj: `test_reloj.py` prueba que la fecha del negocio sale de
+# BUSINESS_TIMEZONE y no del servidor, y eso necesita UN instante fijo con
+# varias zonas. Faltaba declararla y CI no podía ni colectar (lo agarró Qodo).
+time-machine==3.5.0

@@ -199,3 +199,40 @@ def test_el_default_vive_en_un_solo_lugar() -> None:
     # `briefing.py` sólo la nombra en su docstring, contando a qué hora corre su
     # cron; no resuelve ninguna zona con ella.
     assert culpables == ["briefing.py"], f"la zona volvió a escribirse en {culpables}"
+
+
+# ------------------------- una zona inválida NO es un sello con zona default
+#
+# Los tres tests de acá abajo cubren comportamientos que existían y que este PR
+# cambió sin querer. Ninguno tenía test — que es exactamente la tesis de la
+# auditoría: la divergencia era invisible, así que romperla también lo era.
+# Los encontró Qodo revisando #26.
+
+
+def test_sin_en_una_zona_invalida_da_None_y_no_un_sello_adivinado(monkeypatch) -> None:
+    """Un sello ilegible es un DATO malo; una zona inválida es CONFIGURACIÓN
+    mala. Las dos dan None, y no son lo mismo.
+
+    `inventario._momento` depende de esto: devolvía None con una zona inválida,
+    y de ahí `confiable` contesta «nadie confirmó un conteo» — falla cerrada.
+    Fechar el conteo con Buenos Aires adivinado haría que el resumen del dueño
+    informe una antigüedad que nadie midió.
+    """
+    monkeypatch.setenv("BUSINESS_TIMEZONE", "Marte/Olympus_Mons")
+
+    assert reloj.de_erpnext("2026-09-08 14:00:00") is None
+
+
+def test_con_en_el_llamador_manda_aunque_el_entorno_esté_roto(monkeypatch) -> None:
+    """`en` es para el llamador que YA decidió su política de zona.
+
+    `pendientes.edad_horas` y `autonomia._creacion` pasan una zona con respaldo
+    a propósito: un borrador o un comentario que no se puede fechar se pierde
+    del conteo, y eso baja un número sin decir que lo bajó.
+    """
+    monkeypatch.setenv("BUSINESS_TIMEZONE", "Marte/Olympus_Mons")
+
+    momento = reloj.de_erpnext("2026-09-08 14:00:00", en=ZoneInfo("UTC"))
+
+    assert momento is not None
+    assert momento.isoformat() == "2026-09-08T14:00:00+00:00"

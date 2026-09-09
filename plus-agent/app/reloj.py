@@ -149,9 +149,18 @@ def de_erpnext(sello: object, *, en: ZoneInfo | None = None) -> datetime | None:
     documento en paz, no tratarlo como recién creado ni como vencido hace un
     mes. Los tres llamadores ya dependían de eso.
 
-    `en` es para el llamador que ya tiene la zona resuelta y no quiere volver a
-    leer el entorno por fila; sin él usa el respaldo, porque un sello que no se
-    puede fechar ya devuelve None y morirse acá no agrega nada.
+    SIN `en`, LA ZONA SE RESUELVE ESTRICTA y una zona inválida también da None.
+    Un sello ilegible es un DATO malo; una zona inválida es CONFIGURACIÓN mala,
+    y no son lo mismo aunque las dos terminen en None. Dos llamadores dependen
+    de eso: `inventario._momento` devolvía None con una zona inválida, y de ahí
+    `confiable` decía «nadie confirmó un conteo» —falla cerrada—. Fechar el
+    conteo con una zona adivinada haría que el resumen informe una antigüedad
+    que nadie midió. Lo encontró Qodo en la revisión de #26, y era un cambio de
+    comportamiento que este PR no había declarado.
+
+    `en` es para el llamador que YA decidió su política de zona: la pasa
+    resuelta, con respaldo o sin él, y así la decisión queda visible en su
+    módulo — el mismo criterio que `zona()` contra `zona_con_respaldo()`.
     """
     crudo = str(sello or "").strip()
     if not crudo:
@@ -164,4 +173,9 @@ def de_erpnext(sello: object, *, en: ZoneInfo | None = None) -> datetime | None:
         # Ya viene con zona: se respeta. Un ERPNext configurado para devolver
         # sellos con offset no se re-interpreta.
         return momento
-    return momento.replace(tzinfo=en or zona_con_respaldo("reloj"))
+    if en is not None:
+        return momento.replace(tzinfo=en)
+    try:
+        return momento.replace(tzinfo=zona())
+    except ZonaInvalida:
+        return None
