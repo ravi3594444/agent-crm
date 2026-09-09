@@ -15,6 +15,19 @@ from app import erpnext, policy, whatsapp
 from app.runtime_context import SIN_PERMISO
 from app.tools import captura, pedidos
 
+# Este archivo afirma la prosa que `contar_stock` le manda al dueño («faltan 3»),
+# así que declara su idioma en vez de heredarlo del entorno. Pasó a depender del
+# idioma cuando #18 hizo que `contar_stock` resolviera `idioma.gerencia()`, y
+# recién se pudo VER cuando #17 sacó el pin de IDIOMA_* del conftest: mientras
+# el pin estaba, la aserción pasaba por el default y no por decir lo que espera.
+# Ninguno de los dos PRs lo podía notar solo — es lo que dejó rojo a `main` con
+# los dos mergeados.
+#
+# La marca y no `lengua=`: `contar_stock` es una tool de LangChain que se invoca
+# con un `config` y resuelve el idioma del dueño adentro, así que no hay
+# parámetro que pasarle. Donde la firma lo toma, se pasa (ver #17).
+pytestmark = pytest.mark.idioma("es")
+
 
 @pytest.fixture(autouse=True)
 def _context(monkeypatch: pytest.MonkeyPatch) -> None:
