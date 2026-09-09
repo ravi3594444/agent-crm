@@ -29,9 +29,8 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app import erpnext
+from app import erpnext, reloj
 
 # Cuántos conteos confirmados de un producto se miran para encontrar el último.
 # Son los más recientes primero, así que el más nuevo está en el primer puñado.
@@ -53,10 +52,12 @@ def horas_de_validez() -> float:
 
 
 def _ahora() -> datetime:
-    zona = os.getenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires").strip()
+    """Levanta `ERPNextError`, no `ZonaInvalida`: `confiable` la atrapa por ese
+    tipo para devolver «no pude verificar» en vez de morirse, y 46 lugares del
+    código atrapan `erpnext.ERPNextError` en particular."""
     try:
-        return datetime.now(ZoneInfo(zona))
-    except (ZoneInfoNotFoundError, ValueError) as exc:
+        return reloj.ahora()
+    except reloj.ZonaInvalida as exc:
         raise erpnext.ERPNextError("BUSINESS_TIMEZONE inválida") from exc
 
 
@@ -88,12 +89,7 @@ def _momento(fila: dict) -> datetime | None:
     hora = str(fila.get("posting_time") or "00:00:00").strip()
     if not fecha:
         return None
-    zona = os.getenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires").strip()
-    try:
-        crudo = datetime.fromisoformat(f"{fecha} {hora}")
-        return crudo.replace(tzinfo=ZoneInfo(zona))
-    except (ValueError, ZoneInfoNotFoundError):
-        return None
+    return reloj.de_erpnext(f"{fecha} {hora}")
 
 
 def ultimo_conteo(item_code: str, warehouse: str) -> datetime | None:

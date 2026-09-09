@@ -12,10 +12,8 @@ Meta did not accept.
 """
 import hashlib
 import os
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
-from app import entrega, erpnext
+from app import entrega, erpnext, reloj
 from app.formato import cantidad, pesos
 from app.outbound_status import (
     claim_once,
@@ -221,11 +219,10 @@ CONFIRMACION_TTL_SEGUNDOS = 30 * 24 * 60 * 60
 
 
 def _momento_negocio() -> str:
-    zona = os.getenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires").strip()
-    try:
-        return datetime.now(ZoneInfo(zona)).strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        return datetime.now().strftime("%Y-%m-%d %H:%M")
+    """El respaldo era `datetime.now()` SIN zona — el reloj del servidor, casi
+    siempre UTC— así que una zona mal escrita ponía en el aviso una hora de
+    otro reloj sin decirlo. Ahora respalda al default del negocio, con log."""
+    return reloj.ahora_con_respaldo("notificar").strftime("%Y-%m-%d %H:%M")
 
 
 def _direccion_de_entrega(so: dict) -> str:

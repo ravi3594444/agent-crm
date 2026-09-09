@@ -45,7 +45,7 @@ import re
 from collections.abc import Collection
 from datetime import datetime, timedelta
 
-from app import entrega, erpnext, idioma, policy
+from app import entrega, erpnext, idioma, policy, reloj
 
 DIAS_DEFAULT = 7
 # Techo por lectura. Un pedido deja varios comentarios, así que esto es un
@@ -145,18 +145,12 @@ def _creacion(fila: dict) -> datetime | None:
     correría por el offset y los comentarios del borde entrarían o saldrían
     sin que nada lo diga.
     """
-    from app import pendientes
-
-    crudo = str(fila.get("creation") or "").strip()
-    if not crudo:
-        return None
-    try:
-        momento = datetime.fromisoformat(crudo)
-    except (TypeError, ValueError):
-        return None
-    if momento.tzinfo is None:
-        return momento.replace(tzinfo=pendientes._zona())
-    return momento
+    # Con respaldo, que es lo que hacía antes vía `pendientes._zona()`: un
+    # comentario que no se puede fechar se CUENTA igual (ver `_comentarios`),
+    # así que perderlo por una zona mal escrita bajaría el número sin decirlo.
+    return reloj.de_erpnext(
+        fila.get("creation"), en=reloj.zona_con_respaldo("autonomia")
+    )
 
 
 def _comentarios(marca: str, desde: datetime) -> tuple[list[dict], bool] | None:

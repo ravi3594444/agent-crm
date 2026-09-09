@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import unicodedata
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Annotated
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
@@ -21,6 +19,7 @@ from app import (
     erpnext,
     excepciones,
     policy,
+    reloj,
     solicitudes,
 )
 from app.locks import CoordinationError, distributed_lock
@@ -44,7 +43,6 @@ _DIAS = {
     "sabado": 5,
     "domingo": 6,
 }
-_ZONA_HORARIA_DEFAULT = "America/Argentina/Buenos_Aires"
 
 
 class FechaEntregaInvalida(ValueError):
@@ -60,10 +58,12 @@ def _sin_tildes(text: str) -> str:
 
 
 def _hoy_del_negocio() -> date:
-    zone_name = os.getenv("BUSINESS_TIMEZONE", _ZONA_HORARIA_DEFAULT).strip()
+    """Era una copia LITERAL de `policy._hoy_del_negocio`, hasta el mensaje de
+    error. Se delega en vez de re-exportar `policy` para no importar la
+    política desde una herramienta del modelo."""
     try:
-        return datetime.now(ZoneInfo(zone_name)).date()
-    except (ZoneInfoNotFoundError, ValueError) as exc:
+        return reloj.hoy()
+    except reloj.ZonaInvalida as exc:
         raise erpnext.ERPNextError("BUSINESS_TIMEZONE inválida") from exc
 
 

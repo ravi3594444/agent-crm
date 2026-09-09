@@ -33,9 +33,9 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
-from app import erpnext, inventario, locks, notificar, outbound_status
+from app import erpnext, inventario, locks, notificar, outbound_status, reloj
 from app import idioma as idioma_mod
 from app.formato import pesos
 
@@ -54,11 +54,10 @@ ESTADOS_ESPERANDO_DESPACHO = ("To Deliver and Bill", "To Deliver")
 
 
 def _zona() -> ZoneInfo:
-    nombre = os.getenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires").strip()
-    try:
-        return ZoneInfo(nombre)
-    except (ZoneInfoNotFoundError, ValueError):
-        return ZoneInfo("America/Argentina/Buenos_Aires")
+    """Con respaldo, y ahora CON log: antes se conformaba con el default en
+    silencio, así que una zona mal escrita movía la hora del resumen y no lo
+    decía en ninguna parte."""
+    return reloj.zona_con_respaldo("digest")
 
 
 def _ahora() -> datetime:

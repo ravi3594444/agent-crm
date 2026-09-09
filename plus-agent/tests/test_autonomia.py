@@ -1057,3 +1057,24 @@ def test_a_cut_breakdown_says_it_in_the_language_it_was_asked_in() -> None:
     grupos = {f"freno {i}": 9 - i for i in range(8)}
 
     assert "+2 not shown" in autonomia._linea_grupos(grupos, "en")
+
+
+def test_una_zona_invalida_no_le_saca_comentarios_al_conteo(monkeypatch) -> None:
+    """`_creacion` fecha con respaldo, a propósito, y esto lo fija.
+
+    Este módulo ya decidió que un comentario que no se puede fechar **se
+    cuenta** (ver `_comentarios`): descartarlo bajaría el número sin decir que
+    lo bajó, y un número de autonomía bajo es lo que hace bajar un límite.
+    Perderlos por una zona mal escrita sería la misma pérdida por la puerta de
+    al lado.
+
+    Es lo contrario de `inventario._momento`, que con una zona inválida
+    devuelve None para que `confiable` falle cerrada. Las dos políticas son
+    correctas y son distintas — por eso `reloj.de_erpnext` obliga a elegir.
+    """
+    monkeypatch.setenv("BUSINESS_TIMEZONE", "Marte/Olympus_Mons")
+
+    momento = autonomia._creacion({"creation": "2026-09-08 14:00:00"})
+
+    assert momento is not None
+    assert momento.tzinfo is not None

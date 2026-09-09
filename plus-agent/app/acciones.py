@@ -61,18 +61,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import secrets
 import time
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from redis.exceptions import RedisError
 
-from app import erpnext, locks, notificar, solicitudes
+from app import erpnext, locks, notificar, reloj, solicitudes
 from app import telefono as telefono_mod
 from app.formato import pesos, sin_citas
 from app.router import es_equipo
@@ -255,11 +252,9 @@ def pedido_valido(crudo: object) -> str:
 
 
 def _ahora_texto() -> str:
-    zona = os.getenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires").strip()
-    try:
-        return datetime.now(ZoneInfo(zona)).isoformat(timespec="seconds")
-    except (ZoneInfoNotFoundError, ValueError):
-        return datetime.now().isoformat(timespec="seconds")
+    """Sella el registro durable `[accion]`; mismo motivo que `limites._ahora`
+    para no respaldar al reloj del servidor."""
+    return reloj.ahora_con_respaldo("acciones").isoformat(timespec="seconds")
 
 
 # Exactamente seis dígitos. Se valida ANTES de tocar Redis: el código llega de
