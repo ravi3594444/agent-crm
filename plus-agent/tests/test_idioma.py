@@ -24,6 +24,10 @@ from conftest import FakeRedis
 
 from app import idioma, limites, locks
 
+# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
+# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.idioma("es")
+
 
 @pytest.fixture
 def fake_redis_idioma(monkeypatch):

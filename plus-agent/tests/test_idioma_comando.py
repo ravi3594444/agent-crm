@@ -28,6 +28,10 @@ from conftest import FakeRedis
 
 from app import idioma, limites, locks, main, whatsapp
 
+# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
+# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.idioma("es")
+
 EQUIPO = "5493511111111"
 CLIENTE = "5493510000000"
 

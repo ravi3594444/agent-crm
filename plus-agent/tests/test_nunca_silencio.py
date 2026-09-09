@@ -21,6 +21,10 @@ from test_whatsapp_webhook import (  # noqa: F401  (webhook is a fixture)
     webhook,
 )
 
+# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
+# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.idioma("es")
+
 CUSTOMER = "5491112345678"
 STAFF = "5493519999999"
 

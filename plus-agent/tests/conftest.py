@@ -69,14 +69,24 @@ _DUMMY = {
     "BUSINESS_TIMEZONE": "America/Argentina/Buenos_Aires",
     "ERPNEXT_COMPANY": "Lacteos Test SA",
     "ERPNEXT_WAREHOUSE": "Principal - LT",
-    # LAS QUE DECIDEN EN QUÉ IDIOMA SE PRUEBA, y las tres que un .env real
-    # cambia. Con IDIOMA_DEFAULT=en se caen 154 tests y 15 archivos ni colectan;
-    # con IDIOMA_GERENCIA=en, 69; con DIGEST_ACTIVO=0, el que prueba que el
-    # resumen sale una vez por día. Los valores son los de fábrica
-    # (`app/idioma.py::ES`, `app/digest.py::activo`), así que esto no configura
-    # nada nuevo: sólo impide que el entorno lo configure por su cuenta.
+    # EL IDIOMA VA CON setdefault, NO FIJO, y ésa es la diferencia entera.
+    # Fijarlo hacía pasar la suite, pero por la razón equivocada: con
+    # IDIOMA_DEFAULT=en exportado se caían 160 tests con el código funcionando
+    # bien, porque afirmaban la salida española sin decir que la esperaban. Un
+    # pin tapa eso — y con él la suite no puede probar el segundo idioma, que
+    # es el muro contra el que va todo el plan bilingüe.
+    #
+    # El arreglo es que cada test que afirma texto DIGA su idioma
+    # (`pytestmark = pytest.mark.idioma("es")` + el fixture
+    # `_idioma_declarado`), y con eso el entorno puede decir lo que quiera: la
+    # suite da el mismo resultado con IDIOMA_DEFAULT=en y con IDIOMA_GERENCIA=en.
+    # El setdefault se queda para que un checkout limpio sin .env pruebe en el
+    # idioma de fábrica, no para impedir el otro.
     "IDIOMA_DEFAULT": "es",
     "IDIOMA_GERENCIA": "",
+    # DIGEST_ACTIVO sí se queda FIJA (abajo): no elige un idioma equivalente,
+    # apaga la sección entera, y con DIGEST_ACTIVO=0 el test que prueba que el
+    # resumen sale una vez por día no prueba nada.
     "DIGEST_ACTIVO": "true",
     # LAS DOS QUE DECIDEN QUIÉN ES QUIÉN, y las dos que un .env real cambia.
     # app/telefono.py lee PAIS_TELEFONO AL IMPORTAR y app/router.py arma STAFF
@@ -90,11 +100,19 @@ _DUMMY = {
     "TELEFONOS_EQUIPO": "",
 }
 # Casi todo es setdefault: un test o CI que ya fijó algo (REDIS_URL, sobre
-# todo) manda. Pero lo que decide QUIÉN ES QUIÉN, QUÉ PROVEEDOR, QUÉ MOMENTO y
-# QUÉ IDIOMA se prueba se fija sin condición: con setdefault, un shell que
-# exporta LLM_PROVIDER=gemini, BUSINESS_TIMEZONE=Asia/Kolkata o un
-# TELEFONOS_EQUIPO cargado llegaba a la suite, que es justo la fuga que el
-# docstring de arriba describe.
+# todo) manda. Pero lo que decide QUIÉN ES QUIÉN, QUÉ PROVEEDOR y QUÉ MOMENTO
+# se prueba se fija sin condición: con setdefault, un shell que exporta
+# LLM_PROVIDER=gemini, BUSINESS_TIMEZONE=Asia/Kolkata o un TELEFONOS_EQUIPO
+# cargado llegaba a la suite, que es justo la fuga que el docstring de arriba
+# describe.
+#
+# EL IDIOMA NO ESTÁ EN ESTA LISTA, a propósito. Fijar una zona horaria ES el
+# arreglo —`epoch()` tiene Buenos Aires escrito a mano y el reloj del negocio
+# tiene que ser el mismo—, pero fijar el idioma es lo contrario: el catálogo
+# tiene 129 claves escritas en los dos idiomas para que el producto pueda
+# hablar los dos, y un pin le saca a la suite la capacidad de probar el
+# segundo. Ahí el arreglo es que el test lo declare, no que el conftest lo
+# imponga.
 _FIJAS = {
     "LLM_PROVIDER",
     "QWEN_SALES_MODEL",
@@ -102,8 +120,6 @@ _FIJAS = {
     "PAIS_TELEFONO",
     "TELEFONOS_EQUIPO",
     "BUSINESS_TIMEZONE",
-    "IDIOMA_DEFAULT",
-    "IDIOMA_GERENCIA",
     "DIGEST_ACTIVO",
 }
 for _k, _v in _DUMMY.items():
@@ -392,6 +408,52 @@ def marcas_sin_redis(monkeypatch):
     marcas = FakeMarcas()
     monkeypatch.setattr(outbound_status, "_client", marcas)
     return marcas
+
+
+@pytest.fixture(autouse=True)
+def _idioma_declarado(request, monkeypatch):
+    """El idioma de un test lo declara el test, no el entorno.
+
+    Un archivo que afirma literales en un idioma lo dice en una línea:
+
+        pytestmark = pytest.mark.idioma("es")
+
+    y este fixture fija las dos variables que resuelven el idioma para esa
+    corrida. Sin eso el idioma sale del entorno, y la suite pasa sólo donde el
+    entorno diga lo mismo que el test supone: con `IDIOMA_DEFAULT=en`
+    exportado se caían 160 tests **con el código funcionando bien**, afirmando
+    «necesito revisarlo con una persona» contra un inglés correcto. El issue
+    #15 tiene la medición.
+
+    Es la misma forma que `tests/test_fechas_entrega.py`, que fija
+    `HOY = date(2026, 9, 1)` y lo pasa en vez de leer el reloj — y ese archivo
+    existe por un bug que se vio en producción. El test nombra el valor del
+    que depende en vez de heredarlo del mundo.
+
+    ESTO NO REEMPLAZA PASAR `lengua` DONDE EL CONSTRUCTOR LO TOMA. 42 firmas
+    del producto ya lo aceptan, y pasarlo es más fuerte: fija el idioma en la
+    llamada y no depende del entorno para nada. La marca cubre los caminos que
+    resuelven el idioma solos —por teléfono (`idioma.para_destinatario`) o por
+    el store del dueño (`idioma.gerencia`)— y que no reciben el idioma por
+    parámetro.
+
+    Un archivo SIN la marca queda como estaba: hereda el default. Eso es
+    correcto para los que no afirman texto en ningún idioma, y es la razón de
+    que la marca sea opt-in y no automática — `grep -rn "pytest.mark.idioma"
+    tests/` lista exactamente los archivos que dependen del idioma.
+    """
+    marca = request.node.get_closest_marker("idioma")
+    if marca is None:
+        return
+    from app import idioma
+
+    lengua = str(marca.args[0]) if marca.args else ""
+    if lengua not in idioma.IDIOMAS:
+        raise ValueError(
+            f"pytest.mark.idioma({lengua!r}): los idiomas son {idioma.IDIOMAS}"
+        )
+    monkeypatch.setenv("IDIOMA_DEFAULT", lengua)
+    monkeypatch.setenv("IDIOMA_GERENCIA", lengua)
 
 
 @pytest.fixture(autouse=True)

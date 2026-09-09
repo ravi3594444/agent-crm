@@ -14,6 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import aprobacion, decisiones, digest, erpnext, inventario, notificar, outbound_status
 
+# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
+# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.idioma("es")
+
 STAFF = "5493511111111"
 SO = {
     "name": "SAL-ORD-2026-00009",

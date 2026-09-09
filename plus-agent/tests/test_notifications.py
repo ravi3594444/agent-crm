@@ -16,6 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import aprobacion, notificar, whatsapp
 
+# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
+# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.idioma("es")
+
 
 @pytest.fixture(autouse=True)
 def _clean_templates(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -559,3 +559,65 @@ def test_la_oferta_no_le_pide_apretar_un_boton_que_no_existe(lengua):
     assert "botón" not in texto and "button" not in texto
     # Y sigue diciendo, en su idioma, las palabras exactas que el router parsea.
     assert ("acepto" in texto) or ("accept" in texto)
+
+
+# ------------------------------- salida MEZCLADA: marco inglés, carga española
+#
+# Los dos tests de abajo están en xfail ESTRICTO: son bugs de producto abiertos,
+# no tests rotos. Corriendo la suite en inglés se ven 29 fallas de esta forma
+# —marco traducido, carga sin traducir— y el resto de este PR las volvió verdes
+# al declarar el idioma de cada archivo. Eso es correcto para los tests, pero
+# dejaría los bugs SIN NINGUNA cobertura, que es peor que el rojo.
+#
+# `strict=True` es lo que hace que esto no se quede: el día que alguien traduzca
+# la carga, el xfail pasa a XPASS y pytest lo reporta como falla, obligando a
+# borrar el marcador. Un bug conocido con cobertura y fecha de vencimiento, no
+# un test apagado. Ver el issue #15.
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG ABIERTO: 33 de los 37 `raise LimiteError` de app/limites.py no "
+    "llevan `clave`, así que su motivo en español se interpola en el marco "
+    "inglés `codigo.ajuste_no_preparado` y sale textual a WhatsApp. Ver #15.",
+)
+def test_el_rechazo_de_un_cambio_de_limite_sale_entero_en_ingles() -> None:
+    """Lo que el dueño lee en inglés cuando el valor que mandó no sirve.
+
+    El marco está traducido y el motivo no, así que sale
+    «I changed nothing: «monto maximo» no es un número: 'muchisimo'.» El
+    mecanismo para arreglarlo ya existe y ya se usa: `LimiteError` acepta
+    `clave` y los cuatro raise del camino de confirmación por código la llevan.
+    """
+    from app import limites
+
+    for limite, valor in (
+        ("tope", "muchisimo"),
+        ("colchon", "-5"),
+        ("descuentos", "puede ser"),
+    ):
+        try:
+            limites.validar(limite, valor)
+        except limites.LimiteError as exc:
+            motivo = idioma.t(exc.clave, EN) if getattr(exc, "clave", "") else str(exc)
+            respuesta = idioma.t("codigo.ajuste_no_preparado", EN, motivo=motivo)
+            assert restos_en_espanol(respuesta) == [], f"{limite}={valor}: {respuesta}"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG ABIERTO: app/tools/operaciones.py::_cuenta no toma `lengua` y "
+    "devuelve el centinela español DESCONOCIDO dentro del estado en inglés, "
+    "aunque el catálogo ya tiene sistema.desconocido con EN='UNKNOWN'. Ver #15.",
+)
+def test_el_centinela_de_contador_ilegible_sale_traducido() -> None:
+    """`DESCONOCIDO` es la palabra que significa «no lo leas como cero».
+
+    O sea justo la que hay que entender, y sale en español dentro de un mensaje
+    en inglés. El catálogo ya tiene la fila —`sistema.desconocido`, EN
+    «UNKNOWN»— y el mismo archivo la usa bien dos líneas más arriba; lo que
+    falta es que `_cuenta` reciba el idioma.
+    """
+    from app.tools import operaciones
+
+    assert restos_en_espanol(operaciones._cuenta(None)) == []
