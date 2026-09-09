@@ -97,15 +97,13 @@ from __future__ import annotations
 
 import html
 import json
-import os
 import re
 import secrets
 import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from zoneinfo import ZoneInfo
 
-from app import erpnext, idioma
+from app import erpnext, idioma, reloj
 from app.outbound_status import cliente as _redis
 from app.outbound_status import digest_recipiente
 
@@ -1573,9 +1571,10 @@ def _momento_del_negocio(fecha: str, hora: str) -> float:
     """
     if not fecha or not hora:
         return 0.0
-    zona = os.getenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires").strip()
     try:
-        cuando = datetime.fromisoformat(f"{fecha}T{hora}").replace(tzinfo=ZoneInfo(zona))
+        cuando = datetime.fromisoformat(f"{fecha}T{hora}").replace(
+            tzinfo=reloj.zona_con_respaldo("solicitudes")
+        )
     except Exception as exc:
         print(f"[solicitudes] fecha/hora de respaldo no interpretable ({type(exc).__name__})")
         return 0.0

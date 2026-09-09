@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain_core.messages import (
     BaseMessage,
@@ -24,7 +22,7 @@ from langchain_core.messages import (
 )
 from langchain_core.runnables import RunnableConfig
 
-from app import idioma
+from app import idioma, reloj
 from app.prompts import SYSTEM_ES_AR
 from app.prompts_gerencia import SYSTEM_GERENCIA
 
@@ -41,11 +39,9 @@ def max_history() -> int:
 
 
 def business_today() -> str:
-    zone_name = os.getenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires").strip()
-    try:
-        return datetime.now(ZoneInfo(zone_name)).date().isoformat()
-    except (ZoneInfoNotFoundError, ValueError) as exc:
-        raise RuntimeError("BUSINESS_TIMEZONE inválida") from exc
+    # `reloj.ZonaInvalida` ES un `RuntimeError`, que es lo que esta función
+    # levantaba, así que quien lo atrapaba sigue atrapándolo.
+    return reloj.hoy().isoformat()
 
 
 def negocio() -> str:

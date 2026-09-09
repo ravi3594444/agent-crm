@@ -49,12 +49,11 @@ saltear el vencimiento de una solicitud, y al revés.
 """
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
-from app import erpnext, idioma
+from app import erpnext, idioma, reloj
 
 # `tools/pedidos.py::_message_key` = "WA-" + sha256(message_id).hexdigest()[:40].
 # La forma EXACTA, porque el cierre es destructivo: un `po_no` que una persona
@@ -82,7 +81,6 @@ PLANTILLA_CERRADO = "WHATSAPP_CUSTOMER_PENDING_CLOSED_TEMPLATE"
 MARCA_AVISO = "[pendiente-aviso]"
 MARCA_CIERRE = "[pendiente-cerrado]"
 
-_ZONA_DEFAULT = "America/Argentina/Buenos_Aires"
 _NOCHE_DESDE_DEFAULT = "22:00"
 _NOCHE_HASTA_DEFAULT = "07:00"
 
@@ -93,12 +91,9 @@ _RE_HORA = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
 def _zona() -> ZoneInfo:
-    nombre = os.getenv("BUSINESS_TIMEZONE", _ZONA_DEFAULT).strip() or _ZONA_DEFAULT
-    try:
-        return ZoneInfo(nombre)
-    except (ZoneInfoNotFoundError, ValueError):
-        print(f"[pendientes] BUSINESS_TIMEZONE={nombre!r} inválida; uso {_ZONA_DEFAULT}")
-        return ZoneInfo(_ZONA_DEFAULT)
+    """Con respaldo y log: el barrido que se cae por una zona mal escrita deja
+    de recordarle al cliente PARA SIEMPRE, que es peor que el default."""
+    return reloj.zona_con_respaldo("pendientes")
 
 
 def _ahora() -> datetime:
@@ -111,29 +106,16 @@ def edad_horas(fila: dict, ahora: datetime | None = None) -> float | None:
     None no es 0: un `creation` ilegible tiene que dejar el pedido en paz, no
     tratarlo como recién creado ni como vencido hace un mes.
     """
-    crudo = str(fila.get("creation") or "").strip()
-    if not crudo:
+    # La interpretación del sello sin zona vive en `reloj.de_erpnext`, con la
+    # suposición y su verificación documentadas ahí: era el mismo código en
+    # tres módulos y dos lo leían distinto (ver #23). Lo que queda acá es la
+    # resta, que es lo propio de esta función.
+    #
+    # `en=_zona()` y no el default de `de_erpnext` porque este camino corre por
+    # fila en el barrido y no hace falta re-leer el entorno en cada una.
+    creado = reloj.de_erpnext(fila.get("creation"), en=_zona())
+    if creado is None:
         return None
-    try:
-        creado = datetime.fromisoformat(crudo)
-    except (TypeError, ValueError):
-        return None
-    zona = _zona()
-    if creado.tzinfo is None:
-        # ERPNext guarda sin zona, en la hora de su propio sistema; la del
-        # negocio es la que usa todo el resto del código para decidir.
-        #
-        # O sea que esto SUPONE que las dos zonas son la misma, y son dos
-        # cosas configuradas por separado: `System Settings.time_zone` de
-        # ERPNext y BUSINESS_TIMEZONE de acá. Ya no es una suposición muda:
-        # `readiness.chequear_zona_erpnext` las compara y BLOQUEA el
-        # despliegue si difieren, justamente porque acá no hay forma de
-        # notarlo — toda edad saldría corrida por el offset, en silencio, y
-        # los tests comparten esta misma suposición. Con ERPNext en UTC y el
-        # negocio en Argentina, un borrador de hace 2 h informa -1.00 h: se
-        # lee como creado en el futuro y no empieza a envejecer hacia las 48 h
-        # del recordatorio hasta que pasa el offset.
-        creado = creado.replace(tzinfo=zona)
     momento = ahora or _ahora()
     return (momento - creado).total_seconds() / 3600.0
 
