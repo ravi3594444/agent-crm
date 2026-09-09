@@ -22,7 +22,7 @@ from urllib.parse import quote
 
 import httpx
 
-from app import modelos, telefono
+from app import modelos, reloj, telefono
 
 OK, AVISO, FALTA, ERROR = "OK", "AVISO", "FALTA", "ERROR"
 
@@ -638,12 +638,11 @@ def chequear_zona_erpnext(
     rojo para siempre, que es peor que no tenerlo. AVISO, con el motivo y qué
     permiso falta.
     """
-    from app import pendientes
 
     # El default sale de `pendientes`, que es quien lo usa para decidir: dos
     # copias del nombre de la zona es exactamente la clase de deriva que este
     # chequeo vino a cerrar.
-    esperada = _valor(env, "BUSINESS_TIMEZONE") or pendientes._ZONA_DEFAULT
+    esperada = _valor(env, "BUSINESS_TIMEZONE") or reloj.ZONA_DEFAULT
     # `System Settings` es un Single: el nombre del doc es el del doctype, y
     # lleva un espacio que hay que escapar.
     unico = quote("System Settings", safe="")

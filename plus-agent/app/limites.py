@@ -32,12 +32,10 @@ import secrets
 import time
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from redis.exceptions import RedisError
 
-from app import erpnext, locks
+from app import erpnext, locks, reloj
 from app import telefono as telefono_mod
 
 # Marca de los comentarios de auditoría en ERPNext. Redis no puede contestar
@@ -1314,11 +1312,11 @@ def definicion(nombre_o_alias: str) -> Definicion:
 
 
 def _ahora() -> str:
-    zona = os.getenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires").strip()
-    try:
-        return datetime.now(ZoneInfo(zona)).isoformat(timespec="seconds")
-    except (ZoneInfoNotFoundError, ValueError):
-        return datetime.now().isoformat(timespec="seconds")
+    """Sella el registro durable `[limite]`, así que el respaldo importa: era
+    `datetime.now()` sin zona, o sea el reloj del servidor, escribiendo el
+    rastro de auditoría con un reloj distinto del que decide todo lo demás y
+    sin dejar constancia. Ahora es el default del negocio, con log."""
+    return reloj.ahora_con_respaldo("limites").isoformat(timespec="seconds")
 
 
 def _codigo() -> str:

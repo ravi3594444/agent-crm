@@ -3906,3 +3906,26 @@ def test_a_fallback_without_a_date_still_sends_a_non_empty_parameter(mundo) -> N
     sin_fecha = solicitudes.registrar(solicitud, "prueba", ofrecido={"metodo": "entrega"})
 
     assert solicitudes._fecha_ofrecida(sin_fecha).strip()
+
+
+def test_una_zona_invalida_deja_el_vencimiento_en_el_timeout_configurado(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El 0.0 de `_momento_del_negocio` es un contrato, no un detalle.
+
+    Con `BUSINESS_TIMEZONE` inválida no se puede saber a qué instante se
+    refiere «jueves 18:00», así que la función devuelve 0.0 y `_vence_respaldo`
+    usa el timeout configurado. Calcularlo en una zona adivinada le acortaría
+    —o alargaría— al cliente la ventana para aceptar la oferta, por el offset
+    entero y sin que nada lo diga.
+
+    Este test no existía, y por eso #26 cambió este comportamiento sin que se
+    notara. Lo encontró Qodo revisando ese PR.
+    """
+    monkeypatch.setenv("BUSINESS_TIMEZONE", "Marte/Olympus_Mons")
+
+    assert solicitudes._momento_del_negocio("2026-09-10", "18:00") == 0.0
+
+    ahora = 1_757_000_000.0
+    tope = ahora + max(0.5, solicitudes.timeout_horas()) * 3600.0
+    assert solicitudes._vence_respaldo(ahora, "2026-09-10", "18:00") == tope

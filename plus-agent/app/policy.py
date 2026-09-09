@@ -7,9 +7,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app import entrega, erpnext, inventario, limites
+from app import entrega, erpnext, inventario, limites, reloj
 from app.formato import pesos
 from app.locks import distributed_lock
 
@@ -92,12 +91,14 @@ class Sombra:
 
 
 def _hoy_del_negocio() -> date:
-    zone_name = os.getenv(
-        "BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires"
-    ).strip()
+    """Levanta, no usa respaldo: esto DECIDE. Una fecha adivinada acá
+    auto-confirma pedidos contra el día equivocado.
+
+    El tipo se traduce a `ERPNextError` porque los llamadores lo atrapan por
+    ese tipo, no por `RuntimeError`."""
     try:
-        return datetime.now(ZoneInfo(zone_name)).date()
-    except (ZoneInfoNotFoundError, ValueError) as exc:
+        return reloj.hoy()
+    except reloj.ZonaInvalida as exc:
         raise erpnext.ERPNextError("BUSINESS_TIMEZONE inválida") from exc
 
 

@@ -3,13 +3,14 @@ from __future__ import annotations
 import os
 import sys
 from contextlib import contextmanager, nullcontext
-from datetime import date
+from datetime import UTC, date
 from datetime import datetime as RealDateTime
 from pathlib import Path
 from unittest.mock import Mock
 
 import httpx
 import pytest
+import time_machine
 
 os.environ.setdefault("ERPNEXT_URL", "http://erpnext.test")
 os.environ.setdefault("ERPNEXT_API_KEY", "test-key")
@@ -254,20 +255,31 @@ def test_usual_order_uses_bound_customer_not_model_input(
     )
 
 
+@time_machine.travel(RealDateTime(2026, 8, 30, 2, 30, tzinfo=UTC), tick=False)
 def test_date_parser_uses_business_timezone_and_never_defaults_missing_date(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seen: list[str] = []
+    """«mañana» se resuelve contra la fecha DEL NEGOCIO, no la del servidor.
 
-    class Clock:
-        @classmethod
-        def now(cls, tz):
-            seen.append(tz.key)
-            return RealDateTime(2026, 8, 29, 23, 30, tzinfo=tz)
+    Antes esto se probaba parchando `pedidos.datetime` y afirmando que la zona
+    que se le pasaba a `now()` era `"America/Argentina/Buenos_Aires"`. Eso
+    fijaba dos cosas que no son la regla: en qué módulo vive el símbolo
+    `datetime` —así que se rompió al mover el reloj a `app/reloj.py` sin que
+    cambiara ningún comportamiento— y el nombre del default, que es lo que un
+    cliente de otro país cambia.
 
-    monkeypatch.setattr(pedidos, "datetime", Clock)
+    La regla se afirma con UN instante y DOS zonas. A las 02:30 UTC del 30 son
+    las 23:30 del **29** en Buenos Aires y las 11:30 del **30** en Tokio, así
+    que «mañana» tiene que dar dos fechas distintas para el mismo momento. Un
+    parser que leyera el reloj del servidor daría la misma las dos veces, y
+    esta versión no puede pasar por accidente.
+    """
+    monkeypatch.setenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires")
     assert pedidos._parse_fecha("mañana") == "2026-08-30"
-    assert seen == ["America/Argentina/Buenos_Aires"]
+
+    monkeypatch.setenv("BUSINESS_TIMEZONE", "Asia/Tokyo")
+    assert pedidos._parse_fecha("mañana") == "2026-08-31"
+
     with pytest.raises(pedidos.FechaEntregaInvalida, match="falta"):
         pedidos._parse_fecha(None)  # type: ignore[arg-type]
 
