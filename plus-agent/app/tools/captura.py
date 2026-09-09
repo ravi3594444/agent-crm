@@ -27,7 +27,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app import erpnext, notificar, policy
+from app import erpnext, idioma, notificar, policy
 from app.runtime_context import SIN_PERMISO, RuntimeContextError, require_management
 
 
@@ -181,28 +181,35 @@ def contar_stock(
         f"Conteo físico por WhatsApp. Sistema: {sistema:g}, contado: {cantidad_real:g}.",
     )
     dif = cantidad_real - sistema
-    signo = "faltan" if dif < 0 else "sobran"
-    resumen = (
-        f"Conteo de {item_code} ({doc['name']}): el sistema decía {sistema:g}, "
-        f"vos contaste {cantidad_real:g} — {signo} {abs(dif):g}."
+    # El idioma del DUEÑO: esta herramienta es de gerencia (require_management)
+    # y el cuerpo del botón le llega a él por WhatsApp, no al modelo.
+    lengua = idioma.gerencia()
+    resumen = idioma.t(
+        "stock.conteo_faltan" if dif < 0 else "stock.conteo_sobran",
+        lengua,
+        producto=item_code,
+        ajuste=doc["name"],
+        sistema=f"{sistema:g}",
+        contado=f"{cantidad_real:g}",
+        diferencia=f"{abs(dif):g}",
     )
     # The count only starts counting when a person confirms it, so ask for that
     # in one tap instead of sending him into ERPNext.
     pedido = notificar.pedir_confirmacion_conteo(
         actor.actor_phone,
         doc["name"],
-        f"{resumen}\n\n¿Confirmo el ajuste?",
+        f"{resumen}\n\n" + idioma.t("stock.conteo_confirmar", lengua),
     )
     if pedido:
-        return (
-            f"{resumen} Le mandé el botón *Confirmar conteo*. Hasta que lo "
-            "toque, el conteo es un borrador y el bot no promete stock de "
-            f"{item_code}."
+        return idioma.t(
+            "stock.conteo_boton_enviado", lengua, resumen=resumen, producto=item_code
         )
-    return (
-        f"{resumen} No pude mandarle el botón de confirmación: tiene que "
-        f"confirmar {doc['name']} en ERPNext. Hasta entonces el bot no promete "
-        f"stock de {item_code}."
+    return idioma.t(
+        "stock.conteo_sin_boton",
+        lengua,
+        resumen=resumen,
+        producto=item_code,
+        ajuste=doc["name"],
     )
 
 
