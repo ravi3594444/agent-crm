@@ -76,6 +76,10 @@ def _http_sano(url, headers=None, params=None):
         return 200, {"data": {"is_group": 0, "disabled": 0, "company": "Lacteos Test SA"}}
     if "/api/resource/Account/" in url:
         return 200, {"data": CUENTA_SANA}
+    if "System%20Settings" in url:
+        # La zona que ERPNext declara. Sana = la misma que BUSINESS_TIMEZONE,
+        # que es la suposición que `edad_horas` hace sobre `creation`.
+        return 200, {"data": {"time_zone": "America/Argentina/Buenos_Aires"}}
     raise AssertionError(f"URL inesperada {url}")
 
 
@@ -1041,3 +1045,77 @@ def test_the_two_sweep_groups_partition_the_out_of_window_set():
 
     assert siempre & opcional == set()
     assert siempre | opcional == set(readiness.PLANTILLAS_FUERA_DE_VENTANA)
+
+
+# ------------------------------------------- la zona de ERPNext contra la del negocio
+
+
+def test_erpnext_in_another_timezone_blocks_because_every_age_comes_out_skewed() -> None:
+    """Dos zonas configuradas por separado y supuestas iguales.
+
+    ERPNext guarda `creation` SIN zona, en la hora de su propio sistema, y
+    `pendientes.edad_horas` la interpreta en BUSINESS_TIMEZONE. Cuando no
+    coinciden, toda edad sale corrida por el offset y ningún test lo puede ver
+    porque los tests comparten la suposición del código. Bloquea porque esas
+    edades gatean el recordatorio al cliente y el cierre que le suelta el
+    stock: es el sistema mandando los dos a la hora equivocada.
+    """
+    def http(url, headers=None, params=None):
+        if "System%20Settings" in url:
+            return 200, {"data": {"time_zone": "UTC"}}
+        return _http_sano(url, headers, params)
+
+    reporte = _correr(BASE, http=http)
+    texto = reporte.texto()
+    assert "FALTA  ERPNext zona: ERPNext dice UTC y BUSINESS_TIMEZONE dice" in texto
+    assert "America/Argentina/Buenos_Aires" in texto
+    assert reporte.listo is False
+
+
+def test_the_same_timezone_on_both_sides_is_ok() -> None:
+    texto = _correr(BASE, http=_http_sano).texto()
+    assert "OK     ERPNext zona: America/Argentina/Buenos_Aires, igual que BUSINESS_TIMEZONE" in texto
+
+
+def test_an_unreadable_system_settings_is_a_notice_and_never_blocks() -> None:
+    """«No pude leer» no es «están distintas», y bloquear por eso deja rojo para siempre.
+
+    Es el criterio que este archivo ya fijó para las plantillas opcionales:
+    `--sin-red` es la puerta de `deploy.yml` y no puede verificar nada remoto, y
+    `System Settings` es un Single que puede pedir un permiso que la credencial
+    de política no tenga. El aviso dice qué permiso falta.
+    """
+    def http(url, headers=None, params=None):
+        if "System%20Settings" in url:
+            return 403, {"exc_type": "PermissionError"}
+        return _http_sano(url, headers, params)
+
+    reporte = _correr(BASE, http=http)
+    texto = reporte.texto()
+    assert "AVISO  ERPNext zona: no pude leer System Settings.time_zone (HTTP 403)" in texto
+    assert "Dar lectura de System Settings a la credencial de política." in texto
+    # Y no bloquea: el resto de BASE está sano.
+    assert "FALTA  ERPNext zona" not in texto
+
+
+def test_a_system_settings_without_the_field_is_also_a_notice() -> None:
+    """Un ERPNext viejo, o un payload recortado: tampoco es «están distintas»."""
+    def http(url, headers=None, params=None):
+        if "System%20Settings" in url:
+            return 200, {"data": {}}
+        return _http_sano(url, headers, params)
+
+    texto = _correr(BASE, http=http).texto()
+    assert "AVISO  ERPNext zona: no pude leer System Settings.time_zone (HTTP 200)" in texto
+
+
+def test_the_zone_is_compared_against_the_configured_one_not_a_hardcoded_default() -> None:
+    """Si el dueño cambia BUSINESS_TIMEZONE, el chequeo lo sigue."""
+    def http(url, headers=None, params=None):
+        if "System%20Settings" in url:
+            return 200, {"data": {"time_zone": "America/New_York"}}
+        return _http_sano(url, headers, params)
+
+    env = {**BASE, "BUSINESS_TIMEZONE": "America/New_York"}
+    texto = _correr(env, http=http).texto()
+    assert "OK     ERPNext zona: America/New_York, igual que BUSINESS_TIMEZONE" in texto
