@@ -1066,9 +1066,12 @@ def chequear_borradores(reporte: Reporte, *, con_red: bool = True) -> None:
     if datos is None:
         reporte.aviso("Borradores vivos", "no pude contarlos en ERPNext")
         return
+    # El `+` cuando la cuenta quedó cortada: acá el número también se leía como
+    # exacto, y es el mismo número.
+    mas = "+" if datos.get("truncado") else ""
     detalle = (
-        f"{datos['vivos']} de {datos['tope']} "
-        f"({datos['del_bot']} del bot + {datos['a_mano']} cargados a mano)"
+        f"{datos['vivos']}{mas} de {datos['tope']} "
+        f"({datos['del_bot']}{mas} del bot + {datos['a_mano']}{mas} cargados a mano)"
     )
     if datos["pasado"]:
         reporte.aviso(

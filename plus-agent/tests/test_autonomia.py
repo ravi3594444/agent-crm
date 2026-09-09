@@ -987,3 +987,73 @@ def test_the_skipped_count_is_what_this_window_skipped(mundo) -> None:
 
     assert datos["excluidos"] == 1  # sólo SO-1 estaba acá para saltar
     assert datos["grupos"] == {}
+
+
+# ----------------------------------------------- los techos que no avisaban
+
+
+def test_a_live_draft_count_that_filled_the_read_says_it_is_a_floor(
+    mundo, monkeypatch
+) -> None:
+    """`pasado` y `truncado` no dicen lo mismo, y hacían falta los dos.
+
+    `pasado` dice que se pasó el techo del NEGOCIO. `truncado` dice que el
+    número mismo no se pudo medir completo. Con una sola fila de más, `vivos`
+    valía `MAX_BORRADORES + 1` tanto con 501 borradores como con 5000 y se
+    informaba igual — un techo presentado como si fuera el total.
+    """
+    monkeypatch.setattr(policy, "MAX_BORRADORES", 3)
+    mundo["borradores"].extend([_borrador(f"SO-{i}") for i in range(9)])
+
+    datos = autonomia.borradores_vivos()
+
+    assert datos["pasado"] is True
+    assert datos["truncado"] is True
+    assert "es un piso" in autonomia.texto({"dias": 7, "borradores": datos}, "es")
+
+
+def test_a_live_draft_count_that_fits_is_still_reported_as_exact(
+    mundo, monkeypatch
+) -> None:
+    """El caso que separa los dos: techo del negocio pasado, cuenta completa.
+
+    Sin este test, `truncado = pasado` pasaría el de arriba sin decir nada
+    nuevo, que es exactamente el estado del que se viene.
+    """
+    monkeypatch.setattr(policy, "MAX_BORRADORES", 3)
+    mundo["borradores"].extend([_borrador(f"SO-{i}") for i in range(4)])
+
+    datos = autonomia.borradores_vivos()
+
+    assert datos["pasado"] is True
+    assert datos["truncado"] is False
+    assert "es un piso" not in autonomia.texto({"dias": 7, "borradores": datos}, "es")
+
+
+def test_a_breakdown_cut_for_length_says_how_many_it_left_out() -> None:
+    """El corte se lleva SIEMPRE las cubetas más chicas, así que el error está
+    acotado — pero va en la dirección peligrosa: un desglose de frenos corto se
+    lee como «hay menos frenos de los que hay», y eso es lo que hace subir un
+    límite sobre evidencia que no está.
+    """
+    grupos = {f"freno {i}": 7 - i for i in range(7)}
+
+    linea = autonomia._linea_grupos(grupos, "es")
+
+    assert linea.startswith("freno 0 7, freno 1 6")
+    assert "+1 sin mostrar" in linea
+    assert "freno 6" not in linea  # la más chica es la que se cae
+
+
+def test_a_breakdown_that_fits_adds_nothing(mundo) -> None:
+    """Nada de «+0 sin mostrar»: el aviso sólo aparece cuando cortó."""
+    assert autonomia._linea_grupos({"freno a": 2, "freno b": 1}, "es") == (
+        "freno a 2, freno b 1"
+    )
+
+
+def test_a_cut_breakdown_says_it_in_the_language_it_was_asked_in() -> None:
+    """El «+N sin mostrar» pasa por el catálogo, no es un literal pegado."""
+    grupos = {f"freno {i}": 9 - i for i in range(8)}
+
+    assert "+2 not shown" in autonomia._linea_grupos(grupos, "en")

@@ -292,3 +292,59 @@ def test_the_pending_section_header_counts_orders_not_the_instruction_line(
     assert "(4)" not in salida
     # Y la instrucción sigue estando, sólo que fuera de la cuenta.
     assert "Respondé 'confirmar <pedido>'" in salida
+
+
+# --------------------------------------------- el techo de lectura que no avisaba
+
+
+def _fila_pendiente(nombre: str, po_no: str = "WA-" + "a" * 40) -> dict:
+    return {"name": nombre, "po_no": po_no, "creation": "2026-09-06 09:00:00"}
+
+
+def test_a_pending_list_that_filled_the_read_is_not_reported_as_the_total(
+    mundo, monkeypatch
+):
+    """El encabezado decía «(200)» con 900 esperando, y el docstring promete TODOS.
+
+    Un conteo que llenó el techo de lectura es un PISO. Presentarlo como exacto
+    le dice al dueño que ya vio todo lo que tiene para limpiar cuando le
+    faltan 700 — y cada borrador que queda retiene el stock que promete.
+    """
+    from app import pendientes
+
+    filas = [_fila_pendiente(f"SO-{i}") for i in range(digest.TECHO_PENDIENTES + 1)]
+    pedidos: list[int] = []
+
+    def listar(**kw):
+        pedidos.append(int(kw["limite"]))
+        return filas[: int(kw["limite"])]
+
+    monkeypatch.setattr(pendientes, "listar_esperando", listar)
+    monkeypatch.setattr(pendientes, "edad_horas", lambda f, ahora=None: 3.0)
+
+    salida = digest.seccion_pendientes()
+
+    # Se pide UNA fila más que el techo: es lo único que distingue «hay
+    # exactamente 200» de «hay al menos 200».
+    assert pedidos == [digest.TECHO_PENDIENTES + 1]
+    assert f"({digest.TECHO_PENDIENTES}+):" in salida
+    assert f"({digest.TECHO_PENDIENTES}):" not in salida
+    assert "son un piso y no el total" in salida
+    # El «y N más» de las líneas también es un mínimo, por lo mismo.
+    assert f"· … y {digest.TECHO_PENDIENTES - digest.MAX_LINEAS}+ más" in salida
+    # Y la fila extra no se muestra: se leyó para saber, no para listar.
+    assert f"SO-{digest.TECHO_PENDIENTES}" not in salida
+
+
+def test_a_pending_list_that_fits_is_still_reported_as_exact(mundo, monkeypatch):
+    """El caso que separa los dos: el techo justo lleno todavía es exacto."""
+    from app import pendientes
+
+    filas = [_fila_pendiente(f"SO-{i}") for i in range(digest.TECHO_PENDIENTES)]
+    monkeypatch.setattr(pendientes, "listar_esperando", lambda **kw: list(filas))
+    monkeypatch.setattr(pendientes, "edad_horas", lambda f, ahora=None: 3.0)
+
+    salida = digest.seccion_pendientes()
+
+    assert f"({digest.TECHO_PENDIENTES}):" in salida
+    assert "piso" not in salida

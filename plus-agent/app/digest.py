@@ -41,6 +41,11 @@ from app.formato import pesos
 
 HORA_DEFAULT = "18:00"
 MAX_LINEAS = 15
+# Cuántos borradores esperando entran en el resumen. Se pide UNA fila más que
+# esto para poder DECIR que el conteo quedó cortado: un techo lleno hace que
+# `len(filas)` sea un piso y no el total, y presentarlo como exacto es lo que
+# hace que el resumen de las 18:00 diga «200» cuando hay 900.
+TECHO_PENDIENTES = 200
 # Desde qué porcentaje del techo de borradores el resumen avisa. Antes de
 # esto la fuga es normal; pasado el techo la auto-confirmación muere entera.
 UMBRAL_BORRADORES_PCT = 80.0
@@ -172,15 +177,23 @@ def _linea_pedido(
     return linea
 
 
-def _seccion(titulo: str, lineas: list[str], vacio: str) -> str:
+def _seccion(titulo: str, lineas: list[str], vacio: str, *, cortado: bool = False) -> str:
+    """El bloque de una sección. `cortado` marca el conteo como piso, no total.
+
+    Con `cortado`, el número del encabezado lleva un `+` y el «y N más»
+    también: los dos son cuentas de una lista que se leyó incompleta, así que
+    los dos son mínimos. La sección que lo pasa explica el `+` en palabras —
+    un signo solo no se lee.
+    """
     if not lineas:
         return f"{titulo}: {vacio}"
     visibles = lineas[:MAX_LINEAS]
     resto = len(lineas) - len(visibles)
     cuerpo = "\n".join(visibles)
+    mas = "+" if cortado else ""
     if resto > 0:
-        cuerpo += f"\n· … y {resto} más"
-    return f"{titulo} ({len(lineas)}):\n{cuerpo}"
+        cuerpo += f"\n· … y {resto}{mas} más"
+    return f"{titulo} ({len(lineas)}{mas}):\n{cuerpo}"
 
 
 def seccion_despacho() -> str:
@@ -213,14 +226,21 @@ def seccion_pendientes() -> str:
     total de esta sección nunca discute con el del recordatorio ni con los de
     autonomía, que cuentan sólo los del bot; el número se separa en vez de
     reconciliarse.
+
+    «TODOS» tiene un techo de lectura (`TECHO_PENDIENTES`), y cuando se llena
+    la sección lo dice en vez de presentar el techo como el total.
     """
     from app import pendientes
 
     try:
-        filas = pendientes.listar_esperando(limite=200)
+        # Una fila más que el techo: la que sobra es la que permite distinguir
+        # «hay exactamente TECHO» de «hay al menos TECHO».
+        filas = pendientes.listar_esperando(limite=TECHO_PENDIENTES + 1)
     except Exception as exc:
         print(f"[digest] pendientes: {type(exc).__name__}")
         return "🟡 Esperan tu decisión: no pude leer ERPNext"
+    cortado = len(filas) > TECHO_PENDIENTES
+    filas = filas[:TECHO_PENDIENTES]
     ahora = _ahora()
     del_bot = [f for f in filas if pendientes.del_agente(f)]
     a_mano = [f for f in filas if not pendientes.del_agente(f)]
@@ -236,7 +256,14 @@ def seccion_pendientes() -> str:
     # `_seccion` usa len(lineas) como el total entre paréntesis, así que
     # meterla ahí hacía que el encabezado dijera uno más que los pedidos que
     # lista — justo lo que el docstring promete que no puede pasar.
-    cuerpo = _seccion(titulo, lineas, "ninguno")
+    cuerpo = _seccion(titulo, lineas, "ninguno", cortado=cortado)
+    if cortado:
+        # El desglose del encabezado sale de las mismas filas cortadas, así que
+        # también es un piso: se dice una vez, para los dos.
+        cuerpo += (
+            f"\n⚠️ Hay MÁS de {TECHO_PENDIENTES} esperando: no los pude leer todos "
+            "de una vez, así que estos números son un piso y no el total."
+        )
     if lineas:
         cuerpo += "\nRespondé 'confirmar <pedido>', 'rechazar <pedido>' o 'ver <pedido>'."
     return cuerpo
