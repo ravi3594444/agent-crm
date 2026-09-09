@@ -1,0 +1,263 @@
+name: Revisión de Claude
+
+# Todos los PR se revisan, pero no todos con la misma revisión. Un README de dos
+# líneas y un cambio en `app/router.py` —el límite de privilegio entre el bot de
+# clientes y el de gerencia— no son el mismo objeto, y gastarles la misma
+# atención es pagar de más en uno o de menos en el otro. De menos es la
+# dirección cara: una revisión que no miró nada informa exactamente lo mismo que
+# una que miró en serio.
+#
+# Así que el primer job decide cuánto mirar, a partir de lo que el PR toca de
+# verdad, y el segundo lo hace. El nivel controla si la revisión corre, en qué
+# modelos corren los agentes QUE REVISAN, y cuánto tiempo tiene; el
+# razonamiento —incluidas las palancas que se probaron y se descartaron— está en
+# .github/scripts/pr_review_intensity.py.
+#
+# SIN `defaults.run.working-directory: plus-agent`, al revés que ci.yml: acá
+# todo pasa en la raíz del repo (el clasificador vive en .github/scripts/ y los
+# paths que clasifica son relativos a la raíz).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Pushear de nuevo mientras corre una revisión la reemplaza. Sin esto, una rama
+# con cuatro pushes en diez minutos corre cuatro revisiones y tres son sobre
+# código que ya no existe — en el nivel deep, cuatro veces la factura del nivel
+# más caro para una sola respuesta útil. Es la misma cuenta que hizo #28 cuando
+# sacó `push` de las ramas: dos corridas idénticas por push pasaban a ocho con
+# una matriz de cuatro celdas.
+#
+# Cancelar es seguro: una revisión no escribe nada más que comentarios, y los de
+# una corrida reemplazada habrían hablado del diff reemplazado.
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Vacío acá y otorgado por job, como los tres jobs de ci.yml. Nombrar UN permiso
+# en un job pone en `none` todos los que no se nombran, así que cada bloque se
+# basta solo y ningún job hereda un alcance que nadie eligió.
+permissions: {}
+
+jobs:
+  intensidad:
+    name: Cuánto mirar
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      # El contexto `secrets` SÍ se puede usar en un `env:` de job — pero NO en
+      # un `if:` de job, y por eso el filtro de abajo viaja al job siguiente como
+      # output y no como condición. Sólo cruza el resultado de la comparación: la
+      # clave nunca sale de este job, y un secreto puesto en un output de job
+      # sale redactado a cadena vacía igual.
+      HAY_CLAVE: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+      # Alguien que puede pushear una rama acá. La action que revisa SE NIEGA a
+      # correr para cualquier otro —tira «Actor does not have write
+      # permissions»—, así que esto no es precaución: es la diferencia entre un
+      # skip gris limpio y una CRUZ ROJA sobre la contribución de alguien de
+      # afuera, por algo que esa persona no puede arreglar.
+      #
+      # Lista blanca y no lista negra, porque `CONTRIBUTOR` se lee como confiable
+      # y no lo es: significa «ya le mergearon un PR acá», no «puede pushear».
+      ES_CONFIABLE: ${{ contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
+      # `head.repo.fork` es la pregunta equivocada —da true para un PR abierto
+      # DENTRO de un fork contra ese mismo fork— y además `head.repo` queda en
+      # null cuando borran el fork, donde un null se lee como «no es un fork».
+      # Comparar los nombres contesta la pregunta que de verdad se está
+      # haciendo, y el caso null compara distinto: saltea en vez de fallar.
+      ES_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+      # La perilla de apagado. Las revisiones están prendidas salvo que una
+      # variable de repositorio CLAUDE_REVIEW_ENABLED valga la cadena "false",
+      # que es un cambio de CONFIGURACIÓN y no un commit — así cortar el gasto a
+      # las apuradas no obliga a abrir un PR contra el archivo que revisa los PR.
+      HABILITADO: ${{ vars.CLAUDE_REVIEW_ENABLED != 'false' }}
+    outputs:
+      tier: ${{ steps.elegir.outputs.tier }}
+      model: ${{ steps.elegir.outputs.model }}
+      timeout_minutes: ${{ steps.elegir.outputs.timeout_minutes }}
+      comment: ${{ steps.elegir.outputs.comment }}
+      directive: ${{ steps.elegir.outputs.directive }}
+      puede_revisar: ${{ steps.filtro.outputs.puede_revisar }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # LA RAMA BASE, NO EL PULL REQUEST. En un evento `pull_request` el
+          # checkout por defecto agarra el merge ref, que trae el código del que
+          # abrió el PR — o sea que por defecto este job correría un clasificador
+          # que el propio PR puede reescribir. La regla que decide cuánto mirar
+          # un cambio no puede ser una regla que trae el cambio.
+          #
+          # El costo es que un PR que edita el clasificador lo corrige la versión
+          # de `main` y no la suya. Es el lado correcto, y `.github/` es un path
+          # crítico, así que ese PR se revisa en deep igual.
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+
+      - name: Los tests del propio clasificador
+        # El job `lint` corre `ruff check app demo tests` con working-directory
+        # `plus-agent`, y `testpaths = tests` en `plus-agent/pytest.ini` deja la
+        # colección adentro de `plus-agent/tests/`. Nada de `.github/` entra por
+        # ninguno de los dos. Estas aserciones son el reemplazo, y correrlas acá
+        # agarra un clasificador roto ANTES de que decida nada, en vez de después
+        # de que haya mandado `app/main.py` al nivel más barato sin avisar.
+        run: python3 .github/scripts/pr_review_intensity.py --selftest
+
+      - name: Qué cambió el pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Por el entorno y no interpolado adentro del script. Hoy son enteros
+          # que manda GitHub, pero un `run:` que concatena ${{ }} en el shell es
+          # la FORMA del accidente, y no escribirla no cuesta nada.
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        # El endpoint de files y no `gh pr diff --name-only`, porque el
+        # clasificador necesita los contadores por archivo para que refrescar un
+        # lock no cuente como cinco mil líneas de cambio. `per_page=100` porque
+        # el default son 30.
+        #
+        # GitHub corta este endpoint en 3000 archivos. Un PR de ese tamaño ya
+        # pasó todos los umbrales, así que truncar no puede cambiar el nivel.
+        run: |
+          gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" \
+            --jq '.[] | [.filename, .additions, .deletions] | @tsv' > archivos.tsv
+          echo "$(wc -l < archivos.tsv) archivo(s) cambiado(s)"
+
+      - name: Elegir el nivel
+        id: elegir
+        run: |
+          python3 .github/scripts/pr_review_intensity.py \
+            --event "$GITHUB_EVENT_PATH" \
+            --files archivos.tsv
+
+      - name: ¿Se puede revisar?
+        id: filtro
+        run: |
+          if [ "$HABILITADO" != "true" ]; then
+            echo "puede_revisar=false" >> "$GITHUB_OUTPUT"
+            echo "motivo=la variable de repositorio CLAUDE_REVIEW_ENABLED está en false" >> "$GITHUB_OUTPUT"
+          elif [ "$ES_FORK" = "true" ]; then
+            echo "puede_revisar=false" >> "$GITHUB_OUTPUT"
+            echo "motivo=un PR desde un fork no recibe los secretos del repo" >> "$GITHUB_OUTPUT"
+          elif [ "$ES_CONFIABLE" != "true" ]; then
+            echo "puede_revisar=false" >> "$GITHUB_OUTPUT"
+            echo "motivo=el autor no tiene permiso de escritura, que es lo que la action exige" >> "$GITHUB_OUTPUT"
+          elif [ "$HAY_CLAVE" != "true" ]; then
+            echo "puede_revisar=false" >> "$GITHUB_OUTPUT"
+            echo "motivo=no hay secreto ANTHROPIC_API_KEY puesto en este repo" >> "$GITHUB_OUTPUT"
+          else
+            echo "puede_revisar=true" >> "$GITHUB_OUTPUT"
+            echo "motivo=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decir por qué
+        env:
+          NIVEL: ${{ steps.elegir.outputs.tier }}
+          MODELO: ${{ steps.elegir.outputs.model }}
+          MOTIVO: ${{ steps.elegir.outputs.reason }}
+          PUEDE: ${{ steps.filtro.outputs.puede_revisar }}
+          BLOQUEO: ${{ steps.filtro.outputs.motivo }}
+        # El motivo nombra archivos, y en un PR desde un fork esos nombres los
+        # escribe quien lo abrió. Va acá, para que lo lea una persona, y NUNCA al
+        # prompt: el prompt se arma con constantes, el nombre del repo y el
+        # número del PR, y nada más.
+        run: |
+          {
+            echo "### Intensidad de la revisión: \`$NIVEL\`"
+            echo
+            echo "$MOTIVO"
+            echo
+            if [ "$PUEDE" != "true" ]; then
+              echo "No se revisa: $BLOQUEO."
+            elif [ "$NIVEL" = "skip" ]; then
+              echo "Este no lo mira ningún modelo."
+            else
+              echo "Se revisa con \`$MODELO\`. Se puede pisar con una etiqueta"
+              echo "\`review:skip\`, \`review:light\`, \`review:standard\` o \`review:deep\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  revision:
+    name: Revisión (${{ needs.intensidad.outputs.tier }})
+    needs: intensidad
+    # Comparaciones POSITIVAS, no `!= 'skip'`. Si el step del clasificador
+    # alguna vez no llega a escribir su output, el valor es la cadena vacía, y
+    # `'' != 'skip'` da TRUE — o sea que la forma negativa correría la revisión
+    # sin modelo y sin timeout. Nombrar los niveles que sí tienen que correr
+    # falla cerrado, que es la misma regla que `policy.py` aplica en la app.
+    if: >-
+      needs.intensidad.outputs.puede_revisar == 'true' &&
+      contains(fromJSON('["light","standard","deep"]'), needs.intensidad.outputs.tier)
+    runs-on: ubuntu-latest
+    # fromJSON convierte la cadena del clasificador en el número que esta clave
+    # espera. Los outputs de job son SIEMPRE cadenas, y una sin convertir es de
+    # esas cosas que andan en el nivel que probaste y en ninguno de los otros.
+    timeout-minutes: ${{ fromJSON(needs.intensidad.outputs.timeout_minutes) }}
+    permissions:
+      contents: read
+      # Write, y no el `read` de la plantilla original: en standard y deep la
+      # revisión deja comentarios en línea, y crear uno es una escritura.
+      pull-requests: write
+      # Un comentario de primer nivel en un PR es un comentario de issue, y así
+      # es como la revisión informa «no encontré nada».
+      issues: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Correr la revisión
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # EXPLÍCITO, Y NO ES OPCIONAL. Sin esto la action pide un token OIDC y
+          # lo canjea por un token de la GitHub App, y ese canje verifica que el
+          # workflow exista en la rama por defecto — así que EL PROPIO PR QUE
+          # INTRODUCE ESTE ARCHIVO falla con `workflow_not_found_on_default_branch`,
+          # que se lee como un bug del workflow y no como un orden de arranque.
+          # Pasando el token la función vuelve antes de todo eso, y encima se cae
+          # la necesidad de `id-token: write`.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          # `--comment` es lo que hace que el comando comente en vez de sólo
+          # imprimir; el comando ramifica sobre el argumento literal, así que el
+          # nivel decide dándoselo o no. En light los hallazgos quedan en el log
+          # del job y en ningún otro lado, a propósito: una revisión barata que
+          # ADEMÁS comenta entrena a todo el mundo a pasar por encima de los
+          # comentarios, y entonces los niveles caros tampoco se leen. Es el
+          # mismo argumento por el que .coderabbit.yaml apagó el check de
+          # docstrings en vez de bajarle el umbral.
+          #
+          # Después del renglón en blanco va una constante elegida por nivel
+          # (DIRECTIVAS en el clasificador). Mueve el listón de confianza y el
+          # alcance. NO intenta redefinir el procedimiento del comando: decirle
+          # que corra más agentes de los que dice que corre no compra nada.
+          #
+          # El renglón de `synchronize` existe porque SIN ÉL este workflow revisa
+          # el primer push y nunca más nada. El paso 1 del comando corta cuando
+          # Claude ya comentó en el PR — bien para una re-corrida sobre el mismo
+          # diff, MAL para el cuarto push, donde el cambio en `app/main.py` que
+          # no estaba en el primero ahora sí está. Esto lo dice explícito, y sólo
+          # en el evento que significa «hay commits nuevos».
+          prompt: |
+            /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}${{ needs.intensidad.outputs.comment == 'true' && ' --comment' || '' }}
+
+            ${{ github.event.action == 'synchronize' && 'There are new commits on this pull request since you last looked at it. Review the current head even though you have commented here before, and do not repeat a finding you have already posted.' || '' }}
+
+            ${{ needs.intensidad.outputs.directive }}
+          # El modelo DEL ORQUESTADOR, y sólo ése. El comando nombra un modelo
+          # por subagente en su propio texto, así que este flag NO LLEGA a los
+          # agentes que revisan — moverlos a ellos es lo que hace la directiva
+          # del nivel light. Se pone igual porque el orquestador corre el
+          # procedimiento, filtra los hallazgos y escribe los comentarios.
+          #
+          # Sin --max-turns. Recortar los turnos no compra una revisión más
+          # barata, compra una que se corta por la mitad e informa el pedazo que
+          # alcanzó a mirar — indistinguible de un resultado limpio. El techo es
+          # el timeout de este job, que falla fuerte.
+          claude_args: '--model ${{ needs.intensidad.outputs.model }}'
