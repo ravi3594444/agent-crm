@@ -5,7 +5,7 @@ https://github.com/ravi3594444/agent-crm/issues/22
 
 **Primer commit:** guardá este mensaje como `docs/prompt-relojes-en-tests.md` en una rama nueva desde `main`, y pushealo.
 
-**Prerrequisito:** #26 tiene que estar mergeado (`app/reloj.py` en `main`). La mitad de `app/` ya está hecha ahí; esto es la otra mitad, y no antes.
+**Prerrequisito: cumplido.** #26 ya está en `main` (`81492a0`), así que `app/reloj.py` existe y la mitad de `app/` está hecha. Esto es la otra mitad y se puede arrancar ya.
 
 ## El estado
 
