@@ -15,9 +15,14 @@ name: CI
 # está" sea una FALLA y no un skip silencioso: un skip es exactamente cómo la
 # suite deja de ser la suite.
 
+# Cada push a una rama disparaba el job Y el pull_request lo disparaba otra
+# vez: dos corridas idénticas por push. Con una matriz de cuatro celdas eso
+# pasaba a ocho. Ahora `push` cubre sólo `main` —el estado que importa después
+# del merge— y las ramas se cubren por su PR, que es donde alguien mira el
+# resultado.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
 
 defaults:
@@ -26,10 +31,38 @@ defaults:
 
 jobs:
   test:
+    # CUATRO ENTORNOS, NO UNO. En un solo día llegaron a `main` dos fallas de
+    # COMBINACIÓN: cada PR estaba verde por separado y la suma no. #17 sacó el
+    # pin de IDIOMA_* del conftest y #18 hizo que `contar_stock` resolviera el
+    # idioma del dueño; ninguno de los dos podía ver el hueco, y CI tampoco,
+    # porque corre en un solo idioma. La verificación de los cuatro entornos se
+    # hacía A MANO antes de cada merge, que es otra forma de decir que no se
+    # hacía. Ver #13.
+    #
+    # Son cuatro filas y no dieciséis: cada variable se prueba sola contra el
+    # default. El producto cartesiano cuadruplicaría el tiempo para cubrir
+    # combinaciones que ninguna configuración real tiene.
+    name: tests · ${{ matrix.nombre }}
     runs-on: ubuntu-latest
-    # El job corre build y tests, nada que escriba en el repo: token de sólo lectura.
+    # El job corre los tests, nada que escriba en el repo: token de sólo lectura.
     permissions:
       contents: read
+
+    strategy:
+      # Sin fail-fast: si el inglés se rompe, igual queremos saber si el
+      # castellano sigue verde. Cancelar las otras celdas esconde justo la
+      # mitad del dato que hace falta para diagnosticar.
+      fail-fast: false
+      matrix:
+        include:
+          - nombre: "es (default)"
+            prefijo: ""
+          - nombre: "IDIOMA_DEFAULT=en"
+            prefijo: "IDIOMA_DEFAULT=en"
+          - nombre: "IDIOMA_GERENCIA=en"
+            prefijo: "IDIOMA_GERENCIA=en"
+          - nombre: "BUSINESS_TIMEZONE=Asia/Kolkata"
+            prefijo: "BUSINESS_TIMEZONE=Asia/Kolkata"
 
     services:
       redis:
@@ -65,13 +98,65 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r requirements-dev.txt
 
-      - name: Lint
-        run: ruff check app demo tests
-
+      # El prefijo va en la línea del comando y no en un bloque `env:` a
+      # propósito: `IDIOMA_DEFAULT=""` NO es lo mismo que la variable sin
+      # definir. El conftest usa `setdefault`, que no pisa una cadena vacía, así
+      # que una celda "vacía" declarada por `env:` sería un quinto entorno
+      # accidental en vez del default.
       - name: Tests
         # -rs lists every skip in the log. A suite whose coverage quietly
         # shrinks by one skipped test is the failure this job just had.
-        run: pytest -q -rs
+        run: ${{ matrix.prefijo }} pytest -q -rs
+
+      # La celda de la zona NO PUEDE FALLAR todavía, y decirlo es la diferencia
+      # entre una celda y una celda que miente. `tests/conftest.py` tiene
+      # BUSINESS_TIMEZONE en `_FIJAS`, y esa lista se aplica con
+      # `os.environ[_k] = _v` —asignación incondicional— al importarse, así que
+      # la variable que pone CI se sobrescribe antes del primer test.
+      #
+      # El pin es CORRECTO: `tests/test_pendientes.py::epoch()` tiene Buenos
+      # Aires escrito a mano, así que el reloj del negocio tiene que ser el
+      # mismo. Ahí fijar ES el arreglo, al contrario del idioma.
+      #
+      # La celda se queda porque cuesta una fila y se vuelve real sola cuando
+      # aterrice #22 (cada test declara su zona, como #17 hizo con el idioma).
+      # El aviso se apaga solo el día que el pin desaparezca: es la misma forma
+      # que el `xfail(strict=True)` de #17 — un pendiente con fecha de
+      # vencimiento en vez de un verde que no significa nada.
+      - name: ¿Esta celda prueba algo?
+        if: matrix.prefijo == 'BUSINESS_TIMEZONE=Asia/Kolkata'
+        run: |
+          if grep -q '"BUSINESS_TIMEZONE",' tests/conftest.py; then
+            echo "::warning title=Celda vacua::conftest.py fija BUSINESS_TIMEZONE en _FIJAS, así que esta celda corre la MISMA zona que el default y no puede fallar. Se vuelve real con el issue #22. No la leas como cobertura de zona horaria."
+          else
+            echo "El pin salió de _FIJAS: esta celda ya prueba la zona de verdad. Borrá este paso."
+          fi
+
+  # Lint y build NO dependen del entorno, así que salen de la matriz: correrlos
+  # cuatro veces era gastar tres. Y en jobs aparte corren en paralelo con los
+  # tests en vez de esperarlos.
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: plus-agent/requirements-dev.txt
+      - name: Instalar dependencias
+        run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: ruff check app demo tests
+
+  imagen:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
 
       - name: La imagen buildea
         run: docker build -t plus-agent:ci .
