@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build-dashboard.mjs",
-    "check": "node --check plus-agent/app/dashboard_ui/app.js"
+    "check": "node --check plus-agent/app/dashboard_ui/app.js",
+    "test": "node --test scripts/test-dashboard.mjs"
   }
 }

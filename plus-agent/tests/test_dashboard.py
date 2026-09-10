@@ -81,7 +81,7 @@ class DashboardBoundaryTest(unittest.TestCase):
 
     def test_unknown_routes_cannot_call_erp(self):
         with patch.object(dashboard, "snapshot") as snapshot:
-            self.assertEqual(request(path="/orders/submit")[0], 404)
+            self.assertEqual(request(path="/orders/SO-1/submit")[0], 404)
             snapshot.assert_not_called()
 
     def test_non_finite_and_missing_numbers_stay_unknown(self):

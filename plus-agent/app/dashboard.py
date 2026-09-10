@@ -1,4 +1,4 @@
-"""Read-only dashboard API. No agent tools, policy identity, or write operations.
+"""Read-only dashboard API. No agent tools or business write operations.
 
 An independent ASGI surface keeps its bearer auth and CORS away from the signed
 WhatsApp webhook. The UI is public static content; business data never is.
@@ -10,9 +10,137 @@ import hmac
 import json
 import math
 import os
+import re
 from datetime import timedelta
+from html import unescape
+from urllib.parse import quote, unquote, urlsplit
 
 LIMIT = 250
+READ_TIMEOUT = 3.0
+ORDER_FIELDS = [
+    "name", "customer", "customer_name", "transaction_date", "delivery_date",
+    "grand_total", "currency", "status", "docstatus",
+]
+
+
+class RecordNotFound(Exception):
+    """A document outside the configured company is not a dashboard record."""
+
+
+def public_erp_origin() -> str:
+    """Only an explicitly configured browser origin, never the internal API URL."""
+    value = os.getenv("ERPNEXT_PUBLIC_URL", "").strip().rstrip("/")
+    try:
+        parsed = urlsplit(value)
+        local = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        if (
+            not parsed.netloc or parsed.username or parsed.password
+            or parsed.path or parsed.query or parsed.fragment
+            or not (parsed.scheme == "https" or (parsed.scheme == "http" and local))
+        ):
+            return ""
+    except ValueError:
+        return ""
+    return value
+
+
+def plain_text(value: object) -> str:
+    return " ".join(unescape(re.sub(r"<[^>]*>", " ", str(value or ""))).split())[:2000]
+
+
+def model_status() -> list[dict]:
+    """Reuse the repo's provider selection, aliases, and defaults without a model call."""
+    from app import modelos
+
+    try:
+        provider = modelos.proveedor()
+        configured = bool(modelos.clave_api(provider)[1])
+        names = [modelos.nombre_modelo(role, prov=provider)[1] for role in ("clientes", "gerencia")]
+        status = "Configured" if configured else "Missing credentials"
+    except Exception:
+        names, status = ["Unavailable", "Unavailable"], "Configuration error"
+    return [
+        {"id": "sales", "name": "Sales agent", "role": "Customer conversations & order drafts",
+         "model": names[0], "status": status},
+        {"id": "manager", "name": "Management agent", "role": "Business reports & manager assistance",
+         "model": names[1], "status": status},
+    ]
+
+
+def controls() -> dict:
+    """Canonical settings reader preserves the repo's lost-state guards.
+
+    This existing reader may use policy-scoped READS to verify durable Company
+    audit markers. It does not propose, apply, or bypass an owner setting.
+    """
+    from app import inventario, limites
+
+    labels = {
+        "AUTO_CONFIRM_MAX": "Order ceiling",
+        "AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO": "Quantity per product",
+        "STOCK_BUFFER_PCT": "Stock buffer",
+        "AUTO_CONFIRM_MAX_CLIENTE_NUEVO": "New customer ceiling",
+    }
+    rows = limites.resumen()
+    policies = [{
+        "id": row["nombre"], "name": labels.get(row["nombre"], row["alias"]),
+        "value": limites.mostrar(row["nombre"], row["valor"], en_idioma="en")
+        if not row["problema"] else "Unavailable",
+        "note": row["problema"] or row["significado"],
+        "source": row["origen"], "unit": row["unidad"], "valid": not bool(row["problema"]),
+    } for row in rows]
+    policies.append({
+        "id": "STOCK_CONFIABLE_HORAS", "name": "Stock trust window",
+        "value": f"{inventario.horas_de_validez():g} hours",
+        "note": "A submitted stock count must be recent enough before auto-confirmation.",
+        "source": "Environment", "valid": True,
+    })
+    return {"policies": policies}
+
+
+def operations() -> dict:
+    from app import avisos, outbound_status
+
+    client = outbound_status.cliente()
+    client.ping()
+    notice_count = avisos.pendientes()
+    return {
+        "redis": "Connected",
+        # The worker takes a short lease while handling a turn; idle is not failure.
+        "worker": "Active lease" if client.exists("wa:{inbound}:worker-lock") else "No active lease",
+        "queuedMessages": int(client.llen("wa:{inbound}:queue")),
+        "failedReplies": int(client.llen("wa:{inbound}:dead")),
+        "failedNotices": int(client.llen(outbound_status.DEAD_NOTIFY_KEY)),
+        "queuedNotices": notice_count if notice_count >= 0 else None,
+        "providerHealth": "Not probed",
+    }
+
+
+def order_detail(order_id: str) -> dict:
+    from app import erpnext
+
+    with erpnext.manager_scope():
+        try:
+            doc = erpnext.get_doc("Sales Order", order_id, timeout=READ_TIMEOUT)
+        except erpnext.ERPNextError as exc:
+            if exc.status_code in {403, 404}:
+                raise RecordNotFound from exc
+            raise
+        if doc.get("company") != erpnext.default_company():
+            raise RecordNotFound
+        result = order_row(doc)
+        result["items"] = [{
+            "code": str(item.get("item_code") or ""),
+            "name": str(item.get("item_name") or item.get("item_code") or "Item"),
+            "qty": number(item.get("qty")), "rate": number(item.get("rate")),
+            "amount": number(item.get("amount")), "unit": str(item.get("uom") or ""),
+        } for item in doc.get("items", [])]
+        result["address"] = plain_text(doc.get("shipping_address") or doc.get("address_display"))
+        result["erpUrl"] = (
+            public_erp_origin() + "/app/sales-order/" + quote(order_id, safe="")
+            if public_erp_origin() else ""
+        )
+        return result
 
 
 def authorized(header: str) -> bool:
@@ -76,7 +204,7 @@ def snapshot() -> dict:
 
     def read(label: str, doctype: str, **kwargs) -> list[dict] | None:
         try:
-            rows = erpnext.get_list(doctype, limit=LIMIT + 1, **kwargs)
+            rows = erpnext.get_list(doctype, limit=LIMIT + 1, timeout=READ_TIMEOUT, **kwargs)
         except Exception:
             # Never put upstream response bodies or credential-bearing exceptions in JSON.
             errors.append(label)
@@ -88,10 +216,16 @@ def snapshot() -> dict:
     with erpnext.manager_scope():
         orders = read(
             "orders", "Sales Order",
-            filters=[["company", "=", company], ["transaction_date", ">=", since]],
-            fields=["name", "customer", "customer_name", "transaction_date", "delivery_date",
-                    "grand_total", "currency", "status", "docstatus"],
+            filters=[["company", "=", company], ["transaction_date", ">=", since],
+                     ["transaction_date", "<=", now.date().isoformat()]],
+            fields=ORDER_FIELDS,
             order_by="transaction_date desc, name desc",
+        )
+        pending = read(
+            "pending orders", "Sales Order",
+            filters=[["company", "=", company], ["docstatus", "=", 0],
+                     ["status", "not in", ["Closed", "Cancelled", "On Hold"]]],
+            fields=ORDER_FIELDS, order_by="creation asc, name asc",
         )
         customers = read(
             "customers", "Customer", filters=[["disabled", "=", 0]],
@@ -113,7 +247,7 @@ def snapshot() -> dict:
             ) or []
         labels = {x["name"]: x for x in items}
         try:
-            currency = erpnext.get_doc("Company", company).get("default_currency") or ""
+            currency = erpnext.get_doc("Company", company, timeout=READ_TIMEOUT).get("default_currency") or ""
         except Exception:
             currency = ""
             errors.append("currency")
@@ -132,35 +266,23 @@ def snapshot() -> dict:
                 "warehouse": b.get("warehouse", ""),
             })
 
-    # Only whitelisted, non-secret model identifiers are returned. Configured
-    # does not mean the provider or WhatsApp is healthy: no probe is implied.
-    provider = os.getenv("LLM_PROVIDER", "qwen")
-    model_vars = (
-        ("QWEN_SALES_MODEL", "QWEN_MANAGER_MODEL") if provider == "qwen"
-        else ("GEMINI_SALES_MODEL", "GEMINI_MANAGER_MODEL")
-    )
-    models = [os.getenv(key) or "Provider default" for key in model_vars]
     return {
         "mode": "live", "generatedAt": now.isoformat(), "today": now.date().isoformat(),
         "since": since, "company": company, "currency": currency,
         "orders": None if orders is None else [order_row(x) for x in orders],
+        "pendingOrders": None if pending is None else [order_row(x) for x in pending],
         "customers": None if customers is None else [{
             "id": x["name"], "name": x.get("customer_name") or x["name"],
             "group": x.get("customer_group") or "Customer", "territory": x.get("territory") or "",
         } for x in customers],
         "products": products, "policies": None,
-        "agents": [
-            {"id": "sales", "name": "Sales agent", "role": "Customer conversations & order drafts",
-             "model": models[0], "status": "Not checked"},
-            {"id": "manager", "name": "Management agent", "role": "Business reports & manager assistance",
-             "model": models[1], "status": "Not checked"},
-        ],
+        "agents": model_status(), "erpOrigin": public_erp_origin(),
         "errors": errors, "truncated": truncated, "limit": LIMIT,
     }
 
 
 class DashboardAPI:
-    """Bearer-authenticated GET /snapshot, mounted only at /api/dashboard."""
+    """Authenticated read endpoints, mounted only at /api/dashboard."""
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -185,7 +307,14 @@ class DashboardAPI:
             await send({"type": "http.response.body", "body": json.dumps(payload, allow_nan=False).encode()})
 
         path = scope.get("path", "").removeprefix(scope.get("root_path", ""))
-        if path != "/snapshot":
+        detail_match = re.fullmatch(r"/orders/([^/]{1,140})", path)
+        readers = {"/snapshot": snapshot, "/controls": controls, "/operations": operations}
+        if path == "/config" and scope["method"] == "GET":
+            # No company, model, origin, or business data is returned before auth.
+            await reply(200, {"service": "plus-agent", "apiVersion": 1,
+                              "configured": len(os.getenv("DASHBOARD_API_TOKEN", "")) >= 32})
+            return
+        if path not in readers and not detail_match:
             await reply(404, {"error": "Not found"})
             return
         if scope["method"] == "OPTIONS":
@@ -208,8 +337,30 @@ class DashboardAPI:
             await reply(403, {"error": "This dashboard origin is not allowed"})
             return
         try:
-            data = await asyncio.to_thread(snapshot)
+            if detail_match:
+                order_id = unquote(detail_match[1])
+                if "/" in order_id or "\\" in order_id or order_id in {".", ".."}:
+                    raise RecordNotFound
+                data = await asyncio.to_thread(order_detail, order_id)
+            else:
+                data = await asyncio.to_thread(readers[path])
+        except RecordNotFound:
+            await reply(404, {"error": "Order not found in this workspace"})
+            return
         except Exception:
             await reply(502, {"error": "Could not read CRM data. Check the agent service."})
             return
         await reply(200, data)
+
+
+def install_dashboard(application) -> None:
+    """Mount exactly the same application in production and HTTP integration tests."""
+    from pathlib import Path
+
+    from fastapi.staticfiles import StaticFiles
+
+    application.mount("/api/dashboard", DashboardAPI())
+    application.mount(
+        "/dashboard", StaticFiles(directory=Path(__file__).parent / "dashboard_ui", html=True),
+        name="dashboard",
+    )
