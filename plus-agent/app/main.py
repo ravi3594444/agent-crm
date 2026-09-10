@@ -29,14 +29,17 @@ import time
 import unicodedata
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import redis
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.staticfiles import StaticFiles
 
 from app import erpnext, idioma, notificar
 from app import whatsapp as whatsapp_client
 from app.aprobacion import manejar_boton
+from app.dashboard import DashboardAPI
 from app.formato import sin_citas
 from app.graph import responder_cliente, responder_gerencia
 from app.outbound_status import record_inbound_window, record_outbound, update_status
@@ -1631,6 +1634,11 @@ async def _lifespan(application: FastAPI):
 
 
 app = FastAPI(title="Plus Agent", lifespan=_lifespan)
+app.mount("/api/dashboard", DashboardAPI())
+app.mount(
+    "/dashboard", StaticFiles(directory=Path(__file__).parent / "dashboard_ui", html=True),
+    name="dashboard",
+)
 
 
 @app.get("/health")
