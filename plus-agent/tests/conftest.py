@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -58,14 +60,25 @@ _DUMMY = {
     "QWEN_SALES_MODEL": "qwen3.7-plus-2026-05-26",
     "QWEN_MANAGER_MODEL": "qwen3.8-max",
     # opcionales que cambian comportamiento: valores deterministas para tests
-    # LA QUE DECIDE QUÉ MOMENTO ES. Va FIJA, no setdefault: media suite compara
-    # fechas fijas —`tests/test_pendientes.py::epoch` arma sus momentos con esta
-    # zona escrita a mano— contra el reloj del negocio, que sale de esta
-    # variable. Con BUSINESS_TIMEZONE=Asia/Kolkata exportada en el shell se caen
-    # 26 tests con EXACTAMENTE los mismos assert que el PR #12 arregló
-    # (`assert 13 == 3` en test_the_round_is_capped), porque el borrador del
-    # fixture envejece 8:30 h de golpe. Ése PR fijó el reloj y dejó la zona
-    # abierta: son las dos mitades del mismo momento.
+    # LA QUE DECIDE QUÉ MOMENTO ES, y va con setdefault — como el idioma, y por
+    # el mismo motivo. Estuvo FIJA hasta el issue #22, y mientras duró el motivo
+    # era cierto: `tests/test_pendientes.py::epoch` armaba sus momentos con
+    # Buenos Aires escrito a mano, así que el reloj del negocio tenía que ser el
+    # mismo. Medido con el pin afuera y Asia/Kolkata en el entorno: 28 tests
+    # —no 26— con los mismos assert que arregló el PR #12 (`assert 13 == 3` en
+    # test_the_round_is_capped), porque el borrador del fixture envejecía 8:30 h
+    # de golpe.
+    #
+    # Lo que sacó el pin no fue desfijar la variable: fue que los archivos que
+    # dependen del reloj dejaran de heredar la zona. Cada uno declara su día con
+    # `RelojDePrueba` (abajo) y arma sus horas DE PARED en la zona que diga esta
+    # variable, así que las 09:00 en que se crea el borrador, las 15:00 de la
+    # ronda y las 23:30 de la ventana nocturna son las mismas en cualquier zona,
+    # y las edades que los tests restan no se mueven. Recién ahí el pin sobraba.
+    #
+    # Con eso la celda `BUSINESS_TIMEZONE=Asia/Kolkata` de CI (#13, PR #28) pasó
+    # de no poder fallar —esta lista la sobreescribía antes del primer test— a
+    # probar la zona de verdad.
     "BUSINESS_TIMEZONE": "America/Argentina/Buenos_Aires",
     "ERPNEXT_COMPANY": "Lacteos Test SA",
     "ERPNEXT_WAREHOUSE": "Principal - LT",
@@ -106,20 +119,30 @@ _DUMMY = {
 # cargado llegaba a la suite, que es justo la fuga que el docstring de arriba
 # describe.
 #
-# EL IDIOMA NO ESTÁ EN ESTA LISTA, a propósito. Fijar una zona horaria ES el
-# arreglo —`epoch()` tiene Buenos Aires escrito a mano y el reloj del negocio
-# tiene que ser el mismo—, pero fijar el idioma es lo contrario: el catálogo
-# tiene 129 claves escritas en los dos idiomas para que el producto pueda
-# hablar los dos, y un pin le saca a la suite la capacidad de probar el
-# segundo. Ahí el arreglo es que el test lo declare, no que el conftest lo
-# imponga.
+# NI EL IDIOMA NI LA ZONA ESTÁN EN ESTA LISTA, y hasta el issue #22 la nota que
+# había acá decía lo contrario: que fijar una zona ES el arreglo —porque
+# `epoch()` tenía Buenos Aires escrito a mano— y que no había que confundir los
+# dos casos. Resultó ser el mismo caso, y lo que lo probó fue la cuarta celda de
+# CI. El catálogo tiene 129 claves en dos idiomas para que el producto pueda
+# hablar los dos, y un pin le sacaba a la suite la capacidad de probar el
+# segundo; con la zona pasaba igual, salvo que lo que no se podía probar era un
+# negocio que no está en Buenos Aires.
+#
+# La diferencia estaba en `epoch()`, no en el concepto: mientras el test escribía
+# su zona a mano, desfijar la variable rompía 28 tests por la razón equivocada.
+# Con el momento declarado (`RelojDePrueba`) el pin sobra, y sin el pin la celda
+# `BUSINESS_TIMEZONE=Asia/Kolkata` prueba algo. En los dos casos el arreglo es
+# que el test DECLARE lo que supone, no que el conftest se lo imponga a toda la
+# suite.
+#
+# DIGEST_ACTIVO sí se queda fija: no elige un valor equivalente, apaga la
+# sección entera.
 _FIJAS = {
     "LLM_PROVIDER",
     "QWEN_SALES_MODEL",
     "QWEN_MANAGER_MODEL",
     "PAIS_TELEFONO",
     "TELEFONOS_EQUIPO",
-    "BUSINESS_TIMEZONE",
     "DIGEST_ACTIVO",
 }
 for _k, _v in _DUMMY.items():
@@ -133,7 +156,86 @@ from unittest.mock import Mock
 import pytest
 from redis.exceptions import RedisError
 
+from app import reloj
 from tests.fakes import FakeMarcas
+
+
+class RelojDePrueba:
+    """El día que un archivo de test NOMBRA, y las horas de pared que le cuelgan.
+
+    POR QUÉ EXISTE
+    Seis archivos definían su propio reloj —`ZONA`, `AHORA`, `HOY`, `epoch()`—
+    y todos escribían Buenos Aires a mano: la misma zona que el código resuelve
+    desde `BUSINESS_TIMEZONE`. El sello y el reloj salían de la MISMA suposición
+    escrita dos veces, así que la resta que mide una edad daba bien POR
+    CONSTRUCCIÓN y ningún test podía discreparle al código sobre qué hora de
+    pared era. Por eso el bug de zona de #16 pasó inadvertido justamente a los
+    tests que tocaban ese campo: un test que no puede estar en desacuerdo con el
+    código sobre un concepto no está probando ese concepto.
+
+    LA ZONA SE RESUELVE AL USARLA, NO AL IMPORTAR
+    Sale de `reloj.zona()` —el mismo reloj que usa `app/`— en cada llamada. Un
+    archivo nombra su día y sus horas de pared, y nada más:
+
+        RELOJ = RelojDePrueba("2026-09-08")
+        RELOJ.a_las(9)                 # las 09:00 DEL NEGOCIO, en la zona que haya
+        RELOJ.epoch(23, 30)            # el mismo instante, como lo toma tick()
+        RELOJ.sello(RELOJ.a_las(9))    # el sello SIN zona que escribe ERPNext
+
+    Con eso las horas de pared no se mueven cuando se mueve la zona, y las edades
+    que los tests restan tampoco: son las mismas 6 h en Buenos Aires y en
+    Kolkata. Ésa es la propiedad que le sacó el pin a `BUSINESS_TIMEZONE` en
+    `_FIJAS` y volvió real la celda `BUSINESS_TIMEZONE=Asia/Kolkata` de CI.
+
+    NO ES «UN LUGAR MENOS»: `en=` ES LA MITAD QUE IMPORTA
+    `sello(..., en=otra_zona)` escribe el sello en la hora de OTRO sistema. Es lo
+    que le devuelve al test la capacidad de discrepar: un ERPNext en una zona
+    distinta de la del negocio —el caso de #16, y lo que
+    `readiness.chequear_zona_erpnext` bloquea— ahora se puede DECIR, y antes no.
+    Un test que nombra sus dos zonas a propósito es correcto y tiene que
+    nombrarlas; lo que se fue es la zona heredada como decorado.
+    """
+
+    def __init__(self, dia: str) -> None:
+        self._dia = date.fromisoformat(dia)
+
+    @property
+    def hoy(self) -> date:
+        """El día del negocio que este archivo nombra."""
+        return self._dia
+
+    @property
+    def zona(self) -> ZoneInfo:
+        """La zona del negocio, resuelta ahora. Levanta `reloj.ZonaInvalida`."""
+        return reloj.zona()
+
+    def a_las(self, hora: int, minuto: int = 0, *, dia: int | None = None) -> datetime:
+        """Esa hora DE PARED, en la zona del negocio. `dia` es el día del mes."""
+        base = self._dia if dia is None else self._dia.replace(day=dia)
+        return datetime(base.year, base.month, base.day, hora, minuto, tzinfo=self.zona)
+
+    def epoch(self, hora: int, minuto: int = 0, *, dia: int | None = None) -> float:
+        """El mismo instante que `a_las`, como epoch — que es lo que toma `tick()`."""
+        return self.a_las(hora, minuto, dia=dia).timestamp()
+
+    def sello(self, momento: datetime, *, en: ZoneInfo | None = None) -> str:
+        """El sello SIN zona que ERPNext guarda, en la hora de `en`.
+
+        `en=None` es «ERPNext está en la zona del negocio», que es lo que
+        `readiness.chequear_zona_erpnext` exige. Pasarle otra zona es cómo un
+        test dice que NO coinciden, que es el caso que ningún test podía escribir.
+        """
+        return self._naive(momento, en).strftime("%Y-%m-%d %H:%M:%S")
+
+    def sello_partido(
+        self, momento: datetime, *, en: ZoneInfo | None = None
+    ) -> tuple[str, str]:
+        """`(posting_date, posting_time)`, los dos campos que ERPNext separa."""
+        naive = self._naive(momento, en)
+        return naive.date().isoformat(), naive.strftime("%H:%M:%S")
+
+    def _naive(self, momento: datetime, en: ZoneInfo | None) -> datetime:
+        return momento.astimezone(en or self.zona).replace(tzinfo=None)
 
 
 class FakeRedis:
