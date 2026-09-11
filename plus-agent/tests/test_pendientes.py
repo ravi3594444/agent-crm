@@ -19,7 +19,7 @@ from datetime import UTC, date, datetime
 import pytest
 from conftest import RelojDePrueba
 
-from app import avisos, erpnext, outbound_status, pendientes, policy, router, sombra
+from app import avisos, erpnext, outbound_status, pendientes, policy, reloj, router, sombra
 from tests.fakes import entrada_de_cola
 
 PEDIDO = "SAL-ORD-2026-00042"
@@ -659,6 +659,48 @@ def test_nothing_is_sent_during_the_quiet_hours_and_it_goes_out_in_the_morning(
     assert mundo["al_dueno"] == []
 
     pendientes.tick(ahora=epoch(7, 30, dia=9))
+
+    assert len(_al_cliente(mundo)) == 1
+
+
+def test_las_horas_de_silencio_son_las_del_negocio_y_no_las_del_servidor(
+    mundo, monkeypatch
+) -> None:
+    """UN instante, DOS zonas: a las 23:30 del negocio no se escribe, y el MISMO
+    momento en un negocio 8:30 h al este son las 08:00 y sí se escribe.
+
+    ÉSTE ES EL TEST QUE ESTE ARCHIVO NO PODÍA ESCRIBIR. `tick()` recibe un epoch
+    y lo vuelve hora de pared con `datetime.fromtimestamp(ahora, tz=_zona())`;
+    de ahí `en_silencio` compara contra la ventana 22:00–07:00. Esa conversión
+    es lo único que hace que «no molestar de noche» sea la noche DEL CLIENTE.
+    Mientras `epoch()` armaba sus momentos con Buenos Aires escrito a mano —la
+    misma zona que `_zona()` resolvía del conftest— las 51 rondas del archivo no
+    podían discreparle al código sobre qué hora era: el error se cancelaba en
+    las dos puntas.
+
+    Y no es hipotético ni cosmético. Medido sobre este archivo: cambiando esa
+    conversión a `tz=UTC`, las seis horas que la suite usa —9, 10, 15, 16, 23:30
+    y 7:30 del día siguiente— caen todas del mismo lado de la ventana, así que
+    las 51 llamadas a `tick()` siguen verdes mientras en producción la ventana
+    de silencio queda corrida tres horas y el barrido le escribe a un cliente a
+    las cuatro de la mañana.
+
+    Las dos zonas se nombran acá a propósito, y es la única forma de afirmar la
+    regla: el número que separa un caso del otro es la resta de los dos offsets.
+    """
+    monkeypatch.setenv(reloj.VARIABLE, "America/Argentina/Buenos_Aires")
+    _listo(mundo)
+
+    # Las 23:30 en Buenos Aires: dentro de la ventana, no se le habla a nadie.
+    instante = RELOJ.epoch(23, 30)
+    pendientes.tick(ahora=instante)
+
+    assert _al_cliente(mundo) == []
+
+    # EL MISMO INSTANTE, con el negocio en Kolkata: son las 08:00 del día
+    # siguiente, la ventana ya cerró, y el recordatorio sale.
+    monkeypatch.setenv(reloj.VARIABLE, "Asia/Kolkata")
+    pendientes.tick(ahora=instante)
 
     assert len(_al_cliente(mundo)) == 1
 
