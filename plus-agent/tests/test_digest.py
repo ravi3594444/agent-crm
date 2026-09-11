@@ -15,15 +15,13 @@ from __future__ import annotations
 
 import sys
 import threading
-from datetime import date, datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from conftest import FakeRedis
+from conftest import FakeRedis, RelojDePrueba
 
 from app import digest, locks, notificar, router, whatsapp
 
@@ -33,7 +31,17 @@ _RESUMEN_REAL = digest.resumen
 
 DUENO = "5493519999999"  # sorts AFTER the employee: the sorted-first rule picks the wrong one
 EMPLEADO = "5493511111111"
-HOY = date(2026, 9, 6)
+
+# EL DÍA QUE ESTE ARCHIVO NOMBRA, y ahora una sola vez. `HOY` era `date(2026, 9,
+# 6)` escrito acá y el fixture fijaba `digest._ahora` en las 18:00 **UTC** del
+# mismo día: dos relojes que TIENEN que dar la misma fecha —`enviar()` reclama el
+# día con `_ahora().date()` y los tests abren ese reclamo con `_clave(HOY)`— y
+# nada los obligaba. Coincidían por el offset de Buenos Aires y por nada más; con
+# el negocio bastante al este, las 18:00 UTC ya son el día siguiente y la mitad
+# del archivo probaría otra cosa en silencio. Ahora `HOY` sale del mismo reloj que
+# el `_ahora` del fixture, así que no pueden separarse.
+RELOJ = RelojDePrueba("2026-09-06")
+HOY = RELOJ.hoy
 
 
 class RedisAtomico(FakeRedis):
@@ -55,7 +63,8 @@ class RedisAtomico(FakeRedis):
 def mundo(monkeypatch):
     falso = RedisAtomico()
     monkeypatch.setattr(locks, "conexion", lambda: falso)
-    monkeypatch.setattr(digest, "_ahora", lambda: datetime(2026, 9, 6, 18, 0, tzinfo=ZoneInfo("UTC")))
+    # Las 18:00 DEL NEGOCIO, que es contra lo que `tick()` compara DIGEST_HORA.
+    monkeypatch.setattr(digest, "_ahora", lambda: RELOJ.a_las(18))
     monkeypatch.setattr(digest, "resumen", lambda dia=None: f"📋 Resumen del {HOY.isoformat()}\n(prueba)")
     monkeypatch.setenv("DIGEST_ACTIVO", "true")
     monkeypatch.setenv("DIGEST_HORA", "18:00")

@@ -3,12 +3,11 @@ two human steps, the 18:00 digest, and notifications that never vanish."""
 from __future__ import annotations
 
 import sys
-from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock
-from zoneinfo import ZoneInfo
 
 import pytest
+from conftest import RelojDePrueba
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -316,7 +315,10 @@ def erp_digest(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(erpnext, "default_warehouse", lambda: "Principal - LT")
     monkeypatch.setenv("STOCK_CONFIABLE", "true")
     monkeypatch.setenv("STOCK_CONFIABLE_HORAS", "24")
-    ahora = datetime(2026, 9, 2, 18, 5, tzinfo=ZoneInfo("America/Argentina/Buenos_Aires"))
+    # La zona era decorado: lo que el test afirma —«📋 Resumen del 2026-09-02» y
+    # las antigüedades de los conteos— sale del instante y de las restas, no del
+    # nombre de la zona.
+    ahora = RelojDePrueba("2026-09-02").a_las(18, 5)
     monkeypatch.setattr(digest, "_ahora", lambda: ahora)
     conteos = {
         "MAN-200": ahora.replace(hour=7),          # fresh: 11 h old

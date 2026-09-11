@@ -19,9 +19,10 @@ filtro, que es el que decide el número tanto acá como en producción.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 import pytest
+from conftest import RelojDePrueba
 
 from app import autonomia, confirmacion, erpnext, inventario, policy, sombra
 from tests.fakes import listar
@@ -30,12 +31,20 @@ from tests.fakes import listar
 # del entorno. Ver `_idioma_declarado` en tests/conftest.py.
 pytestmark = pytest.mark.idioma("es")
 
-AHORA = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
+# El día que este archivo nombra. Era `AHORA = datetime(2026, 9, 8, 12, 0,
+# tzinfo=UTC)`: con la zona escrita a mano —y en UTC, que NO es el reloj del
+# negocio— mientras `_sello` escribía ese momento como naive y `autonomia._creacion`
+# lo volvía a leer en BUSINESS_TIMEZONE. La asimetría estaba metida adentro del
+# fixture y sin declarar; por `RELOJ` las dos puntas son la misma zona salvo
+# donde un test diga lo contrario.
+RELOJ = RelojDePrueba("2026-09-08")
+AHORA = RELOJ.a_las(12)
 PO_AGENTE = "WA-" + "0123456789abcdef" * 2 + "01234567"
 
 
 def _sello(dias_atras: float = 0) -> str:
-    return (AHORA - timedelta(days=dias_atras)).strftime("%Y-%m-%d %H:%M:%S")
+    """El `creation` SIN zona que guarda ERPNext, como lo lee `_creacion`."""
+    return RELOJ.sello(RELOJ.a_las(12) - timedelta(days=dias_atras))
 
 
 def _comentario(pedido: str, contenido: str, dias_atras: float = 0) -> dict:
