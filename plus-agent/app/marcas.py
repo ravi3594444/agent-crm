@@ -96,6 +96,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from functools import cache
 
 from app import erpnext
 
@@ -120,6 +121,16 @@ BARRIDO = "barrido"  # creation desc, TODAS las de una ventana, con truncado
 SUBCADENA = "subcadena"  # está o no está adentro de un campo del documento
 NO_SE_LEE = "no_se_lee"  # se escribe y nadie lo lee de vuelta
 
+# ----------------------------------------------------------------- el parseo
+#
+# Cómo se lee la carga que va pegada atrás del texto. Se declara el TIPO y no
+# el parser ya construido: pasarle el literal a `json_tras` duplicaba el texto
+# de la fila y podía separarse de él —una fila con `texto="[a]"` y
+# `parser=json_tras("[b]")` no se la agarraba nadie— y además dejaba afuera los
+# heredados, así que un renombre traía la historia vieja de ERPNext y la
+# descartaba por ilegible.
+JSON = "json"
+
 _ORDEN = {
     EXISTENCIA: None,
     MAS_NUEVA: "creation desc",
@@ -141,15 +152,22 @@ def texto_plano(contenido: object) -> str:
     return re.sub(r"<[^>]+>", " ", html.unescape(str(contenido or "")))
 
 
-def json_tras(texto: str) -> Callable[[object], dict | None]:
+@cache
+def json_tras(*textos: str) -> Callable[[object], dict | None]:
     """Parser de los marcadores que llevan un JSON pegado atrás del texto.
 
     `[sombra] {...}` y `[solicitud] {...}` se parseaban con dos regex idénticas
     en dos módulos. Devuelve None —y nunca levanta— si no hay marca, si lo que
     sigue no es JSON, o si el JSON no es un objeto: un comentario ilegible no
     es un registro, y no puede romper un barrido.
+
+    Toma VARIOS textos porque una marca con heredados tiene que poder leer lo
+    que escribió con su nombre viejo. Que la consulta trajera los dos textos y
+    el parser reconociera uno solo era traerse la historia de ERPNext para
+    tirarla por ilegible — la pérdida que `heredados` existe para evitar.
     """
-    patron = re.compile(re.escape(texto) + r"\s*(\{.*\})\s*$", re.DOTALL)
+    alternativa = "|".join(re.escape(t) for t in textos)
+    patron = re.compile(rf"(?:{alternativa})\s*(\{{.*\}})\s*$", re.DOTALL)
 
     def parsear(contenido: object) -> dict | None:
         encontrado = patron.search(texto_plano(contenido))
@@ -183,7 +201,7 @@ class Marca:
     # ninguna fila que lea algo: un techo sin motivo escrito es exactamente lo
     # que el issue #24 señala, y el número no es el problema.
     porque_el_techo: str = ""
-    parser: Callable[[object], object] | None = None
+    parseo: str = ""
     # El campo del documento, sólo para portador CAMPO.
     campo: str = ""
     # Textos VIEJOS del mismo marcador, que siguen en el ERPNext de algún
@@ -205,6 +223,17 @@ class Marca:
         """El texto vigente más los heredados. Lo que hay que buscar para no
         perder la historia."""
         return (self.texto, *self.heredados)
+
+    @property
+    def parser(self) -> Callable[[object], object] | None:
+        """El parser de la carga, DERIVADO de los textos de esta misma fila.
+
+        Derivarlo es lo que hace imposible que el parser y el texto se separen,
+        y lo que hace que un heredado se lea solo.
+        """
+        if self.parseo != JSON:
+            return None
+        return json_tras(*self.textos)
 
 
 # ---------------------------------------------------------------- el registro
@@ -284,7 +313,7 @@ _FILAS = (
             "su vida — y pasado eso el «estado actual» era uno que el pedido "
             "había dejado horas antes."
         ),
-        parser=json_tras("[solicitud]"),
+        parseo=JSON,
     ),
     # ---------------------------------------------------------------- sombra
     Marca(
@@ -302,7 +331,7 @@ _FILAS = (
             "gana la más nueva. No es 20 como confirmacion porque no busca lo "
             "mismo: ver el docstring del módulo."
         ),
-        parser=json_tras("[sombra]"),
+        parseo=JSON,
     ),
     # ---------------------------------------------------------- confirmacion
     #
@@ -445,6 +474,7 @@ def filas(
     techo: int | None = None,
     campos: list[str] | None = None,
     start: int = 0,
+    orden: str | None = None,
 ) -> list[dict]:
     """Los comentarios de un marcador. La ÚNICA consulta de marcas del sistema.
 
@@ -470,6 +500,8 @@ def filas(
         base.append(["creation", ">=", desde.strftime("%Y-%m-%d %H:%M:%S")])
     tope = m.techo if techo is None else techo
     pedidos = campos or ["content", "creation"]
+    # El orden sale de la fila salvo que la LECTURA pida otro: ver `barrer`.
+    orden_efectivo = m.orden if orden is None else orden
 
     def consultar(texto_buscado: str) -> list[dict]:
         return erpnext.policy_get_list(
@@ -477,7 +509,7 @@ def filas(
             filters=[*base, ["content", "like", f"%{texto_buscado}%"]],
             fields=pedidos,
             limit=tope,
-            order_by=m.orden,
+            order_by=orden_efectivo,
             start=start,
         )
 
@@ -496,7 +528,7 @@ def filas(
     juntas = [fila for t in m.textos for fila in consultar(t)]
     juntas.sort(
         key=lambda f: str((f or {}).get("creation") or ""),
-        reverse=m.orden == "creation desc",
+        reverse=orden_efectivo == "creation desc",
     )
     return juntas[:tope] if tope > 0 else juntas
 
@@ -582,6 +614,14 @@ def barrer(
         desde=desde,
         techo=tope + 1,
         campos=["content", "reference_name", "creation"],
+        # SIEMPRE la punta nueva, aunque el marcador lea al revés por pedido.
+        # El orden lo decide la LECTURA, no sólo el marcador: `confirmacion`
+        # declara `creation asc` porque su lectura POR PEDIDO quiere la primera
+        # confirmación, pero un barrido no lee un pedido — lee una ventana
+        # sobre todos, y ahí el techo recorta. Con el orden del marcador el
+        # resumen se armaba con las 500 confirmaciones MÁS VIEJAS y escondía la
+        # actividad reciente. Truncar una ventana tiene que tirar lo viejo.
+        orden=_ORDEN[BARRIDO],
     )
     return list(leidas[:tope]), len(leidas) > tope
 

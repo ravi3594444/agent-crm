@@ -388,3 +388,99 @@ def test_si_una_marca_cambiara_de_texto_se_leerian_los_dos(erp, monkeypatch):
         "un pedido marcado con el texto viejo tiene que seguir contando como "
         "marcado, o el barrido le vuelve a escribir al cliente"
     )
+
+
+# ---------------------------------------------------------------------------
+# 7. EL ORDEN DE UN BARRIDO NO ES EL DE UN DOCUMENTO.
+#
+# Encontrado por Qodo en la review de este PR, y era una regresión de este PR.
+# `confirmacion` declara MAS_VIEJA porque su lectura POR PEDIDO quiere la
+# primera confirmación (el plazo de cancelación corre desde ahí). Pero
+# `autonomia` no lee un pedido: barre una VENTANA sobre todos, y ahí el techo
+# recorta — así que pedir `asc` arma el resumen con las 500 confirmaciones MÁS
+# VIEJAS y deja afuera la actividad reciente. Antes de este PR el barrido pedía
+# `desc` siempre.
+#
+# La lección de diseño: el orden lo decide LA LECTURA, no sólo el marcador. Un
+# barrido siempre quiere la punta nueva, porque truncar una ventana tiene que
+# tirar lo viejo y no lo de recién.
+# ---------------------------------------------------------------------------
+
+def test_un_barrido_pide_la_punta_nueva_aunque_el_marcador_lea_al_reves(erp):
+    """El caso que lo rompía: `confirmacion` lee la más vieja POR PEDIDO."""
+    from datetime import UTC, datetime
+
+    for i in range(6):
+        erp.append(
+            {
+                "content": f"{marcas.texto('confirmacion')} 2026-09-0{i + 1}T10:00:00+00:00",
+                "reference_doctype": "Sales Order",
+                "reference_name": f"SO-{i}",
+                "creation": f"2026-09-0{i + 1} 10:00:00",
+            }
+        )
+    filas, truncado = marcas.barrer(
+        "confirmacion", datetime(2026, 1, 1, tzinfo=UTC), techo=3
+    )
+    assert truncado is True
+    vistos = [f["reference_name"] for f in filas]
+    assert vistos == ["SO-5", "SO-4", "SO-3"], (
+        "un barrido truncado tiene que quedarse con lo MÁS NUEVO; con el orden "
+        "del marcador (asc) el resumen se arma con lo más viejo y esconde la "
+        "actividad reciente"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8. UN TEXTO HEREDADO TIENE QUE PODER PARSEARSE, NO SÓLO ENCONTRARSE.
+#
+# También de la review de Qodo, y es un agujero en el test de heredados de más
+# arriba: afirmaba `existe` y nada más. La consulta buscaba los dos textos pero
+# el parser se compilaba contra UNO, así que un `[solicitud]` viejo se traía de
+# ERPNext y después se descartaba por ilegible — que es justo la pérdida de
+# historia que `heredados` existe para evitar.
+# ---------------------------------------------------------------------------
+
+def test_una_carga_escrita_con_el_texto_viejo_se_sigue_leyendo(erp, monkeypatch):
+    import dataclasses
+
+    viejo = "[solicitud]"
+    # Un renombre de verdad: la fila declara el texto NUEVO y el viejo como
+    # heredado. Ojo con el atajo de `dataclasses.replace` sin más: se lleva el
+    # parser de la fila vieja, que matchea el literal viejo por casualidad y
+    # deja pasar el bug.
+    nueva = dataclasses.replace(
+        marcas.marca("solicitud"),
+        texto="[pedido-evento]",
+        heredados=(viejo,),
+    )
+    assert nueva.parser is not None
+    monkeypatch.setitem(marcas.MARCAS, "solicitud", nueva)
+
+    erp.append(
+        {
+            "content": f'{viejo} {{"estado": "pendiente"}}',
+            "reference_doctype": "Sales Order",
+            "reference_name": PEDIDO,
+            "creation": "2026-08-01 10:00:00",
+        }
+    )
+    assert marcas.leer("solicitud", PEDIDO) == {"estado": "pendiente"}
+    assert marcas.leer_lote("solicitud", [PEDIDO]) == {PEDIDO: {"estado": "pendiente"}}
+
+
+def test_el_parser_no_puede_separarse_del_texto_de_su_fila():
+    """El parser se DERIVA de los textos de la fila, así que no puede quedar
+    apuntando a otro literal.
+
+    Antes se le pasaba el texto a mano (`parser=json_tras("[solicitud]")`), que
+    es el mismo literal escrito dos veces en la misma fila: una fila con
+    `texto="[a]"` y el parser armado sobre `"[b]"` no se la agarraba nadie.
+    """
+    for m in marcas.MARCAS.values():
+        if m.parser is None:
+            continue
+        for t in m.textos:
+            assert m.parser(f'{t} {{"x": 1}}') == {"x": 1}, (
+                f"el parser de {m.nombre!r} no reconoce su propio texto {t!r}"
+            )
