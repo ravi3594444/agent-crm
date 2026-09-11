@@ -68,6 +68,26 @@ the last snapshot with a visible interruption notice. Missing datasets stay
 unavailable; failed settings or queue reads never reuse sample values. Requests
 from a closed sign-in or an old session cannot restore signed-out records.
 
+## Display currency
+
+Use the **Currency** selector beside the reporting period to choose INR, USD,
+ARS, EUR, GBP, BRL, and other common currencies. **Original** restores the
+recorded currencies. The selection is remembered on this device; this preference
+is the only dashboard value written to browser storage.
+
+Overview totals, charts, order amounts and customer totals convert using dated
+[ExchangeRate-API open-access rates](https://www.exchangerate-api.com/docs/free).
+Rates update daily, are cached in memory for an hour, and are labeled as display
+estimates. Historical orders use that displayed rate, not a historical booking
+rate. ERPNext records and saved automation limits remain in their original units.
+Order details always show the original total. CSV exports include original and
+display amounts, their currency codes, the rate date, and conversion status.
+
+The public rate request contains only a currency code, with no CRM credentials
+or records. Failed, malformed or outdated rates cannot relabel an amount: the
+last valid display currency stays selected with a retry message. If a particular
+order currency has no rate, its original amount is labeled explicitly.
+
 ## Data and authority
 
 All business endpoints below require the dedicated bearer token, return

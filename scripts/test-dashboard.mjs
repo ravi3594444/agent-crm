@@ -8,6 +8,7 @@ const source = readFileSync(new URL('../plus-agent/app/dashboard_ui/app.js', imp
 
 function workspace() {
   const listeners = {}, nodes = {}, copied = [], downloads = [], requests = [];
+  const preferences = new Map();
   let document;
   function element(id) {
     const handlers = {};
@@ -44,6 +45,11 @@ function workspace() {
       static revokeObjectURL() {}
     },
     URLSearchParams, Intl, Date, Blob, AbortSignal,
+    localStorage: {
+      getItem: key => preferences.get(key) || null,
+      setItem: (key, value) => preferences.set(key, value),
+      removeItem: key => preferences.delete(key),
+    },
     FormData: class { constructor(form) { this.fields = form.fields; } get(key) { return this.fields[key]; } },
     setTimeout() { return 1; }, clearTimeout() {}, setInterval() { return 1; },
     fetch: async (...args) => { requests.push(args); throw new Error('No network fixture configured'); },
@@ -61,7 +67,7 @@ function workspace() {
     button: element('submit'),
   });
   const submit = target => listeners.submit({ target, preventDefault() {} });
-  return { context, run, click, fixture, live, nodes, copied, downloads, requests, listeners, form, submit };
+  return { context, run, click, fixture, live, nodes, copied, downloads, requests, listeners, form, submit, preferences };
 }
 
 const response = value => ({ ok: true, json: async () => value });
@@ -225,4 +231,90 @@ test('sign-in rejects unsafe origins and closing its dialog cancels an unfinishe
   assert.equal(w.run('data.mode'), 'live');
   assert.equal(w.nodes['connection-dialog'].open, false);
   assert.doesNotMatch(w.nodes.app.innerHTML, /dashboard-fixture-token/);
+});
+
+// Deliberately artificial rates make unit direction and amount conversion testable.
+const fxFixture = (target = 'INR', rates = { INR: 1, ARS: 20, USD: 0.01 }) => ({
+  result: 'success', base_code: target, rates,
+  time_last_update_unix: Math.floor(Date.now() / 1000),
+});
+
+test('currency selection converts monetary values, preserves original records and exports both', async () => {
+  const w = workspace();
+  w.live();
+  const before = w.run('JSON.stringify(data.orders)');
+  let requests = 0;
+  w.context.fetch = async (url, options) => {
+    requests++;
+    assert.equal(url, 'https://open.er-api.com/v6/latest/INR');
+    assert.equal(options.credentials, 'omit');
+    assert.equal(options.headers?.Authorization, undefined);
+    assert.equal(options.body, undefined);
+    return response(fxFixture());
+  };
+  await w.listeners.change({ target: { id: 'display-currency', value: 'INR' } });
+  assert.equal(w.run('state.displayCurrency'), 'INR');
+  assert.equal(w.run("displayAmount(1000,'ARS').value"), 50);
+  assert.equal(w.run("displayAmount(5,'USD').value"), 500);
+  assert.equal(w.run("displayAmount(50,'INR').value"), 50);
+  assert.equal(w.run("displayAmount(null,'ARS').value"), null);
+  assert.match(w.run("moneyFor(1000,'ARS')"), /INR.*50\.00/);
+  assert.match(w.nodes.app.innerHTML, /Display estimates in/);
+  assert.match(w.nodes.app.innerHTML, /Rates By Exchange Rate API/);
+  assert.equal(w.run('JSON.stringify(data.orders)'), before);
+  assert.deepEqual([...w.preferences.entries()], [['plus.dashboard.displayCurrency', 'INR']]);
+  w.run('renderOrder(data.orders[0])');
+  assert.match(w.nodes['detail-dialog'].innerHTML, /Original order total/);
+  assert.match(w.nodes['detail-dialog'].innerHTML, /ARS/);
+  assert.match(w.nodes['detail-dialog'].innerHTML, /INR/);
+  await w.click({ action: 'export' });
+  const csv = await w.downloads.find(v => v instanceof Blob).text();
+  assert.match(csv, /Original amount/);
+  assert.match(csv, /Display amount/);
+  assert.match(csv, /ARS/);
+  assert.match(csv, /INR/);
+  assert.match(csv, /Display estimate/);
+  await w.run("setDisplayCurrency('')");
+  assert.equal(w.run("displayAmount(1000,'ARS').value"), 1000);
+  assert.equal(w.preferences.size, 0);
+  await w.run("setDisplayCurrency('INR')");
+  assert.equal(requests, 1, 'recent public rates are reused');
+});
+
+test('failed and invalid rates preserve the last currency; unsupported records stay original', async () => {
+  const w = workspace();
+  w.live();
+  w.context.fetch = async () => response(fxFixture());
+  await w.run("setDisplayCurrency('INR')");
+  w.context.fetch = async () => ({ ok: false, status: 429 });
+  await w.run("setDisplayCurrency('EUR')");
+  assert.equal(w.run('state.displayCurrency'), 'INR');
+  assert.match(w.nodes.app.innerHTML, /displayed currency has been kept/);
+  assert.equal(w.run("displayAmount(1000,'XYZ').value"), 1000);
+  assert.match(w.run("moneyFor(1000,'XYZ')"), /original/);
+  for (const invalid of [
+    { ...fxFixture('EUR', { EUR: 1, ARS: 0 }), time_last_update_unix: 0 },
+    fxFixture('EUR', { EUR: 1, ARS: -5 }),
+    fxFixture('USD'),
+    fxFixture('EUR', { EUR: 2, ARS: 20 }),
+  ]) {
+    w.context.fetch = async () => response(invalid);
+    await w.run("setDisplayCurrency('EUR')");
+    assert.equal(w.run('state.displayCurrency'), 'INR');
+    assert.equal(w.run('state.fxLoading'), false);
+  }
+});
+
+test('a rate response after sign-out cannot apply to another session', async () => {
+  const w = workspace();
+  w.live();
+  const pending = deferred();
+  w.context.fetch = () => pending.promise;
+  const changing = w.run("setDisplayCurrency('INR')");
+  await w.click({ action: 'disconnect' });
+  pending.resolve(response(fxFixture()));
+  await changing;
+  assert.equal(w.run('state.displayCurrency'), '');
+  assert.equal(w.run('state.fxLoading'), false);
+  assert.equal(w.preferences.size, 0);
 });

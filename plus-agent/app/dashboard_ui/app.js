@@ -31,7 +31,7 @@ const dateShift = (date, days) => { const d = new Date(date + 'T12:00:00Z'); d.s
 const today = new Intl.DateTimeFormat('en-CA', {timeZone:'America/Argentina/Buenos_Aires'}).format(new Date());
 const prettyDate = (date, options = {}) => new Intl.DateTimeFormat('en-GB', {day:'numeric', month:'short', ...options}).format(new Date(date + 'T12:00:00Z'));
 const number = (n) => n == null || !Number.isFinite(Number(n)) ? '—' : new Intl.NumberFormat('en-GB', {maximumFractionDigits:1}).format(n);
-let money = (n, compact=false) => n == null ? '—' : new Intl.NumberFormat('es-AR', {style:'currency', currency:data.currency || 'ARS', maximumFractionDigits:0, ...(compact ? {notation:'compact'} : {})}).format(n);
+const money = (n, compact=false) => moneyFor(n,data.currency,compact);
 const customers = [
   {id:'CUST-001',name:'Almacén Don Pedro',group:'Grocery store',territory:'Córdoba'},
   {id:'CUST-002',name:'Panadería Santa Rita',group:'Bakery',territory:'Córdoba'},
@@ -70,7 +70,9 @@ function disconnectedData() {
   return {mode:'disconnected',company:'Plus CRM',today,since:dateShift(today,-29),currency:'',generatedAt:new Date().toISOString(),orders:null,pendingOrders:null,customers:null,products:null,policies:null,agents:[],operations:null,errors:[],truncated:[],limit:250};
 }
 let data=demoRequested?makeDemo():disconnectedData();
-const state={view:'overview',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,extrasBusy:false,extrasError:'',detailRequest:0,connectRequest:0,configured:null};
+const state={view:'overview',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,extrasBusy:false,extrasError:'',detailRequest:0,connectRequest:0,configured:null,displayCurrency:'',currencyPreference:readCurrencyPreference(),fx:null,fxLoading:false,fxRequest:0,fxError:'',fxFailedTarget:''};
+const currencyNames={ARS:'Argentine peso',INR:'Indian rupee',USD:'US dollar',EUR:'Euro',GBP:'British pound',BRL:'Brazilian real',UYU:'Uruguayan peso',CLP:'Chilean peso',MXN:'Mexican peso',CAD:'Canadian dollar',AUD:'Australian dollar',CHF:'Swiss franc',CNY:'Chinese yuan',JPY:'Japanese yen',AED:'UAE dirham'};
+const fxCache=new Map();
 const nav=[['overview','Overview'],['orders','Orders'],['inventory','Inventory'],['customers','Customers'],['agents','AI agents']];
 const labels={pending:'Pending review',confirmed:'Confirmed',completed:'Completed',cancelled:'Cancelled',closed:'Closed','on-hold':'On hold',unknown:'Unknown'};
 const badge=(status)=>`<span class="badge badge-${escape(status)}">${icon(status==='pending'?'clock':status==='confirmed'||status==='completed'?'check':'info')}${escape(labels[status] || status)}</span>`;
@@ -105,9 +107,9 @@ function shell() {
         ${data.errors.length?`<div class="notice error-notice">Some data could not be read: ${escape(data.errors.join(', '))}. Missing information is shown as unavailable.</div>`:''}
         ${data.truncated.length?`<div class="notice">Showing up to ${data.limit} records per section. Totals cover the loaded records only.</div>`:''}
         <div class="page-heading"><div><div class="eyebrow">YOUR OPERATIONS, CONNECTED</div><h1>${title}</h1><p>${{overview:'A clear view of your business. Every order, every day.',orders:'Follow each order from received to fulfilled.',inventory:'Know what is on the shelf and already reserved.',customers:'The people and businesses behind your orders.',agents:'Your team behind the conversations.',settings:'Connect your dashboard to the agent service.'}[state.view]}</p></div>
-        <div class="heading-actions">${['overview','orders'].includes(state.view)?`<label class="select-wrap">${icon('calendar')}<select id="range" aria-label="Reporting period"><option value="7" ${state.range===7?'selected':''}>Last 7 days</option><option value="30" ${state.range===30?'selected':''}>Last 30 days</option></select></label>`:''}<button class="button ${data.mode!=='live'?'primary':''}" data-action="${data.mode!=='live'?'connect':'refresh'}" ${state.busy?'disabled':''}>${icon(data.mode!=='live'?'link':'refresh')}${state.busy?'Refreshing…':data.mode!=='live'?'Connect live data':'Refresh'}</button></div></div>
-        <div id="view-content">${data.mode==='disconnected'?connectionGate():views[state.view]()}</div>
-        <footer class="footer"><span>Plus CRM <span class="footer-dot">·</span> ${data.mode==='disconnected'?'Sign in to read your CRM':data.mode==='demo'?'Sample data for exploring the dashboard':`Snapshot · ${escape(new Date(data.generatedAt).toLocaleString('en-GB'))}`}</span><span>${data.currency?escape(data.currency)+' currency · ':''}Read-only workspace</span></footer>
+        <div class="heading-actions">${currencySelector()}${['overview','orders'].includes(state.view)?`<label class="select-wrap">${icon('calendar')}<select id="range" aria-label="Reporting period"><option value="7" ${state.range===7?'selected':''}>Last 7 days</option><option value="30" ${state.range===30?'selected':''}>Last 30 days</option></select></label>`:''}<button class="button ${data.mode!=='live'?'primary':''}" data-action="${data.mode!=='live'?'connect':'refresh'}" ${state.busy?'disabled':''}>${icon(data.mode!=='live'?'link':'refresh')}${state.busy?'Refreshing…':data.mode!=='live'?'Connect live data':'Refresh'}</button></div></div>
+        ${currencyNotice()}<div id="view-content">${data.mode==='disconnected'?connectionGate():views[state.view]()}</div>
+        <footer class="footer"><span>Plus CRM <span class="footer-dot">·</span> ${data.mode==='disconnected'?'Sign in to read your CRM':data.mode==='demo'?'Sample data for exploring the dashboard':`Snapshot · ${escape(new Date(data.generatedAt).toLocaleString('en-GB'))}`}</span><span>${data.currency?escape(state.displayCurrency||data.currency)+(state.displayCurrency?' display currency · ':' currency · '):''}Read-only workspace</span></footer>
       </main>
     </div></div>`;
 }
@@ -121,7 +123,7 @@ function stats() {
   const pending=pendingOrders()||[];
   const series=daysSeries().slice(-7), sales=sumSales(orders);
   const stats=[
-    ['Booked sales',missing||!data.currency?'—':money(sales),'receipt','violet',`Confirmed orders · ${data.currency || 'currency unavailable'}`,series.map(d=>sumSales(d.orders))],
+    ['Booked sales',missing||!data.currency?'—':money(sales),'receipt','violet',`Confirmed orders · ${state.displayCurrency||data.currency||'currency unavailable'}`,series.map(d=>sumSales(d.orders))],
     ['Orders received',missing?'—':number(orders.length),'orders','blue','All orders in this period',series.map(d=>d.orders.length)],
     ['Confirmed orders',missing?'—':number(confirmed.length),'check','green','Including completed orders',series.map(d=>d.orders.filter(o=>['confirmed','completed'].includes(o.status)).length)],
     ['Awaiting review',pendingOrders()===null?'—':number(pending.length),'clock','amber',pendingOrders()===null?'Pending orders unavailable':pending.length?'Open drafts · all dates':'No pending orders',series.map(d=>d.orders.filter(o=>o.status==='pending').length)]
@@ -146,7 +148,10 @@ function orderTable(orders, compact=false, unavailable=data.orders===null) {
   if(!orders.length)return empty('No orders found','Try another search or reporting period.');
   return `<div class="table-scroll"><table><thead><tr><th>Order</th><th>Customer</th><th>Status</th><th>${compact?'Channel':'Order date'}</th><th class="amount">Amount</th><th><span class="sr-only">Details</span></th></tr></thead><tbody>${orders.map((o,i)=>`<tr><td><button class="order-link" data-order="${escape(o.id)}">${escape(o.id.replace('SAL-ORD-','SO-'))}</button><span class="cell-note">${prettyDate(o.date)}</span></td><td><div class="customer-cell">${avatar(o.customer,i)}<span>${escape(o.customer)}</span></div></td><td>${badge(o.status)}</td><td>${compact?`<span class="channel"><i class="${o.channel==='WhatsApp'?'wa':''}"></i>${escape(o.channel)}</span>`:escape(o.date)}</td><td class="amount">${moneyFor(o.total,o.currency)}</td><td><button class="icon-button row-open" data-order="${escape(o.id)}" aria-label="View order ${escape(o.id)}">${icon('arrow')}</button></td></tr>`).join('')}</tbody></table></div>`;
 }
-function moneyFor(value,currency) {if(value==null||!currency)return '—';try{return new Intl.NumberFormat('es-AR',{style:'currency',currency,maximumFractionDigits:0}).format(value);}catch{return '—';}}
+function moneyFor(value,currency,compact=false) {
+  const shown=displayAmount(value,currency);
+  return formatMoney(shown.value,shown.currency,compact)+(shown.unavailable?' · original':'');
+}
 function empty(title,note) {return `<div class="empty">${icon('search')}<h3>${title}</h3><p>${note}</p></div>`;}
 function agentsMini() {
   return `<section class="card agents-strip"><div class="strip-title"><span class="stat-icon violet">${icon('agents')}</span><div><h2>Your AI team</h2><p>Two roles. One connected business.</p></div></div>${data.agents.map(a=>`<div class="mini-agent"><span class="agent-avatar ${a.id}">${icon(a.id==='sales'?'bolt':'shield')}</span><div><strong>${escape(a.name)}</strong><span>${escape(a.role)}</span></div><span class="subtle-pill">${escape(a.status)}</span></div>`).join('')}<button class="icon-button" data-view="agents" aria-label="View AI agents">${icon('arrow')}</button></section>`;
@@ -197,7 +202,7 @@ function agentsView() {
     <div class="model-line"><span>Model</span><strong>${escape(a.model)}</strong></div>
     <ul class="capabilities">${(a.id==='sales'?['Answers product and stock questions','Finds or registers customers','Creates order drafts for policy evaluation']:['Reads sales, stock, and customer reports','Prepares actions requested by the manager','Helps the owner review orders and limits']).map(t=>`<li>${icon('check')}${t}</li>`).join('')}</ul>
     <div class="agent-boundary">${icon('shield')}${a.id==='sales'?'Customer-scoped access · draft-only writes':'Management-scoped access · approved actions only'}</div></section>`).join('')}</div>
-    <section class="card policy-card"><div class="card-heading"><div><h2>Automation controls</h2><p>The owner defines the limits. The policy checks every order.</p></div><span class="subtle-pill">${data.mode==='demo'?'Example settings':'Current agent settings'}</span></div>
+    <section class="card policy-card"><div class="card-heading"><div><h2>Automation controls</h2><p>Saved limits in their original units. The policy checks every order.</p></div><span class="subtle-pill">${data.mode==='demo'?'Example settings':'Current agent settings'}</span></div>
     ${data.policies?`<div class="policy-grid">${data.policies.map(p=>`<div class="${p.valid===false?'invalid-policy':''}"><span>${escape(p.name)}</span><strong>${escape(p.value)}${p.unit?` <small>${escape(p.unit)}</small>`:''}</strong><p>${escape(p.note)}</p>${p.source?`<small>Source: ${escape(p.source)}</small>`:''}</div>`).join('')}</div>`:`<div class="policy-explanation"><p>${state.extrasBusy?'Reading current limits from the agent…':'Current limits are unavailable. The manager can still check them through the authorized WhatsApp workflow.'}</p></div>`}
     <div class="policy-footer">${icon('shield')}<span>Changing limits still requires the manager’s existing confirmation code. This dashboard reads the same guarded settings store.</span></div></section>`;
 }
@@ -216,7 +221,7 @@ function detail(title,content) {
   if(!dialog.open)dialog.showModal();
 }
 function renderOrder(o) {
-  detail(o.id,`<div class="detail-status">${badge(o.status)}<span>${escape(o.channel)}</span></div><div class="detail-customer">${avatar(o.customer)}<div><strong>${escape(o.customer)}</strong><span>Customer</span></div></div><dl class="detail-fields"><div><dt>Order date</dt><dd>${prettyDate(o.date,{year:'numeric'})}</dd></div><div><dt>Delivery date</dt><dd>${o.deliveryDate?prettyDate(o.deliveryDate):'Not set'}</dd></div><div><dt>ERPNext status</dt><dd>${escape(o.erpStatus)}</dd></div></dl>${o.items?`<h3>Order items</h3><div class="line-items">${o.items.map(item=>`<div><span><strong>${escape(item.name)}</strong><small>${number(item.qty)} ${escape(item.unit||'')} × ${moneyFor(item.rate,o.currency)}</small></span><b>${moneyFor(item.amount??(item.qty!=null&&item.rate!=null?item.qty*item.rate:null),o.currency)}</b></div>`).join('')}</div>`:'<p class="detail-note">Open this order in ERPNext to view its line items and delivery address.</p>'}${o.address?`<h3>Delivery address</h3><p class="detail-note">${escape(o.address)}</p>`:''}<div class="order-total"><span>Order total</span><strong>${moneyFor(o.total,o.currency)}</strong></div><div class="detail-callout">${icon('shield')}<p>${o.status==='pending'?'This order is waiting for review. Use the authorized manager’s WhatsApp thread to review or confirm it.':'Order actions remain in the existing ERPNext and manager workflow.'}</p></div>${safeErpUrl(o.erpUrl)?`<a class="button primary full" href="${escape(o.erpUrl)}" target="_blank" rel="noopener noreferrer">Open in ERPNext ${icon('arrow')}</a>`:''}<button class="button full" data-copy="${escape(o.id)}">Copy full order ID</button>`);
+  detail(o.id,`<div class="detail-status">${badge(o.status)}<span>${escape(o.channel)}</span></div><div class="detail-customer">${avatar(o.customer)}<div><strong>${escape(o.customer)}</strong><span>Customer</span></div></div><dl class="detail-fields"><div><dt>Order date</dt><dd>${prettyDate(o.date,{year:'numeric'})}</dd></div><div><dt>Delivery date</dt><dd>${o.deliveryDate?prettyDate(o.deliveryDate):'Not set'}</dd></div><div><dt>ERPNext status</dt><dd>${escape(o.erpStatus)}</dd></div><div><dt>Original order total</dt><dd>${formatMoney(o.total,o.currency)}</dd></div></dl>${o.items?`<h3>Order items</h3><div class="line-items">${o.items.map(item=>`<div><span><strong>${escape(item.name)}</strong><small>${number(item.qty)} ${escape(item.unit||'')} × ${moneyFor(item.rate,o.currency)}</small></span><b>${moneyFor(item.amount??(item.qty!=null&&item.rate!=null?item.qty*item.rate:null),o.currency)}</b></div>`).join('')}</div>`:'<p class="detail-note">Open this order in ERPNext to view its line items and delivery address.</p>'}${o.address?`<h3>Delivery address</h3><p class="detail-note">${escape(o.address)}</p>`:''}<div class="order-total"><span>Order total</span><strong>${moneyFor(o.total,o.currency)}</strong></div><div class="detail-callout">${icon('shield')}<p>${o.status==='pending'?'This order is waiting for review. Use the authorized manager’s WhatsApp thread to review or confirm it.':'Order actions remain in the existing ERPNext and manager workflow.'}</p></div>${safeErpUrl(o.erpUrl)?`<a class="button primary full" href="${escape(o.erpUrl)}" target="_blank" rel="noopener noreferrer">Open in ERPNext ${icon('arrow')}</a>`:''}<button class="button full" data-copy="${escape(o.id)}">Copy full order ID</button>`);
 }
 function showProduct(id) {
   state.detailRequest++;
@@ -256,7 +261,7 @@ async function refresh(silent=false) {
   try{
     const snapshot=await fetchData(connection);
     if(state.session!==session)return;
-    data=snapshot;state.stale=false;if(!silent)toast('Dashboard refreshed.');
+    data=snapshot;state.stale=false;if(state.displayCurrency&&Date.now()-(state.fx?.fetchedAt||0)>=3600000)setDisplayCurrency(state.displayCurrency);if(!silent)toast('Dashboard refreshed.');
     if(state.view==='agents')loadExtras(true);
   }catch(e){if(state.session===session){state.stale=true;if(!silent)toast(e.message||'Could not refresh the dashboard.');}}
   finally{if(state.session===session){state.busy=false;render();}}
@@ -264,7 +269,7 @@ async function refresh(silent=false) {
 function exportOrders() {
   if(state.filter==='pending'?pendingOrders()===null:data.orders===null){toast('Order data is unavailable. Refresh before exporting.');return;}
   const cell=(v)=>{const s=String(v??'');return '"'+(/^[=+\-@\t\r]/.test(s)?"'"+s:s).replaceAll('"','""')+'"';};
-  const lines=[['Order ID','Customer','Date','Status','Amount','Currency'],...selectedOrders().map(o=>[o.id,o.customer,o.date,labels[o.status],o.total,o.currency])];
+  const lines=[['Order ID','Customer','Date','Status','Original amount','Original currency','Display amount','Display currency','Rate date','Conversion status'],...selectedOrders().map(o=>{const shown=displayAmount(o.total,o.currency);return [o.id,o.customer,o.date,labels[o.status],o.total,o.currency,shown.value,shown.currency,shown.converted?state.fx.updatedAt.slice(0,10):'',shown.unavailable?'Rate unavailable: original amount':shown.converted?'Display estimate':'Original amount'];})];
   const blob=new Blob(['\ufeff'+lines.map(row=>row.map(cell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'});
   const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`plus-${data.mode}-orders-${data.today}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('Filtered orders exported.');
 }
@@ -280,7 +285,8 @@ document.addEventListener('click',async e=>{
   if(target.dataset.chartDate){const d=target.dataset.chartDate,orders=periodOrders().filter(o=>o.date===d);$('#chart-detail').textContent=`${prettyDate(d)} · ${orders.length} orders · ${money(sumSales(orders))} booked sales`;document.querySelectorAll('.bar').forEach(b=>b.classList.toggle('inspected',b===target));}
   const action=target.dataset.action;
   if(action==='connect')openConnection();
-  if(action==='demo'){state.connectRequest++;state.detailRequest++;data=makeDemo();state.session++;state.connection=null;state.stale=false;state.busy=false;state.extrasBusy=false;state.extrasError='';render();}
+  if(action==='demo'){state.connectRequest++;state.detailRequest++;data=makeDemo();state.session++;state.connection=null;state.stale=false;state.busy=false;state.extrasBusy=false;state.extrasError='';render();restoreDisplayCurrency();}
+  if(action==='retry-currency')setDisplayCurrency(state.fxFailedTarget||state.displayCurrency);
   if(action==='retry-extras')loadExtras(true);
   if(action==='refresh')refresh();
   if(action==='menu'){state.menu=!state.menu;render();}
@@ -288,7 +294,7 @@ document.addEventListener('click',async e=>{
   if(action==='pending'){goto('orders');state.filter='pending';state.range=30;render();}
   if(action==='export')exportOrders();
   if(action==='prev'||action==='next'){state.page+=action==='next'?1:-1;render();}
-  if(action==='disconnect'){state.connectRequest++;document.querySelectorAll('dialog[open]').forEach(d=>d.close());state.connection=null;state.session++;state.busy=false;state.detailRequest++;data=disconnectedData();state.stale=false;state.extrasBusy=false;state.extrasError='';render();toast('Signed out of your CRM.');}
+  if(action==='disconnect'){state.connectRequest++;document.querySelectorAll('dialog[open]').forEach(d=>d.close());state.connection=null;state.session++;state.busy=false;state.detailRequest++;state.fxRequest++;state.fxLoading=false;state.fxError='';data=disconnectedData();state.stale=false;state.extrasBusy=false;state.extrasError='';render();toast('Signed out of your CRM.');}
 });
 document.addEventListener('input',e=>{
   if(e.target.id==='search'){
@@ -296,7 +302,8 @@ document.addEventListener('input',e=>{
     const input=$('#search');input.focus();try{input.setSelectionRange(cursor,cursor);}catch{}
   }
 });
-document.addEventListener('change',e=>{
+document.addEventListener('change',async e=>{
+  if(e.target.id==='display-currency')await setDisplayCurrency(e.target.value);
   if(e.target.id==='range'){state.range=Number(e.target.value);state.page=1;render();}
   if(e.target.id==='stock-filter'){state.stockFilter=e.target.value;render();}
 });
@@ -310,7 +317,7 @@ document.addEventListener('submit',async e=>{
     button.disabled=true;button.textContent='Connecting…';error.textContent='';
     const connection={base:url.origin,token},snapshot=await fetchData(connection);
     if(attempt!==state.connectRequest||!$('#connection-dialog').open)return;
-    data=snapshot;state.connection=connection;state.session++;state.detailRequest++;state.busy=false;state.stale=false;state.page=1;state.extrasError='';state.extrasBusy=false;$('#connection-dialog').close();form.reset();render();toast('Connected to your live CRM.');if(state.view==='agents')loadExtras();
+    data=snapshot;state.connection=connection;state.session++;state.detailRequest++;state.busy=false;state.stale=false;state.page=1;state.extrasError='';state.extrasBusy=false;$('#connection-dialog').close();form.reset();render();restoreDisplayCurrency();toast('Connected to your live CRM.');if(state.view==='agents')loadExtras();
   }catch(ex){if(attempt!==state.connectRequest||!$('#connection-dialog').open)return;error.textContent=ex.name==='TimeoutError'?'The service took too long to respond. Try again.':ex.message==='Failed to fetch'?'Could not reach the service. Check its address, HTTPS, and allowed dashboard origin.':ex.message;button.disabled=false;button.textContent='Connect workspace';}
 });
 document.querySelectorAll('dialog').forEach(dialog=>{dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}});dialog.addEventListener('close',()=>{if(dialog.id==='connection-dialog'){state.connectRequest++;dialog.innerHTML='';}if(dialog.id==='detail-dialog'){state.detailRequest++;dialog.innerHTML='';}});});
@@ -318,6 +325,7 @@ window.addEventListener('hashchange',()=>{const view=location.hash.slice(1);if(v
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&state.menu){state.menu=false;render();}});
 if(views[location.hash.slice(1)])state.view=location.hash.slice(1);
 render();
+if(data.mode!=='disconnected')restoreDisplayCurrency();
 
 function connectionGate() {
   return `<section class="card live-gate">
@@ -338,6 +346,102 @@ function safeErpUrl(value) {
     if(url.username||url.password||!(url.protocol==='https:'||local&&url.protocol==='http:'))return '';
     return url.href;
   }catch{return '';}
+}
+
+function readCurrencyPreference() {
+  try {
+    const value=localStorage.getItem('plus.dashboard.displayCurrency')||'';
+    return /^[A-Z]{3}$/.test(value)?value:'';
+  }catch{return '';}
+}
+
+function rememberCurrency(value) {
+  state.currencyPreference=value;
+  try {
+    if(value)localStorage.setItem('plus.dashboard.displayCurrency',value);
+    else localStorage.removeItem('plus.dashboard.displayCurrency');
+  }catch{}
+}
+
+function currencySelector() {
+  if(data.mode==='disconnected')return '';
+  const choices=[...new Set([data.currency,...Object.keys(currencyNames),state.currencyPreference])].filter(Boolean);
+  return `<label class="select-wrap currency-control"><span>Currency</span><select id="display-currency" aria-label="Display currency" ${state.fxLoading?'disabled':''}>
+    <option value="" ${!state.displayCurrency?'selected':''}>Original${data.currency?' · '+escape(data.currency):''}</option>
+    ${choices.map(code=>`<option value="${escape(code)}" ${state.displayCurrency===code?'selected':''}>${escape(code)}${currencyNames[code]?' · '+escape(currencyNames[code]):''}</option>`).join('')}
+  </select></label>`;
+}
+
+function currencyNotice() {
+  if(data.mode==='disconnected')return '';
+  if(state.fxLoading)return '<div class="currency-note" role="status">Loading exchange rates…</div>';
+  const error=state.fxError?`<div class="currency-note currency-error" role="alert">${escape(state.fxError)} <button class="text-link" data-action="retry-currency">Try again</button></div>`:'';
+  if(!state.displayCurrency||!state.fx)return error;
+  return `${error}<div class="currency-note" role="status"><span>Display estimates in <strong>${escape(state.displayCurrency)}</strong> · Rates dated ${prettyDate(state.fx.updatedAt.slice(0,10),{year:'numeric'})}. Original amounts are in order details.</span><a href="https://www.exchangerate-api.com" target="_blank" rel="noopener noreferrer">Rates By Exchange Rate API</a></div>`;
+}
+
+function formatMoney(value,currency,compact=false) {
+  if(value==null||!Number.isFinite(Number(value))||!currency)return '—';
+  try {
+    return new Intl.NumberFormat('en-GB',{
+      style:'currency',currency,currencyDisplay:'code',
+      ...(compact?{notation:'compact',maximumFractionDigits:1,minimumFractionDigits:0}:{}),
+    }).format(value);
+  }catch{return '—';}
+}
+
+function displayAmount(value,currency) {
+  const original={value:value==null||!Number.isFinite(Number(value))?null:Number(value),currency,converted:false,unavailable:false};
+  if(original.value===null||!state.displayCurrency||currency===state.displayCurrency)return original;
+  const rate=state.fx?.target===state.displayCurrency?state.fx.rates[currency]:null;
+  // Provider rates are units of the source currency per one target unit.
+  const converted=original.value/rate;
+  if(!(rate>0)||!Number.isFinite(converted))return {...original,unavailable:true};
+  return {value:converted,currency:state.displayCurrency,converted:true,unavailable:false};
+}
+
+function validateRates(value,target) {
+  const updated=Number(value?.time_last_update_unix)*1000;
+  if(value?.result!=='success'||value.base_code!==target||!value.rates||Array.isArray(value.rates)
+    ||!Number.isFinite(updated)||updated<=0||updated>Date.now()+300000||Date.now()-updated>7*86400000)
+    throw new Error('The exchange service returned invalid or outdated rates.');
+  const rates=Object.fromEntries(Object.entries(value.rates).filter(([code,rate])=>/^[A-Z]{3}$/.test(code)&&typeof rate==='number'&&Number.isFinite(rate)&&rate>0));
+  if(rates[target]!==1)throw new Error('The exchange service returned an invalid base rate.');
+  return {target,rates,updatedAt:new Date(updated).toISOString(),fetchedAt:Date.now()};
+}
+
+async function setDisplayCurrency(target) {
+  if(target&&!/^[A-Z]{3}$/.test(target))return;
+  const request=++state.fxRequest,session=state.session;
+  state.fxError='';state.fxFailedTarget='';
+  if(!target){state.displayCurrency='';state.fx=null;state.fxLoading=false;rememberCurrency('');render();return;}
+  if(data.mode==='disconnected'){rememberCurrency(target);return;}
+  state.fxLoading=true;render();
+  try {
+    let rates=fxCache.get(target);
+    if(!rates||Date.now()-rates.fetchedAt>=3600000){
+      // This public request contains only a currency code, never CRM data or tokens.
+      const response=await fetch('https://open.er-api.com/v6/latest/'+target,{
+        credentials:'omit',redirect:'error',signal:AbortSignal.timeout(12000),
+      });
+      if(!response.ok)throw new Error(response.status===429?'The exchange service is busy. Try again later.':'Exchange rates could not be loaded.');
+      rates=validateRates(await response.json(),target);
+    }
+    if(state.session!==session||state.fxRequest!==request)return;
+    if(data.currency&&!rates.rates[data.currency])throw new Error('A rate for the company currency is unavailable.');
+    fxCache.set(target,rates);state.fx=rates;state.displayCurrency=target;rememberCurrency(target);
+  }catch(error){
+    if(state.session!==session||state.fxRequest!==request)return;
+    state.fxError=(error.name==='TypeError'||error.name==='TimeoutError'?'Exchange rates could not be reached.':error.message)+' The displayed currency has been kept.';
+    state.fxFailedTarget=target;
+  }finally{
+    if(state.session===session&&state.fxRequest===request){state.fxLoading=false;render();}
+  }
+}
+
+function restoreDisplayCurrency() {
+  state.fxRequest++;state.fxLoading=false;state.fxError='';
+  if(state.currencyPreference)setDisplayCurrency(state.currencyPreference);
 }
 
 async function apiRead(connection, path) {
