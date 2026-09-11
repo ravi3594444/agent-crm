@@ -95,7 +95,6 @@ never an instruction to anything. See ``citar``.
 
 from __future__ import annotations
 
-import html
 import json
 import re
 import secrets
@@ -103,11 +102,16 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
-from app import erpnext, idioma, reloj
+from app import erpnext, idioma, marcas, reloj
 from app.outbound_status import cliente as _redis
 from app.outbound_status import digest_recipiente
 
-MARCA = "[solicitud]"
+# El texto vive en `app/marcas.py` con su techo, su orden y el motivo de los
+# dos al lado. Acá el techo NO es holgura: un pedido acumula un evento por
+# oferta, aceptación, vencimiento y revisión, así que 60 es una cantidad
+# esperada y no un margen — otra razón por la que un techo sólo quiere decir
+# algo junto a su marcador.
+MARCA = marcas.texto("solicitud")
 VERSION = 1
 
 # Types of decision a request can carry. The type decides which terms matter
@@ -207,9 +211,6 @@ ESCALACION_TTL_SEGUNDOS = 24 * 60 * 60
 # say how many there are. A stuck draft is invisible otherwise: it is not a
 # failed message and not a pending decision, it is just stock nobody can sell.
 CLAVE_TRABADAS = "wa:{inbound}:solicitudes-trabadas"
-
-_JSON = re.compile(re.escape(MARCA) + r"\s*(\{.*\})\s*$", re.DOTALL)
-
 
 @dataclass(frozen=True)
 class Solicitud:
@@ -376,16 +377,12 @@ def _clave_cache(pedido: str) -> str:
 
 
 def _parsear(contenido: str) -> dict | None:
-    """One event out of an ERPNext comment, however ERPNext stored it."""
-    texto = re.sub(r"<[^>]+>", " ", html.unescape(str(contenido or "")))
-    encontrado = _JSON.search(texto)
-    if not encontrado:
-        return None
-    try:
-        datos = json.loads(encontrado.group(1))
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return None
-    return datos if isinstance(datos, dict) else None
+    """One event out of an ERPNext comment, however ERPNext stored it.
+
+    El parser es el de la fila del registro: era la misma regex y el mismo
+    desescapado de HTML que `sombra._parsear`, escritos dos veces.
+    """
+    return marcas.marca("solicitud").parser(contenido)
 
 
 def _desde_dict(datos: dict) -> Solicitud | None:
@@ -430,7 +427,7 @@ def _escribir(solicitud: Solicitud) -> bool:
     """
     cuerpo = json.dumps(solicitud.como_dict(), ensure_ascii=False, separators=(",", ":"))
     try:
-        erpnext.registrar_comentario("Sales Order", solicitud.pedido, f"{MARCA} {cuerpo}")
+        marcas.escribir("solicitud", solicitud.pedido, cuerpo, exigir=True)
     except Exception as exc:
         print(
             f"[solicitudes] {solicitud.pedido}: evento {solicitud.evento} NO durable "
@@ -506,17 +503,7 @@ def _desde_erpnext(pedido: str) -> Solicitud | None:
     of the page it happened to fit in.
     """
     try:
-        filas = erpnext.policy_get_list(
-            "Comment",
-            filters=[
-                ["reference_doctype", "=", "Sales Order"],
-                ["reference_name", "=", pedido],
-                ["content", "like", f"%{MARCA}%"],
-            ],
-            fields=["content", "creation"],
-            limit=MAX_EVENTOS,
-            order_by="creation desc",
-        )
+        filas = marcas.filas("solicitud", pedido)
     except Exception as exc:
         print(f"[solicitudes] {pedido}: no pude leer los eventos ({type(exc).__name__})")
         return None
@@ -678,16 +665,11 @@ def vencimientos(pedidos: list[str]) -> dict[str, float]:
 
     tope = MAX_EVENTOS * max(1, len(faltan))
     try:
-        filas = erpnext.policy_get_list(
-            "Comment",
-            filters=[
-                ["reference_doctype", "=", "Sales Order"],
-                ["reference_name", "in", faltan],
-                ["content", "like", f"%{MARCA}%"],
-            ],
-            fields=["content", "reference_name", "creation"],
-            limit=tope,
-            order_by="creation desc",
+        filas = marcas.filas(
+            "solicitud",
+            faltan,
+            techo=tope,
+            campos=["content", "reference_name", "creation"],
         )
     except Exception as exc:
         print(f"[solicitudes] vencimientos no legibles ({type(exc).__name__})")
@@ -919,15 +901,10 @@ def reconstruir_indice() -> int:
     truncada = False
     for pagina in range(MAX_PAGINAS_RECONSTRUCCION):
         try:
-            filas = erpnext.policy_get_list(
-                "Comment",
-                filters=[
-                    ["reference_doctype", "=", "Sales Order"],
-                    ["content", "like", f"%{MARCA}%"],
-                ],
-                fields=["content", "reference_name", "creation"],
-                limit=MAX_RECONSTRUCCION,
-                order_by="creation desc",
+            filas = marcas.filas(
+                "solicitud",
+                techo=MAX_RECONSTRUCCION,
+                campos=["content", "reference_name", "creation"],
                 start=pagina * MAX_RECONSTRUCCION,
             )
         except Exception as exc:

@@ -69,7 +69,7 @@ from dataclasses import dataclass
 
 from redis.exceptions import RedisError
 
-from app import erpnext, locks, notificar, reloj, solicitudes
+from app import erpnext, locks, marcas, notificar, reloj, solicitudes
 from app import telefono as telefono_mod
 from app.formato import pesos, sin_citas
 from app.router import es_equipo
@@ -103,7 +103,12 @@ INTENTOS_DE_CODIGO = 8
 # La marca del comentario durable en ERPNext. Es el registro de que ALGUIEN
 # AUTORIZÓ esto: qué acción, sobre qué pedido, con qué parámetros y desde qué
 # número. Lo que efectivamente pasó después lo anota el handler de siempre.
-MARCA_DURABLE = "[accion]"
+#
+# Es el único que NADIE lee de vuelta, y por eso es el que más necesitaba estar
+# en el registro: sin una fila en `app/marcas.py` no había nada en el sistema
+# que se muriera si alguien le cambiaba el texto a lo único que prueba que una
+# persona autorizó una acción.
+MARCA_DURABLE = marcas.texto("accion")
 
 
 class AccionError(RuntimeError):

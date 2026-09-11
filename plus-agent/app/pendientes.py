@@ -53,7 +53,7 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app import erpnext, idioma, reloj
+from app import erpnext, idioma, marcas, reloj
 
 # `tools/pedidos.py::_message_key` = "WA-" + sha256(message_id).hexdigest()[:40].
 # La forma EXACTA, porque el cierre es destructivo: un `po_no` que una persona
@@ -78,8 +78,12 @@ POR_RONDA = 10
 # porque una plantilla vive registrada en UN idioma en Meta.
 PLANTILLA_RECORDATORIO = "WHATSAPP_CUSTOMER_PENDING_TEMPLATE"
 PLANTILLA_CERRADO = "WHATSAPP_CUSTOMER_PENDING_CLOSED_TEMPLATE"
-MARCA_AVISO = "[pendiente-aviso]"
-MARCA_CIERRE = "[pendiente-cerrado]"
+# El texto vive en `app/marcas.py`, con su techo y su motivo al lado, y
+# `tests/test_marcas.py` lo fija contra una tabla escrita a mano. Antes
+# estaba acá y nada lo afirmaba: la auditoría le cambió el texto a
+# MARCA_AVISO y no se rompió un solo test.
+MARCA_AVISO = marcas.texto("pendiente_aviso")
+MARCA_CIERRE = marcas.texto("pendiente_cierre")
 
 _NOCHE_DESDE_DEFAULT = "22:00"
 _NOCHE_HASTA_DEFAULT = "07:00"
@@ -285,27 +289,23 @@ def _sin_solicitud_abierta(pedidos: list[str]) -> list[str]:
     return [p for p in pedidos if p not in con_plazo]
 
 
-def _tiene_marca(pedido: str, marca: str) -> bool | None:
+def _tiene_marca(pedido: str, nombre: str) -> bool | None:
     """True/False si se pudo averiguar, None si ERPNext no contestó.
 
     Los tres estados son distintos: aplastar el None en False manda el segundo
-    recordatorio al cliente cada vez que ERPNext tose.
+    recordatorio al cliente cada vez que ERPNext tose. Por eso la consulta se
+    comparte (`marcas.existe`) y el TERCER ESTADO no: `marcas` deja salir la
+    excepción justamente para que cada módulo conserve su propia respuesta al
+    «no sé», que acá es None y en `limites` es levantar.
     """
     try:
-        filas = erpnext.policy_get_list(
-            "Comment",
-            filters=[
-                ["reference_doctype", "=", "Sales Order"],
-                ["reference_name", "=", pedido],
-                ["content", "like", f"%{marca}%"],
-            ],
-            fields=["name"],
-            limit=1,
-        )
+        return marcas.existe(nombre, pedido)
     except Exception as exc:
-        print(f"[pendientes] {pedido}: no pude ver la marca {marca}: {type(exc).__name__}")
+        print(
+            f"[pendientes] {pedido}: no pude ver la marca "
+            f"{marcas.texto(nombre)}: {type(exc).__name__}"
+        )
         return None
-    return bool(filas)
 
 
 def _sigue_esperando(pedido: str) -> dict | None:
@@ -390,7 +390,7 @@ def _avisar(filas: list[dict], momento: datetime) -> int:
         if avisados >= POR_RONDA:
             break
         try:
-            if _tiene_marca(pedido, MARCA_AVISO) is not False:
+            if _tiene_marca(pedido, "pendiente_aviso") is not False:
                 continue
             if _sigue_esperando(pedido) is None:
                 continue
@@ -501,7 +501,7 @@ def _cerrar(filas: list[dict], momento: datetime) -> int:
         if edad is None or edad < horas:
             continue
         try:
-            if _tiene_marca(pedido, MARCA_CIERRE) is not False:
+            if _tiene_marca(pedido, "pendiente_cierre") is not False:
                 continue
             with distributed_lock(f"pendiente:{pedido}", lease_seconds=60, wait_seconds=5):
                 if _sigue_esperando(pedido) is None:

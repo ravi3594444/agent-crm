@@ -34,18 +34,18 @@ pedido. Un fallo acá se loguea y se sigue.
 """
 from __future__ import annotations
 
-import html
 import json
-import re
 from datetime import UTC, date, datetime
 
-from app import erpnext, locks, policy
+from app import locks, marcas, policy
 
-MARCA = "[sombra]"
-
-# Suficiente para encontrar el registro del pedido. Uno por pedido: si hay más
-# de uno (dos barridos que corrieron a la vez), el más nuevo manda.
-MAX_MARCAS = 5
+# El texto, el techo y el ORDEN viven juntos en `app/marcas.py`, que es la
+# única forma en que el techo quiere decir algo: 5 alcanza porque la consulta
+# pide `creation desc` y gana la primera parseable. Escrito aparte, «5» y «20»
+# (confirmacion) parecían el mismo número con dos valores; leídos con su orden
+# al lado son dos preguntas distintas. El motivo está en la fila del registro.
+MARCA = marcas.texto("sombra")
+MAX_MARCAS = marcas.marca("sombra").techo
 # Cuántos borradores se anotan por ronda. El barrido corre cada 60 s y cada
 # anotación es una evaluación completa contra ERPNext (historial, deuda, stock
 # y precio por renglón): sin techo, una cola de doscientos borradores dejaría
@@ -53,7 +53,6 @@ MAX_MARCAS = 5
 POR_RONDA = 10
 CONTADOR_TTL_SEGUNDOS = 45 * 24 * 60 * 60
 
-_JSON = re.compile(re.escape(MARCA) + r"\s*(\{.*\})\s*$", re.DOTALL)
 
 
 def _clave_contador(dia: date) -> str:
@@ -83,19 +82,11 @@ def encendido() -> bool:
 def _parsear(contenido: str) -> dict | None:
     """Un registro de sombra sacado de un comentario, como sea que ERPNext lo guardó.
 
-    ERPNext mete etiquetas HTML y escapa entidades en el contenido de un
-    comentario, así que el crudo no se parsea nunca. Mismo tratamiento que
-    `solicitudes._parsear`.
+    El parseo es el de la fila del registro: era la MISMA regex y el mismo
+    desescapado de HTML que `solicitudes._parsear`, escritos dos veces. Sigue
+    existiendo con este nombre porque `app/autonomia.py` lo llama.
     """
-    texto = re.sub(r"<[^>]+>", " ", html.unescape(str(contenido or "")))
-    encontrado = _JSON.search(texto)
-    if not encontrado:
-        return None
-    try:
-        datos = json.loads(encontrado.group(1))
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return None
-    return datos if isinstance(datos, dict) else None
+    return marcas.marca("sombra").parser(contenido)
 
 
 def leer(pedido: str) -> dict | None:
@@ -108,25 +99,10 @@ def leer(pedido: str) -> dict | None:
     if not pedido:
         return None
     try:
-        filas = erpnext.policy_get_list(
-            "Comment",
-            filters=[
-                ["reference_doctype", "=", "Sales Order"],
-                ["reference_name", "=", pedido],
-                ["content", "like", f"%{MARCA}%"],
-            ],
-            fields=["content", "creation"],
-            limit=MAX_MARCAS,
-            order_by="creation desc",
-        )
+        return marcas.leer("sombra", pedido)
     except Exception as exc:
         print(f"[sombra] {pedido}: no pude leer el registro: {type(exc).__name__}")
         return None
-    for fila in filas:
-        datos = _parsear(str(fila.get("content") or ""))
-        if datos is not None:
-            return datos
-    return None
 
 
 def ya_anotado(pedido: str) -> bool | None:
@@ -140,20 +116,10 @@ def ya_anotado(pedido: str) -> bool | None:
     if not pedido:
         return None
     try:
-        filas = erpnext.policy_get_list(
-            "Comment",
-            filters=[
-                ["reference_doctype", "=", "Sales Order"],
-                ["reference_name", "=", pedido],
-                ["content", "like", f"%{MARCA}%"],
-            ],
-            fields=["name"],
-            limit=1,
-        )
+        return marcas.existe("sombra", pedido)
     except Exception as exc:
         print(f"[sombra] {pedido}: no pude ver si ya estaba anotado: {type(exc).__name__}")
         return None
-    return bool(filas)
 
 
 def anotar(pedido: str, sales_order: dict) -> bool:
@@ -182,7 +148,7 @@ def anotar(pedido: str, sales_order: dict) -> bool:
         "tope_vigente": sombra.tope_vigente,
         "ts": _ahora().isoformat(),
     }
-    texto = f"{MARCA} {json.dumps(carga, ensure_ascii=False, sort_keys=True)}"
+    cuerpo = json.dumps(carga, ensure_ascii=False, sort_keys=True)
     # `registrar_comentario` LEVANTA y `add_comment` se lo traga. Acá hace
     # falta el que levanta, y el try/except lo vuelve best-effort igual: sigue
     # sin cambiar una palabra de lo que se le dice a un cliente. La diferencia
@@ -191,7 +157,7 @@ def anotar(pedido: str, sales_order: dict) -> bool:
     # ERPNext rechazó. Contarlo de más es el error caro: infla la evidencia
     # sobre la que el dueño decide subir un límite.
     try:
-        erpnext.registrar_comentario("Sales Order", pedido, texto)
+        marcas.escribir("sombra", pedido, cuerpo, exigir=True)
     except Exception as exc:
         print(f"[sombra] {pedido}: no pude anotar el registro: {type(exc).__name__}")
         return False
@@ -251,28 +217,8 @@ def registros(pedidos: list[str]) -> dict[str, dict]:
     unicos = [p for p in dict.fromkeys(str(x or "").strip() for x in pedidos) if p]
     if not unicos:
         return {}
-    tope = MAX_MARCAS * len(unicos)
     try:
-        filas = erpnext.policy_get_list(
-            "Comment",
-            filters=[
-                ["reference_doctype", "=", "Sales Order"],
-                ["reference_name", "in", unicos],
-                ["content", "like", f"%{MARCA}%"],
-            ],
-            fields=["content", "reference_name", "creation"],
-            limit=tope,
-            order_by="creation desc",
-        )
+        return marcas.leer_lote("sombra", unicos)
     except Exception as exc:
         print(f"[sombra] no pude leer los registros del lote: {type(exc).__name__}")
         return {}
-    encontrados: dict[str, dict] = {}
-    for fila in filas:
-        nombre = str(fila.get("reference_name") or "").strip()
-        if not nombre or nombre in encontrados:
-            continue  # creation desc: el primero que aparece es el más nuevo
-        datos = _parsear(str(fila.get("content") or ""))
-        if datos is not None:
-            encontrados[nombre] = datos
-    return encontrados

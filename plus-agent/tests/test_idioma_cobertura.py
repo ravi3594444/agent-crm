@@ -413,7 +413,14 @@ def test_la_lista_de_intencionalmente_sin_traducir_esta_documentada():
     import idioma_allowlist as permitido
 
     assert permitido.__doc__ and "no tiene idioma" in permitido.__doc__
-    assert permitido.MARCAS_DURABLES
+    # NO `assert permitido.MARCAS_DURABLES`, que era lo que decía: eso sólo
+    # pedía que la tupla no estuviera vacía, así que pasaba con las cuatro de
+    # doce que listaba y habría pasado igual con una sola. Ahora sale del
+    # registro y se afirma que están TODAS.
+    from app import marcas
+
+    assert set(permitido.MARCAS_DURABLES) == {m.texto for m in marcas.MARCAS.values()}
+    assert len(permitido.MARCAS_DURABLES) == 12
     assert permitido.ERPNEXT_CANONICO
     assert permitido.COMANDOS_ES
     # Los comandos en inglés se AGREGARON; los de siempre siguen.

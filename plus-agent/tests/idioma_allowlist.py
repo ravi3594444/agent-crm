@@ -13,6 +13,8 @@ probablemente sea un texto que había que traducir.
 """
 from __future__ import annotations
 
+from app import marcas
+
 # --------------------------------------------------------------------------
 # 1. LOGS. Los lee quien opera el sistema, en la consola, no un cliente.
 #    Traducirlos sólo lograría que la mitad de un archivo de log esté en un
@@ -37,8 +39,28 @@ ERPNEXT_CANONICO = (
 #    configuró» de «se perdió el almacén». Cambiar una rompe la reconstrucción
 #    durable, que es justamente lo que evita que algo se auto-confirme después
 #    de perder Redis.
+#
+#    SALE DEL REGISTRO, no de una copia escrita a mano acá. Escrita a mano
+#    listaba CUATRO de las doce que existen, y el único test que la miraba
+#    decía `assert permitido.MARCAS_DURABLES` — o sea, que la tupla no estuviera
+#    vacía. Una lista incompleta que nada podía contradecir es la misma forma
+#    del hallazgo 4: un guard que no se puede romper no está guardando.
+#
+#    Ojo con la dirección: acá se DERIVA a propósito, porque lo que esta lista
+#    tiene que decir es «lo que el código trata como marca». Quién fija el texto
+#    durable contra un literal escrito a mano es `tests/test_marcas.py`, y ahí
+#    derivarlo sería la tautología.
 # --------------------------------------------------------------------------
-MARCAS_DURABLES = ("[limite]", "[entrega]", "[idioma]", "[confirmado-por-agente]")
+MARCAS_DURABLES = tuple(m.texto for m in marcas.MARCAS.values())
+
+# Sólo las de corchetes entran a lo permitido en una salida en inglés: son un
+# formato, no prosa. Las dos EN PROSA («Requiere revisión humana:»,
+# «Rechazado manualmente por») son español de verdad y no se permiten en una
+# salida en inglés por ser marcas — nunca salen por WhatsApp, así que
+# permitirlas sólo taparía una filtración real.
+MARCAS_DURABLES_ENTRE_CORCHETES = tuple(
+    m.texto for m in marcas.MARCAS.values() if not m.prosa
+)
 
 # --------------------------------------------------------------------------
 # 4. COMANDOS. El payload que parsea el router determinista. Siguen en español
@@ -99,7 +121,10 @@ EXCEPCIONES_INTERNAS = "las que ningún handler interpola en una respuesta"
 # Lo que un texto EN INGLÉS puede contener en español sin que sea un error.
 # Se usa en el guard de cobertura.
 PERMITIDO_EN_SALIDA_INGLESA = (
-    ERPNEXT_CANONICO + MARCAS_DURABLES + COMANDOS_ES + NOMBRES_PROPIOS
+    ERPNEXT_CANONICO
+    + MARCAS_DURABLES_ENTRE_CORCHETES
+    + COMANDOS_ES
+    + NOMBRES_PROPIOS
 )
 
 
