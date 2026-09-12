@@ -4,7 +4,6 @@
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["deploy"]
 
 [tool.ruff.lint]
 select = [
@@ -32,3 +31,13 @@ ignore = [
 # Los tests importan la app después de setear el entorno: el import no puede
 # estar arriba del todo (ver tests/conftest.py).
 "tests/*.py" = ["E402"]
+# `deploy/` ESTABA EXCLUIDO de ruff hasta que aparecieron los dos scripts de
+# datos reales (docs/prompt-datos-reales.md). Ahora se lintea, salvo una línea:
+#
+# `deploy/seed_dairy.py` tiene un `# noqa: E402` que quedó viejo —ruff aprendió
+# a permitir un import después de un `sys.path.insert`, así que ya no hace
+# falta— y esta semana ese archivo es de otra sesión. Trece caracteres de
+# limpieza no valen un conflicto de merge en el archivo que esa sesión está
+# editando. BORRAR ESTA LÍNEA cuando esa sesión cierre: `ruff check deploy` lo
+# vuelve a decir solo.
+"deploy/seed_dairy.py" = ["RUF100"]

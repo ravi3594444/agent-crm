@@ -22,11 +22,11 @@ test: install ## Correr los tests (sin credenciales ni red, pero NECESITA un Red
 	REDIS_OBLIGATORIO=1 $(PY) -m pytest -q
 
 lint: install ## Lint (ruff check; el formato todavía no se exige)
-	$(VENV)/bin/ruff check app demo tests
+	$(VENV)/bin/ruff check app demo tests deploy
 
 fmt: install ## Formatear y autocorregir lo que ruff sabe arreglar
 	$(VENV)/bin/ruff format app demo tests
-	$(VENV)/bin/ruff check --fix app demo tests
+	$(VENV)/bin/ruff check --fix app demo tests deploy
 
 check: lint test ## Todo lo que corre CI
 
