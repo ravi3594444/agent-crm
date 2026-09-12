@@ -999,15 +999,34 @@ def chequear_entrega(
         and _puesto("RETIRO_LOCAL_DIAS")
         and _puesto("RETIRO_LOCAL_HORA")
     )
+    def _dicho(nombre: str) -> str:
+        """El valor como se MUESTRA, no como está guardado.
+
+        Los días se guardan siempre en español —"lunes,viernes"— y quién decide
+        cómo se escriben para una persona es `limites.mostrar`, en un solo
+        lugar. Interpolar el valor crudo acá era una segunda ortografía del
+        mismo dato: hoy se ve casi igual, y el día que la forma guardada cambie,
+        este informe va a decir otra cosa que el resto del producto.
+
+        El idioma se pide EXPLÍCITO y es el español, como toda la prosa de este
+        informe: lo lee quien opera el sistema en una consola, no un cliente en
+        WhatsApp (ver la sección 1 de tests/idioma_allowlist.py). Dejarlo al
+        default lo ataría a `IDIOMA_DEFAULT`, y un despliegue en inglés
+        imprimiría «reparto Monday,Friday» adentro de una frase en español.
+        """
+        from app import idioma as _idioma
+
+        return limites.mostrar(nombre, _puesto(nombre), _idioma.ES)
+
     if reparto:
         reporte.ok(
             "ENTREGA_DIAS",
-            f"reparto {_puesto('ENTREGA_DIAS')} a las {_puesto('ENTREGA_HORA')}",
+            f"reparto {_dicho('ENTREGA_DIAS')} a las {_dicho('ENTREGA_HORA')}",
         )
     if retiro:
         reporte.ok(
             "RETIRO_LOCAL_DIAS",
-            f"retiro {_puesto('RETIRO_LOCAL_DIAS')} a las {_puesto('RETIRO_LOCAL_HORA')}",
+            f"retiro {_dicho('RETIRO_LOCAL_DIAS')} a las {_dicho('RETIRO_LOCAL_HORA')}",
         )
     if not reparto and not retiro:
         reporte.aviso(

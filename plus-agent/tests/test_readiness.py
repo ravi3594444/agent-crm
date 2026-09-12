@@ -500,6 +500,24 @@ def test_with_neither_a_round_nor_a_pickup_the_owner_is_warned() -> None:
     assert reporte.listo, texto
 
 
+def test_los_dias_del_informe_salen_de_limites_mostrar_y_no_del_valor_crudo() -> None:
+    """Una sola ortografía para un día, en todo el producto.
+
+    El informe armaba «reparto miercoles,sabado» interpolando el valor guardado,
+    que es una segunda forma de escribir lo mismo: `limites.mostrar` es quien
+    decide cómo se le muestra un día a una persona, y el que le contesta al
+    dueño por WhatsApp ya pasaba por ahí. Dos ortografías del mismo dato es la
+    clase de diferencia que nadie nota hasta que una de las dos cambia.
+    """
+    def con_tildes():
+        return _entrega(ENTREGA_DIAS="miercoles,sabado", ENTREGA_HORA="09:00")
+
+    texto = _correr(BASE, limites=con_tildes).texto()
+
+    assert "reparto miércoles,sábado a las 09:00" in texto
+    assert "miercoles,sabado" not in texto
+
+
 def test_a_pickup_counter_alone_is_enough_of_a_fallback() -> None:
     def solo_retiro():
         return _entrega(
@@ -512,7 +530,10 @@ def test_a_pickup_counter_alone_is_enough_of_a_fallback() -> None:
 
     texto = _correr(BASE, limites=solo_retiro).texto()
 
-    assert "retiro sabado a las 10:00" in texto
+    # «sábado» y no «sabado»: el informe muestra el día como lo escribe
+    # `limites.mostrar`, que es quien decide eso para todo el producto. Lo
+    # guardado sigue siendo la forma sin tilde.
+    assert "retiro sábado a las 10:00" in texto
     assert "Respaldo de vencimiento" not in texto
 
 
