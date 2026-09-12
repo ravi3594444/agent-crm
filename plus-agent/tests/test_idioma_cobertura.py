@@ -400,6 +400,57 @@ def _titulos_inspeccionados() -> int:
     return total
 
 
+# --------------------------------------- el idioma no se escribe a mano
+
+# LA PRUEBA DE QUE EL CALL SITE ESTÁ CABLEADO, que es distinta de la prueba de
+# que el catálogo tiene las dos filas. Un test que le pide un texto al catálogo
+# pasa igual aunque el call site le pase "es" fijo, y ése es exactamente el
+# error que se comete al migrar: se escriben las dos versiones y se olvida
+# enchufar el idioma de quien lee.
+#
+# `idioma.ES` / `idioma.EN` SÍ se permiten: son la forma explícita y greppable
+# de decir «este texto va en español a propósito» —el informe de arranque, el
+# fragmento que acompaña a un marco todavía sin migrar— y cada una está
+# comentada donde está. Lo que no puede haber es un "es" suelto adentro de una
+# llamada, que es indistinguible de un olvido.
+def _idiomas_escritos_a_mano() -> list[tuple[str, int, str]]:
+    hallados = []
+    for archivo in sorted(_APP.rglob("*.py")):
+        if "__pycache__" in str(archivo):
+            continue
+        for nodo in ast.walk(ast.parse(archivo.read_text())):
+            if not isinstance(nodo, ast.Call):
+                continue
+            if getattr(nodo.func, "attr", None) != "t":
+                continue
+            if len(nodo.args) < 2:
+                continue
+            lengua = nodo.args[1]
+            if isinstance(lengua, ast.Constant) and isinstance(lengua.value, str):
+                hallados.append(
+                    (str(archivo.relative_to(_APP.parent)), nodo.lineno, lengua.value)
+                )
+    return hallados
+
+
+def test_ninguna_llamada_al_catalogo_fija_el_idioma_con_un_literal():
+    """El idioma sale de quien lee, no de quien escribió la línea."""
+    assert _idiomas_escritos_a_mano() == []
+
+
+def test_la_auditoria_del_idioma_fijo_mira_las_llamadas_de_verdad():
+    """El guard del guard: si dejara de encontrar llamadas a `idioma.t` con
+    idioma, no estaría auditando nada."""
+    llamadas = 0
+    for archivo in sorted(_APP.rglob("*.py")):
+        if "__pycache__" in str(archivo):
+            continue
+        for nodo in ast.walk(ast.parse(archivo.read_text())):
+            if isinstance(nodo, ast.Call) and getattr(nodo.func, "attr", None) == "t":
+                llamadas += len(nodo.args) >= 2
+    assert llamadas >= 100, f"se perdieron llamadas al catálogo: {llamadas}"
+
+
 def test_ningun_titulo_de_boton_es_un_literal():
     """Un botón lo lee una persona, así que sale del catálogo y no del código."""
     assert _titulos_literales() == []
