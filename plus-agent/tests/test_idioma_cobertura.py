@@ -397,6 +397,83 @@ def test_ningun_punto_de_salida_recibe_un_literal_en_espanol():
     assert _literales_en_sinks() == []
 
 
+# --------------------------------------- los títulos de los botones
+
+# LA ASERCIÓN QUE FALTABA, y por qué la que ya estaba no alcanzaba.
+#
+# `_literales_en_sinks` mira los ARGUMENTOS de `enviar_botones`, y el título de
+# un botón no es un argumento: viaja adentro de una lista de diccionarios. Así
+# que `{"id": ..., "title": "Confirmar"}` pasaba por el punto de salida sin que
+# ninguna de las dos auditorías lo tocara —la estática no lo veía y la de
+# ejecución no corre `notificar_equipo`— y el dueño con IDIOMA_GERENCIA=en
+# recibía un aviso en inglés con botones en español.
+#
+# Tampoco estaba en tests/idioma_allowlist.py, que es donde habría que haberlo
+# defendido si fuera a propósito. No lo era: la regla del allowlist es «se
+# traduce lo que LEE UNA PERSONA en WhatsApp», y un botón es literalmente eso.
+#
+# Se miran TODOS los diccionarios de `app/`, no sólo los que están escritos
+# dentro de una llamada a `enviar_botones`: una lista de botones armada tres
+# líneas antes y pasada por variable es la misma filtración, y es la forma en
+# que se escribe apenas hay una condición de por medio.
+def _titulos_literales() -> list[tuple[str, int, str]]:
+    """Títulos de botón escritos como literal en `app/`. Deben ser cero."""
+    hallados = []
+    for archivo in sorted(_APP.rglob("*.py")):
+        if "__pycache__" in str(archivo):
+            continue
+        for nodo in ast.walk(ast.parse(archivo.read_text())):
+            if not isinstance(nodo, ast.Dict):
+                continue
+            for clave, valor in zip(nodo.keys, nodo.values, strict=True):
+                if not (isinstance(clave, ast.Constant) and clave.value == "title"):
+                    continue
+                texto = _texto_del_nodo(valor)
+                if texto is not None:
+                    hallados.append(
+                        (str(archivo.relative_to(_APP.parent)), nodo.lineno, texto)
+                    )
+    return hallados
+
+
+def _titulos_inspeccionados() -> int:
+    """Cuántos títulos de botón existen en `app/`, literales o no."""
+    total = 0
+    for archivo in sorted(_APP.rglob("*.py")):
+        if "__pycache__" in str(archivo):
+            continue
+        for nodo in ast.walk(ast.parse(archivo.read_text())):
+            if isinstance(nodo, ast.Dict):
+                total += sum(
+                    1
+                    for clave in nodo.keys
+                    if isinstance(clave, ast.Constant) and clave.value == "title"
+                )
+    return total
+
+
+def test_ningun_titulo_de_boton_es_un_literal():
+    """Un botón lo lee una persona, así que sale del catálogo y no del código."""
+    assert _titulos_literales() == []
+
+
+def test_la_auditoria_de_botones_encuentra_los_botones():
+    """El guard del guard: si no ve ningún título, no está auditando nada.
+
+    Son cuatro: los tres del producto (`ok:`, `ver:` y `conteo:`) y el que
+    `app/whatsapp.py` arma para Meta con el valor que le pasaron.
+    """
+    assert _titulos_inspeccionados() >= 4
+
+
+def test_las_etiquetas_de_boton_estan_en_el_catalogo_en_los_dos_idiomas():
+    """Y son las que el producto manda: el test de arriba prueba que no hay
+    literales, éste que existe algo que ponerles en su lugar."""
+    for clave in ("boton.confirmar", "boton.ver_detalle", "boton.confirmar_conteo"):
+        assert clave in idioma.CATALOGO, clave
+        assert idioma.t(clave, ES) != idioma.t(clave, EN), clave
+
+
 def test_el_catalogo_esta_completo_en_los_dos_idiomas():
     assert idioma.claves_incompletas() == []
 
@@ -404,7 +481,8 @@ def test_el_catalogo_esta_completo_en_los_dos_idiomas():
 def test_el_catalogo_cubre_las_categorias_de_la_migracion():
     categorias = {clave.split(".")[0] for clave in idioma.CATALOGO}
     for esperada in ("ack", "fallback", "pedido", "gerencia", "entrega",
-                     "codigo", "accion", "sistema", "stock", "precio", "idioma"):
+                     "codigo", "accion", "sistema", "stock", "precio", "idioma",
+                     "boton", "dia"):
         assert esperada in categorias, f"falta {esperada}"
 
 

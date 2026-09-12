@@ -170,6 +170,30 @@ def _correr(env, http=_http_sano, limites=_limites_ok):
     return reporte
 
 
+def test_un_LOCALE_mal_escrito_se_dice_en_el_arranque() -> None:
+    """`formato.pesos` cae al de por defecto en silencio, a propósito: un monto
+    mal formateado no puede dejar un mensaje sin salir. El precio de esa
+    decisión es que nadie se entera, así que el chequeo de arranque lo dice."""
+    reporte = _correr({**BASE, "LOCALE": "en-UK"})
+
+    assert not reporte.listo
+    assert "no es ninguno de es_AR, en_US" in reporte.texto()
+
+
+def test_un_LOCALE_valido_se_reporta_con_su_forma_normal() -> None:
+    for crudo, normal in (("en_US", "en_US"), ("en-us", "en_US"), ("es_AR", "es_AR")):
+        reporte = _correr({**BASE, "LOCALE": crudo})
+        assert reporte.listo, reporte.texto()
+        assert f"montos con forma {normal}" in reporte.texto()
+
+
+def test_sin_LOCALE_el_arranque_sigue_listo() -> None:
+    """Un despliegue que ya existe no tiene la variable, y no migra por esto."""
+    reporte = _correr(BASE)
+    assert reporte.listo
+    assert "los montos se escriben es_AR" in reporte.texto()
+
+
 def test_a_complete_environment_is_ready_and_the_report_exposes_no_value() -> None:
     reporte = _correr(BASE)
     texto = reporte.texto()

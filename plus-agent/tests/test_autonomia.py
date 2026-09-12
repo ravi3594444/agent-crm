@@ -27,9 +27,10 @@ from conftest import RelojDePrueba
 from app import autonomia, confirmacion, erpnext, inventario, policy, sombra
 from tests.fakes import listar
 
-# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
-# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
-pytestmark = pytest.mark.idioma("es")
+# Este archivo afirma texto en español y montos con forma argentina, así que
+# declara los dos en vez de heredarlos del entorno. Ver `_idioma_declarado` y
+# `_locale_declarado` en tests/conftest.py.
+pytestmark = [pytest.mark.idioma("es"), pytest.mark.locale("es_AR")]
 
 # El día que este archivo nombra. Era `AHORA = datetime(2026, 9, 8, 12, 0,
 # tzinfo=UTC)`: con la zona escrita a mano —y en UTC, que NO es el reloj del

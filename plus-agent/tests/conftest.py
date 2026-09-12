@@ -97,6 +97,13 @@ _DUMMY = {
     # idioma de fábrica, no para impedir el otro.
     "IDIOMA_DEFAULT": "es",
     "IDIOMA_GERENCIA": "",
+    # LA FORMA DEL NÚMERO, y va con setdefault por el mismo motivo que el
+    # idioma. `$12.000` y `$12,000` son el mismo monto escrito para dos personas
+    # distintas, así que un archivo que afirma uno de los dos tiene que DECIRLO
+    # (`pytestmark = pytest.mark.locale("es_AR")`) y no heredarlo. Con el
+    # locale fijo acá, la suite no podría probar nunca la salida que ve el
+    # cliente que habla inglés — que es justo la que este trabajo agregó.
+    "LOCALE": "es_AR",
     # DIGEST_ACTIVO sí se queda FIJA (abajo): no elige un idioma equivalente,
     # apaga la sección entera, y con DIGEST_ACTIVO=0 el test que prueba que el
     # resumen sale una vez por día no prueba nada.
@@ -556,6 +563,35 @@ def _idioma_declarado(request, monkeypatch):
         )
     monkeypatch.setenv("IDIOMA_DEFAULT", lengua)
     monkeypatch.setenv("IDIOMA_GERENCIA", lengua)
+
+
+@pytest.fixture(autouse=True)
+def _locale_declarado(request, monkeypatch):
+    """La FORMA DEL NÚMERO también la declara el test, no el entorno.
+
+    Hermano de `_idioma_declarado`, y separado a propósito porque son dos
+    decisiones distintas: `IDIOMA_GERENCIA` elige en qué idioma se le habla al
+    dueño y `LOCALE` elige si un total se escribe `$12.000` o `$12,000`. Un
+    almacén argentino con un dueño que lee en inglés usa los dos valores
+    cruzados, así que una sola marca para ambos mentiría sobre el caso real.
+
+        pytestmark = pytest.mark.locale("es_AR")
+
+    Sin la marca, el archivo hereda el default — correcto para los que no
+    afirman ningún monto. `grep -rn "pytest.mark.locale" tests/` lista los que
+    sí dependen de la forma del número.
+    """
+    marca = request.node.get_closest_marker("locale")
+    if marca is None:
+        return
+    from app import formato
+
+    codigo = str(marca.args[0]) if marca.args else ""
+    if codigo not in formato.LOCALES:
+        raise ValueError(
+            f"pytest.mark.locale({codigo!r}): los locales son {formato.LOCALES}"
+        )
+    monkeypatch.setenv("LOCALE", codigo)
 
 
 @pytest.fixture(autouse=True)

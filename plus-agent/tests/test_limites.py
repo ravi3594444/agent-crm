@@ -2229,3 +2229,131 @@ def test_the_closer_caps_at_one_week_not_thirty_days():
     de 720 h se contradecía a sí mismo.
     """
     assert limites.LIMITES["PENDIENTE_CIERRE_HORAS"].maximo == 168.0
+
+
+# --------------------------------------------------- los días, en los dos
+# Un dueño que lee en inglés no podía configurar NINGUNA de las tres reglas de
+# días: "monday" moría en el parser. Lo que se guarda sigue siendo el español —
+# ésa es la mitad que hace que esto no sea una migración— y la traducción pasa
+# al mostrarlo.
+
+DIAS_EN_INGLES = [
+    ("monday,friday", "lunes,viernes"),
+    ("Monday, Friday", "lunes,viernes"),
+    ("monday and friday", "lunes,viernes"),
+    ("MONDAY", "lunes"),
+    ("mon,tue,wed,thu,fri", "lunes,martes,miercoles,jueves,viernes"),
+    ("tues, weds, thurs", "martes,miercoles,jueves"),
+    ("saturdays and sundays", "sabado,domingo"),
+    ("sat sun", "sabado,domingo"),
+    # El orden lo pone la semana, no lo que tecleó: igual que en español.
+    ("friday,monday", "lunes,viernes"),
+    # Y los dos idiomas mezclados, que es lo que pasa de verdad cuando el alias
+    # del ajuste sigue en español y el dueño piensa en inglés.
+    ("martes y friday", "martes,viernes"),
+]
+
+
+@pytest.mark.parametrize("nombre", ["ENTREGA_DIAS", "ENTREGA_EXCEPCION_DIAS", "RETIRO_LOCAL_DIAS"])
+@pytest.mark.parametrize("dicho,esperado", DIAS_EN_INGLES)
+def test_los_dias_en_ingles_se_aceptan_y_se_guardan_en_espanol(
+    nombre: str, dicho: str, esperado: str
+) -> None:
+    """Las tres reglas de días, porque las tres eran inconfigurables en inglés."""
+    assert limites.validar(nombre, dicho) == esperado
+
+
+@pytest.mark.parametrize("dicho,esperado", DIAS_EN_INGLES)
+def test_normalizar_dos_veces_un_dia_en_ingles_da_lo_mismo(dicho, esperado) -> None:
+    """validar() corre en proponer() y otra vez en aplicar(): si no fuera
+    idempotente, el dueño confirmaría una cosa y se guardaría otra."""
+    una = limites.validar("ENTREGA_DIAS", dicho)
+
+    assert una == esperado
+    assert limites.validar("ENTREGA_DIAS", una, tecleado=False) == una
+    assert limites.validar("ENTREGA_DIAS", una) == una
+
+
+@pytest.mark.parametrize(
+    "dicho", ["lunes y viernes", "martes", "sabado, domingo", "Miércoles"]
+)
+def test_los_dias_en_espanol_siguen_valiendo_exactamente_igual(dicho: str) -> None:
+    """El idioma nuevo no puede costar el que ya andaba."""
+    limites.validar("ENTREGA_DIAS", dicho)
+
+
+@pytest.mark.parametrize("dicho", ["funday", "monday,funday", "lunes,jueevs", "may"])
+def test_lo_que_no_es_un_dia_se_sigue_rechazando_por_su_nombre(dicho: str) -> None:
+    """Aceptar un vocabulario más no es aceptar cualquier cosa: un día que el
+    dueño escribió mal tiene que fallar, o se programa un reparto que no pidió.
+
+    "may" es a propósito: es un mes en inglés y una forma del verbo, y no es
+    ningún día de la semana en ningún idioma.
+    """
+    with pytest.raises(limites.LimiteError):
+        limites.validar("ENTREGA_DIAS", dicho)
+
+
+def test_el_dia_guardado_es_el_que_lee_app_excepciones() -> None:
+    """La razón por la que el valor normal no se traduce: lo parsea otro módulo.
+
+    `app/excepciones.py` resuelve la próxima fecha con los índices que arma
+    `limites`, y esos salen del valor guardado. Un "Monday" en el almacén sería
+    un día que nadie sabe leer.
+    """
+    from app.tools import pedidos
+
+    guardado = limites.validar("ENTREGA_DIAS", "monday,friday")
+
+    for dia in guardado.split(","):
+        assert dia in pedidos._DIAS, f"{dia!r} no lo puede leer app/tools/pedidos.py"
+
+
+@pytest.mark.parametrize(
+    "guardado,en_espanol,en_ingles",
+    [
+        ("lunes,viernes", "lunes,viernes", "Monday,Friday"),
+        ("miercoles", "miércoles", "Wednesday"),
+        ("sabado,domingo", "sábado,domingo", "Saturday,Sunday"),
+        (
+            "lunes,martes,miercoles,jueves,viernes",
+            "lunes,martes,miércoles,jueves,viernes",
+            "Monday,Tuesday,Wednesday,Thursday,Friday",
+        ),
+    ],
+)
+def test_los_dias_se_muestran_en_el_idioma_del_dueno(
+    guardado: str, en_espanol: str, en_ingles: str
+) -> None:
+    """Sólo cambia el idioma: el separador es el que está guardado, sin espacio.
+
+    En español la salida es BYTE A BYTE la de siempre —«lunes,viernes»— y eso
+    es a propósito: este cambio es de idioma, y meterle de contrabando un
+    retoque cosmético al camino que ya andaba es cómo un cambio chico se vuelve
+    uno que hay que revisar entero.
+    """
+    assert limites.mostrar("ENTREGA_DIAS", guardado, "es") == en_espanol
+    assert limites.mostrar("ENTREGA_DIAS", guardado, "en") == en_ingles
+
+
+def test_mostrar_un_dia_nunca_rompe_lo_que_no_entiende() -> None:
+    """Mostrar no valida: si en el almacén hay algo raro, se muestra tal cual.
+
+    Un valor que no se puede traducir es un problema para `resumen()`, no una
+    excepción en el camino que le contesta al dueño.
+    """
+    assert limites.mostrar("ENTREGA_DIAS", "lunes,marte", "en") == "lunes,marte"
+    assert limites.mostrar("ENTREGA_DIAS", limites.NINGUNO, "en") == limites.NINGUNO
+    assert limites.mostrar("ENTREGA_DIAS", "", "en") == ""
+
+
+@pytest.mark.parametrize("dicho", ["yes", "y", "no", "n", "true", "false", "on", "off"])
+def test_el_si_y_el_no_en_ingles_ya_se_entendian_y_se_siguen_entendiendo(
+    dicho: str,
+) -> None:
+    """Las formas que un dueño que lee en inglés teclea de verdad para un
+    sí/no. Ya estaban en `_VERDADEROS`/`_FALSOS`; esto lo fija para que un
+    refactor de la lista no se las lleve en silencio."""
+    esperado = "true" if dicho in ("yes", "y", "true", "on") else "false"
+
+    assert limites.validar("ENTREGA_EXCEPCION_ACTIVA", dicho) == esperado

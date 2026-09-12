@@ -23,6 +23,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import avisos, erpnext, notificar, outbound_status, whatsapp
 from tests.fakes import FakeMarcas, entrada_de_cola
 
+# Este archivo afirma montos con forma argentina («4.800,00 ARS»), así que la
+# declara en vez de heredarla del entorno. El idioma NO: los dos casos de
+# `test_the_confirmation_carries_order_items_total_and_fulfilment` lo pasan por
+# parámetro, que es más fuerte. Ver `_locale_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.locale("es_AR")
+
 SO = "SAL-ORD-2026-00011"
 CUSTOMER_PHONE = "5493512222222"
 

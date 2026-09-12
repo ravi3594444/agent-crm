@@ -153,6 +153,18 @@ ERPNEXT_API_KEY=<setup-key> ERPNEXT_API_SECRET=<setup-secret> make seed
 **Expect:** products, customers, and a Stock Reconciliation created as a
 draft. Running it twice does not create a second reconciliation.
 
+For a demo to an English-speaking prospect, seed the English catalog instead
+and set the two variables that decide what he reads:
+
+```bash
+ERPNEXT_API_KEY=<setup-key> ERPNEXT_API_SECRET=<setup-secret> \
+  SEED_DATASET=en make seed
+```
+
+**Expect:** the same thirteen products and seven customers, with English names
+and codes. `IDIOMA_GERENCIA=en` and `LOCALE=en_US` are what turn the messages,
+the buttons and the amounts around it — the catalog alone does not.
+
 **Now the important part — open ERPNext in the browser and click Submit on
 that Stock Reconciliation.** If it fails, tell me the exact error message.
 That tells me whether your instance needs `expense_account` or a different

@@ -280,6 +280,97 @@ def test_la_alerta_de_auto_confirmado_no_pide_responder(lengua):
         assert restos_en_espanol(texto, ("Demo Bakery", "Whole Milk 1 L")) == []
 
 
+# --------------------------------------------------- los botones del aviso
+# El aviso de pedido pendiente es EL ÚNICO camino en el que una persona recibe
+# algo sin haber escrito nada: el bot le escribe al dueño por su cuenta. Su
+# idioma no puede salir de lo que tecleó —no tecleó— así que sale del ajuste, y
+# hasta este PR eso valía para el cuerpo y no para los botones.
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_los_botones_del_aviso_salen_en_el_idioma_del_dueno(lengua, monkeypatch):
+    from unittest.mock import Mock
+
+    from app import notificar
+
+    staff = "5491100000000"
+    monkeypatch.setenv("IDIOMA_GERENCIA", lengua)
+    monkeypatch.setattr(notificar, "STAFF", {staff})
+    monkeypatch.setattr(notificar, "window_open", lambda telefono: True)
+    monkeypatch.setattr(notificar.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(notificar, "record_outbound", Mock())
+    monkeypatch.setattr(notificar, "has_accepted", lambda *a, **k: False)
+    botones = Mock(return_value={"messages": [{"id": "wamid.btn"}]})
+    monkeypatch.setattr(notificar, "enviar_botones", botones)
+
+    assert notificar.notificar_equipo(PEDIDO, _SO, auto=False, motivos=MOTIVO) is True
+
+    titulos = [b["title"] for b in botones.call_args.args[2]]
+    # El `id` es el payload del router y NO cambia con el idioma: si cambiara,
+    # el botón dejaría de confirmar el pedido que dice confirmar.
+    assert [b["id"] for b in botones.call_args.args[2]] == [
+        f"ok:{PEDIDO}", f"ver:{PEDIDO}"
+    ]
+    if lengua == EN:
+        assert titulos == ["Confirm", "View details"]
+        assert restos_en_espanol(" · ".join(titulos)) == []
+    else:
+        assert titulos == ["Confirmar", "Ver detalle"]
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_boton_de_conteo_sale_en_el_idioma_del_dueno(lengua, monkeypatch):
+    from unittest.mock import Mock
+
+    from app import notificar, whatsapp
+
+    monkeypatch.setenv("IDIOMA_GERENCIA", lengua)
+    enviados = Mock(return_value={"messages": [{"id": "wamid.btn"}]})
+    monkeypatch.setattr(whatsapp, "enviar_botones", enviados)
+
+    assert notificar.pedir_confirmacion_conteo("5491100000000", "SR-0001", "x") is True
+
+    boton = enviados.call_args.args[2][0]
+    assert boton["id"] == "conteo:SR-0001"
+    assert boton["title"] == ("Confirm count" if lengua == EN else "Confirmar conteo")
+
+
+@pytest.mark.parametrize("clave", [c for c in idioma.CATALOGO if c.startswith("boton.")])
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_ninguna_etiqueta_de_boton_llega_cortada(clave, lengua):
+    """Meta corta el título en 20 caracteres, y `enviar_botones` también.
+
+    Las dos veces EN SILENCIO: una etiqueta que no entra no falla, llega
+    cortada a la pantalla del dueño. Por eso el largo es una aserción del
+    catálogo y no una nota en un comentario — una traducción futura se entera
+    acá y no en vivo.
+    """
+    etiqueta = idioma.t(clave, lengua)
+    assert etiqueta.strip()
+    assert len(etiqueta) <= 20, f"{clave}:{lengua} entra cortada: {etiqueta!r}"
+
+
+def test_la_respuesta_al_modelo_nombra_el_boton_que_esta_en_la_pantalla():
+    """El informe dice «le mandé el botón X»: X tiene que ser la etiqueta real.
+
+    Escrita a mano en el catálogo, el día que se tradujo el botón esta frase
+    habría mandado al dueño a buscar uno que no existe.
+    """
+    for lengua in IDIOMAS:
+        etiqueta = idioma.t("boton.confirmar_conteo", lengua)
+        informe = idioma.t(
+            "stock.conteo_boton_enviado", lengua,
+            resumen="Count of QUE-CRE", producto="QUE-CRE", boton=etiqueta,
+        )
+        assert etiqueta in informe
+    ingles = idioma.t(
+        "stock.conteo_boton_enviado", EN,
+        resumen="Count of QUE-CRE", producto="QUE-CRE",
+        boton=idioma.t("boton.confirmar_conteo", EN),
+    )
+    assert restos_en_espanol(ingles, ("QUE-CRE",)) == []
+
+
 @pytest.mark.parametrize("lengua", IDIOMAS)
 def test_el_detalle_de_confirmacion_al_equipo_sale_en_su_idioma(lengua):
     from app import notificar

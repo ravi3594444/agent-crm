@@ -12,6 +12,8 @@ os.environ.setdefault("ERPNEXT_API_KEY", "test-key")
 os.environ.setdefault("ERPNEXT_API_SECRET", "test-secret")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from idioma_captura import restos_en_espanol
+
 from deploy import seed_dairy as seed
 
 
@@ -203,3 +205,151 @@ def test_main_creates_only_a_draft_reconciliation(
     create_doc.assert_called_once_with("Stock Reconciliation", payload)
     assert payload.get("docstatus", 0) == 0
     blocked_erpnext_network["submit_doc"].assert_not_called()
+
+
+# --------------------------------------------------- el catálogo en inglés
+# Una demo es el producto: un prospecto que habla inglés viendo al bot contestar
+# «Leche entera sachet 1 L» está viendo el producto de otro. El dataset en
+# inglés es el mismo negocio con otras palabras, y estos tests fijan las dos
+# mitades de eso: que sea EL MISMO (misma forma, mismos números) y que esté de
+# verdad en inglés.
+
+
+def test_el_dataset_por_defecto_es_el_de_siempre(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Un despliegue que ya existe corre el script y siembra lo que sembró."""
+    monkeypatch.delenv("SEED_DATASET", raising=False)
+    datos = seed.dataset()
+
+    assert datos.nombre == "es"
+    assert datos.productos is seed.PRODUCTOS
+    assert datos.clientes is seed.CLIENTES
+    assert datos.stock is seed.STOCK_INICIAL
+    assert datos.grupo == "Lacteos"
+
+
+@pytest.mark.parametrize("dicho", ["en", "EN", " en ", "english", "en_US", "ingles"])
+def test_el_ingles_se_pide_como_a_uno_se_le_ocurra(dicho: str) -> None:
+    assert seed.dataset(dicho).nombre == "en"
+
+
+def test_el_dataset_se_puede_pedir_por_entorno(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SEED_DATASET", "en")
+    assert seed.dataset().nombre == "en"
+    # El argumento explícito le gana al entorno.
+    assert seed.dataset("es").nombre == "es"
+
+
+def test_el_dataset_se_puede_pedir_por_argumento(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SEED_DATASET", raising=False)
+    assert seed._pedido_en_la_linea(["--dataset", "en"]).nombre == "en"
+    assert seed._pedido_en_la_linea([]).nombre == "es"
+
+
+def test_un_dataset_desconocido_siembra_el_espanol_y_lo_dice(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Sembrar el catálogo equivocado en un ERPNext real es un catálogo que
+    alguien tiene que borrar a mano: ante la duda, el de siempre."""
+    assert seed.dataset("fr").nombre == "es"
+    assert "dataset desconocido" in capsys.readouterr().out
+
+
+def test_los_dos_datasets_tienen_exactamente_la_misma_forma() -> None:
+    """Mismo negocio, otras palabras: un escenario escrito contra uno camina el
+    otro. Si un día se le agrega un producto a uno solo, esto se cae."""
+    es, en = seed.dataset("es"), seed.dataset("en")
+
+    assert len(en.productos) == len(es.productos) == 13
+    assert len(en.clientes) == len(es.clientes) == 7
+    assert len(en.stock) == len(es.stock)
+    assert len(en.unidades) == len(es.unidades)
+    assert len(en.grupos_cliente) == len(es.grupos_cliente)
+    # Las mismas cantidades, producto por producto y en el mismo orden.
+    assert list(en.stock.values()) == list(es.stock.values())
+    # Y la misma relación de precios, que es lo que hace que un pedido de la
+    # demo caiga del mismo lado de un tope en los dos catálogos.
+    precios_es = [p for *_, p in es.productos]
+    precios_en = [p for *_, p in en.productos]
+    assert [round(p / precios_en[0], 4) for p in precios_en] == [
+        round(p / precios_es[0], 4) for p in precios_es
+    ]
+
+
+@pytest.mark.parametrize("dicho", ["es", "en"])
+def test_cada_dataset_es_coherente_consigo_mismo(dicho: str) -> None:
+    """El stock nombra productos que existen, y cada producto y cliente usa una
+    unidad y un grupo que el script crea antes."""
+    datos = seed.dataset(dicho)
+    codigos = {code for code, *_ in datos.productos}
+
+    assert set(datos.stock) == codigos
+    assert {uom for _, _, uom, _ in datos.productos} <= set(datos.unidades)
+    assert {grupo for _, _, grupo in datos.clientes} <= set(datos.grupos_cliente)
+    assert len({tel for _, tel, _ in datos.clientes}) == len(datos.clientes)
+
+
+def test_el_catalogo_en_ingles_no_tiene_una_palabra_en_espanol() -> None:
+    """INCLUIDOS LOS CÓDIGOS. El código del producto sale por WhatsApp —el aviso
+    de un conteo dice «Count of QUE-CRE»— así que un catálogo en inglés con
+    códigos en español le muestra al prospecto justo la palabra que el resto de
+    la demo evita."""
+    datos = seed.dataset("en")
+    texto = " ".join(
+        [datos.grupo, datos.pregunta, *datos.unidades, *datos.grupos_cliente]
+        + [f"{code} {nombre}" for code, nombre, _, _ in datos.productos]
+        + [f"{nombre} {grupo}" for nombre, _, grupo in datos.clientes]
+    )
+
+    assert restos_en_espanol(texto) == []
+
+
+def test_el_catalogo_en_espanol_no_se_movio() -> None:
+    """El de siempre es el default y no cambió: los mismos códigos, que son los
+    que dicen los pedidos que ya están en ese ERPNext."""
+    datos = seed.dataset("es")
+
+    assert [code for code, *_ in datos.productos][:3] == [
+        "LEC-ENT-1L", "LEC-DES-1L", "LEC-BOT-1L"
+    ]
+    assert datos.productos[0][1] == "Leche entera sachet 1 L"
+    assert datos.clientes[0][0] == "Almacen Don Jose"
+
+
+def test_main_siembra_el_catalogo_que_le_dan(
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_erpnext_network: dict[str, Mock],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ensure = Mock()
+    monkeypatch.setattr(seed, "_ensure", ensure)
+    monkeypatch.setattr(seed, "_existing_stock_reconciliation", Mock(return_value=None))
+    monkeypatch.setattr(
+        seed,
+        "_stock_reconciliation_payload",
+        Mock(return_value={"purpose": "Opening Stock", "items": []}),
+    )
+    get_list = blocked_erpnext_network["get_list"]
+    get_list.side_effect = None
+    get_list.return_value = [{"name": "ya tiene precio"}]
+    context = blocked_erpnext_network["default_context"]
+    context.side_effect = None
+    context.return_value = ("Dairy Plus LLC", "Finished Goods - DP")
+    create_doc = blocked_erpnext_network["create_doc"]
+    create_doc.side_effect = None
+    create_doc.return_value = {"name": "MAT-RECO-2026-00003"}
+
+    seed.main(seed.dataset("en"))
+
+    sembrados = [c.args[1] for c in ensure.call_args_list]
+    assert "Dairy" in sembrados
+    assert "MILK-WHL-1L" in sembrados and "LEC-ENT-1L" not in sembrados
+    assert "Riverside Grocery" in sembrados
+    salida = capsys.readouterr().out
+    # La nota de los precios inventados sigue estando, y la frase de prueba
+    # nombra un producto del catálogo que se acaba de sembrar.
+    assert "los precios son inventados" in salida
+    assert "cream cheese" in salida

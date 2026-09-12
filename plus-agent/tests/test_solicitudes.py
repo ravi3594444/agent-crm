@@ -44,9 +44,10 @@ from app import (
 )
 from tests.fakes import FakeMarcas, entrada_de_cola, listar
 
-# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
-# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
-pytestmark = pytest.mark.idioma("es")
+# Este archivo afirma texto en español y montos con forma argentina, así que
+# declara los dos en vez de heredarlos del entorno. Ver `_idioma_declarado` y
+# `_locale_declarado` en tests/conftest.py.
+pytestmark = [pytest.mark.idioma("es"), pytest.mark.locale("es_AR")]
 
 # Captured before the `mundo` fixture stubs it: the tests about the customer's
 # confirmation surviving a failed re-read need the REAL queue.
