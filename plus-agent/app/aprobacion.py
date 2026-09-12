@@ -291,6 +291,9 @@ def _notificar_confirmada(nombre: str, conocido: dict) -> None:
             completo = _leer_doc("Sales Order", nombre)
         except erpnext.ERPNextError:
             completo = conocido
-        notificar.notificar_confirmacion(completo, "manual (confirmación humana)")
+        # La CLAVE, no el texto: el mensaje se arma en el idioma del dueño. El
+        # registro durable de más arriba sigue guardando su español, que es lo
+        # que ya está escrito en los ERPNext de los despliegues.
+        notificar.notificar_confirmacion(completo, "gerencia.fuente_manual")
     except Exception as exc:
         print(f"[approval] {nombre}: aviso de confirmación falló ({type(exc).__name__})")

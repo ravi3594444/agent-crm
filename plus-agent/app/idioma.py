@@ -577,6 +577,27 @@ CATALOGO: dict[str, dict[str, str]] = {
             "To void it within {horas} h: cancelar {pedido} <reason>"
         ),
     },
+    # DE DÓNDE SALIÓ UNA CONFIRMACIÓN, que es el campo «Origen:» del mensaje de
+    # arriba. Se armaba como literal en los tres que confirman —«automática
+    # (política)», «manual (confirmación humana)», «solicitud aprobada y
+    # aceptada»— y el mismo string se usaba para DOS cosas: el aviso que lee el
+    # dueño y el registro durable que abre la ventana de anulación.
+    #
+    # Acá está sólo la mitad que se lee. El registro durable sigue guardando su
+    # texto en español, como todo rastro de auditoría (sección 6 del allowlist):
+    # es un valor que ya está escrito en los ERPNext de los despliegues.
+    "gerencia.fuente_automatica": {
+        ES: "automática (política)",
+        EN: "automatic (policy)",
+    },
+    "gerencia.fuente_manual": {
+        ES: "manual (confirmación humana)",
+        EN: "manual (human confirmation)",
+    },
+    "gerencia.fuente_solicitud": {
+        ES: "solicitud aprobada y aceptada",
+        EN: "request approved and accepted",
+    },
     "gerencia.escalamiento_asunto": {
         ES: "🙋 Un cliente necesita una persona",
         EN: "🙋 A customer needs a person",

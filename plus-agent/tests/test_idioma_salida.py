@@ -352,6 +352,56 @@ def test_la_alerta_de_auto_confirmado_no_pide_responder(lengua):
         assert restos_en_espanol(texto, ("Demo Bakery", "Whole Milk 1 L")) == []
 
 
+@pytest.mark.parametrize("lengua", IDIOMAS)
+@pytest.mark.parametrize(
+    "clave, en_espanol, en_ingles",
+    [
+        ("gerencia.fuente_automatica", "automática (política)", "automatic (policy)"),
+        ("gerencia.fuente_manual", "manual (confirmación humana)",
+         "manual (human confirmation)"),
+        ("gerencia.fuente_solicitud", "solicitud aprobada y aceptada",
+         "request approved and accepted"),
+    ],
+)
+def test_el_origen_de_una_confirmacion_sale_en_el_idioma(
+    lengua, clave, en_espanol, en_ingles
+):
+    """El campo «Origen:» del aviso de confirmado, que lo arma cada camino que
+    confirma. Salía como literal en español adentro del mensaje traducido —
+    «Source: manual (confirmación humana)»— y lo encontró la corrida del piloto
+    en inglés, no un test: ningún audit lo miraba porque el valor entra por
+    parámetro desde otro módulo.
+
+    El registro durable de ERPNext sigue guardando su texto en español: es el
+    mismo string usado para dos cosas, y sólo una la lee una persona.
+    """
+    from app import notificar
+
+    texto = notificar.texto_confirmacion(
+        _SO, clave, momento="2026-09-05 16:14", lengua=lengua
+    )
+
+    if lengua == EN:
+        assert en_ingles in texto
+        assert en_espanol not in texto
+        assert restos_en_espanol(
+            texto, ("Demo Bakery", "Whole Milk 1 L", "ARS", "cancelar")
+        ) == [], texto
+    else:
+        assert en_espanol in texto
+
+
+def test_un_origen_que_no_es_una_clave_sale_como_vino():
+    """El mismo string se escribe en el registro durable, que no se traduce, así
+    que un llamador que pase el texto no puede quedarse sin «Origen»."""
+    from app import notificar
+
+    texto = notificar.texto_confirmacion(
+        _SO, "manual", momento="2026-09-05 16:14", lengua=EN
+    )
+    assert "manual" in texto
+
+
 # ------------------------------------------------- los avisos al equipo
 # `solicitudes._avisar_equipo` manda por `avisos.encolar_equipo` ->
 # `whatsapp.enviar_mensaje`: son mensajes que LEE UNA PERSONA en WhatsApp, no

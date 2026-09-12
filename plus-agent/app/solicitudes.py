@@ -2454,7 +2454,7 @@ def _cerrar_confirmado(
     except Exception as exc:
         print(f"[solicitudes] {pedido}: confirmación al cliente no encolada ({type(exc).__name__})")
     try:
-        notificar.notificar_confirmacion(completo, "solicitud aprobada y aceptada")
+        notificar.notificar_confirmacion(completo, "gerencia.fuente_solicitud")
     except Exception as exc:
         print(f"[solicitudes] {pedido}: aviso al equipo falló ({type(exc).__name__})")
     if confirmada is None:
