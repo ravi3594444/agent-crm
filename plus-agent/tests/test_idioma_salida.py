@@ -283,8 +283,8 @@ def test_el_total_del_aviso_lo_escribe_pesos_y_no_python(lengua, monkeypatch):
     from app import notificar
 
     for locale, esperado, crudo in (
-        ("es_AR", "Total: $6.000,00", "6,000.00"),
-        ("en_US", "Total: $6,000.00", "Total: 6,000.00"),
+        ("es_AR", "Total: $6.000,00 ARS", "6,000.00"),
+        ("en_US", "Total: $6,000.00 ARS", "Total: 6,000.00"),
     ):
         monkeypatch.setenv("LOCALE", locale)
         texto = notificar._texto_libre(
@@ -293,6 +293,49 @@ def test_el_total_del_aviso_lo_escribe_pesos_y_no_python(lengua, monkeypatch):
         )
         assert esperado in texto, texto
         assert crudo not in texto, texto
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_aviso_dice_en_que_moneda_esta_el_pedido(lengua, monkeypatch):
+    """El símbolo lo elige LOCALE; el código de moneda lo dice el PEDIDO.
+
+    `pesos` escribe "$" para las dos formas de número que habla el producto, así
+    que un pedido en INR salía "$4.800,00" a secas en el aviso pendiente — y el
+    MISMO pedido, ya confirmado, "$4.800,00 INR" por `texto_confirmacion`. Dos
+    respuestas distintas sobre cuánta plata es, y la que no lo decía era la
+    pantalla en la que se autoriza.
+    """
+    from app import notificar
+
+    monkeypatch.setenv("LOCALE", "es_AR")
+    en_rupias = {**_SO, "currency": "INR", "grand_total": 4800}
+
+    texto = notificar._texto_libre(
+        PEDIDO, en_rupias, auto=False, motivos=MOTIVO,
+        detalle="5 x Whole Milk 1 L", lengua=lengua,
+    )
+
+    assert "Total: $4.800,00 INR" in texto, texto
+    # Y el confirmado dice exactamente lo mismo del mismo pedido.
+    assert "$4.800,00 INR" in notificar.texto_confirmacion(
+        en_rupias, "manual", momento="2026-09-05 16:14", lengua=lengua
+    )
+
+
+def test_un_pedido_sin_moneda_no_deja_un_espacio_colgando(monkeypatch):
+    """ERPNext siempre la trae, pero un dict de prueba o un pedido a medio armar
+    no: el total no puede terminar en un espacio suelto."""
+    from app import notificar
+
+    monkeypatch.setenv("LOCALE", "es_AR")
+    sin_moneda = {k: v for k, v in _SO.items() if k != "currency"}
+
+    texto = notificar._texto_libre(
+        PEDIDO, sin_moneda, auto=False, motivos=MOTIVO,
+        detalle="5 x Whole Milk 1 L", lengua=ES,
+    )
+
+    assert "Total: $6.000,00\n" in texto, texto
 
 
 @pytest.mark.parametrize("lengua", IDIOMAS)
