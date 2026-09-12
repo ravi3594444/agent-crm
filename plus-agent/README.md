@@ -1058,6 +1058,14 @@ Prices are invented in both — ask the client for his real ones. The dataset
 only changes the DATA: an English demo also needs `IDIOMA_GERENCIA=en` (what
 the owner reads) and `LOCALE=en_US` (the shape of a number).
 
+**Each dataset declares its currency** (`ARS` for the Spanish one, `USD` for
+the English one) and writes it on every Item Price, along with the UOM. The
+script **refuses to seed** when the price list is in another currency, because
+nothing about that combination raises an error by itself: 1.20 in a peso list
+is a plausible price, and the catalog silently becomes a thousand times
+cheaper than every ceiling in `AUTO_CONFIRM_MAX`. Seed the English dataset
+against a USD price list, and point `AUTO_CONFIRM_PRICE_LIST` at it.
+
 ## WhatsApp response and delivery contract
 
 The HTTP `200` returned to Meta acknowledges the webhook and is invisible to

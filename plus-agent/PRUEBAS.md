@@ -165,6 +165,12 @@ ERPNEXT_API_KEY=<setup-key> ERPNEXT_API_SECRET=<setup-secret> \
 and codes. `IDIOMA_GERENCIA=en` and `LOCALE=en_US` are what turn the messages,
 the buttons and the amounts around it — the catalog alone does not.
 
+The English prices are in dollars, so the price list has to be in **USD**. The
+script aborts with `ABORTADO: la lista de precios ... está en ARS` if it is
+not, before writing a single price: a dollar catalog loaded into a peso list
+is not an error anywhere, it is a catalog a thousand times cheaper than every
+`AUTO_CONFIRM_*` ceiling.
+
 **Now the important part — open ERPNext in the browser and click Submit on
 that Stock Reconciliation.** If it fails, tell me the exact error message.
 That tells me whether your instance needs `expense_account` or a different
