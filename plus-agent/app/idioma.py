@@ -992,20 +992,20 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "¿Confirmo el ajuste?",
         EN: "Shall I apply the adjustment?",
     },
-    # Las dos respuestas al modelo. El NOMBRE del botón queda en español en
-    # las dos versiones a propósito: es la etiqueta que Meta tiene registrada
-    # y que el dueño va a ver literalmente en la pantalla, así que decirle
-    # «tap *Confirm count*» sería mandarlo a buscar un botón que no existe.
-    # Traducir la etiqueta es del PR de inglés; hasta entonces, esto dice la
-    # verdad sobre lo que hay en la pantalla.
+    # Las dos respuestas al modelo. El NOMBRE del botón se INTERPOLA, no se
+    # escribe: lo que va acá tiene que ser la etiqueta que el dueño ve en la
+    # pantalla, y ahora esa etiqueta la decide `boton.confirmar_conteo`. Escrita
+    # a mano, el día que se tradujo el botón esto lo habría mandado a buscar uno
+    # que no existe — que era exactamente el riesgo que el texto viejo nombraba,
+    # con la etiqueta en español dentro de la versión en inglés.
     "stock.conteo_boton_enviado": {
         ES: (
-            "{resumen} Le mandé el botón *Confirmar conteo*. Hasta que lo "
+            "{resumen} Le mandé el botón *{boton}*. Hasta que lo "
             "toque, el conteo es un borrador y el bot no promete stock de "
             "{producto}."
         ),
         EN: (
-            "{resumen} I sent them the *Confirmar conteo* button. Until they "
+            "{resumen} I sent them the *{boton}* button. Until they "
             "tap it the count is a draft and the bot promises no stock of "
             "{producto}."
         ),
@@ -1025,6 +1025,30 @@ CATALOGO: dict[str, dict[str, str]] = {
     "precio.a_confirmar": {
         ES: "precio a confirmar",
         EN: "price to be confirmed",
+    },
+    # ---------------------------------------------- las etiquetas de botones
+    # LO ÚNICO QUE LEE UNA PERSONA SIN HABER ESCRITO NADA. El aviso de un pedido
+    # pendiente se lo manda el bot al dueño solo, y hasta este PR el cuerpo salía
+    # en su idioma y los botones en español: la única pantalla del producto donde
+    # él no puede haber elegido el idioma con lo que tecleó era justo la que no lo
+    # respetaba.
+    #
+    # CORTAS A PROPÓSITO. `whatsapp.enviar_botones` trunca el título en 20
+    # caracteres SIN AVISAR, así que una etiqueta larga no falla: llega cortada a
+    # la pantalla del dueño. «View details» y «Confirm count» entran con lugar de
+    # sobra, y `tests/test_idioma_salida.py` afirma el largo para que una
+    # traducción futura no lo descubra en vivo.
+    "boton.confirmar": {
+        ES: "Confirmar",
+        EN: "Confirm",
+    },
+    "boton.ver_detalle": {
+        ES: "Ver detalle",
+        EN: "View details",
+    },
+    "boton.confirmar_conteo": {
+        ES: "Confirmar conteo",
+        EN: "Confirm count",
     },
     # ------------------------------------------------ fallback / revisión
     "fallback.error_tecnico": {

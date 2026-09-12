@@ -34,6 +34,19 @@ def _lengua_equipo() -> str:
     return idioma_mod.gerencia()
 
 
+def _boton(clave: str, lengua: str | None = None) -> str:
+    """La etiqueta de un botón, en el idioma del equipo y ya recortada.
+
+    Meta corta el título en 20 caracteres y `whatsapp.enviar_botones` lo hace
+    también, las dos veces en silencio. Recortar acá no arregla eso: lo que lo
+    arregla es que las etiquetas entren, y `tests/test_idioma_salida.py` lo
+    exige para las dos versiones de cada una.
+    """
+    from app import idioma as idioma_mod
+
+    return idioma_mod.t(clave, lengua if lengua is not None else _lengua_equipo())
+
+
 def _texto_libre(
     nombre: str, so: dict, auto: bool, motivos: str, detalle: str,
     lengua: str | None = None,
@@ -108,13 +121,19 @@ def notificar_equipo(
     # A generic ERPNext Sales Order has no durable "rejected draft" state.
     # Offer only actions whose state transition we can enforce truthfully.
     acciones = None if auto else [f"ok:{nombre}", f"ver:{nombre}"]
-    texto = _texto_libre(nombre, so, auto, motivos, detalle, _lengua_equipo())
+    lengua = _lengua_equipo()
+    texto = _texto_libre(nombre, so, auto, motivos, detalle, lengua)
+    # El `id` es el payload que parsea el router y NO se traduce nunca; el
+    # `title` es lo único que lee el dueño, y es lo que estaba en español aunque
+    # el cuerpo del aviso saliera en inglés. Éste es además el único camino del
+    # producto en que él recibe algo sin haber escrito nada, así que su idioma no
+    # puede salir de lo que tecleó: sale del ajuste.
     botones = (
         None
         if auto
         else [
-            {"id": f"ok:{nombre}", "title": "Confirmar"},
-            {"id": f"ver:{nombre}", "title": "Ver detalle"},
+            {"id": f"ok:{nombre}", "title": _boton("boton.confirmar", lengua)},
+            {"id": f"ver:{nombre}", "title": _boton("boton.ver_detalle", lengua)},
         ]
     )
 
@@ -543,7 +562,7 @@ def pedir_confirmacion_conteo(telefono: str, nombre: str, texto: str) -> bool:
         whatsapp.enviar_botones(
             telefono,
             texto,
-            [{"id": f"conteo:{nombre}", "title": "Confirmar conteo"}],
+            [{"id": f"conteo:{nombre}", "title": _boton("boton.confirmar_conteo")}],
         )
         return True
     except Exception as exc:
