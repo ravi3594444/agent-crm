@@ -65,7 +65,11 @@ def _texto_libre(
             pedido=nombre,
             cliente=so.get("customer_name") or so.get("customer") or "Cliente",
             detalle=detalle,
-            total=f"{float(so.get('grand_total') or 0):,.2f}",
+            # `pesos`, como TODA la plata que lee una persona. Era la única que
+            # quedaba escrita a mano: `f"{...:,.2f}"` da "1,200.50", que un
+            # argentino lee como un peso veinte, y sin símbolo — justo en el
+            # aviso con el que autoriza el pedido.
+            total=pesos(so.get("grand_total"), 2),
             entrega=so.get("delivery_date")
             or idioma_mod.t("gerencia.sin_fecha", lengua),
         ),

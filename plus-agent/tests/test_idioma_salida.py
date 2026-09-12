@@ -267,6 +267,35 @@ def test_la_alerta_de_pedido_pendiente_sale_en_el_idioma_del_equipo(lengua):
 
 
 @pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_total_del_aviso_lo_escribe_pesos_y_no_python(lengua, monkeypatch):
+    """El único monto del producto que no pasaba por `formato.pesos`.
+
+    Salía de un `f"{...:,.2f}"` escrito a mano, o sea "6,000.00": sin símbolo, y
+    con el punto y la coma al revés de como los lee un argentino — un peso
+    veinte en la pantalla en la que el dueño autoriza seis mil. Que sea el aviso
+    de pedido pendiente es lo que lo hace caro: es el único mensaje que recibe
+    sin haber escrito nada.
+
+    Se afirma con las DOS formas de número, porque una sola no distingue el bug:
+    con `LOCALE=en_US` los dígitos crudos coinciden con los correctos y lo único
+    que los separa es el símbolo.
+    """
+    from app import notificar
+
+    for locale, esperado, crudo in (
+        ("es_AR", "Total: $6.000,00", "6,000.00"),
+        ("en_US", "Total: $6,000.00", "Total: 6,000.00"),
+    ):
+        monkeypatch.setenv("LOCALE", locale)
+        texto = notificar._texto_libre(
+            PEDIDO, _SO, auto=False, motivos=MOTIVO,
+            detalle="5 x Whole Milk 1 L", lengua=lengua,
+        )
+        assert esperado in texto, texto
+        assert crudo not in texto, texto
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
 def test_la_alerta_de_auto_confirmado_no_pide_responder(lengua):
     from app import notificar
 
