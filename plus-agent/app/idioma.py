@@ -1026,6 +1026,20 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "precio a confirmar",
         EN: "price to be confirmed",
     },
+    # ------------------------------------------------ los días de la semana
+    # EL VALOR GUARDADO ES EL ESPAÑOL, siempre: "lunes,viernes" es lo que hay en
+    # el almacén de cada despliegue, lo que parsea app/excepciones.py y lo que
+    # escribió la auditoría durable. Estas claves son SÓLO para mostrarlo —
+    # `limites.mostrar()`—, nunca para guardarlo. Un día traducido que volviera
+    # al almacén dejaría de matchear, que es la mitad de la regla que hace que
+    # aceptar «monday» no cueste una migración.
+    "dia.lunes": {ES: "lunes", EN: "Monday"},
+    "dia.martes": {ES: "martes", EN: "Tuesday"},
+    "dia.miercoles": {ES: "miércoles", EN: "Wednesday"},
+    "dia.jueves": {ES: "jueves", EN: "Thursday"},
+    "dia.viernes": {ES: "viernes", EN: "Friday"},
+    "dia.sabado": {ES: "sábado", EN: "Saturday"},
+    "dia.domingo": {ES: "domingo", EN: "Sunday"},
     # ---------------------------------------------- las etiquetas de botones
     # LO ÚNICO QUE LEE UNA PERSONA SIN HABER ESCRITO NADA. El aviso de un pedido
     # pendiente se lo manda el bot al dueño solo, y hasta este PR el cuerpo salía

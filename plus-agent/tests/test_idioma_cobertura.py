@@ -482,7 +482,7 @@ def test_el_catalogo_cubre_las_categorias_de_la_migracion():
     categorias = {clave.split(".")[0] for clave in idioma.CATALOGO}
     for esperada in ("ack", "fallback", "pedido", "gerencia", "entrega",
                      "codigo", "accion", "sistema", "stock", "precio", "idioma",
-                     "boton"):
+                     "boton", "dia"):
         assert esperada in categorias, f"falta {esperada}"
 
 

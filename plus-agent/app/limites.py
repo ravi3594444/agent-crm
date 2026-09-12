@@ -569,6 +569,37 @@ _ORDEN_DIAS = (
     "domingo",
 )
 _DIAS_SEMANA = {nombre: indice for indice, nombre in enumerate(_ORDEN_DIAS)}
+
+# CÓMO LO ESCRIBE UNA PERSONA, y por qué lo guardado sigue siendo lo de arriba.
+#
+# Un dueño que lee en inglés no podía configurar NINGUNA de las tres reglas de
+# días —ENTREGA_DIAS, ENTREGA_EXCEPCION_DIAS y RETIRO_LOCAL_DIAS— porque
+# "delivery days monday,friday" moría en «"monday" no es un día de la semana».
+#
+# Lo que se guarda NO cambia: "lunes,viernes" en los dos casos. Es la decisión
+# entera de este cambio. El valor normal es lo que ya está en el almacén de cada
+# despliegue, lo que `app/excepciones.py` parsea, lo que la auditoría durable
+# escribió y lo que dicen los mensajes que ya salieron; traducir el valor
+# guardado sería migrar todo eso para que un owner pueda teclear otra palabra.
+# Acá se amplía lo que se ACEPTA, y `mostrar()` traduce a la salida.
+#
+# Las abreviaturas son las que una persona escribe de verdad (mon, tue, tues,
+# wed, thu, thurs, fri, sat, sun) y los plurales que salen solos al dictar una
+# lista ("mondays and fridays"). No se inventan abreviaturas en español: el
+# español ya andaba entero y agregarle formas nuevas es superficie sin pedido.
+_DICHOS_EN = {
+    "lunes": ("monday", "mondays", "mon"),
+    "martes": ("tuesday", "tuesdays", "tue", "tues"),
+    "miercoles": ("wednesday", "wednesdays", "wed", "weds"),
+    "jueves": ("thursday", "thursdays", "thu", "thur", "thurs"),
+    "viernes": ("friday", "fridays", "fri"),
+    "sabado": ("saturday", "saturdays", "sat"),
+    "domingo": ("sunday", "sundays", "sun"),
+}
+_DIAS_DICHOS = {canonico: canonico for canonico in _ORDEN_DIAS}
+for _canonico, _formas in _DICHOS_EN.items():
+    for _forma in _formas:
+        _DIAS_DICHOS[_forma] = _canonico
 _HORA_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
@@ -860,24 +891,31 @@ def _bool(defi: Definicion, crudo: str) -> bool:
 
 
 def _dias(defi: Definicion, crudo: str) -> str:
-    """"Martes y viernes" -> "martes,viernes". Deterministic, no judgement.
+    """"Martes y viernes" y "tuesday and friday" -> "martes,viernes".
 
-    Separators are commas, whitespace and the word "y", because that is how a
-    person writes a list. Anything that is not a weekday is refused by name:
-    silently dropping it would schedule a round the owner did not ask for.
+    Deterministic, no judgement. Separators are commas, whitespace and the
+    words "y" and "and", because that is how a person writes a list in each
+    language. Anything that is not a weekday is refused by name: silently
+    dropping it would schedule a round the owner did not ask for.
+
+    THE STORED VALUE IS ALWAYS THE SPANISH ONE. Accepting a second vocabulary
+    is not storing a second one: what goes to the store is the normal form that
+    every deployment already has, that app/excepciones.py reads and that the
+    durable audit wrote. `mostrar()` is what translates it on the way out.
     """
-    texto = _sin_tildes(crudo).replace(" y ", ",")
+    texto = _sin_tildes(crudo).replace(" y ", ",").replace(" and ", ",")
     partes = [parte for parte in re.split(r"[,\s]+", texto) if parte]
     if not partes:
         raise LimiteError(f"«{defi.alias[0]}» está vacío: decime qué días")
     elegidos: set[str] = set()
     for parte in partes:
-        if parte not in _DIAS_SEMANA:
+        canonico = _DIAS_DICHOS.get(parte)
+        if canonico is None:
             raise LimiteError(
                 f"«{parte}» no es un día de la semana. Van así: "
                 f"{', '.join(_ORDEN_DIAS)}"
             )
-        elegidos.add(parte)
+        elegidos.add(canonico)
     return ",".join(dia for dia in _ORDEN_DIAS if dia in elegidos)
 
 
@@ -992,6 +1030,21 @@ def mostrar(nombre: str, valor: object, en_idioma: str | None = None) -> str:
         elegido = idioma_mod.normalizar(crudo)
         if elegido:
             return idioma_mod.nombre(elegido, en_idioma)
+    # Un día SÍ es prosa, aunque se guarde como valor. "lunes,viernes" es lo que
+    # está en el almacén en todos los despliegues y lo que se sigue guardando; lo
+    # que lee el dueño es "Monday, Friday" si lee en inglés. La traducción es acá
+    # y sólo acá: un día traducido que volviera al almacén dejaría de matchear en
+    # app/excepciones.py.
+    if defi is not None and defi.tipo == DIAS and crudo and crudo != NINGUNO:
+        from app import idioma as idioma_mod
+
+        dias = [d for d in (p.strip() for p in crudo.split(",")) if d]
+        if dias and all(d in _DIAS_SEMANA for d in dias):
+            # Se traduce cada día y NADA MÁS: el separador queda como está
+            # guardado, sin espacio. Lo que cambia acá es el idioma, y un
+            # cambio cosmético escondido adentro de uno de idioma es un cambio
+            # que nadie pidió — y dos tests del camino en español lo dicen.
+            return ",".join(idioma_mod.t(f"dia.{d}", en_idioma) for d in dias)
     return crudo
 
 
