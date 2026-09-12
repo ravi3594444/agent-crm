@@ -440,5 +440,5 @@ def test_la_marca_agenda_sale_del_registro_y_no_de_un_literal() -> None:
     lector deja de encontrar lo que el escritor escribe — que es el agujero que
     `app/marcas.py` existe para cerrar.
     """
-    assert agenda.MARCA == marcas.texto("agenda")
+    assert marcas.texto("agenda") == agenda.MARCA
     assert marcas.marca("agenda").parser is not None
