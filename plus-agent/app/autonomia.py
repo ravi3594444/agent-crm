@@ -45,7 +45,7 @@ import re
 from collections.abc import Collection
 from datetime import datetime, timedelta
 
-from app import entrega, erpnext, idioma, policy, reloj
+from app import entrega, erpnext, idioma, marcas, policy, reloj
 
 DIAS_DEFAULT = 7
 # Techo por lectura. Un pedido deja varios comentarios, así que esto es un
@@ -59,8 +59,16 @@ MAX_PRODUCTOS = 20
 # y el corte es al mostrar, así que se dice cuántas quedaron afuera.
 MAX_GRUPOS = 6
 
-MARCA_REVISION = "Requiere revisión humana:"
-MARCA_RECHAZO = "Rechazado manualmente por"
+# Los dos EN PROSA. Están en el registro como los diez de corchetes, pero
+# marcados `prosa=True`, porque no son lo mismo: un marcador entre corchetes es
+# un formato que el sistema eligió, y éstos son texto que alguien escribió, en
+# español, del que sólo el PREFIJO es contrato. Lo que los ponía peor que a los
+# otros es que la constante estaba acá, del lado del LECTOR, y los que escriben
+# (`tools/pedidos.py`, `decisiones.py`) interpolan el literal a mano: las dos
+# mitades podían separarse sin que se cayera nada. Ahora hay un test que lee el
+# fuente de los dos escritores y se muere si dejan de empezar con este texto.
+MARCA_REVISION = marcas.texto("revision_humana")
+MARCA_RECHAZO = marcas.texto("rechazo_manual")
 
 _FUENTE = re.compile(r"fuente=(?P<fuente>.+?)\s*$", re.MULTILINE)
 
@@ -153,31 +161,28 @@ def _creacion(fila: dict) -> datetime | None:
     )
 
 
-def _comentarios(marca: str, desde: datetime) -> tuple[list[dict], bool] | None:
+def _comentarios(nombre: str, desde: datetime) -> tuple[list[dict], bool] | None:
     """(comentarios de la ventana, se llenó el techo). None si no se pudo leer.
 
     El filtro de fecha va también en la consulta —para no traer un año de
     historia— pero se vuelve a aplicar en Python: así el resultado es el mismo
     con o sin un ERPNext que respete el operador.
+
+    EL TECHO ES DE ESTE BARRIDO, no del marcador. Es una ventana de días sobre
+    TODOS los pedidos, así que 500 no se compara con el 5 de `sombra` ni con el
+    20 de `confirmacion`, que son techos POR PEDIDO: son cantidades distintas
+    que tocó llamar igual. Por eso va explícito acá y no sale de la fila.
     """
     try:
-        filas = erpnext.policy_get_list(
-            "Comment",
-            filters=[
-                ["reference_doctype", "=", "Sales Order"],
-                ["content", "like", f"%{marca}%"],
-                ["creation", ">=", desde.strftime("%Y-%m-%d %H:%M:%S")],
-            ],
-            fields=["content", "reference_name", "creation"],
-            limit=MAX_COMENTARIOS + 1,
-            order_by="creation desc",
-        )
+        filas, truncado = marcas.barrer(nombre, desde, techo=MAX_COMENTARIOS)
     except Exception as exc:
-        print(f"[autonomia] no pude leer {marca}: {type(exc).__name__}: {exc}")
+        print(
+            f"[autonomia] no pude leer {marcas.texto(nombre)}: "
+            f"{type(exc).__name__}: {exc}"
+        )
         return None
-    truncado = len(filas) > MAX_COMENTARIOS
     dentro = []
-    for fila in filas[:MAX_COMENTARIOS]:
+    for fila in filas:
         momento = _creacion(fila)
         if momento is None or momento >= desde:
             # Un `creation` ilegible se cuenta: descartarlo bajaría el número
@@ -192,9 +197,8 @@ def confirmaciones(dias: int = DIAS_DEFAULT) -> dict | None:
     Un pedido con dos marcas cuenta una vez: se toma la más vieja, igual que
     `confirmacion._desde_erpnext`, que es la que fija el plazo de cancelación.
     """
-    from app import confirmacion
 
-    leido = _comentarios(confirmacion.MARCA, _desde(dias))
+    leido = _comentarios("confirmacion", _desde(dias))
     if leido is None:
         return None
     filas, truncado = leido
@@ -228,7 +232,7 @@ def rechazos(dias: int = DIAS_DEFAULT) -> dict | None:
     decirlo. Nombrar la bandera y tirarla dejaba el único número de este módulo
     que se informaba como exacto sin poder saberlo.
     """
-    leido = _comentarios(MARCA_RECHAZO, _desde(dias))
+    leido = _comentarios("rechazo_manual", _desde(dias))
     if leido is None:
         return None
     filas, truncado = leido
@@ -245,7 +249,7 @@ def sombras(dias: int = DIAS_DEFAULT) -> dict | None:
     """
     from app import sombra as sombra_mod
 
-    leido = _comentarios(sombra_mod.MARCA, _desde(dias))
+    leido = _comentarios("sombra", _desde(dias))
     if leido is None:
         return None
     filas, truncado = leido
@@ -316,7 +320,7 @@ def revisiones(
     freno que ya no está; uno recortado hace subir un límite que no había que
     subir.
     """
-    leido = _comentarios(MARCA_REVISION, _desde(dias))
+    leido = _comentarios("revision_humana", _desde(dias))
     if leido is None:
         return None
     filas, truncado = leido

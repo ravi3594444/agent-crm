@@ -30,7 +30,7 @@ from __future__ import annotations
 import os
 import time
 
-from app import confirmacion, erpnext, idioma, solicitudes, telefono
+from app import confirmacion, erpnext, idioma, marcas, solicitudes, telefono
 from app.locks import CoordinationError, distributed_lock
 from app.outbound_status import (
     has_accepted,
@@ -52,7 +52,11 @@ _ESTADO_SIN_RESERVA = "Closed"
 # Stamped into the remarks of every Delivery Note this system prepares, so
 # "despreparar" can tell a draft the agent created from one a person made by
 # hand in ERPNext. A draft without it is never touched.
-MARCA_REMITO_AGENTE = "[remito-preparado-por-agente]"
+#
+# El único de los diez que NO vive en un comentario: va en un CAMPO del
+# documento, así que ninguna consulta de Comment lo encuentra. El registro lo
+# dice (`portador=CAMPO`) en vez de dejar que se descubra.
+MARCA_REMITO_AGENTE = marcas.texto("remito_agente")
 
 
 def _resultado(ok: bool, aviso_cliente: bool, detalle: str) -> dict:
@@ -608,7 +612,7 @@ def _remito_intacto(remito: dict, so: dict, nombre_so: str) -> tuple[bool, str]:
     """Whether this draft is one the agent prepared and nobody has touched."""
     if int(remito.get("docstatus") or 0) != 0:
         return False, "ya no es un borrador"
-    if MARCA_REMITO_AGENTE not in str(remito.get("remarks") or ""):
+    if not marcas.en_campo("remito_agente", remito):
         return False, "no lo preparó el agente"
     if str(remito.get("customer") or "").strip() != str(so.get("customer") or "").strip():
         return False, "el cliente del remito no es el del pedido"

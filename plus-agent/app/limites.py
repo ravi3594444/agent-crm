@@ -35,14 +35,14 @@ from dataclasses import dataclass
 
 from redis.exceptions import RedisError
 
-from app import erpnext, locks, reloj
+from app import erpnext, locks, marcas, reloj
 from app import telefono as telefono_mod
 
 # Marca de los comentarios de auditoría en ERPNext. Redis no puede contestar
 # «¿me borraron?»: un almacén vacío es idéntico a uno recién instalado. La
 # copia durable de cada cambio vive en ERPNext, así que un almacén vacío CON
 # cambios registrados es pérdida de datos, no una instalación nueva.
-MARCA_DURABLE = "[limite]"
+MARCA_DURABLE = marcas.texto("limite")
 # Marca APARTE para las reglas de entrega, y en esto está TODO el punto de
 # haber separado los dos registros. _hubo_cambios_durables() le pregunta a
 # ERPNext por MARCA_DURABLE para distinguir «nunca se configuró» de «se perdió
@@ -52,14 +52,14 @@ MARCA_DURABLE = "[limite]"
 # armado ese fusible para siempre, y un flush de Redis el mes que viene frenaba
 # las ventas por un cambio de horario. Son dos hechos distintos y se anotan
 # distinto.
-MARCA_DURABLE_ENTREGA = "[entrega]"
+MARCA_DURABLE_ENTREGA = marcas.texto("entrega")
 # Y una TERCERA marca para el idioma, por la misma razón que la de entrega es
 # distinta de la de límites: son hechos distintos y se anotan distinto. Un
 # cambio de idioma no puede armar el fusible que frena las ventas, y un flush
 # de Redis no puede dejar al sistema mudo esperando que alguien reconfigure un
 # idioma. Perder el idioma cuesta una respuesta en el otro idioma; perder un
 # límite cuesta un pedido que se confirma solo. No se comparte la marca.
-MARCA_DURABLE_IDIOMA = "[idioma]"
+MARCA_DURABLE_IDIOMA = marcas.texto("idioma")
 DURABLE_CACHE_SEGUNDOS = 60.0
 
 CLAVE_VALORES = "plus-agent:limites"
@@ -616,25 +616,23 @@ _durable_cache_entrega: tuple[float, bool] | None = None
 _durable_cache_idioma: tuple[float, bool] | None = None
 
 
-def _consultar_marca(marca: str, queja: str) -> bool:
+def _consultar_marca(nombre: str, queja: str) -> bool:
     """¿Hay en ERPNext algún comentario de auditoría con esa marca?
 
-    Sin cachear: los dos que preguntan tienen su propio caché, porque una marca
+    Sin cachear: los tres que preguntan tienen su propio caché, porque una marca
     puede estar y la otra no y ésa es exactamente la distinción que importa.
+
+    La consulta la comparte `app/marcas.py`; la POLÍTICA DE ERROR se queda acá,
+    y es la razón de que el lector compartido deje salir la excepción en vez de
+    contestar por todos. Los tres que llaman contestan distinto al «no pude
+    averiguarlo»: límites LEVANTA —y con eso no se auto-confirma nada—, entrega
+    devuelve True y idioma devuelve False. Un lector que eligiera una de las
+    tres sería un cambio de comportamiento con plata atada.
     """
     try:
-        filas = erpnext.policy_get_list(
-            "Comment",
-            filters=[
-                ["reference_doctype", "=", "Company"],
-                ["content", "like", f"%{marca}%"],
-            ],
-            fields=["name"],
-            limit=1,
-        )
+        return marcas.existe(nombre)
     except erpnext.ERPNextError as exc:
         raise LimiteError(queja) from exc
-    return bool(filas)
 
 
 def _hubo_cambios_durables() -> bool:
@@ -653,7 +651,7 @@ def _hubo_cambios_durables() -> bool:
     if _durable_cache and _durable_cache[0] > ahora:
         return _durable_cache[1]
     hubo = _consultar_marca(
-        MARCA_DURABLE,
+        "limite",
         "no pude verificar en ERPNext si los límites se configuraron antes",
     )
     _durable_cache = (ahora + DURABLE_CACHE_SEGUNDOS, hubo)
@@ -678,7 +676,7 @@ def _hubo_cambios_durables_entrega() -> bool:
     if _durable_cache_entrega and _durable_cache_entrega[0] > ahora:
         return _durable_cache_entrega[1]
     try:
-        hubo = _consultar_marca(MARCA_DURABLE_ENTREGA, "entrega no verificable")
+        hubo = _consultar_marca("entrega", "entrega no verificable")
     except LimiteError:
         print(
             "[limites] no pude verificar en ERPNext si las reglas de entrega "
@@ -716,7 +714,7 @@ def _hubo_cambios_durables_idioma() -> bool:
     if _durable_cache_idioma and _durable_cache_idioma[0] > ahora:
         return _durable_cache_idioma[1]
     try:
-        hubo = _consultar_marca(MARCA_DURABLE_IDIOMA, "idioma no verificable")
+        hubo = _consultar_marca("idioma", "idioma no verificable")
     except LimiteError:
         print(
             "[limites] no pude verificar en ERPNext si el idioma se fijó antes; "
