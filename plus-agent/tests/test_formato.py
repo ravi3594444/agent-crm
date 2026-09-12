@@ -221,3 +221,46 @@ def test_ver_pedido_muestra_montos_con_miles_argentinos(
     # Las cantidades siguen siendo cantidades, no plata.
     assert "10 x Queso cremoso" in result
     assert "2.5 x MANTECA" in result
+
+
+# --- la tabla que se fija ANTES de cambiar la implementación ----------------
+
+# POR QUÉ ESTA TABLA EXISTE
+# `pesos` pasó de dar vuelta los separadores a mano a `babel.numbers.
+# format_currency`. Un cambio así se defiende de una sola manera: fijar la
+# salida EXACTA de hoy, byte a byte, para cada caso que ya había, y recién
+# entonces cambiar el adentro. Si Babel hubiera diferido en un espacio o en la
+# posición del símbolo, esta tabla lo decía antes del swap y no en producción.
+#
+# Cada fila de acá salía ya de un test de arriba: la tabla no inventa casos,
+# los junta para que el swap tenga UN lugar donde fallar. Los de arriba se
+# quedan porque dicen POR QUÉ cada forma importa; ésta dice QUÉ sale.
+PESOS_ES_AR = (
+    (12000, 0, "$12.000"),
+    (98000, 0, "$98.000"),
+    (1234567, 0, "$1.234.567"),
+    (1500.5, 2, "$1.500,50"),
+    (0.5, 2, "$0,50"),
+    (0, 0, "$0"),
+    (999, 0, "$999"),
+    (1000, 0, "$1.000"),
+    (-12000, 0, "-$12.000"),
+    (-1500.5, 2, "-$1.500,50"),
+    (12000.4, 0, "$12.000"),
+    (12000.6, 0, "$12.001"),
+    # Basura y vacíos: valen $0 y no levantan. Un total que no se puede
+    # formatear no puede ser una excepción en el camino de un mensaje.
+    (None, 0, "$0"),
+    ("", 0, "$0"),
+    ("abc", 0, "$0"),
+    ("12000", 0, "$12.000"),
+)
+
+
+@pytest.mark.parametrize("monto, decimales, esperado", PESOS_ES_AR)
+def test_pesos_es_ar_es_identico_byte_a_byte(monto, decimales, esperado) -> None:
+    assert pesos(monto, decimales) == esperado
+
+
+def test_pesos_no_explota_con_un_objeto_cualquiera() -> None:
+    assert pesos(object()) == "$0"
