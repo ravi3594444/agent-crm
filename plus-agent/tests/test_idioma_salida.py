@@ -615,6 +615,74 @@ def test_el_estado_del_sistema_sale_en_el_idioma_del_equipo(lengua, monkeypatch)
 
 
 @pytest.mark.parametrize("lengua", IDIOMAS)
+def test_las_entradas_de_avisos_caidos_salen_enteras_en_el_idioma(lengua, monkeypatch):
+    """Las líneas del registro, que es donde estaban los tres restos.
+
+    Los dos fallbacks —«sin pedido», «sin propósito»— no son un caso raro: son
+    la forma NORMAL de una respuesta fallida a un cliente, que no tiene pedido.
+    Y «— destinatario {tag}…» salía en TODA entrada con tag, no sólo en ésas;
+    el detector no lo veía porque `destinatario` no estaba en `_PALABRAS_ES`,
+    que es la mitad que este PR también arregla.
+    """
+    import json
+
+    from app.tools import operaciones
+
+    class _ClienteFalso:
+        def lrange(self, clave, desde, hasta):
+            return [
+                json.dumps({"order_name": "SAL-ORD-2026-00042",
+                            "purpose": "staff_order_pending",
+                            "destinatario": "a1b2c3d4e5"}),
+                # La entrada sin pedido ni propósito: los dos fallbacks juntos.
+                json.dumps({"destinatario": "f6g7h8i9"}),
+                "esto no es json",
+            ]
+
+    monkeypatch.setattr(operaciones.outbound_status, "cliente", _ClienteFalso)
+
+    lineas, problema = operaciones._entradas_de_avisos_caidos(10, lengua)
+
+    assert len(lineas) == 2, lineas
+    assert "SAL-ORD-2026-00042" in lineas[-1]
+    assert problema, "la entrada ilegible se cuenta y se dice"
+    todo = "\n".join(lineas) + "\n" + problema
+    if lengua == EN:
+        assert restos_en_espanol(todo, ("SAL-ORD-2026-00042", "staff_order_pending")) == []
+        assert "no order" in todo and "no purpose" in todo
+        assert "recipient a1b2c3d4" in todo
+    else:
+        assert "sin pedido" in todo and "sin propósito" in todo
+        assert "destinatario a1b2c3d4" in todo
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_no_autorizado_de_los_informes_sale_en_el_idioma(lengua, monkeypatch):
+    """Era una constante de módulo, evaluada al importar: el único string del
+    archivo que no podía tener idioma porque se resolvía antes de que hubiera
+    uno. Los dos informes devuelven esta misma rama."""
+    from app.tools import operaciones
+
+    monkeypatch.setattr(idioma, "gerencia", lambda: lengua)
+
+    def _prohibido(config):
+        from app.runtime_context import RuntimeContextError
+
+        raise RuntimeContextError("no")
+
+    monkeypatch.setattr(operaciones, "require_management", _prohibido)
+
+    for informe in (operaciones.estado_del_sistema, operaciones.ver_avisos_fallidos):
+        texto = informe.func(_config_gerencia())
+        assert texto.strip()
+        if lengua == EN:
+            assert restos_en_espanol(texto) == [], texto
+            assert "not authorized" in texto
+        else:
+            assert "no está autorizado" in texto
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
 def test_los_avisos_fallidos_salen_en_el_idioma_del_equipo(lengua, monkeypatch):
     from app.tools import operaciones
 
@@ -625,7 +693,9 @@ def test_los_avisos_fallidos_salen_en_el_idioma_del_equipo(lengua, monkeypatch):
         lambda: {"avisos_en_dead_letter": 0, "respuestas_en_dead_letter": 0,
                  "entregas_fallidas": 0},
     )
-    monkeypatch.setattr(operaciones, "_entradas_de_avisos_caidos", lambda m: ([], ""))
+    monkeypatch.setattr(
+        operaciones, "_entradas_de_avisos_caidos", lambda m, lengua=None: ([], "")
+    )
     texto = operaciones.ver_avisos_fallidos.func(_config_gerencia())
     if lengua == EN:
         assert "Communication that did not arrive:" in texto
@@ -814,20 +884,30 @@ def test_una_excepcion_sin_clave_sigue_saliendo_con_su_texto() -> None:
     assert limites.motivo(limites.LimiteError("sin clave"), EN) == "sin clave"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG ABIERTO: app/tools/operaciones.py::_cuenta no toma `lengua` y "
-    "devuelve el centinela español DESCONOCIDO dentro del estado en inglés, "
-    "aunque el catálogo ya tiene sistema.desconocido con EN='UNKNOWN'. Ver #15.",
-)
-def test_el_centinela_de_contador_ilegible_sale_traducido() -> None:
+# El otro `xfail(strict=True)` que se fue con su bug: `_cuenta` ya toma idioma.
+@pytest.mark.parametrize("ilegible", [None, -1, "no es un número", object()])
+def test_el_centinela_de_contador_ilegible_sale_traducido(ilegible) -> None:
     """`DESCONOCIDO` es la palabra que significa «no lo leas como cero».
 
-    O sea justo la que hay que entender, y sale en español dentro de un mensaje
-    en inglés. El catálogo ya tiene la fila —`sistema.desconocido`, EN
-    «UNKNOWN»— y el mismo archivo la usa bien dos líneas más arriba; lo que
-    falta es que `_cuenta` reciba el idioma.
+    O sea justo la que hay que entender, y salía en español adentro de un
+    informe en inglés. El catálogo ya tenía la fila —`sistema.desconocido`, EN
+    «UNKNOWN»— y el mismo archivo la usaba bien dos líneas más arriba; lo que
+    faltaba era que `_cuenta` recibiera el idioma.
+
+    Las cuatro formas de «no pude leer» dan el mismo centinela: None, el -1 que
+    usa el contador, algo que no es número y algo que no es nada.
     """
     from app.tools import operaciones
 
-    assert restos_en_espanol(operaciones._cuenta(None)) == []
+    assert operaciones._cuenta(ilegible, EN) == "UNKNOWN"
+    assert operaciones._cuenta(ilegible, ES) == "DESCONOCIDO"
+    assert restos_en_espanol(operaciones._cuenta(ilegible, EN)) == []
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_un_contador_que_sí_se_pudo_leer_es_el_mismo_en_los_dos_idiomas(lengua) -> None:
+    """Un número es un dato: no tiene idioma."""
+    from app.tools import operaciones
+
+    assert operaciones._cuenta(0, lengua) == "0"
+    assert operaciones._cuenta(17, lengua) == "17"

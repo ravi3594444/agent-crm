@@ -989,6 +989,20 @@ CATALOGO: dict[str, dict[str, str]] = {
     # ------------------------------------------------ estado del sistema
     # El informe de estado. Los NOMBRES de los componentes (Redis, ERPNext,
     # WhatsApp) son propios y no se traducen; sí la prosa alrededor.
+    # La rama de «no autorizado» de los dos informes. Era una constante de
+    # módulo en app/tools/operaciones.py —evaluada al importar, o sea antes de
+    # que hubiera un idioma que consultar— y por eso era el único string de ese
+    # archivo sin clave.
+    "sistema.sin_permiso": {
+        ES: (
+            "Ese número no está autorizado para ver el estado del sistema. No "
+            "consulté nada."
+        ),
+        EN: (
+            "That number is not authorized to see the system status. I checked "
+            "nothing."
+        ),
+    },
     "sistema.titulo": {ES: "Estado del sistema:", EN: "System status:"},
     "sistema.responde": {ES: "responde", EN: "responding"},
     "sistema.no_disponible": {ES: "NO DISPONIBLE", EN: "UNAVAILABLE"},
@@ -1092,6 +1106,15 @@ CATALOGO: dict[str, dict[str, str]] = {
             "\nEach one has an ERPNext task to contact them by hand. Nothing is "
             "retried from here."
         ),
+    },
+    # Los tres restos del informe de avisos caídos. Los dos primeros se alcanzan
+    # en la forma más normal de una respuesta fallida a un cliente: no tiene
+    # pedido. El tercero salía en TODA entrada con tag, no sólo en ésas.
+    "sistema.sin_pedido": {ES: "sin pedido", EN: "no order"},
+    "sistema.sin_proposito": {ES: "sin propósito", EN: "no purpose"},
+    "sistema.destinatario": {
+        ES: " — destinatario {tag}…",
+        EN: " — recipient {tag}…",
     },
     "sistema.ilegibles": {
         ES: "{n} entrada(s) ilegible(s) omitida(s)",
