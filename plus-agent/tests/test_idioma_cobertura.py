@@ -497,7 +497,7 @@ def test_la_lista_de_intencionalmente_sin_traducir_esta_documentada():
     from app import marcas
 
     assert set(permitido.MARCAS_DURABLES) == {m.texto for m in marcas.MARCAS.values()}
-    assert len(permitido.MARCAS_DURABLES) == 12
+    assert len(permitido.MARCAS_DURABLES) == 13
     assert permitido.ERPNEXT_CANONICO
     assert permitido.COMANDOS_ES
     # Los comandos en inglés se AGREGARON; los de siempre siguen.

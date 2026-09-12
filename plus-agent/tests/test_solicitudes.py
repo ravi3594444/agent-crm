@@ -3889,12 +3889,13 @@ def test_readiness_watches_exactly_the_notices_a_sweep_fires() -> None:
 
     Los otros dos avisos al cliente (`solicitud_oferta`, `solicitud_rechazo`)
     salen en la misma vuelta en que el cliente escribió, así que su ventana
-    está abierta y no necesitan plantilla. Estos cinco los dispara un barrido
-    horas después, y son los únicos así. Este test ya hizo su trabajo una vez:
-    se puso rojo cuando `app/pendientes.py` agregó sus dos, que era justo lo
-    que había que no dejar pasar.
+    está abierta y no necesitan plantilla. Estos SEIS los dispara un barrido
+    horas después, y son los únicos así. Este test ya hizo su trabajo dos
+    veces: se puso rojo cuando `app/pendientes.py` agregó sus dos, y otra vez
+    cuando `app/agenda.py` agregó el aviso previo a la entrega. Las dos veces
+    era justo lo que había que no dejar pasar.
     """
-    from app import pendientes, readiness
+    from app import agenda, pendientes, readiness
 
     assert set(readiness.PLANTILLAS_FUERA_DE_VENTANA) == {
         solicitudes.PLANTILLA_VENCIDA,
@@ -3902,6 +3903,7 @@ def test_readiness_watches_exactly_the_notices_a_sweep_fires() -> None:
         solicitudes.PLANTILLA_REVISION_VENCIDA,
         pendientes.PLANTILLA_RECORDATORIO,
         pendientes.PLANTILLA_CERRADO,
+        agenda.PLANTILLA_AVISO_ENTREGA,
     }
     # Y todas están en la lista que readiness recorre.
     assert set(readiness.PLANTILLAS_FUERA_DE_VENTANA) <= set(readiness.PLANTILLAS)

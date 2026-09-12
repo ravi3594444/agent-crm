@@ -139,7 +139,17 @@ IDIOMA = "idioma"
 # whatever the .env said. This sentinel stores, resolves and reads back as
 # "none", which is what the owner actually asked for.
 NINGUNO = "-"
-_NINGUNO_DICHO = frozenset({"-", "ninguno", "ninguna", "nada", "no", "vacio", "vacío"})
+# Las formas de decir "apagalo". Las inglesas están porque el primer límite con
+# alias en inglés (AVISO_ANTES_DE_ENTREGA_HORAS) es `opcional`, y sin esto el
+# dueño que lee en inglés tendría una forma de ENCENDERLO y ninguna de apagarlo:
+# `none`/`off` caían en `_numero` y contestaban «no es un número». La asimetría
+# es la misma que `_VERDADEROS`/`_FALSOS` ya resolvieron para los booleanos.
+_NINGUNO_DICHO = frozenset(
+    {
+        "-", "ninguno", "ninguna", "nada", "no", "vacio", "vacío",
+        "none", "off", "never", "nothing",
+    }
+)
 
 # Where a delivery value comes from when the store was WIPED: not the owner,
 # not the bootstrap environment, not a default — NOTHING is in effect, because
@@ -322,6 +332,42 @@ LIMITES: dict[str, Definicion] = {
         # Más de dos días no es un recordatorio: el cliente ya se fue a otro
         # proveedor y el aviso llega para confirmárselo.
         maximo=48.0,
+        opcional=True,
+    ),
+    "AVISO_ANTES_DE_ENTREGA_HORAS": Definicion(
+        nombre="AVISO_ANTES_DE_ENTREGA_HORAS",
+        alias=(
+            # `alias[0]` es el nombre que se muestra en TODOS lados, y por eso
+            # va en español (tests/test_idioma_salida.py lo trata como un dato
+            # legítimamente español). Los ingleses van después, nunca primero.
+            #
+            # Ninguno dice sólo «aviso» ni sólo «entrega»: la resolución por
+            # subcadena de `definicion()` es global, y una palabra suelta que ya
+            # resuelve a otro límite pasaría a ser ambigua para el dueño.
+            "aviso antes de la entrega",
+            "aviso previo a la entrega",
+            "horas antes de la entrega",
+            "delivery lead notice",
+            "notice before delivery",
+        ),
+        significado=(
+            "Cuánto antes de la entrega prometida se le avisa al cliente que "
+            "su pedido TODAVÍA no está confirmado. No promete día, ni hora, ni "
+            "precio: repite el plazo que el cliente ya conocía y dice que no "
+            "llegó a confirmarse. Necesita además una hora de reparto "
+            "configurada (ENTREGA_HORA), porque la fecha de entrega de ERPNext "
+            "no tiene hora. En NINGUNO no se avisa nada"
+        ),
+        unidad="h",
+        # NINGUNO, igual que el aviso y el cierre de pendientes, y por el mismo
+        # motivo escrito arriba: entre el deploy y el mensaje que lo apagara
+        # habría clientes recibiendo WhatsApps de una función que nadie armó.
+        # Un valor razonable para arrancar es 3.
+        default=NINGUNO,
+        # Un día. Más que eso no es «antes de la entrega», es otro recordatorio
+        # de que el pedido sigue sin confirmar — y ése ya existe, y es
+        # PENDIENTE_AVISO_HORAS.
+        maximo=24.0,
         opcional=True,
     ),
     "PENDIENTE_CIERRE_HORAS": Definicion(

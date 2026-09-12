@@ -401,6 +401,32 @@ _FILAS = (
             "veces es el error caro de los dos."
         ),
     ),
+    # ----------------------------------------------------------------- agenda
+    #
+    # La lista durable de cosas que vencen más tarde (`app/agenda.py`). Es la
+    # única marca del registro que guarda VARIAS filas vivas por documento: un
+    # pedido puede tener a la vez el aviso al cliente antes de la entrega, el
+    # re-ping al dueño y un seguimiento que pidió el modelo. Por eso se lee
+    # como `[solicitud]` —desc, gana la primera que parsea por id— y no como
+    # `[pendiente-aviso]`, que sólo contesta «¿hay alguno?».
+    Marca(
+        nombre="agenda",
+        texto="[agenda]",
+        doctype="Sales Order",
+        portador=COMENTARIO,
+        lectura=MAS_NUEVA,
+        techo=80,
+        porque_el_techo=(
+            "Cada fila escribe un evento al crearse y otro al terminar, y un "
+            "pedido puede tener varias filas vivas más las que ya terminaron. "
+            "80 son unas veinte filas de historia completa, que es más de lo "
+            "que un pedido junta antes de cerrarse. Se pide desc y gana la "
+            "primera parseable de CADA id: truncar pierde la historia vieja, "
+            "que ya no decide nada, nunca el estado actual — que es el evento "
+            "más nuevo y por lo tanto el primero de la página."
+        ),
+        parseo=JSON,
+    ),
     # ----------------------------------------------------- los dos en prosa
     #
     # NO son iguales a los diez de corchetes, y el registro lo dice con
