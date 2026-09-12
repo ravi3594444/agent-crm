@@ -72,7 +72,18 @@ def mundo(monkeypatch):
     monkeypatch.setattr(locks, "conexion", lambda: falso)
     # Las 18:00 DEL NEGOCIO, que es contra lo que `tick()` compara DIGEST_HORA.
     monkeypatch.setattr(digest, "_ahora", lambda: RELOJ.a_las(18))
-    monkeypatch.setattr(digest, "resumen", lambda dia=None: f"📋 Resumen del {HOY.isoformat()}\n(prueba)")
+    # El doble FECHA lo que le pasan, no lo que el archivo supone. Con
+    # `HOY.isoformat()` escrito acá, el cuerpo salía con la misma fecha siempre y
+    # `enviar()` podía componer el resumen de un día y reclamar otro sin que
+    # nadie lo viera: medido, componer con `dia - 1` dejaba los 2481 tests en
+    # verde. Es el mismo defecto que este archivo fue a buscar —dos relojes que
+    # tienen que coincidir y nada los obliga—, una capa más abajo. Lo encontró
+    # Qodo revisando #31.
+    monkeypatch.setattr(
+        digest,
+        "resumen",
+        lambda dia=None: f"📋 Resumen del {(dia or HOY).isoformat()}\n(prueba)",
+    )
     monkeypatch.setenv("DIGEST_ACTIVO", "true")
     monkeypatch.setenv("DIGEST_HORA", "18:00")
     # Pinned, not inherited: alertar_excepcion's routing IS this flag, and a
@@ -179,7 +190,15 @@ def test_el_dia_que_se_reclama_es_el_del_negocio_y_no_el_del_servidor(
         assert digest.enviar() is True
         assert mundo["redis"].get(digest._clave(date(2026, 9, 7))) is not None
 
-    assert len(mundo["enviados"]) == 2
+    # Y el CUERPO lleva el mismo día que el reclamo, que es la otra mitad y no
+    # se seguía de la primera: `enviar()` saca `dia` una vez y se lo pasa al
+    # reclamo Y a `resumen(dia)`. Afirmar sólo las claves dejaba pasar un resumen
+    # fechado un día y reclamado otro — el dueño recibe el resumen de ayer y el
+    # de hoy queda reclamado y sin salir nunca.
+    cuerpos = [texto for _, texto in mundo["enviados"]]
+    assert len(cuerpos) == 2
+    assert "2026-09-06" in cuerpos[0]
+    assert "2026-09-07" in cuerpos[1]
 
 
 def test_without_redis_nothing_is_claimed_and_nothing_is_sent(mundo):
