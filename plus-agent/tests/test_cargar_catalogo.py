@@ -497,3 +497,92 @@ def test_verificar_reporta_la_deriva_en_las_dos_direcciones(
     assert "- SOBRANTE" in salida
     assert "ERPNext dice 999, el archivo dice 1200" in salida
     sin_red["create_doc"].assert_not_called()
+
+
+# ------------------------------------------------------ lo que encontró Qodo
+
+
+def test_una_lista_de_precios_distinta_a_la_del_runtime_se_rechaza(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El runtime no lee «la lista de precios»: lee EXACTAMENTE la que nombra
+    AUTO_CONFIRM_PRICE_LIST. Cargar en otra es un catálogo invisible."""
+    monkeypatch.setenv("AUTO_CONFIRM_PRICE_LIST", "Lista Mayorista")
+
+    problema = cargar.configuracion_incompatible("Standard Selling", "ARS")
+
+    assert "Standard Selling" in problema and "Lista Mayorista" in problema
+
+
+def test_una_moneda_distinta_a_la_del_runtime_tambien(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AUTO_CONFIRM_PRICE_LIST", raising=False)
+    monkeypatch.setenv("AUTO_CONFIRM_CURRENCY", "USD")
+
+    assert "USD" in cargar.configuracion_incompatible("Standard Selling", "ARS")
+
+
+def test_si_coinciden_no_hay_nada_que_decir(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTO_CONFIRM_PRICE_LIST", "Standard Selling")
+    monkeypatch.setenv("AUTO_CONFIRM_CURRENCY", "ARS")
+
+    assert cargar.configuracion_incompatible("Standard Selling", "ARS") == ""
+
+
+def test_con_la_lista_mal_configurada_no_se_escribe_nada(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sin_red: dict[str, Mock],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _preparar_main(monkeypatch, sin_red, _erp(grupos=set()))
+    monkeypatch.setenv("AUTO_CONFIRM_PRICE_LIST", "Lista Mayorista")
+
+    assert cargar.main([str(_csv(tmp_path, *BIEN)), "--aplicar"]) == 1
+
+    sin_red["create_doc"].assert_not_called()
+    sin_red["pedido_admin"].assert_not_called()
+    assert "NO CARGUÉ NADA" in capsys.readouterr().out
+
+
+def test_los_ajustes_se_buscan_por_renglon_y_no_leyendo_cada_documento(
+    monkeypatch: pytest.MonkeyPatch, sin_red: dict[str, Mock]
+) -> None:
+    """Recorrer las cabeceras obliga a cortar la lista en algún número, y el día
+    que el ajuste que interesa quede afuera de ese corte se duplica el borrador."""
+    lista = sin_red["get_list"]
+    lista.side_effect = lambda doctype, **kw: (
+        [{"parent": "MAT-RECO-2026-00001", "item_code": "LEC-ENT-1L"}]
+        if doctype == "Stock Reconciliation Item"
+        else []
+    )
+
+    actual = cargar.relevar(
+        [_filas()[0]], "Productos Terminados - LP", "Standard Selling"
+    )
+
+    assert actual.ajustes == {"LEC-ENT-1L": "MAT-RECO-2026-00001"}
+    # Ni una lectura de documento completo, y la consulta es a la tabla hija.
+    sin_red["get_doc"].assert_not_called()
+    pedido = next(
+        c for c in lista.call_args_list if c.args[0] == "Stock Reconciliation Item"
+    )
+    assert pedido.kwargs["parent"] == "Stock Reconciliation"
+    assert ["docstatus", "!=", 2] in pedido.kwargs["filters"]
+    assert ["warehouse", "=", "Productos Terminados - LP"] in pedido.kwargs["filters"]
+
+
+def test_un_codigo_con_barra_se_actualiza_en_su_propia_ruta(
+    monkeypatch: pytest.MonkeyPatch, sin_red: dict[str, Mock]
+) -> None:
+    fila = cargar.Fila(2, "LEC/1L", "Leche", "Unidad", Decimal(1200), Decimal(0), "Lacteos")
+    plan = cargar.Plan(items_cambiados=[(fila, {"item_name": "Leche"})])
+    admin = Mock(return_value={})
+    monkeypatch.setattr(cargar.cuentas, "pedido_admin", admin)
+
+    cargar.aplicar(plan, "Dep - LP", "Lácteos Plus SA", "Standard Selling", Decimal(60))
+
+    admin.assert_called_once_with(
+        "PUT", "/api/resource/Item/LEC%2F1L", {"item_name": "Leche"}
+    )

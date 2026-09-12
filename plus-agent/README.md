@@ -1081,17 +1081,33 @@ Reconciliation is refused with a Frappe `ValidationError` — HTTP `417`. Until
 that is fixed no opening stock has ever loaded, and `STOCK_CONFIABLE=true`
 would be a promise with nothing behind it.
 
+Both scripts run **on the host from `plus-agent/`, with the project venv** —
+the same way `make seed` runs the seed. The production image only copies
+`app/`, so `/srv/deploy` does not exist inside the container, and putting
+Administrator-capable scripts in the service image would widen exactly what
+the identity split exists to keep narrow.
+
 ```
-docker compose exec -e ERPNEXT_API_KEY=… -e ERPNEXT_API_SECRET=… \
-    agente python /srv/deploy/cuentas_inventario.py                  # look
-docker compose exec … agente python /srv/deploy/cuentas_inventario.py \
-    --aplicar --probar                                               # fix, and prove it
+ERPNEXT_API_KEY=… ERPNEXT_API_SECRET=… \
+    .venv/bin/python deploy/cuentas_inventario.py                    # look
+ERPNEXT_API_KEY=… ERPNEXT_API_SECRET=… \
+    .venv/bin/python deploy/cuentas_inventario.py --aplicar --probar # fix, and prove it
+```
+
+If all you have is the container, mount the directory for that one run:
+
+```
+docker compose run --rm -v "$PWD/deploy:/srv/deploy:ro" \
+    -e ERPNEXT_API_KEY=… -e ERPNEXT_API_SECRET=… \
+    agente python /srv/deploy/cuentas_inventario.py --aplicar --probar
 ```
 
 It finds the accounts by `account_type`, not by name, because a chart of
 accounts is in whatever language it was installed in. It creates what is
-missing under a group of the same type, and refuses to guess a parent when
-there is none — `--padre-inventario` / `--padre-ajuste` name one. `--probar`
+missing under a group of the same type. It never picks between candidates: if
+no account of that type exists, or if several do, it lists them and stops —
+`--cuenta-inventario` / `--cuenta-ajuste` name the account to use,
+`--padre-inventario` / `--padre-ajuste` the group to create it under. `--probar`
 creates a draft Stock Reconciliation and deletes it again: the validation that
 raised the `417` runs on save, so saving is the only honest proof.
 
@@ -1101,10 +1117,13 @@ stock_inicial, grupo` — and writes Items, Item Prices and one draft Stock
 Reconciliation. `--ejemplo` writes the template.
 
 ```
-docker compose exec … agente python /srv/deploy/cargar_catalogo.py --ejemplo
-docker compose exec … agente python /srv/deploy/cargar_catalogo.py catalogo.csv
-docker compose exec … agente python /srv/deploy/cargar_catalogo.py catalogo.csv --aplicar
-docker compose exec … agente python /srv/deploy/cargar_catalogo.py catalogo.csv --verificar
+.venv/bin/python deploy/cargar_catalogo.py --ejemplo
+ERPNEXT_API_KEY=… ERPNEXT_API_SECRET=… \
+    .venv/bin/python deploy/cargar_catalogo.py catalogo.csv             # plan only
+ERPNEXT_API_KEY=… ERPNEXT_API_SECRET=… \
+    .venv/bin/python deploy/cargar_catalogo.py catalogo.csv --aplicar
+ERPNEXT_API_KEY=… ERPNEXT_API_SECRET=… \
+    .venv/bin/python deploy/cargar_catalogo.py catalogo.csv --verificar
 ```
 
 A dry run is the default: without `--aplicar` it prints the whole plan and
@@ -1114,7 +1133,11 @@ numbered list naming the line, because a half-loaded catalogue is worse than an
 unloaded one. Re-running with the same file changes nothing; re-running with
 three new rows adds three items. Prices go into the same price list the seed
 uses, read out of `seed_dairy.py` itself rather than written down twice.
-`--verificar` compares in both directions and reports price drift.
+`--verificar` compares in both directions and reports price drift. If
+`AUTO_CONFIRM_PRICE_LIST` (or `AUTO_CONFIRM_CURRENCY`) names something other
+than what the seed writes to, the load is **refused**: the runtime reads only
+the configured list, so loading anywhere else produces a catalogue the bot
+cannot see a single price of.
 
 ## WhatsApp response and delivery contract
 

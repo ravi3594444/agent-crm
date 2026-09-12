@@ -7,10 +7,22 @@ invocar un mensaje de WhatsApp. Nadie lo cablee después a `app/tools/`: la
 separación de las tres identidades (cliente / gerencia / política) es lo que
 hace que este producto se pueda vender, y esto vive afuera de las tres.
 
-    docker compose exec -e ERPNEXT_API_KEY=... -e ERPNEXT_API_SECRET=... \
-        agente python /srv/deploy/cuentas_inventario.py            # mira
-    docker compose exec ... agente python /srv/deploy/cuentas_inventario.py \
-        --aplicar --probar                                         # arregla
+Se corre DESDE `plus-agent/`, en el host y con el venv del proyecto — igual
+que `make seed`. La imagen de producción sólo copia `app/`, así que dentro del
+contenedor no existe `/srv/deploy`; y poner ahí scripts que pueden escribir con
+credenciales de Administrator sería ensanchar justo lo que este archivo se
+cuida de no ensanchar.
+
+    ERPNEXT_API_KEY=... ERPNEXT_API_SECRET=... \
+        .venv/bin/python deploy/cuentas_inventario.py            # mira
+    ERPNEXT_API_KEY=... ERPNEXT_API_SECRET=... \
+        .venv/bin/python deploy/cuentas_inventario.py --aplicar --probar
+
+Si sólo tenés el contenedor, montale el directorio para esa corrida y nada más:
+
+    docker compose run --rm -v "$PWD/deploy:/srv/deploy:ro" \
+        -e ERPNEXT_API_KEY=... -e ERPNEXT_API_SECRET=... \
+        agente python /srv/deploy/cuentas_inventario.py --aplicar --probar
 
 EL PROBLEMA QUE ARREGLA
 El paso de stock de `seed_dairy.py` nunca cargó nada: ERPNext contesta 417 al
@@ -47,6 +59,7 @@ import argparse
 import os
 import sys
 from dataclasses import dataclass
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -93,6 +106,18 @@ class Cuenta:
         if self.accion == "falta":
             return "(ninguna)"
         return f"{self.nombre} (nueva, bajo {self.padre})" if self.padre else self.nombre
+
+
+def ruta_recurso(doctype: str, nombre: str | None = None) -> str:
+    """La URL de un documento, con el nombre escapado.
+
+    Un nombre de documento es texto libre: un código de producto con una barra
+    («LEC/1L») pega una ruta que no es la del documento, y uno con `#` o `?` la
+    corta. `app/erpnext.py` escapa con `safe=""` por esta misma razón; esto
+    hace lo mismo para los pedidos que arma este script.
+    """
+    base = f"/api/resource/{quote(doctype, safe='')}"
+    return base if nombre is None else f"{base}/{quote(nombre, safe='')}"
 
 
 def pedido_admin(metodo: str, ruta: str, payload: dict | None = None) -> dict:
@@ -153,7 +178,9 @@ def _cuenta_de_la_empresa(empresa: str, campo: str) -> str:
     return str(erpnext.get_doc("Company", empresa).get(campo) or "").strip()
 
 
-def resolver(empresa: str, campo: str, *, padre: str = "", nombre: str = "") -> Cuenta:
+def resolver(
+    empresa: str, campo: str, *, padre: str = "", nombre: str = "", cuenta: str = ""
+) -> Cuenta:
     """¿Qué cuenta le corresponde a este campo, y hay que hacer algo para tenerla?
 
     No escribe: decide. Así el diagnóstico (sin `--aplicar`) y el arreglo
@@ -163,27 +190,61 @@ def resolver(empresa: str, campo: str, *, padre: str = "", nombre: str = "") -> 
     if actual:
         return Cuenta(campo, actual, actual, "ya está")
 
-    hojas = cuentas_por_tipo(empresa, TIPO[campo], grupo=False)
-    if hojas:
+    if cuenta.strip():
         return Cuenta(
-            campo, "", hojas[0], "se asigna",
-            detalle=f"ya existe en el plan de cuentas (account_type={TIPO[campo]})",
+            campo, "", cuenta.strip(), "se asigna", detalle="la elegiste vos en la línea de comandos"
         )
 
-    destino = padre.strip() or next(iter(cuentas_por_tipo(empresa, TIPO[campo], grupo=True)), "")
+    hojas = cuentas_por_tipo(empresa, TIPO[campo], grupo=False)
+    if len(hojas) == 1:
+        return Cuenta(
+            campo, "", hojas[0], "se asigna",
+            detalle=f"es la única con account_type={TIPO[campo]} en el plan de cuentas",
+        )
+    if len(hojas) > 1:
+        # Elegir "la primera" de una lista que ERPNext no ordena es elegir al
+        # azar en qué rama contable cae TODO el movimiento de stock, y quedaría
+        # escrito en la compañía sin que nadie lo haya decidido.
+        return Cuenta(
+            campo, "", "", "falta",
+            detalle=_elegí(campo, "cuenta", hojas, f"tienen account_type={TIPO[campo]}"),
+        )
+
+    if padre.strip():
+        destino = padre.strip()
+    else:
+        grupos = cuentas_por_tipo(empresa, TIPO[campo], grupo=True)
+        if len(grupos) > 1:
+            return Cuenta(
+                campo, "", "", "falta",
+                detalle=_elegí(campo, "padre", grupos, f"son grupos con account_type={TIPO[campo]}"),
+            )
+        destino = next(iter(grupos), "")
     if not destino:
         return Cuenta(
             campo, "", "", "falta",
             detalle=(
                 f"no hay ninguna cuenta con account_type={TIPO[campo]} en {empresa}, "
                 f"ni hoja ni grupo: decime bajo qué grupo crearla con "
-                f"--padre-{'inventario' if campo == INVENTARIO else 'ajuste'} "
-                f"\"Nombre exacto de la cuenta grupo\""
+                f"--padre-{_sufijo(campo)} \"Nombre exacto de la cuenta grupo\""
             ),
         )
     return Cuenta(
         campo, "", (nombre or NOMBRE_SUGERIDO[campo]).strip(), "se crea y se asigna",
         padre=destino,
+    )
+
+
+def _sufijo(campo: str) -> str:
+    return "inventario" if campo == INVENTARIO else "ajuste"
+
+
+def _elegí(campo: str, flag: str, candidatas: list[str], porque: str) -> str:
+    """El mensaje de «hay varias y no elijo yo», con la lista y el comando."""
+    return (
+        f"hay {len(candidatas)} candidatas y {porque}, así que no elijo yo: "
+        + ", ".join(f"«{c}»" for c in sorted(candidatas))
+        + f". Decime cuál con --{flag}-{_sufijo(campo)} \"Nombre exacto\""
     )
 
 
@@ -207,7 +268,7 @@ def asignar(empresa: str, cambios: dict[str, str]) -> None:
     del doctype puede devolver 200 con el valor viejo adentro. Reportar eso
     como éxito sería justo la mentira que este script existe para no contar.
     """
-    cuerpo = pedido_admin("PUT", f"/api/resource/Company/{empresa}", cambios)
+    cuerpo = pedido_admin("PUT", ruta_recurso("Company", empresa), cambios)
     datos = cuerpo.get("data") if isinstance(cuerpo.get("data"), dict) else {}
     for campo, esperado in cambios.items():
         quedo = str(datos.get(campo) or "").strip()
@@ -275,7 +336,7 @@ def probar_paso_de_stock(empresa: str, deposito: str) -> bool:
     finally:
         if nombre:
             try:
-                pedido_admin("DELETE", f"/api/resource/Stock Reconciliation/{nombre}")
+                pedido_admin("DELETE", ruta_recurso("Stock Reconciliation", nombre))
                 print(f"  ✓ ERPNext ACEPTÓ el borrador {nombre} (y se borró: era la prueba)")
             except erpnext.ERPNextError as exc:
                 print(f"  ✓ ERPNext aceptó el borrador {nombre}, pero no se pudo borrar: {exc}")
@@ -291,8 +352,12 @@ def main(argv: list[str] | None = None) -> int:
 
     padres = {INVENTARIO: opciones.padre_inventario, AJUSTE: opciones.padre_ajuste}
     nombres = {INVENTARIO: opciones.nombre_inventario, AJUSTE: opciones.nombre_ajuste}
+    elegidas = {INVENTARIO: opciones.cuenta_inventario, AJUSTE: opciones.cuenta_ajuste}
     cuentas = [
-        resolver(empresa, campo, padre=padres[campo], nombre=nombres[campo])
+        resolver(
+            empresa, campo,
+            padre=padres[campo], nombre=nombres[campo], cuenta=elegidas[campo],
+        )
         for campo in (INVENTARIO, AJUSTE)
     ]
 
@@ -303,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"      {cuenta.accion}" + (f" — {cuenta.detalle}" if cuenta.detalle else ""))
 
     if any(c.accion == "falta" for c in cuentas):
-        print("\nNo puedo seguir: me falta saber dónde crear una cuenta (ver arriba).")
+        print("\nNo puedo seguir: me falta saber qué cuenta usar o dónde crearla (ver arriba).")
         return 1
 
     pendientes = [c for c in cuentas if c.hay_que_tocar]
@@ -347,6 +412,8 @@ def _opciones(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="crear (y borrar) un borrador de Stock Reconciliation para ver si ERPNext lo acepta",
     )
+    parser.add_argument("--cuenta-inventario", default="", help="usar ESTA cuenta de inventario, sin buscarla")
+    parser.add_argument("--cuenta-ajuste", default="", help="usar ESTA cuenta de ajuste, sin buscarla")
     parser.add_argument("--padre-inventario", default="", help="cuenta grupo bajo la cual crear la de inventario")
     parser.add_argument("--padre-ajuste", default="", help="cuenta grupo bajo la cual crear la de ajuste")
     parser.add_argument("--nombre-inventario", default="", help=f"default: {NOMBRE_SUGERIDO[INVENTARIO]}")

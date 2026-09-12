@@ -7,18 +7,25 @@ puede invocar un mensaje de WhatsApp. Nadie lo cablee después a `app/tools/`:
 la separación de las tres identidades (cliente / gerencia / política) es lo que
 hace que este producto se pueda vender, y esto vive afuera de las tres.
 
+Se corre DESDE `plus-agent/`, en el host y con el venv del proyecto — igual
+que `make seed`. La imagen de producción sólo copia `app/`, así que dentro del
+contenedor no existe `/srv/deploy` (si sólo tenés el contenedor, montalo para
+esa corrida: ver `deploy/cuentas_inventario.py`).
+
     # 1. la plantilla, para llenar en Excel o Google Sheets
-    docker compose exec -e ERPNEXT_API_KEY=... -e ERPNEXT_API_SECRET=... \
-        agente python /srv/deploy/cargar_catalogo.py --ejemplo
+    .venv/bin/python deploy/cargar_catalogo.py --ejemplo
 
     # 2. el plan completo, sin escribir NADA (esto es el default)
-    docker compose exec ... agente python /srv/deploy/cargar_catalogo.py catalogo.csv
+    ERPNEXT_API_KEY=... ERPNEXT_API_SECRET=... \
+        .venv/bin/python deploy/cargar_catalogo.py catalogo.csv
 
     # 3. recién ahora se escribe
-    docker compose exec ... agente python /srv/deploy/cargar_catalogo.py catalogo.csv --aplicar
+    ERPNEXT_API_KEY=... ERPNEXT_API_SECRET=... \
+        .venv/bin/python deploy/cargar_catalogo.py catalogo.csv --aplicar
 
     # 4. ¿ERPNext dice lo mismo que el archivo?
-    docker compose exec ... agente python /srv/deploy/cargar_catalogo.py catalogo.csv --verificar
+    ERPNEXT_API_KEY=... ERPNEXT_API_SECRET=... \
+        .venv/bin/python deploy/cargar_catalogo.py catalogo.csv --verificar
 
 POR QUÉ EXISTE
 Los precios que siembra `seed_dairy.py` son inventados y el propio script lo
@@ -332,7 +339,7 @@ def _en_tandas(codigos: list[str], tamano: int = 90):
         yield codigos[inicio : inicio + tamano]
 
 
-def relevar(filas: list[Fila], deposito: str, empresa: str, lista: str) -> EnErpnext:
+def relevar(filas: list[Fila], deposito: str, lista: str) -> EnErpnext:
     """Todo lo que ERPNext ya sabe de estos códigos, en pocas consultas.
 
     De a tandas y no de a uno: un catálogo de doscientos productos serían
@@ -386,19 +393,31 @@ def relevar(filas: list[Fila], deposito: str, empresa: str, lista: str) -> EnErp
 
     # Un ajuste en BORRADOR todavía no movió el stock, así que el Bin sigue en
     # cero y sin esto cada corrida agregaría otro borrador para lo mismo.
-    for cabecera in erpnext.get_list(
-        "Stock Reconciliation",
-        filters=[["company", "=", empresa], ["docstatus", "!=", 2]],
-        fields=["name"],
-        limit=200,
-    ):
-        nombre = str(cabecera.get("name") or "").strip()
-        if not nombre:
-            continue
-        for renglon in erpnext.get_doc("Stock Reconciliation", nombre).get("items") or []:
+    #
+    # Se pregunta por los RENGLONES y no por las cabeceras. Recorrer las
+    # cabeceras obliga a leer cada documento entero para ver qué trae, y a
+    # cortar la lista en algún número: el día que el ajuste que interesa quede
+    # afuera de ese corte, esto duplica el borrador en silencio. Preguntar por
+    # la tabla hija filtrando por los códigos del archivo no tiene ese corte y
+    # es una sola consulta por tanda. Es el mismo camino que usa
+    # `app/inventario.py` para encontrar el último conteo de un producto.
+    for tanda in _en_tandas(codigos):
+        for renglon in erpnext.get_list(
+            "Stock Reconciliation Item",
+            filters=[
+                ["item_code", "in", tanda],
+                ["warehouse", "=", deposito],
+                ["docstatus", "!=", 2],
+            ],
+            fields=["parent", "item_code"],
+            limit=len(tanda) * 10,
+            parent="Stock Reconciliation",
+            order_by="modified desc",
+        ):
             codigo = str(renglon.get("item_code") or "").strip()
-            if codigo and str(renglon.get("warehouse") or "").strip() == deposito:
-                actual.ajustes.setdefault(codigo, nombre)
+            padre = str(renglon.get("parent") or "").strip()
+            if codigo and padre:
+                actual.ajustes.setdefault(codigo, padre)
     return actual
 
 
@@ -535,7 +554,7 @@ def aplicar(plan: Plan, deposito: str, empresa: str, lista: str, costo_pct: Deci
         })
         print(f"  + Item {fila.codigo}")
     for fila, cambios in plan.items_cambiados:
-        cuentas.pedido_admin("PUT", f"/api/resource/Item/{fila.codigo}", cambios)
+        cuentas.pedido_admin("PUT", cuentas.ruta_recurso("Item", fila.codigo), cambios)
         print(f"  ~ Item {fila.codigo}: {', '.join(cambios)}")
 
     for fila in plan.precios_nuevos:
@@ -548,7 +567,7 @@ def aplicar(plan: Plan, deposito: str, empresa: str, lista: str, costo_pct: Deci
         print(f"  + precio {fila.codigo} = {fila.precio}")
     for fila, vieja, nombre in plan.precios_cambiados:
         cuentas.pedido_admin(
-            "PUT", f"/api/resource/Item Price/{nombre}",
+            "PUT", cuentas.ruta_recurso("Item Price", nombre),
             {"price_list_rate": float(fila.precio)},
         )
         print(f"  ~ precio {fila.codigo}: {vieja} → {fila.precio}")
@@ -581,6 +600,38 @@ def aplicar(plan: Plan, deposito: str, empresa: str, lista: str, costo_pct: Deci
 
 
 # --------------------------------------------------------------- verificar
+
+
+def configuracion_incompatible(lista: str, moneda: str) -> str:
+    """¿El bot va a poder LEER los precios que estoy por escribir?
+
+    El runtime no lee «la lista de precios»: lee EXACTAMENTE la que nombra
+    `AUTO_CONFIRM_PRICE_LIST`, y filtra por `AUTO_CONFIRM_CURRENCY`
+    (`app/tools/catalogo.py` para cotizar, `app/policy.py` para
+    auto-confirmar). Los precios se escriben en la lista del seed, que es la
+    que corresponde; pero si el despliegue está configurado para leer OTRA, el
+    catálogo entra y el bot no ve ni un precio.
+
+    Eso no es un aviso: es cargar un catálogo invisible. Se rechaza antes de
+    escribir, con las dos puntas nombradas, y lo arregla el que sabe cuál de
+    las dos está mal — el .env o la lista.
+    """
+    configurada = os.getenv("AUTO_CONFIRM_PRICE_LIST", "").strip()
+    if configurada and configurada != lista:
+        return (
+            f"escribiría los precios en «{lista}» (la lista del seed) y el despliegue "
+            f"lee AUTO_CONFIRM_PRICE_LIST=«{configurada}». El bot no vería ni uno de "
+            f"estos precios. Igualá las dos: o cambiás el .env, o el catálogo va a "
+            f"la lista que ya está configurada."
+        )
+    esperada = os.getenv("AUTO_CONFIRM_CURRENCY", "").strip()
+    if moneda and esperada and moneda != esperada:
+        return (
+            f"la lista «{lista}» está en {moneda} y el despliegue lee "
+            f"AUTO_CONFIRM_CURRENCY={esperada}. Con esa diferencia el bot tampoco "
+            f"podría cotizar estos precios."
+        )
+    return ""
 
 
 def verificar(filas: list[Fila], actual: EnErpnext, lista: str) -> int:
@@ -659,7 +710,7 @@ def main(argv: list[str] | None = None) -> int:
     # recién ahí se enteraba del sexto (la unidad que ERPNext no conoce).
     lista = lista_de_precios()
     empresa, deposito = erpnext.default_context()
-    actual = relevar(filas, deposito, empresa, lista)
+    actual = relevar(filas, deposito, lista)
     problemas += [f"{ruta} {p}" for p in problemas_contra_erpnext(filas, actual)]
     if problemas:
         return _rechazar(ruta, problemas)
@@ -669,12 +720,10 @@ def main(argv: list[str] | None = None) -> int:
         return verificar(filas, actual, lista)
 
     moneda = moneda_de(lista)
-    esperada = os.getenv("AUTO_CONFIRM_CURRENCY", "").strip()
-    if moneda and esperada and moneda != esperada:
-        print(
-            f"\n  ! la lista «{lista}» está en {moneda} y AUTO_CONFIRM_CURRENCY dice "
-            f"{esperada}: con esa diferencia el bot NO va a poder cotizar estos precios."
-        )
+    desacuerdo = configuracion_incompatible(lista, moneda)
+    if desacuerdo:
+        print(f"\nNO CARGUÉ NADA. {desacuerdo}")
+        return 1
 
     plan = planificar(filas, actual)
     imprimir_plan(plan, lista, moneda, opciones.costo_pct)

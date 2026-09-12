@@ -142,7 +142,7 @@ def test_si_guardo_de_verdad_no_se_queja(
 
     admin.assert_called_once_with(
         "PUT",
-        "/api/resource/Company/Lácteos Plus SA",
+        "/api/resource/Company/L%C3%A1cteos%20Plus%20SA",
         {cuentas.INVENTARIO: "Stock In Hand - LP"},
     )
 
@@ -177,7 +177,7 @@ def test_la_prueba_crea_un_borrador_y_lo_borra(
         }
     ]
     admin.assert_called_once_with(
-        "DELETE", "/api/resource/Stock Reconciliation/MAT-RECO-2026-00009"
+        "DELETE", "/api/resource/Stock%20Reconciliation/MAT-RECO-2026-00009"
     )
     assert "ACEPTÓ" in capsys.readouterr().out
 
@@ -232,3 +232,49 @@ def test_sin_aplicar_no_escribe_nada(
     salida = capsys.readouterr().out
     assert "2 cambio(s) pendiente(s)" in salida
     assert "--aplicar" in salida
+
+
+# ------------------------------------------------------ lo que encontró Qodo
+
+
+def test_el_nombre_del_documento_va_escapado_en_la_url() -> None:
+    """Un nombre de documento es texto libre. Un código con una barra pega una
+    ruta que no es la del documento, y uno con `#` la corta."""
+    assert cuentas.ruta_recurso("Item", "LEC/ENT#1L") == "/api/resource/Item/LEC%2FENT%231L"
+    assert cuentas.ruta_recurso("Stock Reconciliation") == "/api/resource/Stock%20Reconciliation"
+
+
+def test_con_varias_hojas_candidatas_no_elige_ninguna(sin_red: dict[str, Mock]) -> None:
+    """Elegir «la primera» de una lista que ERPNext no ordena es elegir al azar
+    en qué rama contable cae todo el movimiento de stock."""
+    _empresa(sin_red, default_inventory_account="")
+    _cuentas(sin_red, [{"name": "Stock Central - LP"}, {"name": "Stock Sucursal - LP"}])
+
+    cuenta = cuentas.resolver("Lácteos Plus SA", cuentas.INVENTARIO)
+
+    assert cuenta.accion == "falta"
+    assert "Stock Central - LP" in cuenta.detalle and "Stock Sucursal - LP" in cuenta.detalle
+    assert "--cuenta-inventario" in cuenta.detalle
+
+
+def test_con_varios_grupos_candidatos_tampoco(sin_red: dict[str, Mock]) -> None:
+    _empresa(sin_red, stock_adjustment_account="")
+    _cuentas(sin_red, [], [{"name": "Gastos A - LP"}, {"name": "Gastos B - LP"}])
+
+    cuenta = cuentas.resolver("Lácteos Plus SA", cuentas.AJUSTE)
+
+    assert cuenta.accion == "falta"
+    assert "--padre-ajuste" in cuenta.detalle
+
+
+def test_la_cuenta_que_nombra_el_dueno_no_se_busca(sin_red: dict[str, Mock]) -> None:
+    """Con `--cuenta-inventario` no hay ambigüedad que resolver: ya la resolvió él."""
+    _empresa(sin_red, default_inventory_account="")
+
+    cuenta = cuentas.resolver(
+        "Lácteos Plus SA", cuentas.INVENTARIO, cuenta="Mercadería en stock - LP"
+    )
+
+    assert cuenta.accion == "se asigna"
+    assert cuenta.nombre == "Mercadería en stock - LP"
+    sin_red["get_list"].assert_not_called()
