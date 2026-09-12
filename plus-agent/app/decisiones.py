@@ -1006,7 +1006,10 @@ def aprobar_solicitud(nombre: str, por: str) -> dict:
             False,
             False,
             f"«aprobar {nombre}» aprueba lo que pidió el cliente, y de eso "
-            f"falta {solicitudes.enumerar(faltan)}: no puedo ofrecer una entrega "
+            # El marco de este mensaje todavía es español (es otra migración),
+            # así que lo que falta se nombra en español para que la frase no
+            # quede mitad y mitad. El día que se migre el marco, pasa `lengua`.
+            f"falta {solicitudes.enumerar(solicitudes.nombres_de_terminos(faltan, idioma.ES), idioma.ES)}: no puedo ofrecer una entrega "
             "cuyos términos nadie fijó. No cambié nada.\n\n"
             "Decime los términos completos:\n"
             f"{solicitudes.como_pedir_los_terminos(nombre, solicitud.solicitado)}",

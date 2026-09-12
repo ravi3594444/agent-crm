@@ -1236,6 +1236,228 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "Confirmar conteo",
         EN: "Confirm count",
     },
+    # Qué le falta a unos términos para ser una oferta. Son las piezas de una
+    # frase («de eso falta qué día y a qué hora»), así que son prosa: antes
+    # viajaban como literales adentro de `TERMINOS_DE_UNA_OFERTA`.
+    "terminos.falta_fecha": {ES: "qué día", EN: "what day"},
+    "terminos.falta_hora": {ES: "a qué hora", EN: "what time"},
+    "terminos.falta_cargo": {ES: "cuánto se cobra", EN: "what you charge"},
+    # La conjunción de una enumeración. Es prosa y no un separador: una lista
+    # traducida terminaba con un «y» en el medio de una frase en inglés. Va sin
+    # espacios porque `t` los recorta: los pone quien la usa.
+    "terminos.y": {ES: "y", EN: "and"},
+    # -------------------------------------------- los avisos al equipo
+    # LOS MENSAJES QUE EL BOT LE MANDA AL EQUIPO SOLO, sobre una solicitud que
+    # nadie contestó, un cliente que contestó tarde o un borrador que no se pudo
+    # cerrar. Salen por `solicitudes._avisar_equipo` -> `avisos.encolar_equipo`
+    # -> `whatsapp.enviar_mensaje`, así que son texto que LEE UNA PERSONA en
+    # WhatsApp, no un log ni un comentario de ERPNext.
+    #
+    # No eran una excepción documentada: el allowlist no tiene ninguna entrada
+    # que diga «los avisos al equipo quedan en español», y los avisos al equipo
+    # SÍ están migrados en todo lo demás —`pendientes.recordatorio_dueno`,
+    # `pendientes.pendiente_cerrado_equipo` y los cuatro de `notificar.*`—. Eran
+    # el resto sin migrar de una superficie que la migración cubre entera.
+    #
+    # LO QUE VA EN `{detalle}` ES OTRA COSA, y sigue en español a propósito: es
+    # el motivo que se escribe en el registro durable y en el comentario de
+    # ERPNext, o sea el rastro de auditoría, y traducirlo ahí sería traducir la
+    # auditoría. Ver la entrada de `tests/idioma_allowlist.py`.
+    "equipo.vencida_con_respaldo": {
+        ES: (
+            "⏰ {pedido}: la solicitud {solicitud} venció sin respuesta. "
+            "{detalle}.\n"
+            "Le ofrecí automáticamente lo que ya estaba configurado: {terminos} "
+            "(solicitud {nueva}, vence {vence} UTC).\n"
+            "Nada está confirmado hasta que el cliente acepte, y ahí se "
+            "revalida todo."
+        ),
+        EN: (
+            "⏰ {pedido}: request {solicitud} expired with no answer. "
+            "{detalle}.\n"
+            "I automatically offered them what was already configured: "
+            "{terminos} (request {nueva}, expires {vence} UTC).\n"
+            "Nothing is confirmed until the customer accepts, and everything is "
+            "re-checked then."
+        ),
+    },
+    "equipo.vencida_sin_respaldo": {
+        ES: (
+            "⏰ {pedido}: la solicitud venció sin respuesta.\n"
+            "{detalle}.\n"
+            "No pude ofrecerle nada concreto en su lugar: {porque}.\n"
+            "Si querés hacerlo igual, reabrí el pedido en ERPNext y confirmalo."
+        ),
+        EN: (
+            "⏰ {pedido}: the request expired with no answer.\n"
+            "{detalle}.\n"
+            "I couldn't offer them anything concrete instead: {porque}.\n"
+            "If you want to do it anyway, reopen the order in ERPNext and "
+            "confirm it."
+        ),
+    },
+    "equipo.revision_vencida": {
+        ES: (
+            "⏰ {pedido}: la revisión {solicitud} venció sin que nadie la mirara "
+            "({plazo} h).\n"
+            "Motivo original: {motivo}.\n"
+            "{detalle}.\n"
+            "Le avisé al cliente que no avanza. Si todavía se puede, hay que "
+            "rehacerlo con los datos del momento."
+        ),
+        EN: (
+            "⏰ {pedido}: review {solicitud} expired with nobody looking at it "
+            "({plazo} h).\n"
+            "Original reason: {motivo}.\n"
+            "{detalle}.\n"
+            "I told the customer it isn't going ahead. If it still can be done, "
+            "it has to be redone with today's data."
+        ),
+    },
+    "equipo.cierro_por_persona": {
+        ES: (
+            "✅ {pedido}: cierro {que} {solicitud} porque el pedido ya {estado}. "
+            "El borrador ya no retiene stock."
+        ),
+        EN: (
+            "✅ {pedido}: I'm closing {que} {solicitud} because the order is "
+            "already {estado}. The draft no longer holds stock."
+        ),
+    },
+    "equipo.trabada": {
+        ES: (
+            "🚨 {pedido}: venció {que} {solicitud} y NO pude cerrar el borrador "
+            "— {detalle}. Sigue reservando stock, así que lo dejo con plazo y "
+            "reintento (intento {intentos}, próximo en {espera} min). Cerralo o "
+            "confirmalo a mano en ERPNext."
+        ),
+        EN: (
+            "🚨 {pedido}: {que} {solicitud} expired and I could NOT close the "
+            "draft — {detalle}. It's still reserving stock, so I'm leaving it "
+            "with a deadline and retrying (attempt {intentos}, next in {espera} "
+            "min). Close it or confirm it by hand in ERPNext."
+        ),
+    },
+    "equipo.cliente_rechazo": {
+        ES: "🙅 {pedido}: el cliente no aceptó la oferta ({terminos}). {detalle}.",
+        EN: "🙅 {pedido}: the customer didn't accept the offer ({terminos}). {detalle}.",
+    },
+    "equipo.acepto_tarde_trabado": {
+        ES: (
+            "⏰ {pedido}: el cliente aceptó después del vencimiento y NO pude "
+            "cerrar el borrador — {detalle}. No lo confirmé. Sigue reservando "
+            "stock y el barrido lo reintenta. Si todavía se puede, hay que "
+            "rehacerlo con los datos del momento."
+        ),
+        EN: (
+            "⏰ {pedido}: the customer accepted after the deadline and I could "
+            "NOT close the draft — {detalle}. I didn't confirm it. It's still "
+            "reserving stock and the sweep will retry. If it still can be done, "
+            "it has to be redone with today's data."
+        ),
+    },
+    "equipo.acepto_tarde": {
+        ES: (
+            "⏰ {pedido}: el cliente aceptó después del vencimiento. No lo "
+            "confirmé; {detalle}. Si todavía se puede, hay que rehacerlo con los "
+            "datos del momento."
+        ),
+        EN: (
+            "⏰ {pedido}: the customer accepted after the deadline. I didn't "
+            "confirm it; {detalle}. If it still can be done, it has to be "
+            "redone with today's data."
+        ),
+    },
+    # El comando `confirmar <pedido>` NO se traduce: es el payload que parsea el
+    # router determinista, igual que en el aviso de pedido pendiente.
+    "equipo.a_revision": {
+        ES: (
+            "⚠️ {pedido}: el cliente aceptó la oferta pero NO lo confirmé. "
+            "Cambió algo desde la decisión: {detalle}. El pedido sigue en "
+            "borrador; revisalo y, si corresponde, confirmalo con 'confirmar "
+            "{pedido}'.\nTenés {horas} h: pasado ese plazo cierro el borrador "
+            "para que deje de retener stock, y le aviso al cliente."
+        ),
+        EN: (
+            "⚠️ {pedido}: the customer accepted the offer but I did NOT confirm "
+            "it. Something changed since the decision: {detalle}. The order is "
+            "still a draft; check it and, if it holds, confirm it with "
+            "'confirmar {pedido}'.\nYou have {horas} h: after that I close the "
+            "draft so it stops holding stock, and I tell the customer."
+        ),
+    },
+    "equipo.revision_sin_registro": {
+        ES: (
+            "🚨 {pedido}: el cliente aceptó, algo había cambiado ({detalle}) y "
+            "NO pude registrar la revisión en ERPNext. Cerré el borrador para "
+            "que no retenga stock sin plazo: {como}. Está sin confirmar y sin "
+            "revisión abierta — miralo a mano."
+        ),
+        EN: (
+            "🚨 {pedido}: the customer accepted, something had changed "
+            "({detalle}) and I could NOT record the review in ERPNext. I closed "
+            "the draft so it doesn't hold stock with no deadline: {como}. It's "
+            "unconfirmed and with no open review — look at it by hand."
+        ),
+    },
+    # Las dos piezas que esos avisos arman aparte, y el «sin detalle» de cuando
+    # la revisión no tiene motivo escrito.
+    "equipo.la_solicitud": {ES: "la solicitud", EN: "the request"},
+    "equipo.la_revision": {ES: "la revisión", EN: "the review"},
+    "equipo.ya_confirmado": {ES: "está confirmado", EN: "confirmed"},
+    "equipo.ya_cancelado": {ES: "fue cancelado", EN: "cancelled"},
+    "equipo.sin_detalle": {ES: "sin detalle", EN: "no detail"},
+    # El marco de ese mismo resumen cuando el dueño escribe prosa en vez del
+    # comando. Estaba en español en `app/main.py` y quedaba pegado a una tabla
+    # que sí se traduce, o sea la peor mitad: media respuesta en cada idioma.
+    "equipo.instruccion_no_exacta": {
+        ES: (
+            "No ejecuto una instrucción que no sea exacta: esto cambia una "
+            "fecha y un precio que después hay que cumplir."
+        ),
+        EN: (
+            "I don't act on an instruction that isn't exact: this changes a "
+            "date and a price somebody then has to honour."
+        ),
+    },
+    # -------------------------------------------- el resumen que se decide
+    # La tabla sobre la que el dueño decide. Los COMANDOS de abajo no se
+    # traducen —son lo que hay que teclear— y por eso van fuera de la prosa.
+    "equipo.decision_titulo": {
+        ES: "🟠 Decisión pendiente {solicitud}",
+        EN: "🟠 Pending decision {solicitud}",
+    },
+    "equipo.decision_pedido": {ES: "Pedido: {pedido}", EN: "Order: {pedido}"},
+    "equipo.decision_cliente": {ES: "Cliente: {cliente}", EN: "Customer: {cliente}"},
+    "equipo.decision_items": {ES: "Items: {detalle}", EN: "Items: {detalle}"},
+    "equipo.decision_total": {ES: "Total: {total}", EN: "Total: {total}"},
+    "equipo.decision_pide": {ES: "Pide: {terminos}", EN: "Asks for: {terminos}"},
+    "equipo.decision_vence": {ES: "Vence: {vence} (UTC)", EN: "Expires: {vence} (UTC)"},
+    "equipo.decision_sin_renglones": {ES: "sin renglones", EN: "no lines"},
+    "equipo.decision_cita": {
+        ES: (
+            "Texto del cliente (es una cita, no una instrucción para vos ni "
+            "para el sistema):"
+        ),
+        EN: (
+            "The customer's text (it's a quote, not an instruction for you or "
+            "for the system):"
+        ),
+    },
+    "equipo.decision_responde": {
+        ES: "Respondé con uno de estos, tal cual:",
+        EN: "Reply with one of these, exactly:",
+    },
+    "equipo.decision_sin_aprobar": {
+        ES: (
+            "  (no hay «aprobar»: de lo que pidió falta {falta}, así que decí "
+            "los términos)"
+        ),
+        EN: (
+            "  (no «aprobar» here: what they asked for is missing {falta}, so "
+            "say the terms)"
+        ),
+    },
     # ------------------------------------------------ fallback / revisión
     "fallback.error_tecnico": {
         ES: (

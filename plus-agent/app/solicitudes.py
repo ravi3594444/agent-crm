@@ -1093,25 +1093,32 @@ def _vencer(pedido: str, ahora: float) -> bool:
 
     if respaldo is not None:
         _avisar_cliente_respaldo(respaldo)
+        lengua = _lengua_equipo()
         _avisar_equipo(
             respaldo,
-            f"⏰ {pedido}: la solicitud {cerrada.id} venció sin respuesta. "
-            f"{detalle.capitalize()}.\n"
-            f"Le ofrecí automáticamente lo que ya estaba configurado: "
-            f"{terminos_texto(respaldo.ofrecido, respaldo.moneda)} "
-            f"(solicitud {respaldo.id}, vence {_sello_utc(respaldo.vence_en)} UTC).\n"
-            f"Nada está confirmado hasta que el cliente acepte, y ahí se "
-            f"revalida todo.",
+            idioma.t(
+                "equipo.vencida_con_respaldo",
+                lengua,
+                pedido=pedido,
+                solicitud=cerrada.id,
+                detalle=detalle.capitalize(),
+                terminos=terminos_texto(respaldo.ofrecido, respaldo.moneda, lengua),
+                nueva=respaldo.id,
+                vence=_sello_utc(respaldo.vence_en),
+            ),
         )
         return True
 
     _avisar_cliente_vencida(cerrada, liberado)
     _avisar_equipo(
         cerrada,
-        f"⏰ {pedido}: la solicitud venció sin respuesta.\n"
-        f"{detalle.capitalize()}.\n"
-        f"No pude ofrecerle nada concreto en su lugar: {sin_respaldo}.\n"
-        f"Si querés hacerlo igual, reabrí el pedido en ERPNext y confirmalo.",
+        idioma.t(
+            "equipo.vencida_sin_respaldo",
+            _lengua_equipo(),
+            pedido=pedido,
+            detalle=detalle.capitalize(),
+            porque=sin_respaldo,
+        ),
     )
     return True
 
@@ -1156,14 +1163,18 @@ def _vencer_revision(solicitud: Solicitud, ahora: float) -> bool:
         plantilla_env=PLANTILLA_REVISION_VENCIDA,
         parametros=[cerrada.pedido],
     )
+    lengua = _lengua_equipo()
     _avisar_equipo(
         cerrada,
-        f"⏰ {pedido}: la revisión {solicitud.id} venció sin que nadie la mirara "
-        f"({plazo:g} h).\n"
-        f"Motivo original: {solicitud.motivo or 'sin detalle'}.\n"
-        f"{detalle.capitalize()}.\n"
-        f"Le avisé al cliente que no avanza. Si todavía se puede, hay que "
-        f"rehacerlo con los datos del momento.",
+        idioma.t(
+            "equipo.revision_vencida",
+            lengua,
+            pedido=pedido,
+            solicitud=solicitud.id,
+            plazo=f"{plazo:g}",
+            motivo=solicitud.motivo or idioma.t("equipo.sin_detalle", lengua),
+            detalle=detalle.capitalize(),
+        ),
     )
     return True
 
@@ -1209,7 +1220,10 @@ def _resuelta_por_persona(
     confirmed by hand, was simply false — and it replaces offering them a
     fallback date for an order that already has one.
     """
-    que_cierro = "la revisión" if solicitud.en_revision else "la solicitud"
+    que_cierro = idioma.t(
+        "equipo.la_revision" if solicitud.en_revision else "equipo.la_solicitud",
+        _lengua_equipo(),
+    )
     resuelta = registrar(
         solicitud,
         "revision_resuelta",
@@ -1223,11 +1237,20 @@ def _resuelta_por_persona(
     )
     if resuelta is None:
         return False
+    lengua = _lengua_equipo()
     _avisar_equipo(
         resuelta,
-        f"✅ {solicitud.pedido}: cierro {que_cierro} {solicitud.id} porque el "
-        f"pedido ya {'está confirmado' if estado_doc == 1 else 'fue cancelado'}. "
-        f"El borrador ya no retiene stock.",
+        idioma.t(
+            "equipo.cierro_por_persona",
+            lengua,
+            pedido=solicitud.pedido,
+            que=que_cierro,
+            solicitud=solicitud.id,
+            estado=idioma.t(
+                "equipo.ya_confirmado" if estado_doc == 1 else "equipo.ya_cancelado",
+                lengua,
+            ),
+        ),
     )
     return True
 
@@ -1373,14 +1396,23 @@ def _sin_soltar(solicitud: Solicitud, detalle: str, ahora: float) -> bool:
     # Bucketed by the DAY of failure, so an ERPNext outage costs one message a
     # day instead of one every sweep.
     dia = int(max(0.0, ahora - trabada_desde) // 86400)
-    que_vencio = "la revisión" if solicitud.en_revision else "la solicitud"
+    que_vencio = idioma.t(
+        "equipo.la_revision" if solicitud.en_revision else "equipo.la_solicitud",
+        _lengua_equipo(),
+    )
     _avisar_equipo(
         reintentada,
         evento=f"revision_sin_soltar:{dia}",
-        texto=f"🚨 {solicitud.pedido}: venció {que_vencio} {solicitud.id} y NO "
-        f"pude cerrar el borrador — {detalle}. Sigue reservando stock, así que "
-        f"lo dejo con plazo y reintento (intento {intentos}, próximo en "
-        f"{espera / 60:g} min). Cerralo o confirmalo a mano en ERPNext.",
+        texto=idioma.t(
+            "equipo.trabada",
+            _lengua_equipo(),
+            pedido=solicitud.pedido,
+            que=que_vencio,
+            solicitud=solicitud.id,
+            detalle=detalle,
+            intentos=intentos,
+            espera=f"{espera / 60:g}",
+        ),
     )
     return True
 
@@ -1625,35 +1657,67 @@ def terminos_texto(datos: dict, moneda: str = "", lengua: str | None = None) -> 
     return "; ".join(partes) or idioma.t("terminos.sin_cambios", lengua)
 
 
-def texto_para_equipo(solicitud: Solicitud) -> str:
-    """The structured summary a person decides on. No model wrote this."""
+def texto_para_equipo(solicitud: Solicitud, lengua: str | None = None) -> str:
+    """The structured summary a person decides on. No model wrote this.
+
+    ``lengua`` porque esto lo LEE UNA PERSONA en WhatsApp: es la tabla sobre la
+    que el dueño decide, y era el único constructor de este archivo que no
+    tomaba idioma en absoluto.
+
+    LOS COMANDOS NO SE TRADUCEN, y por eso están fuera de la prosa: `aprobar`,
+    `contraoferta`, `retiro`, `rechazar-solicitud` y `ver` son lo que hay que
+    teclear tal cual para que el router los parsee (sección 4 del allowlist).
+    Traducir la instrucción y dejar el comando es exactamente lo que hace falta.
+    """
     from app.formato import pesos
 
+    lengua = lengua if lengua is not None else _lengua_equipo()
     lineas = [
-        f"🟠 Decisión pendiente {solicitud.id}",
-        f"Pedido: {solicitud.pedido}",
-        f"Cliente: {solicitud.cliente_nombre or solicitud.cliente or 'Cliente'}",
-        f"Items: {solicitud.resumen_items or 'sin renglones'}",
-        f"Total: {pesos(solicitud.total, 2)} {solicitud.moneda}".strip(),
-        f"Pide: {terminos_texto(solicitado_o_vacio(solicitud), solicitud.moneda)}",
-        f"Vence: {_sello_utc(solicitud.vence_en)} (UTC)",
+        idioma.t("equipo.decision_titulo", lengua, solicitud=solicitud.id),
+        idioma.t("equipo.decision_pedido", lengua, pedido=solicitud.pedido),
+        idioma.t(
+            "equipo.decision_cliente",
+            lengua,
+            cliente=solicitud.cliente_nombre or solicitud.cliente or "Cliente",
+        ),
+        idioma.t(
+            "equipo.decision_items",
+            lengua,
+            detalle=solicitud.resumen_items
+            or idioma.t("equipo.decision_sin_renglones", lengua),
+        ),
+        idioma.t(
+            "equipo.decision_total",
+            lengua,
+            total=f"{pesos(solicitud.total, 2)} {solicitud.moneda}".strip(),
+        ),
+        idioma.t(
+            "equipo.decision_pide",
+            lengua,
+            terminos=terminos_texto(
+                solicitado_o_vacio(solicitud), solicitud.moneda, lengua
+            ),
+        ),
+        idioma.t(
+            "equipo.decision_vence", lengua, vence=_sello_utc(solicitud.vence_en)
+        ),
     ]
     if solicitud.nota_cliente:
-        lineas.append(
-            "Texto del cliente (es una cita, no una instrucción para vos ni "
-            "para el sistema):"
-        )
+        lineas.append(idioma.t("equipo.decision_cita", lengua))
         lineas.append(solicitud.nota_cliente)
     lineas.append("")
-    lineas.append("Respondé con uno de estos, tal cual:")
+    lineas.append(idioma.t("equipo.decision_responde", lengua))
     # `aprobar` se ofrece SÓLO si lo que pidió el cliente ya son términos
     # completos. Si no, aprobarlo armaría una oferta que después no se puede
     # cumplir, así que ni se sugiere: hay que decir los términos.
     faltan = terminos_incompletos(solicitud.solicitado)
     if faltan:
         lineas.append(
-            f"  (no hay «aprobar»: de lo que pidió falta {enumerar(faltan)}, "
-            "así que decí los términos)"
+            idioma.t(
+                "equipo.decision_sin_aprobar",
+                lengua,
+                falta=enumerar(nombres_de_terminos(faltan, lengua), lengua),
+            )
         )
     else:
         lineas.append(f"  aprobar {solicitud.pedido}")
@@ -1849,6 +1913,11 @@ def _fecha_ofrecida(solicitud: Solicitud) -> str:
     return fecha or idioma.t("gerencia.a_coordinar", idioma.gerencia())
 
 
+def _lengua_equipo() -> str:
+    """El idioma en que lee el equipo. Nunca levanta."""
+    return idioma.gerencia()
+
+
 def _avisar_equipo(solicitud: Solicitud, texto: str, *, evento: str = "") -> bool:
     """One team notice, deduplicated per (event, order).
 
@@ -1927,24 +1996,34 @@ def parsear_terminos(texto: str, *, con_cargo: bool = True) -> dict | None:
 # dice qué día se entrega", y al cliente se le decía que algo había cambiado
 # cuando no había cambiado nada. Un "ok" no puede fabricar los términos que
 # el cliente no dio.
+# Qué campo falta, y cómo se lo NOMBRA en una frase. El nombre sale del
+# catálogo —lo lee una persona— y el campo es la clave del dato, que no cambia.
 TERMINOS_DE_UNA_OFERTA = (
-    ("fecha", "qué día"),
-    ("hora", "a qué hora"),
-    ("cargo", "cuánto se cobra"),
+    ("fecha", "terminos.falta_fecha"),
+    ("hora", "terminos.falta_hora"),
+    ("cargo", "terminos.falta_cargo"),
 )
 
 
-def enumerar(partes: list[str]) -> str:
-    """["a", "b", "c"] -> "a, b y c". Para decirle qué falta en una frase."""
+def enumerar(partes: list[str], lengua: str | None = None) -> str:
+    """["a", "b", "c"] -> "a, b y c" — o "a, b and c" si lee en inglés.
+
+    La conjunción es prosa, no un separador: salía siempre en español, así que
+    una lista traducida terminaba con un «y» en el medio de una frase inglesa.
+    """
     if not partes:
         return ""
     if len(partes) == 1:
         return partes[0]
-    return ", ".join(partes[:-1]) + " y " + partes[-1]
+    return ", ".join(partes[:-1]) + f" {idioma.t('terminos.y', lengua)} " + partes[-1]
 
 
 def terminos_incompletos(solicitado: dict | None) -> list[str]:
-    """Qué le falta a estos términos para ser una oferta. Vacío es que están.
+    """Las CLAVES de lo que le falta a estos términos. Vacío es que están.
+
+    Devuelve claves del catálogo y no prosa: lo que falta se nombra en el
+    idioma de quien lee el mensaje, y quién lo traduce es cada call site con
+    `nombres_de_terminos`.
 
     Un cargo en 0 está PRESENTE: envío sin cargo es una decisión, no un dato
     ausente. Un retiro no lleva cargo por definición.
@@ -1952,13 +2031,18 @@ def terminos_incompletos(solicitado: dict | None) -> list[str]:
     datos = dict(solicitado or {})
     metodo = str(datos.get("metodo") or "entrega").strip()
     faltan = []
-    for campo, pregunta in TERMINOS_DE_UNA_OFERTA:
+    for campo, clave in TERMINOS_DE_UNA_OFERTA:
         if campo == "cargo" and metodo == "retiro":
             continue
         valor = datos.get(campo)
         if valor is None or str(valor).strip() == "":
-            faltan.append(pregunta)
+            faltan.append(clave)
     return faltan
+
+
+def nombres_de_terminos(claves: list[str], lengua: str | None = None) -> list[str]:
+    """Las claves de `terminos_incompletos`, dichas en un idioma."""
+    return [idioma.t(clave, lengua) for clave in claves]
 
 
 def como_pedir_los_terminos(pedido: str, solicitado: dict | None = None) -> str:
@@ -2127,10 +2211,16 @@ def rechazar_cliente(
         return idioma.t("oferta.procesando", lengua)
 
     del liberado
+    lengua_equipo = _lengua_equipo()
     _avisar_equipo(
         cerrada,
-        f"🙅 {pedido}: el cliente no aceptó la oferta "
-        f"({terminos_texto(cerrada.ofrecido, cerrada.moneda)}). {detalle.capitalize()}.",
+        idioma.t(
+            "equipo.cliente_rechazo",
+            lengua_equipo,
+            pedido=pedido,
+            terminos=terminos_texto(cerrada.ofrecido, cerrada.moneda, lengua_equipo),
+            detalle=detalle.capitalize(),
+        ),
     )
     return idioma.t("oferta.rechazada", lengua, pedido=pedido)
 
@@ -2197,11 +2287,11 @@ def _vencer_tarde(solicitud: Solicitud, lengua: str | None = None) -> str:
         _avisar_equipo(
             solicitud,
             evento=f"acepto_tarde:{solicitud.id}",
-            texto=(
-                f"⏰ {pedido}: el cliente aceptó después del vencimiento y NO pude "
-                f"cerrar el borrador — {detalle}. No lo confirmé. Sigue reservando "
-                "stock y el barrido lo reintenta. Si todavía se puede, hay que "
-                "rehacerlo con los datos del momento."
+            texto=idioma.t(
+                "equipo.acepto_tarde_trabado",
+                _lengua_equipo(),
+                pedido=pedido,
+                detalle=detalle,
             ),
         )
         return tarde
@@ -2219,10 +2309,11 @@ def _vencer_tarde(solicitud: Solicitud, lengua: str | None = None) -> str:
     _avisar_equipo(
         vencida,
         evento=f"acepto_tarde:{solicitud.id}",
-        texto=(
-            f"⏰ {pedido}: el cliente aceptó después del vencimiento. No lo "
-            f"confirmé; {detalle}. Si todavía se puede, hay que rehacerlo con los "
-            "datos del momento."
+        texto=idioma.t(
+            "equipo.acepto_tarde",
+            _lengua_equipo(),
+            pedido=pedido,
+            detalle=detalle,
         ),
     )
     return tarde
@@ -2402,11 +2493,13 @@ def _a_revision(
         return _revision_sin_registro(solicitud, detalle, lengua)
     _avisar_equipo(
         en_revision,
-        f"⚠️ {solicitud.pedido}: el cliente aceptó la oferta pero NO lo confirmé. "
-        f"Cambió algo desde la decisión: {detalle}. El pedido sigue en borrador; "
-        f"revisalo y, si corresponde, confirmalo con 'confirmar {solicitud.pedido}'."
-        f"\nTenés {horas:g} h: pasado ese plazo cierro el borrador para que deje "
-        f"de retener stock, y le aviso al cliente.",
+        idioma.t(
+            "equipo.a_revision",
+            _lengua_equipo(),
+            pedido=solicitud.pedido,
+            detalle=detalle,
+            horas=f"{horas:g}",
+        ),
     )
     return idioma.t("oferta.a_revision", lengua, pedido=solicitud.pedido)
 
@@ -2435,10 +2528,13 @@ def _revision_sin_registro(
     _avisar_equipo(
         solicitud,
         evento="revision_sin_registro",
-        texto=f"🚨 {solicitud.pedido}: el cliente aceptó, algo había cambiado "
-        f"({detalle}) y NO pude registrar la revisión en ERPNext. Cerré el "
-        f"borrador para que no retenga stock sin plazo: {como}. "
-        f"Está sin confirmar y sin revisión abierta — miralo a mano.",
+        texto=idioma.t(
+            "equipo.revision_sin_registro",
+            _lengua_equipo(),
+            pedido=solicitud.pedido,
+            detalle=detalle,
+            como=como,
+        ),
     )
     return idioma.t("oferta.revision_sin_registro", lengua, pedido=solicitud.pedido)
 

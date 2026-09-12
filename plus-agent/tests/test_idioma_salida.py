@@ -352,6 +352,123 @@ def test_la_alerta_de_auto_confirmado_no_pide_responder(lengua):
         assert restos_en_espanol(texto, ("Demo Bakery", "Whole Milk 1 L")) == []
 
 
+# ------------------------------------------------- los avisos al equipo
+# `solicitudes._avisar_equipo` manda por `avisos.encolar_equipo` ->
+# `whatsapp.enviar_mensaje`: son mensajes que LEE UNA PERSONA en WhatsApp, no
+# logs ni comentarios de ERPNext. No estaban migrados y tampoco eran una
+# excepción documentada — el allowlist no dice en ninguna parte que los avisos
+# al equipo queden en español, y los de `notificar.*` y `pendientes.*` sí están
+# traducidos. Eran el resto sin migrar de una superficie cubierta en todo lo
+# demás.
+
+
+def _aviso(clave, lengua, **params):
+    return idioma.t(clave, lengua, **params)
+
+
+AVISOS_AL_EQUIPO = [
+    ("equipo.vencida_con_respaldo",
+     {"pedido": PEDIDO, "solicitud": "DR-1", "detalle": "The draft was closed",
+      "terminos": "delivery on 2026-09-08 at 10:00", "nueva": "DR-2",
+      "vence": "2026-09-08 12:00"}),
+    ("equipo.vencida_sin_respaldo",
+     {"pedido": PEDIDO, "detalle": "The draft was closed",
+      "porque": "no fallback configured"}),
+    ("equipo.revision_vencida",
+     {"pedido": PEDIDO, "solicitud": "DR-1", "plazo": "6",
+      "motivo": "stock moved", "detalle": "The draft was closed"}),
+    ("equipo.cierro_por_persona",
+     {"pedido": PEDIDO, "que": "the request", "solicitud": "DR-1",
+      "estado": "confirmed"}),
+    ("equipo.trabada",
+     {"pedido": PEDIDO, "que": "the request", "solicitud": "DR-1",
+      "detalle": "ERPNext refused", "intentos": 2, "espera": "30"}),
+    ("equipo.cliente_rechazo",
+     {"pedido": PEDIDO, "terminos": "delivery on 2026-09-08",
+      "detalle": "The draft was closed"}),
+    ("equipo.acepto_tarde_trabado", {"pedido": PEDIDO, "detalle": "ERPNext refused"}),
+    ("equipo.acepto_tarde", {"pedido": PEDIDO, "detalle": "ERPNext refused"}),
+    ("equipo.a_revision",
+     {"pedido": PEDIDO, "detalle": "the price moved", "horas": "6"}),
+    ("equipo.revision_sin_registro",
+     {"pedido": PEDIDO, "detalle": "the price moved", "como": "draft closed"}),
+]
+
+
+@pytest.mark.parametrize("clave, params", AVISOS_AL_EQUIPO)
+def test_los_avisos_al_equipo_salen_enteros_en_ingles(clave, params):
+    texto = _aviso(clave, EN, **params)
+
+    assert texto.strip()
+    assert "{" not in texto, f"{clave}: quedó sin interpolar — {texto}"
+    assert PEDIDO in texto
+    # El comando NO se traduce: es el payload que parsea el router.
+    permitido = (*(str(v) for v in params.values()), "confirmar")
+    assert restos_en_espanol(texto, permitido) == [], f"{clave}: {texto}"
+
+
+@pytest.mark.parametrize("clave, params", AVISOS_AL_EQUIPO)
+def test_cada_aviso_al_equipo_tiene_dos_textos_distintos(clave, params):
+    """Escritos a mano los dos. Si alguien copia el español al inglés, se ve."""
+    assert _aviso(clave, ES, **params) != _aviso(clave, EN, **params)
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_resumen_de_decision_sale_en_el_idioma_del_equipo(lengua):
+    """La tabla sobre la que el dueño decide. Era el único constructor de
+    app/solicitudes.py que no tomaba idioma en absoluto."""
+    from app import solicitudes
+
+    sol = _solicitud_equipo()
+    texto = solicitudes.texto_para_equipo(sol, lengua)
+
+    assert PEDIDO in texto and "DR-9" in texto
+    # Los CINCO comandos salen iguales en los dos idiomas: son lo que hay que
+    # teclear, no prosa.
+    for comando in ("contraoferta", "retiro", "rechazar-solicitud", "ver"):
+        assert f"{comando} {PEDIDO}" in texto, comando
+    if lengua == EN:
+        assert restos_en_espanol(
+            texto, ("Demo Bakery", "5 x Whole Milk 1 L", "ARS", "contraoferta",
+                    "retiro", "rechazar-solicitud", "ver", "aprobar", "fecha",
+                    "hora", "cargo", "motivo")
+        ) == [], texto
+        assert "Pending decision" in texto
+    else:
+        assert "Decisión pendiente" in texto
+
+
+def test_lo_que_falta_para_una_oferta_se_nombra_en_el_idioma_de_quien_lee():
+    """`terminos_incompletos` devolvía la prosa ya escrita en español, así que
+    el resumen decía «falta qué día y a qué hora» adentro de una tabla inglesa.
+    Ahora devuelve claves y cada call site las dice en su idioma."""
+    from app import solicitudes
+
+    faltan = solicitudes.terminos_incompletos({})
+
+    assert faltan == [
+        "terminos.falta_fecha", "terminos.falta_hora", "terminos.falta_cargo"
+    ]
+    assert solicitudes.enumerar(
+        solicitudes.nombres_de_terminos(faltan, ES), ES
+    ) == "qué día, a qué hora y cuánto se cobra"
+    assert solicitudes.enumerar(
+        solicitudes.nombres_de_terminos(faltan, EN), EN
+    ) == "what day, what time and what you charge"
+
+
+def _solicitud_equipo():
+    from app import solicitudes
+
+    return solicitudes.Solicitud(
+        id="DR-9", pedido=PEDIDO, tipo=solicitudes.TIPO_ENTREGA,
+        estado=solicitudes.PENDIENTE, cliente="CUST-1",
+        cliente_nombre="Demo Bakery", resumen_items="5 x Whole Milk 1 L",
+        total=6000.0, moneda="ARS", creada_en=0.0, vence_en=6 * 3600.0,
+        sello=0.0, solicitado={"metodo": "entrega"},
+    )
+
+
 # --------------------------------------------------- los botones del aviso
 # El aviso de pedido pendiente es EL ÚNICO camino en el que una persona recibe
 # algo sin haber escrito nada: el bot le escribe al dueño por su cuenta. Su

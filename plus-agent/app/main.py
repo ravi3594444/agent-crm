@@ -684,10 +684,11 @@ def _resumen_de_solicitud(text: str) -> str | None:
             continue
         if solicitud is None or not solicitud.abierta:
             continue
+        lengua = idioma.gerencia()
         return (
-            "No ejecuto una instrucción que no sea exacta: esto cambia una fecha "
-            "y un precio que después hay que cumplir.\n\n"
-            f"{solicitudes.texto_para_equipo(solicitud)}"
+            idioma.t("equipo.instruccion_no_exacta", lengua)
+            + "\n\n"
+            + solicitudes.texto_para_equipo(solicitud, lengua)
         )
     return None
 
