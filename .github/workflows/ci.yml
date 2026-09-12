@@ -16,7 +16,7 @@ name: CI
 # suite deja de ser la suite.
 
 # Cada push a una rama disparaba el job Y el pull_request lo disparaba otra
-# vez: dos corridas idénticas por push. Con una matriz de cuatro celdas eso
+# vez: dos corridas idénticas por push. Con una matriz de cinco celdas eso
 # pasaba a ocho. Ahora `push` cubre sólo `main` —el estado que importa después
 # del merge— y las ramas se cubren por su PR, que es donde alguien mira el
 # resultado.
@@ -31,17 +31,17 @@ defaults:
 
 jobs:
   test:
-    # CUATRO ENTORNOS, NO UNO. En un solo día llegaron a `main` dos fallas de
+    # CINCO ENTORNOS, NO UNO. En un solo día llegaron a `main` dos fallas de
     # COMBINACIÓN: cada PR estaba verde por separado y la suma no. #17 sacó el
     # pin de IDIOMA_* del conftest y #18 hizo que `contar_stock` resolviera el
     # idioma del dueño; ninguno de los dos podía ver el hueco, y CI tampoco,
-    # porque corre en un solo idioma. La verificación de los cuatro entornos se
+    # porque corre en un solo idioma. La verificación de esos entornos se
     # hacía A MANO antes de cada merge, que es otra forma de decir que no se
     # hacía. Ver #13.
     #
-    # Son cuatro filas y no dieciséis: cada variable se prueba sola contra el
-    # default. El producto cartesiano cuadruplicaría el tiempo para cubrir
-    # combinaciones que ninguna configuración real tiene.
+    # Son cinco filas y no treinta y dos: cada variable se prueba sola contra el
+    # default. El producto cartesiano multiplicaría el tiempo por seis para
+    # cubrir combinaciones que ninguna configuración real tiene.
     name: tests · ${{ matrix.nombre }}
     runs-on: ubuntu-latest
     # El job corre los tests, nada que escriba en el repo: token de sólo lectura.
@@ -63,6 +63,14 @@ jobs:
             prefijo: "IDIOMA_GERENCIA=en"
           - nombre: "BUSINESS_TIMEZONE=Asia/Kolkata"
             prefijo: "BUSINESS_TIMEZONE=Asia/Kolkata"
+          # La quinta, por la misma razón que existen las otras cuatro: LOCALE
+          # decide la FORMA de todo monto que alguien lee, y un pin en el
+          # conftest habría hecho que la suite no pudiera probar la otra. Sin
+          # esta fila, «$1,200.50» se verifica a mano antes de cada merge, que
+          # es otra forma de decir que no se verifica. Encontró dos archivos
+          # que afirmaban «4.800,00» sin declararlo el día que se agregó.
+          - nombre: "LOCALE=en_US"
+            prefijo: "LOCALE=en_US"
 
     services:
       redis:
