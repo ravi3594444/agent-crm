@@ -39,11 +39,14 @@ def preparar(limite: str, valor: str, telefono: str) -> str:
     try:
         propuesta = limites.proponer(limite, valor, telefono)
     except limites.LimiteError as exc:
-        # En el idioma del equipo, como todo lo demás que sale de acá; el
-        # motivo viene con su clave del catálogo cuando la tiene.
+        # En el idioma del equipo, como todo lo demás que sale de acá. Quién
+        # convierte la excepción en ese texto es `limites.motivo`, en un solo
+        # lugar: acá y en app/main.py estaba la MISMA línea escrita dos veces, y
+        # dos copias de una regla son dos reglas.
         lengua = idioma.gerencia()
-        motivo = idioma.t(exc.clave, lengua) if getattr(exc, "clave", "") else str(exc)
-        return idioma.t("codigo.ajuste_no_preparado", lengua, motivo=motivo)
+        return idioma.t(
+            "codigo.ajuste_no_preparado", lengua, motivo=limites.motivo(exc, lengua)
+        )
 
     # El idioma en que se le habla al equipo AHORA — no el propuesto. Si está
     # pasando de español a inglés, el pedido de confirmación llega todavía en

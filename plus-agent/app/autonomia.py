@@ -109,6 +109,48 @@ _GRUPOS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 OTROS = "otros"
 
+# CÓMO SE LLAMA CADA CUBETA para una persona. La tabla de arriba tiene el nombre
+# CANÓNICO y acá está el del catálogo: los nombres de arriba se cuentan, se
+# suman entre fuentes y se ordenan, o sea que son claves, y una clave traducida
+# parte una cubeta en dos. Es la misma regla que los días de reparto — lo
+# guardado en español, lo mostrado en el idioma de quien lee.
+#
+# `policy.POSTURA_TOPE` y `POSTURA_STOCK` entran acá por el mismo camino: los
+# cuenta `_por_sombras` y los muestra `_linea_grupos`.
+_NOMBRE_DE_CUBETA = {
+    "auto-confirmación apagada": "grupo.auto_apagada",
+    "límites ilegibles": "grupo.limites_ilegibles",
+    "inventario apagado": "grupo.inventario_apagado",
+    "tope del pedido": "grupo.tope_del_pedido",
+    "cliente nuevo": "grupo.cliente_nuevo",
+    "muy por encima de su promedio": "grupo.sobre_el_promedio",
+    "historial ilegible": "grupo.historial_ilegible",
+    "deuda vencida": "grupo.deuda_vencida",
+    "sin conteo de stock": "grupo.sin_conteo",
+    "sin stock": "grupo.sin_stock",
+    "zona de entrega": "grupo.zona_de_entrega",
+    "fecha de entrega": "grupo.fecha_de_entrega",
+    "cantidad por producto": "grupo.cantidad_por_producto",
+    "descuento": "grupo.descuento",
+    "lista o moneda": "grupo.lista_o_moneda",
+    "pedido incompleto": "grupo.pedido_incompleto",
+    OTROS: "grupo.otros",
+    "tope": "grupo.postura_tope",
+    "stock apagado": "grupo.postura_stock",
+}
+
+
+def nombre_de_cubeta(nombre: str, lengua: str | None = None) -> str:
+    """El nombre de una cubeta, como lo lee una persona.
+
+    Una cubeta que no esté en el mapa sale con su nombre tal cual: es el mismo
+    principio que el resto del módulo —un dato que no se pudo resolver se
+    muestra, no se esconde— y además es lo que hace visible que falta una fila
+    acá. `test_autonomia.py` exige que no falte ninguna.
+    """
+    clave = _NOMBRE_DE_CUBETA.get(nombre)
+    return idioma.t(clave, lengua) if clave else nombre
+
 
 def grupo(motivo: object) -> str:
     """En qué cubeta cae un motivo. `otros` cuando no coincide con ninguna."""
@@ -473,7 +515,10 @@ def _linea_grupos(grupos: dict[str, int] | None, lengua: str | None = None) -> s
     if not grupos:
         return ""
     ordenados = sorted(grupos.items(), key=lambda kv: (-kv[1], kv[0]))
-    linea = ", ".join(f"{nombre} {cuenta}" for nombre, cuenta in ordenados[:MAX_GRUPOS])
+    linea = ", ".join(
+        f"{nombre_de_cubeta(nombre, lengua)} {cuenta}"
+        for nombre, cuenta in ordenados[:MAX_GRUPOS]
+    )
     resto = len(ordenados) - MAX_GRUPOS
     if resto > 0:
         linea += ", " + idioma.t("gerencia.autonomia_grupos_mas", lengua, cuantos=resto)
@@ -539,7 +584,12 @@ def texto(datos: dict, lengua: str | None = None) -> str:
         conteos=(
             ilegible
             if cue is None
-            else f"{cue.get('frescos')} de {cue.get('mirados')}"
+            else idioma.t(
+                "gerencia.autonomia_conteos",
+                lengua,
+                frescos=cue.get("frescos"),
+                mirados=cue.get("mirados"),
+            )
         ),
         falto=", ".join((cue or {}).get("faltan") or []) or "—",
     )

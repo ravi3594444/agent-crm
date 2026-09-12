@@ -386,7 +386,7 @@ def _notificar_confirmada(order: dict) -> None:
     except Exception as exc:
         print(f"[orders] aviso al cliente no encolado ({type(exc).__name__})")
     try:
-        notificar_confirmacion(order, "automática (política)")
+        notificar_confirmacion(order, "gerencia.fuente_automatica")
     except Exception as exc:
         print(f"[orders] aviso de confirmación falló ({type(exc).__name__})")
 

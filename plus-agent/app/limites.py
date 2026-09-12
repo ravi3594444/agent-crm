@@ -75,15 +75,47 @@ AUDITORIA_MAXIMA = 500
 class LimiteError(RuntimeError):
     """Un límite falta, no se puede leer, o no es un número creíble.
 
-    ``clave`` es opcional y nombra una entrada del catálogo de app/idioma.py.
-    Los errores que ve una persona —un código que no es, uno vencido, uno ya
-    usado— la traen para poder mostrarse en su idioma; el resto sigue viajando
-    sólo con su texto en español, que es lo que ya hacían.
+    ``clave`` nombra una entrada del catálogo de app/idioma.py y ``datos`` son
+    los valores que ese texto interpola — el alias del ajuste, lo que tecleó el
+    dueño, un mínimo, un máximo. Los dos juntos son lo que hace que el motivo
+    salga en el idioma de quien lo lee: `app/ajustes.py` y `app/main.py` meten
+    ese motivo adentro de un mensaje que ya sale en inglés, así que un motivo en
+    español era media frase en cada idioma.
+
+    ``datos`` existe porque casi ningún motivo es una frase fija: «no es un
+    número: 'abc'» necesita el 'abc'. Sin él, la clave sólo alcanzaba para los
+    cuatro errores del código de confirmación, que son los únicos sin datos, y
+    por eso eran los únicos cuatro que la tenían.
+
+    El texto en español se sigue pasando y sigue siendo `str(exc)`: es lo que
+    va al log, y lo que ve cualquier camino que todavía no conozca la clave.
     """
 
-    def __init__(self, mensaje: object = "", clave: str = "") -> None:
+    def __init__(
+        self, mensaje: object = "", clave: str = "", datos: dict | None = None
+    ) -> None:
         super().__init__(mensaje)
         self.clave = clave
+        self.datos = dict(datos or {})
+
+
+def motivo(exc: Exception, lengua: str | None = None) -> str:
+    """El texto de un `LimiteError` en el idioma de quien lo va a leer.
+
+    Vive acá y no copiado en cada handler porque `app/ajustes.py` y
+    `app/main.py` hacían la misma línea con el mismo ternario, y dos copias de
+    una regla son dos reglas: la segunda se olvida el día que la primera
+    aprende algo. Ahora las dos preguntan lo mismo.
+
+    Sin clave cae al texto en español, que es exactamente lo que hacía antes:
+    una excepción de otro módulo o una vieja sigue saliendo, nunca vacía.
+    """
+    clave = str(getattr(exc, "clave", "") or "")
+    if not clave:
+        return str(exc)
+    from app import idioma as idioma_mod
+
+    return idioma_mod.t(clave, lengua, **getattr(exc, "datos", {}))
 
 
 # What KIND of value a setting holds. Each kind has exactly one validator and
@@ -647,7 +679,7 @@ _durable_cache_entrega: tuple[float, bool] | None = None
 _durable_cache_idioma: tuple[float, bool] | None = None
 
 
-def _consultar_marca(nombre: str, queja: str) -> bool:
+def _consultar_marca(nombre: str, queja: str, clave: str = "") -> bool:
     """¿Hay en ERPNext algún comentario de auditoría con esa marca?
 
     Sin cachear: los tres que preguntan tienen su propio caché, porque una marca
@@ -663,7 +695,12 @@ def _consultar_marca(nombre: str, queja: str) -> bool:
     try:
         return marcas.existe(nombre)
     except erpnext.ERPNextError as exc:
-        raise LimiteError(queja) from exc
+        # `clave` la pone quien llama, igual que `queja`, y por el mismo motivo:
+        # los tres contestan distinto al «no pude averiguarlo». El de LÍMITES es
+        # el único que LEVANTA, y su excepción llega hasta `ajustes.preparar`,
+        # que la mete adentro de una respuesta ya traducida — así que necesita
+        # su clave. Los otros dos la miran y la loguean, y por eso no la traen.
+        raise LimiteError(queja, clave=clave) from exc
 
 
 def _hubo_cambios_durables() -> bool:
@@ -684,6 +721,7 @@ def _hubo_cambios_durables() -> bool:
     hubo = _consultar_marca(
         "limite",
         "no pude verificar en ERPNext si los límites se configuraron antes",
+        clave="limite.marca_no_verificable",
     )
     _durable_cache = (ahora + DURABLE_CACHE_SEGUNDOS, hubo)
     return hubo
@@ -798,7 +836,9 @@ def _almacen() -> dict[str, str]:
     try:
         crudo = locks.conexion().hgetall(CLAVE_VALORES)
     except (locks.CoordinationError, RedisError) as exc:
-        raise LimiteError("no pude leer los límites configurados") from exc
+        raise LimiteError(
+            "no pude leer los límites configurados", clave="limite.no_pude_leer"
+        ) from exc
     valores = {_texto(k): _texto(v) for k, v in (crudo or {}).items()}
     # El hash es UNO para límites, reglas de entrega e idioma. La pregunta es
     # si faltan LOS LÍMITES, no si el hash está vacío: después de una pérdida,
@@ -811,7 +851,8 @@ def _almacen() -> dict[str, str]:
         raise LimiteError(
             "los límites que configuró el dueño no están en el almacén, y "
             "ERPNext tiene cambios registrados: hay que restaurarlos antes de "
-            "que algo se confirme solo"
+            "que algo se confirme solo",
+            clave="limite.perdidos",
         )
     return valores
 
@@ -863,18 +904,32 @@ def _numero(defi: Definicion, crudo: str, *, tecleado: bool = True) -> float:
         valor = float(texto.replace(",", "."))
     except (TypeError, ValueError) as exc:
         raise LimiteError(
-            f"«{defi.alias[0]}» no es un número: {crudo!r}"
+            f"«{defi.alias[0]}» no es un número: {crudo!r}",
+            clave="limite.no_es_numero",
+            datos={"ajuste": defi.alias[0], "valor": repr(crudo)},
         ) from exc
     if valor != valor or valor in (float("inf"), float("-inf")):
-        raise LimiteError(f"«{defi.alias[0]}» no es un número usable: {crudo!r}")
+        raise LimiteError(
+            f"«{defi.alias[0]}» no es un número usable: {crudo!r}",
+            clave="limite.no_es_numero_usable",
+            datos={"ajuste": defi.alias[0], "valor": repr(crudo)},
+        )
     if valor < defi.minimo:
         raise LimiteError(
-            f"«{defi.alias[0]}» no puede ser menor que {defi.minimo:g}"
+            f"«{defi.alias[0]}» no puede ser menor que {defi.minimo:g}",
+            clave="limite.minimo",
+            datos={"ajuste": defi.alias[0], "minimo": f"{defi.minimo:g}"},
         )
     if valor > defi.maximo:
         raise LimiteError(
             f"«{defi.alias[0]}» {valor:g} es imposible: el máximo es "
-            f"{defi.maximo:g} {defi.unidad}".strip()
+            f"{defi.maximo:g} {defi.unidad}".strip(),
+            clave="limite.maximo",
+            datos={
+                "ajuste": defi.alias[0],
+                "valor": f"{valor:g}",
+                "maximo": f"{defi.maximo:g} {defi.unidad}".strip(),
+            },
         )
     return valor
 
@@ -886,7 +941,9 @@ def _bool(defi: Definicion, crudo: str) -> bool:
     if normal in _FALSOS:
         return False
     raise LimiteError(
-        f"«{defi.alias[0]}» tiene que ser sí o no, no {crudo!r}"
+        f"«{defi.alias[0]}» tiene que ser sí o no, no {crudo!r}",
+        clave="limite.si_o_no",
+        datos={"ajuste": defi.alias[0], "valor": repr(crudo)},
     )
 
 
@@ -906,14 +963,24 @@ def _dias(defi: Definicion, crudo: str) -> str:
     texto = _sin_tildes(crudo).replace(" y ", ",").replace(" and ", ",")
     partes = [parte for parte in re.split(r"[,\s]+", texto) if parte]
     if not partes:
-        raise LimiteError(f"«{defi.alias[0]}» está vacío: decime qué días")
+        raise LimiteError(
+            f"«{defi.alias[0]}» está vacío: decime qué días",
+            clave="limite.dias_vacio",
+            datos={"ajuste": defi.alias[0]},
+        )
     elegidos: set[str] = set()
     for parte in partes:
         canonico = _DIAS_DICHOS.get(parte)
         if canonico is None:
             raise LimiteError(
                 f"«{parte}» no es un día de la semana. Van así: "
-                f"{', '.join(_ORDEN_DIAS)}"
+                f"{', '.join(_ORDEN_DIAS)}",
+                clave="limite.dia_desconocido",
+                # La lista de días válidos NO se interpola: cada idioma nombra
+                # en el catálogo las formas que de verdad parsean en él, que
+                # desde #33 son las dos. Un test cruza esa lista contra `_dias`
+                # para que no se separen.
+                datos={"valor": parte},
             )
         elegidos.add(canonico)
     return ",".join(dia for dia in _ORDEN_DIAS if dia in elegidos)
@@ -943,7 +1010,9 @@ def _localidades(defi: Definicion, crudo: str) -> str:
     partes = _partes_de_lista(crudo)
     if not partes:
         raise LimiteError(
-            f"«{defi.alias[0]}» está vacío: decime en qué localidades repartís"
+            f"«{defi.alias[0]}» está vacío: decime en qué localidades repartís",
+            clave="limite.localidades_vacio",
+            datos={"ajuste": defi.alias[0]},
         )
     elegidas: list[str] = []
     vistas: set[str] = set()
@@ -953,7 +1022,9 @@ def _localidades(defi: Definicion, crudo: str) -> str:
         clave = re.sub(r"[^a-z0-9]+", " ", _sin_tildes(limpia)).strip()
         if not clave:
             raise LimiteError(
-                f"«{parte}» no es una localidad: no tiene ni una letra ni un número"
+                f"«{parte}» no es una localidad: no tiene ni una letra ni un número",
+                clave="limite.no_es_localidad",
+                datos={"valor": parte},
             )
         if clave not in vistas:
             vistas.add(clave)
@@ -972,13 +1043,19 @@ def _codigos_postales(defi: Definicion, crudo: str) -> str:
         partes.extend(p for p in re.split(r"\s+", grupo) if p)
     if not partes:
         raise LimiteError(
-            f"«{defi.alias[0]}» está vacío: decime qué códigos postales"
+            f"«{defi.alias[0]}» está vacío: decime qué códigos postales",
+            clave="limite.cp_vacio",
+            datos={"ajuste": defi.alias[0]},
         )
     elegidos: list[str] = []
     for parte in partes:
         limpio = re.sub(r"[^A-Z0-9]+", "", parte.upper())
         if not limpio:
-            raise LimiteError(f"«{parte}» no es un código postal")
+            raise LimiteError(
+                f"«{parte}» no es un código postal",
+                clave="limite.no_es_cp",
+                datos={"valor": parte},
+            )
         if limpio not in elegidos:
             elegidos.append(limpio)
     return ", ".join(elegidos)
@@ -992,7 +1069,9 @@ def _hora(defi: Definicion, crudo: str) -> str:
     encontrado = _HORA_RE.match(texto)
     if not encontrado:
         raise LimiteError(
-            f"«{defi.alias[0]}» tiene que ser una hora tipo 08:00, no {crudo!r}"
+            f"«{defi.alias[0]}» tiene que ser una hora tipo 08:00, no {crudo!r}",
+            clave="limite.hora_invalida",
+            datos={"ajuste": defi.alias[0], "valor": repr(crudo)},
         )
     return f"{int(encontrado.group(1)):02d}:{encontrado.group(2)}"
 
@@ -1009,7 +1088,9 @@ def _idioma(defi: Definicion, crudo: str) -> str:
     elegido = idioma_mod.normalizar(crudo)
     if elegido is None:
         raise LimiteError(
-            f"«{defi.alias[0]}» sólo puede ser español o inglés, no {crudo!r}"
+            f"«{defi.alias[0]}» sólo puede ser español o inglés, no {crudo!r}",
+            clave="limite.idioma_invalido",
+            datos={"ajuste": defi.alias[0], "valor": repr(crudo)},
         )
     return elegido
 
@@ -1338,7 +1419,7 @@ def definicion(nombre_o_alias: str) -> Definicion:
     """Encuentra el límite por su nombre técnico o por como lo dice el dueño."""
     buscado = str(nombre_o_alias or "").strip().lower()
     if not buscado:
-        raise LimiteError("no me dijiste qué límite")
+        raise LimiteError("no me dijiste qué límite", clave="limite.cual")
     for nombre, defi in TODOS.items():
         if buscado == nombre.lower() or buscado in defi.alias:
             return defi
@@ -1356,10 +1437,19 @@ def definicion(nombre_o_alias: str) -> Definicion:
     if parecidos:
         opciones = ", ".join(f"«{defi.alias[0]}»" for defi in parecidos)
         raise LimiteError(
-            f"«{nombre_o_alias}» puede ser varias cosas: {opciones}. Decime cuál"
+            f"«{nombre_o_alias}» puede ser varias cosas: {opciones}. Decime cuál",
+            clave="limite.ambiguo",
+            datos={"valor": nombre_o_alias, "opciones": opciones},
         )
     conocidos = ", ".join(defi.alias[0] for defi in TODOS.values())
-    raise LimiteError(f"no conozco el ajuste «{nombre_o_alias}». Hay: {conocidos}")
+    raise LimiteError(
+        # La LISTA de alias sigue en español en los dos idiomas, y no es un
+        # olvido: son los comandos que el dueño teclea (sección 4 del
+        # allowlist). Lo que se traduce es la frase alrededor.
+        f"no conozco el ajuste «{nombre_o_alias}». Hay: {conocidos}",
+        clave="limite.ajuste_desconocido",
+        datos={"valor": nombre_o_alias, "conocidos": conocidos},
+    )
 
 
 def _ahora() -> str:
@@ -1469,7 +1559,7 @@ def proponer(nombre_o_alias: str, valor_crudo: str, telefono: str) -> dict:
     aplicaba nada.
     """
     if not telefono:
-        raise LimiteError("no sé quién pide el cambio")
+        raise LimiteError("no sé quién pide el cambio", clave="limite.sin_quien_pide")
     defi = definicion(nombre_o_alias)
     nuevo = validar(defi.nombre, valor_crudo)
     anterior = vigente(defi.nombre)
@@ -1498,7 +1588,10 @@ def proponer(nombre_o_alias: str, valor_crudo: str, telefono: str) -> dict:
             json.dumps(propuesta, ensure_ascii=False),
         )
     except (locks.CoordinationError, RedisError) as exc:
-        raise LimiteError("no pude registrar el cambio para confirmarlo") from exc
+        raise LimiteError(
+            "no pude registrar el cambio para confirmarlo",
+            clave="limite.no_registre_propuesta",
+        ) from exc
     return {**propuesta, "repetida": False}
 
 
@@ -1547,13 +1640,17 @@ def aplicar(codigo: str, telefono: str) -> dict:
     ERPNext, y el historial contaba dos cambios donde el dueño hizo uno.
     """
     if not telefono:
-        raise LimiteError("no sé quién confirma el cambio")
+        raise LimiteError(
+            "no sé quién confirma el cambio", clave="limite.sin_quien_confirma"
+        )
     limpio = str(codigo or "").strip()
     clave = _clave_propuesta(telefono)
     try:
         crudo = locks.conexion().get(clave)
     except (locks.CoordinationError, RedisError) as exc:
-        raise LimiteError("no pude leer el cambio pendiente") from exc
+        raise LimiteError(
+            "no pude leer el cambio pendiente", clave="codigo.pendiente_no_legible"
+        ) from exc
     if not crudo:
         raise LimiteError(
             "no hay ningún cambio esperando confirmación",
@@ -1562,7 +1659,9 @@ def aplicar(codigo: str, telefono: str) -> dict:
     try:
         propuesta = json.loads(_texto(crudo))
     except ValueError as exc:
-        raise LimiteError("el cambio pendiente quedó ilegible") from exc
+        raise LimiteError(
+            "el cambio pendiente quedó ilegible", clave="codigo.pendiente_ilegible"
+        ) from exc
 
     if str(propuesta.get("codigo")) != limpio:
         raise LimiteError(
@@ -1587,21 +1686,30 @@ def aplicar(codigo: str, telefono: str) -> dict:
     try:
         reclamado = locks.conexion().getdel(clave)
     except (locks.CoordinationError, RedisError) as exc:
-        raise LimiteError("no pude leer el cambio pendiente") from exc
+        raise LimiteError(
+            "no pude leer el cambio pendiente", clave="codigo.pendiente_no_legible"
+        ) from exc
     if not reclamado:
-        raise LimiteError("ese cambio ya se confirmó")
+        raise LimiteError("ese cambio ya se confirmó", clave="codigo.ya_confirmado")
     try:
         propuesta = json.loads(_texto(reclamado))
     except ValueError as exc:
-        raise LimiteError("el cambio pendiente quedó ilegible") from exc
+        raise LimiteError(
+            "el cambio pendiente quedó ilegible", clave="codigo.pendiente_ilegible"
+        ) from exc
     # Entre el vistazo y el reclamo pudo entrar otra propuesta: la que se
     # aplica es la que el código nombra, nunca la que quedó en su lugar.
     if str(propuesta.get("codigo")) != limpio:
-        raise LimiteError("ese código no es el del cambio pendiente")
+        raise LimiteError(
+            "ese código no es el del cambio pendiente", clave="codigo.invalido"
+        )
 
     nombre = str(propuesta.get("limite") or "")
     if nombre not in TODOS:
-        raise LimiteError("el cambio pendiente apunta a un ajuste que no existe")
+        raise LimiteError(
+            "el cambio pendiente apunta a un ajuste que no existe",
+            clave="codigo.ajuste_inexistente",
+        )
     # tecleado=False: proponer() ya normalizó esto. Re-agruparlo es el error
     # de mil veces que describe el docstring de _numero.
     nuevo = validar(nombre, str(propuesta.get("nuevo")), tecleado=False)
@@ -1624,7 +1732,9 @@ def aplicar(codigo: str, telefono: str) -> dict:
         cliente.rpush(CLAVE_AUDITORIA, json.dumps(entrada, ensure_ascii=False))
         cliente.ltrim(CLAVE_AUDITORIA, -AUDITORIA_MAXIMA, -1)
     except (locks.CoordinationError, RedisError) as exc:
-        raise LimiteError("no pude guardar el cambio") from exc
+        raise LimiteError(
+            "no pude guardar el cambio", clave="limite.no_pude_guardar"
+        ) from exc
     print(
         f"[limites] {nombre}: {anterior} -> {nuevo} "
         f"por {_tag(telefono)} ({entrada['ts']})"
@@ -1660,7 +1770,8 @@ def _auditar_en_erpnext(entrada: dict) -> None:
         )
     except erpnext.ERPNextError as exc:
         raise LimiteError(
-            "no pude registrar el cambio en ERPNext, así que no lo apliqué"
+            "no pude registrar el cambio en ERPNext, así que no lo apliqué",
+            clave="limite.no_registre_en_erpnext",
         ) from exc
     if idioma_cambio:
         _durable_cache_idioma = None
@@ -1675,7 +1786,9 @@ def auditoria(maximo: int = 10) -> list[dict]:
     try:
         crudos = locks.conexion().lrange(CLAVE_AUDITORIA, -max(1, maximo), -1)
     except (locks.CoordinationError, RedisError) as exc:
-        raise LimiteError("no pude leer el historial de cambios") from exc
+        raise LimiteError(
+            "no pude leer el historial de cambios", clave="limite.no_pude_leer_historial"
+        ) from exc
     entradas = []
     for crudo in reversed(list(crudos or [])):
         try:

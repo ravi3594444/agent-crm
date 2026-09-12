@@ -308,24 +308,42 @@ def texto_confirmacion(
     total = f"{pesos(so.get('grand_total'), 2)} {so.get('currency') or ''}".strip()
     from app import idioma as idioma_mod
 
+    lengua_final = lengua if lengua is not None else _lengua_equipo()
     return idioma_mod.t(
         "gerencia.confirmado_detalle",
-        lengua if lengua is not None else _lengua_equipo(),
+        lengua_final,
         pedido=so.get("name"),
         cliente=so.get("customer_name") or so.get("customer") or "Cliente",
         detalle=_renglones(so),
         total=total,
         entrega=entrega_txt,
-        fuente=fuente,
+        fuente=_fuente(fuente, lengua_final),
         momento=momento or _momento_negocio(),
         horas=os.getenv("CANCELACION_HORAS", "24"),
     )[:3500]
 
 
+def _fuente(fuente: str, lengua: str | None = None) -> str:
+    """De dónde salió la confirmación, dicho en el idioma del equipo.
+
+    ``fuente`` es una CLAVE del catálogo (`gerencia.fuente_*`). Era el literal
+    en español que arma cada camino que confirma, y salía tal cual adentro del
+    mensaje traducido: «Source: manual (confirmación humana)».
+
+    Un valor que no es una clave sale como vino. Es a propósito: el MISMO string
+    se escribe también en el registro durable de ERPNext, que no se traduce, así
+    que un llamador que todavía pase el texto no se queda sin «Origen».
+    """
+    from app import idioma as idioma_mod
+
+    return idioma_mod.t(fuente, lengua) if fuente in idioma_mod.CATALOGO else fuente
+
+
 def notificar_confirmacion(so: dict, fuente: str) -> bool:
     """Tell the human manager an order is confirmed — exactly once per order.
 
-    ``fuente`` is "automática (política)" or "manual (confirmación humana)".
+    ``fuente`` is a catalogue key: ``gerencia.fuente_automatica``,
+    ``gerencia.fuente_manual`` or ``gerencia.fuente_solicitud``.
     Returns True when Meta accepted it for at least one staff phone, or when
     the order was already notified. Never raises.
     """
@@ -343,6 +361,21 @@ def notificar_confirmacion(so: dict, fuente: str) -> bool:
     texto = texto_confirmacion(so, fuente, momento)
     plantilla = os.getenv("WHATSAPP_STAFF_CONFIRMED_TEMPLATE", "").strip()
     locale_plantilla = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"
+    # LA CLAVE SE RESUELVE EN LAS TRES SALIDAS, no sólo en el texto libre.
+    #
+    # `fuente` es una clave del catálogo, así que cualquier lugar que la escriba
+    # sin resolver le muestra «gerencia.fuente_manual» a una persona. Son tres y
+    # cada uno tiene su idioma:
+    #   * el texto libre, en el del equipo — lo hace `texto_confirmacion`;
+    #   * el parámetro de la PLANTILLA, en el idioma en que Meta la tiene
+    #     registrada (`WHATSAPP_TEMPLATE_LANGUAGE`), porque los otros seis
+    #     parámetros están escritos en ése;
+    #   * el comentario durable de ERPNext, SIEMPRE en español, porque es
+    #     auditoría y ya está escrito así en los despliegues.
+    from app import idioma as _idioma
+
+    fuente_plantilla = _fuente(fuente, _idioma.valido(locale_plantilla.split("_")[0]))
+    fuente_auditoria = _fuente(fuente, _idioma.ES)
     parametros = [
         nombre,
         "Confirmado",
@@ -353,7 +386,7 @@ def notificar_confirmacion(so: dict, fuente: str) -> bool:
             p for p in (_direccion_de_entrega(so), str(so.get("delivery_date") or "")) if p
         )[:1000]
         or "a coordinar",
-        f"Origen: {fuente}; confirmado {momento}"[:1000],
+        f"Origen: {fuente_plantilla}; confirmado {momento}"[:1000],
     ]
 
     if not STAFF:
@@ -398,7 +431,8 @@ def notificar_confirmacion(so: dict, fuente: str) -> bool:
         erpnext.add_comment(
             "Sales Order",
             nombre,
-            f"Aviso de pedido confirmado ({fuente}) aceptado por Meta para {enviados} integrante(s).",
+            f"Aviso de pedido confirmado ({fuente_auditoria}) aceptado por Meta "
+            f"para {enviados} integrante(s).",
         )
         return True
 

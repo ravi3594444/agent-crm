@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -352,6 +353,249 @@ def test_la_alerta_de_auto_confirmado_no_pide_responder(lengua):
         assert restos_en_espanol(texto, ("Demo Bakery", "Whole Milk 1 L")) == []
 
 
+@pytest.mark.parametrize("lengua", IDIOMAS)
+@pytest.mark.parametrize(
+    "clave, en_espanol, en_ingles",
+    [
+        ("gerencia.fuente_automatica", "automática (política)", "automatic (policy)"),
+        ("gerencia.fuente_manual", "manual (confirmación humana)",
+         "manual (human confirmation)"),
+        ("gerencia.fuente_solicitud", "solicitud aprobada y aceptada",
+         "request approved and accepted"),
+    ],
+)
+def test_el_origen_de_una_confirmacion_sale_en_el_idioma(
+    lengua, clave, en_espanol, en_ingles
+):
+    """El campo «Origen:» del aviso de confirmado, que lo arma cada camino que
+    confirma. Salía como literal en español adentro del mensaje traducido —
+    «Source: manual (confirmación humana)»— y lo encontró la corrida del piloto
+    en inglés, no un test: ningún audit lo miraba porque el valor entra por
+    parámetro desde otro módulo.
+
+    El registro durable de ERPNext sigue guardando su texto en español: es el
+    mismo string usado para dos cosas, y sólo una la lee una persona.
+    """
+    from app import notificar
+
+    texto = notificar.texto_confirmacion(
+        _SO, clave, momento="2026-09-05 16:14", lengua=lengua
+    )
+
+    if lengua == EN:
+        assert en_ingles in texto
+        assert en_espanol not in texto
+        assert restos_en_espanol(
+            texto, ("Demo Bakery", "Whole Milk 1 L", "ARS", "cancelar")
+        ) == [], texto
+    else:
+        assert en_espanol in texto
+
+
+@pytest.mark.parametrize(
+    "clave, en_espanol",
+    [
+        ("gerencia.fuente_automatica", "automática (política)"),
+        ("gerencia.fuente_manual", "manual (confirmación humana)"),
+        ("gerencia.fuente_solicitud", "solicitud aprobada y aceptada"),
+    ],
+)
+def test_la_clave_del_origen_no_sale_cruda_por_ninguna_de_las_tres_puertas(
+    clave, en_espanol, monkeypatch
+):
+    """HALLAZGO DE QODO. El valor que entra es una clave, así que TODO lugar que
+    la escriba sin resolver le muestra «gerencia.fuente_manual» a una persona —
+    o peor, la deja escrita para siempre en la auditoría de ERPNext.
+
+    Son tres puertas y sólo una estaba cubierta: el texto libre. Faltaban el
+    parámetro 7 de la plantilla de Meta —que se usa justamente cuando la
+    plantilla ESTÁ configurada, o sea en el despliegue real— y el comentario
+    durable que se escribe después de avisar.
+    """
+    from unittest.mock import Mock
+
+    from app import notificar
+
+    staff = "5491100000000"
+    monkeypatch.setenv("IDIOMA_GERENCIA", EN)
+    monkeypatch.setenv("WHATSAPP_STAFF_CONFIRMED_TEMPLATE", "confirmado_v1")
+    monkeypatch.setenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR")
+    monkeypatch.setattr(notificar, "STAFF", {staff})
+    monkeypatch.setattr(notificar, "claim_once", lambda *a, **k: True)
+    monkeypatch.setattr(notificar, "record_outbound", Mock())
+    comentarios = Mock()
+    monkeypatch.setattr(notificar.erpnext, "add_comment", comentarios)
+    plantilla = Mock(return_value={"messages": [{"id": "wamid.tpl"}]})
+    monkeypatch.setattr(notificar, "enviar_plantilla", plantilla)
+
+    assert notificar.notificar_confirmacion(_SO, clave) is True
+
+    parametros = plantilla.call_args.args[3]
+    origen = next(p for p in parametros if p.startswith("Origen:"))
+    assert clave not in origen, origen
+    # La plantilla la tiene Meta registrada en es_AR, y sus otros seis
+    # parámetros están escritos en ése: el origen va en el mismo idioma.
+    assert en_espanol in origen, origen
+
+    escrito = comentarios.call_args.args[2]
+    assert clave not in escrito, escrito
+    # La auditoría durable es española siempre: ya está escrita así en los
+    # ERPNext de los despliegues.
+    assert en_espanol in escrito, escrito
+
+
+def test_el_origen_de_la_plantilla_sigue_el_idioma_en_que_meta_la_tiene(monkeypatch):
+    """Si la plantilla está registrada en inglés, su parámetro también."""
+    from unittest.mock import Mock
+
+    from app import notificar
+
+    monkeypatch.setenv("IDIOMA_GERENCIA", ES)
+    monkeypatch.setenv("WHATSAPP_STAFF_CONFIRMED_TEMPLATE", "confirmed_v1")
+    monkeypatch.setenv("WHATSAPP_TEMPLATE_LANGUAGE", "en_US")
+    monkeypatch.setattr(notificar, "STAFF", {"5491100000000"})
+    monkeypatch.setattr(notificar, "claim_once", lambda *a, **k: True)
+    monkeypatch.setattr(notificar, "record_outbound", Mock())
+    monkeypatch.setattr(notificar.erpnext, "add_comment", Mock())
+    plantilla = Mock(return_value={"messages": [{"id": "wamid.tpl"}]})
+    monkeypatch.setattr(notificar, "enviar_plantilla", plantilla)
+
+    notificar.notificar_confirmacion(_SO, "gerencia.fuente_manual")
+
+    origen = next(
+        p for p in plantilla.call_args.args[3] if p.startswith("Origen:")
+    )
+    assert "manual (human confirmation)" in origen, origen
+
+
+def test_un_origen_que_no_es_una_clave_sale_como_vino():
+    """El mismo string se escribe en el registro durable, que no se traduce, así
+    que un llamador que pase el texto no puede quedarse sin «Origen»."""
+    from app import notificar
+
+    texto = notificar.texto_confirmacion(
+        _SO, "manual", momento="2026-09-05 16:14", lengua=EN
+    )
+    assert "manual" in texto
+
+
+# ------------------------------------------------- los avisos al equipo
+# `solicitudes._avisar_equipo` manda por `avisos.encolar_equipo` ->
+# `whatsapp.enviar_mensaje`: son mensajes que LEE UNA PERSONA en WhatsApp, no
+# logs ni comentarios de ERPNext. No estaban migrados y tampoco eran una
+# excepción documentada — el allowlist no dice en ninguna parte que los avisos
+# al equipo queden en español, y los de `notificar.*` y `pendientes.*` sí están
+# traducidos. Eran el resto sin migrar de una superficie cubierta en todo lo
+# demás.
+
+
+def _aviso(clave, lengua, **params):
+    return idioma.t(clave, lengua, **params)
+
+
+AVISOS_AL_EQUIPO = [
+    ("equipo.vencida_con_respaldo",
+     {"pedido": PEDIDO, "solicitud": "DR-1", "detalle": "The draft was closed",
+      "terminos": "delivery on 2026-09-08 at 10:00", "nueva": "DR-2",
+      "vence": "2026-09-08 12:00"}),
+    ("equipo.vencida_sin_respaldo",
+     {"pedido": PEDIDO, "detalle": "The draft was closed",
+      "porque": "no fallback configured"}),
+    ("equipo.revision_vencida",
+     {"pedido": PEDIDO, "solicitud": "DR-1", "plazo": "6",
+      "motivo": "stock moved", "detalle": "The draft was closed"}),
+    ("equipo.cierro_por_persona",
+     {"pedido": PEDIDO, "que": "the request", "solicitud": "DR-1",
+      "estado": "confirmed"}),
+    ("equipo.trabada",
+     {"pedido": PEDIDO, "que": "the request", "solicitud": "DR-1",
+      "detalle": "ERPNext refused", "intentos": 2, "espera": "30"}),
+    ("equipo.cliente_rechazo",
+     {"pedido": PEDIDO, "terminos": "delivery on 2026-09-08",
+      "detalle": "The draft was closed"}),
+    ("equipo.acepto_tarde_trabado", {"pedido": PEDIDO, "detalle": "ERPNext refused"}),
+    ("equipo.acepto_tarde", {"pedido": PEDIDO, "detalle": "ERPNext refused"}),
+    ("equipo.a_revision",
+     {"pedido": PEDIDO, "detalle": "the price moved", "horas": "6"}),
+    ("equipo.revision_sin_registro",
+     {"pedido": PEDIDO, "detalle": "the price moved", "como": "draft closed"}),
+]
+
+
+@pytest.mark.parametrize("clave, params", AVISOS_AL_EQUIPO)
+def test_los_avisos_al_equipo_salen_enteros_en_ingles(clave, params):
+    texto = _aviso(clave, EN, **params)
+
+    assert texto.strip()
+    assert "{" not in texto, f"{clave}: quedó sin interpolar — {texto}"
+    assert PEDIDO in texto
+    # El comando NO se traduce: es el payload que parsea el router.
+    permitido = (*(str(v) for v in params.values()), "confirmar")
+    assert restos_en_espanol(texto, permitido) == [], f"{clave}: {texto}"
+
+
+@pytest.mark.parametrize("clave, params", AVISOS_AL_EQUIPO)
+def test_cada_aviso_al_equipo_tiene_dos_textos_distintos(clave, params):
+    """Escritos a mano los dos. Si alguien copia el español al inglés, se ve."""
+    assert _aviso(clave, ES, **params) != _aviso(clave, EN, **params)
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_resumen_de_decision_sale_en_el_idioma_del_equipo(lengua):
+    """La tabla sobre la que el dueño decide. Era el único constructor de
+    app/solicitudes.py que no tomaba idioma en absoluto."""
+    from app import solicitudes
+
+    sol = _solicitud_equipo()
+    texto = solicitudes.texto_para_equipo(sol, lengua)
+
+    assert PEDIDO in texto and "DR-9" in texto
+    # Los CINCO comandos salen iguales en los dos idiomas: son lo que hay que
+    # teclear, no prosa.
+    for comando in ("contraoferta", "retiro", "rechazar-solicitud", "ver"):
+        assert f"{comando} {PEDIDO}" in texto, comando
+    if lengua == EN:
+        assert restos_en_espanol(
+            texto, ("Demo Bakery", "5 x Whole Milk 1 L", "ARS", "contraoferta",
+                    "retiro", "rechazar-solicitud", "ver", "aprobar", "fecha",
+                    "hora", "cargo", "motivo")
+        ) == [], texto
+        assert "Pending decision" in texto
+    else:
+        assert "Decisión pendiente" in texto
+
+
+def test_lo_que_falta_para_una_oferta_se_nombra_en_el_idioma_de_quien_lee():
+    """`terminos_incompletos` devolvía la prosa ya escrita en español, así que
+    el resumen decía «falta qué día y a qué hora» adentro de una tabla inglesa.
+    Ahora devuelve claves y cada call site las dice en su idioma."""
+    from app import solicitudes
+
+    faltan = solicitudes.terminos_incompletos({})
+
+    assert faltan == [
+        "terminos.falta_fecha", "terminos.falta_hora", "terminos.falta_cargo"
+    ]
+    assert solicitudes.enumerar(
+        solicitudes.nombres_de_terminos(faltan, ES), ES
+    ) == "qué día, a qué hora y cuánto se cobra"
+    assert solicitudes.enumerar(
+        solicitudes.nombres_de_terminos(faltan, EN), EN
+    ) == "what day, what time and what you charge"
+
+
+def _solicitud_equipo():
+    from app import solicitudes
+
+    return solicitudes.Solicitud(
+        id="DR-9", pedido=PEDIDO, tipo=solicitudes.TIPO_ENTREGA,
+        estado=solicitudes.PENDIENTE, cliente="CUST-1",
+        cliente_nombre="Demo Bakery", resumen_items="5 x Whole Milk 1 L",
+        total=6000.0, moneda="ARS", creada_en=0.0, vence_en=6 * 3600.0,
+        sello=0.0, solicitado={"metodo": "entrega"},
+    )
+
+
 # --------------------------------------------------- los botones del aviso
 # El aviso de pedido pendiente es EL ÚNICO camino en el que una persona recibe
 # algo sin haber escrito nada: el bot le escribe al dueño por su cuenta. Su
@@ -615,6 +859,74 @@ def test_el_estado_del_sistema_sale_en_el_idioma_del_equipo(lengua, monkeypatch)
 
 
 @pytest.mark.parametrize("lengua", IDIOMAS)
+def test_las_entradas_de_avisos_caidos_salen_enteras_en_el_idioma(lengua, monkeypatch):
+    """Las líneas del registro, que es donde estaban los tres restos.
+
+    Los dos fallbacks —«sin pedido», «sin propósito»— no son un caso raro: son
+    la forma NORMAL de una respuesta fallida a un cliente, que no tiene pedido.
+    Y «— destinatario {tag}…» salía en TODA entrada con tag, no sólo en ésas;
+    el detector no lo veía porque `destinatario` no estaba en `_PALABRAS_ES`,
+    que es la mitad que este PR también arregla.
+    """
+    import json
+
+    from app.tools import operaciones
+
+    class _ClienteFalso:
+        def lrange(self, clave, desde, hasta):
+            return [
+                json.dumps({"order_name": "SAL-ORD-2026-00042",
+                            "purpose": "staff_order_pending",
+                            "destinatario": "a1b2c3d4e5"}),
+                # La entrada sin pedido ni propósito: los dos fallbacks juntos.
+                json.dumps({"destinatario": "f6g7h8i9"}),
+                "esto no es json",
+            ]
+
+    monkeypatch.setattr(operaciones.outbound_status, "cliente", _ClienteFalso)
+
+    lineas, problema = operaciones._entradas_de_avisos_caidos(10, lengua)
+
+    assert len(lineas) == 2, lineas
+    assert "SAL-ORD-2026-00042" in lineas[-1]
+    assert problema, "la entrada ilegible se cuenta y se dice"
+    todo = "\n".join(lineas) + "\n" + problema
+    if lengua == EN:
+        assert restos_en_espanol(todo, ("SAL-ORD-2026-00042", "staff_order_pending")) == []
+        assert "no order" in todo and "no purpose" in todo
+        assert "recipient a1b2c3d4" in todo
+    else:
+        assert "sin pedido" in todo and "sin propósito" in todo
+        assert "destinatario a1b2c3d4" in todo
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_no_autorizado_de_los_informes_sale_en_el_idioma(lengua, monkeypatch):
+    """Era una constante de módulo, evaluada al importar: el único string del
+    archivo que no podía tener idioma porque se resolvía antes de que hubiera
+    uno. Los dos informes devuelven esta misma rama."""
+    from app.tools import operaciones
+
+    monkeypatch.setattr(idioma, "gerencia", lambda: lengua)
+
+    def _prohibido(config):
+        from app.runtime_context import RuntimeContextError
+
+        raise RuntimeContextError("no")
+
+    monkeypatch.setattr(operaciones, "require_management", _prohibido)
+
+    for informe in (operaciones.estado_del_sistema, operaciones.ver_avisos_fallidos):
+        texto = informe.func(_config_gerencia())
+        assert texto.strip()
+        if lengua == EN:
+            assert restos_en_espanol(texto) == [], texto
+            assert "not authorized" in texto
+        else:
+            assert "no está autorizado" in texto
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
 def test_los_avisos_fallidos_salen_en_el_idioma_del_equipo(lengua, monkeypatch):
     from app.tools import operaciones
 
@@ -625,7 +937,9 @@ def test_los_avisos_fallidos_salen_en_el_idioma_del_equipo(lengua, monkeypatch):
         lambda: {"avisos_en_dead_letter": 0, "respuestas_en_dead_letter": 0,
                  "entregas_fallidas": 0},
     )
-    monkeypatch.setattr(operaciones, "_entradas_de_avisos_caidos", lambda m: ([], ""))
+    monkeypatch.setattr(
+        operaciones, "_entradas_de_avisos_caidos", lambda m, lengua=None: ([], "")
+    )
     texto = operaciones.ver_avisos_fallidos.func(_config_gerencia())
     if lengua == EN:
         assert "Communication that did not arrive:" in texto
@@ -738,49 +1052,187 @@ def test_la_oferta_no_le_pide_apretar_un_boton_que_no_existe(lengua):
 # un test apagado. Ver el issue #15.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG ABIERTO: 33 de los 37 `raise LimiteError` de app/limites.py no "
-    "llevan `clave`, así que su motivo en español se interpola en el marco "
-    "inglés `codigo.ajuste_no_preparado` y sale textual a WhatsApp. Ver #15.",
-)
+# Este test era un `xfail(strict=True)` con el bug escrito en su motivo: «33 de
+# los 37 raise LimiteError no llevan clave». Ya lo llevan, así que el xfail se
+# fue — que es exactamente para lo que sirve un pendiente con fecha de
+# vencimiento.
+#
+# Y de paso el test pasa a probar algo: le pasaba ALIAS a `limites.validar`, que
+# toma el nombre canónico, así que levantaba KeyError antes de llegar a ninguna
+# aserción. El xfail se lo tragaba —un test que falla por la razón equivocada
+# parece estar esperando el arreglo— y por eso ahora se resuelve el alias con
+# `limites.definicion`, que es lo que hace el producto.
 def test_el_rechazo_de_un_cambio_de_limite_sale_entero_en_ingles() -> None:
     """Lo que el dueño lee en inglés cuando el valor que mandó no sirve.
 
-    El marco está traducido y el motivo no, así que sale
-    «I changed nothing: «monto maximo» no es un número: 'muchisimo'.» El
-    mecanismo para arreglarlo ya existe y ya se usa: `LimiteError` acepta
-    `clave` y los cuatro raise del camino de confirmación por código la llevan.
+    ENTERO quiere decir entero: el marco Y el motivo. Salía «I changed nothing:
+    «monto maximo» no es un número: 'muchisimo'.» —media frase en cada idioma—
+    porque `LimiteError` sólo llevaba `clave` en los cuatro raise del camino del
+    código, y los otros treinta y dos viajaban con su texto en español. El
+    mecanismo era el correcto y lo que faltaba era usarlo en todos, más los
+    datos que cada texto interpola.
+
+    Se prueban los tres tipos de validación que un dueño rompe de verdad —un
+    monto que no es número, un porcentaje por debajo del mínimo y un sí/no que
+    no lo es— y el que teclea un ajuste que no existe, que es el más común.
     """
     from app import limites
 
-    for limite, valor in (
-        ("tope", "muchisimo"),
-        ("colchon", "-5"),
-        ("descuentos", "puede ser"),
-    ):
+    casos = [
+        ("tope", "muchisimo", "is not a number"),
+        ("colchon", "-5", "cannot be lower than"),
+        ("descuentos", "puede ser", "has to be yes or no"),
+        ("días de reparto", "funday", "is not a weekday"),
+        ("hora de reparto", "tipo tarde", "has to be a time like"),
+    ]
+    for alias, valor, esperado in casos:
+        defi = limites.definicion(alias)
         try:
-            limites.validar(limite, valor)
+            limites.validar(defi.nombre, valor)
         except limites.LimiteError as exc:
-            motivo = idioma.t(exc.clave, EN) if getattr(exc, "clave", "") else str(exc)
-            respuesta = idioma.t("codigo.ajuste_no_preparado", EN, motivo=motivo)
-            assert restos_en_espanol(respuesta) == [], f"{limite}={valor}: {respuesta}"
+            respuesta = idioma.t(
+                "codigo.ajuste_no_preparado", EN, motivo=limites.motivo(exc, EN)
+            )
+            assert esperado in respuesta, f"{alias}={valor}: {respuesta}"
+            # Los datos sobreviven, y son dos: lo que tecleó el dueño y el
+            # NOMBRE DEL AJUSTE. El alias queda en español en los dos idiomas a
+            # propósito —es lo que él escribe para nombrarlo, o sea un comando,
+            # igual que «confirmar»— y por eso entra acá como dato permitido y
+            # no como un resto sin traducir. Los alias en inglés son otro
+            # trabajo, explícitamente fuera de esta rebanada.
+            assert restos_en_espanol(respuesta, (valor, defi.alias[0])) == [], respuesta
+            # Y nada quedó sin interpolar.
+            assert "{" not in respuesta, respuesta
+        else:
+            raise AssertionError(f"{alias}={valor} debería haber fallado")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG ABIERTO: app/tools/operaciones.py::_cuenta no toma `lengua` y "
-    "devuelve el centinela español DESCONOCIDO dentro del estado en inglés, "
-    "aunque el catálogo ya tiene sistema.desconocido con EN='UNKNOWN'. Ver #15.",
-)
-def test_el_centinela_de_contador_ilegible_sale_traducido() -> None:
+def test_un_erpnext_caido_tampoco_deja_espanol_adentro_del_ingles(monkeypatch):
+    """HALLAZGO DE QODO, y el más difícil de ver: este motivo no nace de lo que
+    tecleó el dueño.
+
+    `_consultar_marca` levanta cuando no puede preguntarle a ERPNext si los
+    límites se configuraron antes, y ese camino —`proponer` -> `vigente` ->
+    `_almacen` -> `_hubo_cambios_durables`— termina adentro de la respuesta que
+    arma `ajustes.preparar`, que ya sale traducida. Era el único `raise` sin
+    clave y estaba exceptuado por escrito con el motivo equivocado: «no sale por
+    WhatsApp». Sale.
+
+    La cadena se prueba en sus TRES eslabones, porque el fixture `limites_sin_redis`
+    cortocircuita `_hubo_cambios_durables` en toda la suite —a propósito: ningún
+    test le pregunta a ERPNext— y con él en el medio ningún test de punta a punta
+    tocaría la línea que importa. Los tres eslabones son: que la marca ilegible
+    levante CON su clave, que el call site se la pase, y que el handler la diga
+    en inglés.
+    """
+    from app import ajustes, erpnext, limites, marcas
+
+    monkeypatch.setattr(
+        marcas, "existe", Mock(side_effect=erpnext.ERPNextError("503"))
+    )
+
+    # 1. El eslabón que Qodo encontró suelto.
+    try:
+        limites._consultar_marca(
+            "limite", "no pude verificar", clave="limite.marca_no_verificable"
+        )
+    except limites.LimiteError as exc:
+        assert exc.clave == "limite.marca_no_verificable"
+        assert limites.motivo(exc, EN) == (
+            "I couldn't check in ERPNext whether the limits were configured before"
+        )
+        assert restos_en_espanol(limites.motivo(exc, EN)) == []
+        # Y el español sigue siendo el de siempre, que es lo que va al log.
+        assert limites.motivo(exc, ES) == str(exc) or "verificar" in limites.motivo(
+            exc, ES
+        )
+    else:
+        raise AssertionError("una marca ilegible tiene que levantar")
+
+    # 2. Que el call site la pase: sin esto el eslabón 1 no sirve de nada, y es
+    #    justo lo que estaba mal. Se mira el fuente porque el fixture autouse
+    #    reemplaza esta función en toda la suite.
+    import ast
+    from pathlib import Path as _Path
+
+    fuente = (_Path(__file__).resolve().parents[1] / "app" / "limites.py").read_text()
+    consultas = [
+        nodo
+        for nodo in ast.walk(ast.parse(fuente))
+        if isinstance(nodo, ast.Call)
+        and getattr(nodo.func, "id", "") == "_consultar_marca"
+        and nodo.args
+        and getattr(nodo.args[0], "value", "") == "limite"
+    ]
+    assert consultas, "no encontré la consulta de la marca de límites"
+    assert all(
+        any(k.arg == "clave" for k in nodo.keywords) for nodo in consultas
+    ), "la consulta de la marca de LÍMITES tiene que pasar su clave: es la que levanta"
+
+    # 3. Y que el handler la diga en el idioma del dueño.
+    monkeypatch.setenv("IDIOMA_GERENCIA", EN)
+    monkeypatch.setattr(
+        limites,
+        "proponer",
+        Mock(
+            side_effect=limites.LimiteError(
+                "no pude verificar en ERPNext si los límites se configuraron antes",
+                clave="limite.marca_no_verificable",
+            )
+        ),
+    )
+
+    respuesta = ajustes.preparar("tope", "30000", "5491100000000")
+
+    assert "I couldn't check in ERPNext" in respuesta, respuesta
+    assert restos_en_espanol(respuesta) == [], respuesta
+
+
+def test_el_mismo_rechazo_en_espanol_dice_lo_mismo_que_siempre() -> None:
+    """El idioma nuevo no puede costar el que ya andaba: el texto en español es
+    el de siempre, que además sigue siendo `str(exc)` para el log."""
+    from app import limites
+
+    try:
+        limites.validar(limites.definicion("tope").nombre, "muchisimo")
+    except limites.LimiteError as exc:
+        assert limites.motivo(exc, ES) == "«monto maximo» no es un número: 'muchisimo'"
+        assert str(exc) == "«monto maximo» no es un número: 'muchisimo'"
+
+
+def test_una_excepcion_sin_clave_sigue_saliendo_con_su_texto() -> None:
+    """`motivo` nunca devuelve vacío: una excepción de otro módulo, o una que
+    todavía no tenga clave, sale con lo que diga."""
+    from app import limites
+
+    assert limites.motivo(ValueError("algo pasó"), EN) == "algo pasó"
+    assert limites.motivo(limites.LimiteError("sin clave"), EN) == "sin clave"
+
+
+# El otro `xfail(strict=True)` que se fue con su bug: `_cuenta` ya toma idioma.
+@pytest.mark.parametrize("ilegible", [None, -1, "no es un número", object()])
+def test_el_centinela_de_contador_ilegible_sale_traducido(ilegible) -> None:
     """`DESCONOCIDO` es la palabra que significa «no lo leas como cero».
 
-    O sea justo la que hay que entender, y sale en español dentro de un mensaje
-    en inglés. El catálogo ya tiene la fila —`sistema.desconocido`, EN
-    «UNKNOWN»— y el mismo archivo la usa bien dos líneas más arriba; lo que
-    falta es que `_cuenta` reciba el idioma.
+    O sea justo la que hay que entender, y salía en español adentro de un
+    informe en inglés. El catálogo ya tenía la fila —`sistema.desconocido`, EN
+    «UNKNOWN»— y el mismo archivo la usaba bien dos líneas más arriba; lo que
+    faltaba era que `_cuenta` recibiera el idioma.
+
+    Las cuatro formas de «no pude leer» dan el mismo centinela: None, el -1 que
+    usa el contador, algo que no es número y algo que no es nada.
     """
     from app.tools import operaciones
 
-    assert restos_en_espanol(operaciones._cuenta(None)) == []
+    assert operaciones._cuenta(ilegible, EN) == "UNKNOWN"
+    assert operaciones._cuenta(ilegible, ES) == "DESCONOCIDO"
+    assert restos_en_espanol(operaciones._cuenta(ilegible, EN)) == []
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_un_contador_que_sí_se_pudo_leer_es_el_mismo_en_los_dos_idiomas(lengua) -> None:
+    """Un número es un dato: no tiene idioma."""
+    from app.tools import operaciones
+
+    assert operaciones._cuenta(0, lengua) == "0"
+    assert operaciones._cuenta(17, lengua) == "17"
