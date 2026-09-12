@@ -1089,6 +1089,20 @@ def _seguimiento(fila: Fila, ahora: float) -> Resultado | None:
     doc = _documento(fila.sobre)
     if doc is None:
         return None
+
+    # UN seguimiento por pedido, hecho valer acá y no sólo al crearlo. `recordar`
+    # crea el nuevo antes de cancelar el viejo —para que un fallo de escritura
+    # no deje CERO recordatorios, que es el error caro— y el precio de ese orden
+    # es que una cancelación fallida deje dos vivos. Éste es el lugar donde eso
+    # se paga sin que se note: si hay uno MÁS NUEVO para el mismo pedido, éste
+    # se termina sin hablar. Dos filas pueden convivir un rato; dos mensajes al
+    # equipo por el mismo pedido, no.
+    hermanas = vivas(fila.sobre, SEGUIMIENTO)
+    if hermanas is None:
+        return None  # no pude saber: mejor no hablar que hablar de más
+    if any(otra.sello > fila.sello for otra in hermanas):
+        return Resultado(detalle="lo reemplazó un seguimiento más nuevo")
+
     motivo = str(fila.params.get("por_que") or "").strip()
     return Resultado(
         detalle="seguimiento avisado",

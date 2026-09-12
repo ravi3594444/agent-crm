@@ -699,3 +699,41 @@ def test_el_aviso_al_dueno_nombra_el_plazo_recalculado_y_no_el_que_traia_la_fila
     _, cuerpo = mundo["al_dueno"][0]
     assert "14:00" in cuerpo
     assert "09:30" not in cuerpo
+
+
+def test_si_quedaron_dos_seguimientos_vivos_sale_UN_solo_mensaje(
+    mundo, marcas_sin_redis, monkeypatch
+) -> None:
+    """El residuo del orden «crear antes de cancelar», pagado donde no se nota.
+
+    `recordar` crea el nuevo antes de cancelar el viejo para que un fallo de
+    escritura no deje CERO recordatorios. El precio es que una cancelación
+    fallida deje dos vivos. Dos FILAS pueden convivir un rato; dos MENSAJES al
+    equipo por el mismo pedido no, y el barrido es el que lo hace valer.
+    """
+    # conftest fija TELEFONOS_EQUIPO="" a propósito y `router.STAFF` se arma al
+    # importar, así que sin esto `encolar_equipo` no le manda a nadie y el test
+    # contaría cero mensajes por el motivo equivocado.
+    from app import router
+
+    monkeypatch.setattr(router, "STAFF", ["5493510000001"])
+    viejo = agenda.crear(
+        PEDIDO, agenda.SEGUIMIENTO, epoch(15), params={"por_que": "el viejo"},
+        ahora=epoch(9),
+    )
+    nuevo = agenda.crear(
+        PEDIDO, agenda.SEGUIMIENTO, epoch(16), params={"por_que": "el nuevo"},
+        ahora=epoch(10),
+    )
+    assert viejo is not None and nuevo is not None
+    # Los dos vivos a la vez: la cancelación del viejo no entró.
+    assert len(agenda.vivas(PEDIDO, agenda.SEGUIMIENTO)) == 2
+
+    agenda.tick(ahora=epoch(17))
+
+    salientes = [
+        e for e in _en_cola(marcas_sin_redis)
+        if e["evento"].startswith("agenda_seguimiento")
+    ]
+    assert len(salientes) == 1
+    assert "el nuevo" in salientes[0]["texto"]
