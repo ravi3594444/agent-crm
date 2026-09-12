@@ -782,6 +782,12 @@ confirming the order.
    authorized ERPNext selling price list and currency. Auto-confirmation fails
    closed if either is missing or if a line has a different UOM, rate, validity
    window, customer-specific price or discount.
+   Set `LOCALE` next to them to the shape a person reads a number in: `es_AR`
+   gives `$12.000` and `$1.500,50`, `en_US` gives `$12,000` and `$1,500.50`.
+   It is **not** the language of the prose — an Argentine store whose owner
+   reads English uses English with `es_AR` — and it never arrives by WhatsApp:
+   a number's shape is not an owner limit. Unset or unknown means `es_AR`,
+   which is what the code wrote before the variable existed.
 6. `make up` — brings up the agent and Redis Stack on port **8081** (8080 is
    ERPNext) and waits for `/health`. To run inside the existing ERPNext stack
    instead, copy the `agente` and `redis` services from `docker-compose.yml`

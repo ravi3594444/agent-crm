@@ -726,6 +726,34 @@ def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_l
         else:
             reporte.aviso(clave, "vacía: el catálogo responde 'precio a confirmar' y nada se auto-confirma")
 
+    # LOCALE se fija en el onboarding al lado de la moneda, y un valor mal
+    # escrito no rompe nada: `formato.pesos` cae al de por defecto para no dejar
+    # un mensaje sin salir. Por eso lo dice acá, una vez y en el arranque, en vez
+    # de que un total con forma argentina aparezca en la pantalla de alguien que
+    # lo lee como otra cifra y nadie se entere. Se valida el valor de `env` —no
+    # `formato.locale_configurado()`— porque este chequeo tiene que poder mirar
+    # un .env que todavía no es el del proceso.
+    from app import formato as _formato
+
+    crudo_locale = _valor(env, "LOCALE")
+    conocidos = {codigo.lower(): codigo for codigo in _formato.LOCALES}
+    normal_locale = conocidos.get(crudo_locale.replace("-", "_").lower())
+    if not crudo_locale:
+        reporte.ok(
+            "LOCALE",
+            f"vacía: los montos se escriben {_formato.LOCALE_POR_DEFECTO} "
+            "($12.000), como siempre",
+        )
+    elif normal_locale is None:
+        reporte.error(
+            "LOCALE",
+            f"{crudo_locale!r} no es ninguno de {', '.join(_formato.LOCALES)}: "
+            f"los montos se van a escribir {_formato.LOCALE_POR_DEFECTO} igual, "
+            "que puede no ser lo que lee este cliente",
+        )
+    else:
+        reporte.ok("LOCALE", f"montos con forma {normal_locale}")
+
     if resumen_limites is None:
         reporte.aviso("Límites", "sin Redis: no se verificaron los límites del dueño")
         return

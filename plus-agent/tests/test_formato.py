@@ -16,7 +16,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import aprobacion, whatsapp
-from app.formato import cantidad, pesos, whatsapp_texto
+from app.formato import cantidad, locale_configurado, pesos, whatsapp_texto
+
+# Este archivo afirma montos con forma argentina, así que la declara en vez de
+# heredarla del entorno. Los tests de `en_US` fijan el suyo en la llamada. Ver
+# `_locale_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.locale("es_AR")
 
 # --- pesos ------------------------------------------------------------------
 
@@ -132,6 +137,83 @@ def test_pesos_fijado_byte_a_byte(monto, decimales, esperado) -> None:
 def test_pesos_objeto_cualquiera_vale_cero() -> None:
     """Fuera de la mesa porque `object()` no se puede escribir como literal."""
     assert pesos(object()) == "$0"
+
+
+# --- pesos en_US ------------------------------------------------------------
+
+# El mismo monto, para la otra persona. `$1.200,50` le dice a un estadounidense
+# "un dólar veinte": no es una preferencia de estilo, es otra cifra.
+FIJADOS_EN_US = [
+    (1200.5, 2, "$1,200.50"),
+    (12000, 0, "$12,000"),
+    (1234567, 0, "$1,234,567"),
+    (1500.5, 2, "$1,500.50"),
+    (0.5, 2, "$0.50"),
+    (999, 0, "$999"),
+    (0, 0, "$0"),
+    (-12000, 0, "-$12,000"),
+    (-1500.5, 2, "-$1,500.50"),
+    (None, 0, "$0"),
+    ("abc", 0, "$0"),
+]
+
+
+@pytest.mark.parametrize("monto, decimales, esperado", FIJADOS_EN_US)
+def test_pesos_en_us(monkeypatch: pytest.MonkeyPatch, monto, decimales, esperado) -> None:
+    monkeypatch.setenv("LOCALE", "en_US")
+    assert pesos(monto, decimales) == esperado
+
+
+def test_el_locale_lo_decide_el_despliegue_y_se_lee_en_cada_llamada(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No hay estado de proceso: `babel` toma el locale por llamada.
+
+    Es la diferencia con el módulo `locale` de la stdlib, y es la razón por la
+    que esto se puede usar en un servidor con hilos de barrido. Si algún día
+    alguien lo cambia por `locale.setlocale`, este test se cae.
+    """
+    monkeypatch.setenv("LOCALE", "en_US")
+    assert pesos(1200.5, 2) == "$1,200.50"
+    monkeypatch.setenv("LOCALE", "es_AR")
+    assert pesos(1200.5, 2) == "$1.200,50"
+
+
+@pytest.mark.parametrize(
+    "crudo, esperado",
+    [
+        ("en_US", "en_US"),
+        ("en-US", "en_US"),
+        ("EN_us", "en_US"),
+        ("es_AR", "es_AR"),
+        ("", "es_AR"),
+        ("   ", "es_AR"),
+        # Un locale que existe pero que este producto no habla, y uno que no
+        # existe: los dos caen al de por defecto en vez de romper un mensaje.
+        ("pt_BR", "es_AR"),
+        ("no-es-un-locale", "es_AR"),
+    ],
+)
+def test_locale_configurado_nunca_queda_vacio_ni_levanta(
+    monkeypatch: pytest.MonkeyPatch, crudo: str, esperado: str
+) -> None:
+    monkeypatch.setenv("LOCALE", crudo)
+    assert locale_configurado() == esperado
+
+
+def test_sin_LOCALE_en_el_entorno_es_el_de_por_defecto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Un despliegue que ya existe no migra: sin la variable, todo sigue igual."""
+    monkeypatch.delenv("LOCALE", raising=False)
+    assert locale_configurado() == "es_AR"
+    assert pesos(12000) == "$12.000"
+
+
+def test_un_monto_que_no_es_un_numero_finito_no_llega_a_la_pantalla() -> None:
+    """`$inf` en la pantalla en la que alguien aprueba un pedido es peor que $0."""
+    assert pesos(float("inf")) == "$0"
+    assert pesos(float("nan"), 2) == "$0,00"
 
 
 def test_cantidad_sin_ceros_y_con_coma_decimal() -> None:
