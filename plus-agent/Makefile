@@ -6,11 +6,14 @@ PY     := $(VENV)/bin/python
 PIP    := $(VENV)/bin/pip
 PUERTO ?= 8081
 
-.PHONY: help install test lint fmt check check-env check-env-offline verificar-modelos build up down logs autonomia decisiones briefing demo demo-gemini seed
+.PHONY: help install test lint fmt check check-env check-env-offline verificar-modelos build up down logs autonomia decisiones briefing demo demo-gemini seed dashboard-setup
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN{FS=":.*?## "};{printf "  \033[36m%-12s\033[0m %s\n",$$1,$$2}'
+
+dashboard-setup: ## Activar el dashboard web con un token exclusivo (no cambia otras claves)
+	python3 deploy/configurar_dashboard.py
 
 $(VENV):
 	python3 -m venv $(VENV)

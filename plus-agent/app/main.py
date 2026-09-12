@@ -37,6 +37,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from app import erpnext, idioma, notificar
 from app import whatsapp as whatsapp_client
 from app.aprobacion import manejar_boton
+from app.dashboard import install_dashboard
 from app.formato import sin_citas
 from app.graph import responder_cliente, responder_gerencia
 from app.outbound_status import record_inbound_window, record_outbound, update_status
@@ -1631,6 +1632,7 @@ async def _lifespan(application: FastAPI):
 
 
 app = FastAPI(title="Plus Agent", lifespan=_lifespan)
+install_dashboard(app)
 
 
 @app.get("/health")

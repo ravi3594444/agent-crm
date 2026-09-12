@@ -8,6 +8,13 @@ staged verification guide — nothing advances until the current stage passes.
 Start with `make test` (a few seconds, no credentials and no network — but it
 does need a **Redis Stack** running; see [Tests and Redis](#tests-and-redis)).
 
+## Operations dashboard
+
+The agent also serves a responsive CRM dashboard at `/dashboard/`: live orders,
+order items and delivery addresses, warehouse stock, customers, agent settings,
+and queue status. Run `make dashboard-setup` to enable sign-in in an existing
+agent configuration. See [dashboard setup and access](../DASHBOARD.md).
+
 ## Architecture
 
 The service keeps the LLM behind narrow ERPNext tools, a deterministic

@@ -1,0 +1,11 @@
+{
+  "name": "plus-agent-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-dashboard.mjs",
+    "check": "node --check plus-agent/app/dashboard_ui/app.js",
+    "test": "node --test scripts/test-dashboard.mjs"
+  }
+}

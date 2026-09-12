@@ -30,6 +30,26 @@ defaults:
     working-directory: plus-agent
 
 jobs:
+  dashboard:
+    name: dashboard interactions and static build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: JavaScript syntax
+        run: npm run check
+      - name: Dashboard interactions
+        run: npm test
+      - name: Static dashboard build
+        run: npm run build
+
   test:
     # CUATRO ENTORNOS, NO UNO. En un solo día llegaron a `main` dos fallas de
     # COMBINACIÓN: cada PR estaba verde por separado y la suma no. #17 sacó el
