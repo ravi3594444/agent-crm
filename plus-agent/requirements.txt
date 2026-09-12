@@ -25,3 +25,10 @@ langchain-openai==1.6.0
 
 # app/__init__.py hace load_dotenv() antes de que nadie lea os.environ.
 python-dotenv==1.2.3
+
+# Separadores de miles y decimales por locale (app/formato.py::pesos). NO es
+# el módulo `locale` de la stdlib: recibe el locale en cada llamada y no deja
+# estado en el proceso, que es lo que lo hace usable desde los hilos de
+# barrido. Sin esto, un total sale con los separadores argentinos siempre —
+# y `$1.200,50` para un cliente estadounidense es un dólar veinte.
+babel==2.18.0

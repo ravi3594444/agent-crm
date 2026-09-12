@@ -16,7 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import aprobacion, whatsapp
-from app.formato import cantidad, pesos, whatsapp_texto
+from app.formato import cantidad, locale_actual, pesos, whatsapp_texto
 
 # --- pesos ------------------------------------------------------------------
 
@@ -264,3 +264,73 @@ def test_pesos_es_ar_es_identico_byte_a_byte(monto, decimales, esperado) -> None
 
 def test_pesos_no_explota_con_un_objeto_cualquiera() -> None:
     assert pesos(object()) == "$0"
+
+
+# --- el otro locale: lo que ve un dueño estadounidense ----------------------
+
+# Un prospecto que habla inglés mirando `$1.200,50` lee un dólar veinte. Es la
+# misma duda que motivó este archivo, en la otra dirección: por eso el locale
+# es un valor de despliegue y no una preferencia de presentación.
+PESOS_EN_US = (
+    (1200.5, 2, "$1,200.50"),
+    (12000, 0, "$12,000"),
+    (98000, 0, "$98,000"),
+    (1234567, 0, "$1,234,567"),
+    (0.5, 2, "$0.50"),
+    (0, 0, "$0"),
+    (999, 0, "$999"),
+    (1000, 0, "$1,000"),
+    (-12000, 0, "-$12,000"),
+    (-1500.5, 2, "-$1,500.50"),
+    (None, 0, "$0"),
+    ("abc", 0, "$0"),
+)
+
+
+@pytest.mark.parametrize("monto, decimales, esperado", PESOS_EN_US)
+def test_pesos_en_us(monkeypatch, monto, decimales, esperado) -> None:
+    monkeypatch.setenv("LOCALE", "en_US")
+    assert pesos(monto, decimales) == esperado
+
+
+def test_el_simbolo_es_el_mismo_y_lo_que_cambia_son_los_separadores(monkeypatch) -> None:
+    """La moneda sale del LOCALE, no de AUTO_CONFIRM_CURRENCY.
+
+    Si `pesos` le pasara a Babel el nombre de la moneda de ERPNext junto con
+    un locale que no es el suyo, saldría «ARS 1,200.50»: el código en lugar
+    del símbolo. Eso es exactamente lo que no puede ver un prospecto.
+    """
+    monkeypatch.setenv("AUTO_CONFIRM_CURRENCY", "ARS")
+    monkeypatch.setenv("LOCALE", "en_US")
+    salida = pesos(1200.5, 2)
+    assert salida == "$1,200.50"
+    assert "ARS" not in salida
+
+
+@pytest.mark.parametrize("crudo", ["", "   ", "fr_FR", "en-US", "basura", "EN_US"])
+def test_un_locale_que_no_conocemos_cae_en_es_ar(monkeypatch, crudo) -> None:
+    """Un .env mal escrito no puede ser la razón por la que un total no sale."""
+    monkeypatch.setenv("LOCALE", crudo)
+    assert locale_actual() == "es_AR"
+    assert pesos(12000) == "$12.000"
+
+
+def test_sin_locale_en_el_entorno_es_es_ar(monkeypatch) -> None:
+    monkeypatch.delenv("LOCALE", raising=False)
+    assert locale_actual() == "es_AR"
+    assert pesos(1200.5, 2) == "$1.200,50"
+
+
+def test_el_locale_se_lee_en_cada_llamada_y_no_queda_pegado(monkeypatch) -> None:
+    """Babel no deja estado en el proceso: dos hilos con dos locales no se pisan.
+
+    Ésta es la razón por la que se pudo usar Babel y no `locale.setlocale`.
+    La app corre barridos en hilos; un formateador con estado global haría que
+    el total de un mensaje dependiera de quién formateó último.
+    """
+    monkeypatch.setenv("LOCALE", "en_US")
+    assert pesos(1200.5, 2) == "$1,200.50"
+    monkeypatch.setenv("LOCALE", "es_AR")
+    assert pesos(1200.5, 2) == "$1.200,50"
+    monkeypatch.setenv("LOCALE", "en_US")
+    assert pesos(1200.5, 2) == "$1,200.50"
