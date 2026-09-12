@@ -45,6 +45,16 @@ def _csv(tmp_path: Path, *lineas: str) -> Path:
     return ruta
 
 
+def _precio(fila: cargar.Fila, rate: Decimal | None = None) -> dict:
+    """Un Item Price como queda después de una carga: con unidad y moneda."""
+    return {
+        "name": f"P-{fila.codigo}",
+        "price_list_rate": fila.precio if rate is None else rate,
+        "uom": fila.unidad,
+        "currency": "ARS",
+    }
+
+
 def _erp(**kwargs) -> cargar.EnErpnext:
     base = {
         "unidades": {"Unidad", "Kg"},
@@ -251,7 +261,7 @@ def test_la_segunda_corrida_con_el_mismo_archivo_no_hace_nada() -> None:
             f.codigo: {"item_code": f.codigo, "item_name": f.nombre, "stock_uom": f.unidad, "item_group": f.grupo}
             for f in filas
         },
-        precios={f.codigo: {"name": f"P-{f.codigo}", "price_list_rate": f.precio} for f in filas},
+        precios={f.codigo: _precio(f) for f in filas},
         stock={f.codigo: f.stock for f in filas},
     )
 
@@ -274,7 +284,7 @@ def test_tres_filas_nuevas_agregan_tres_productos() -> None:
             f.codigo: {"item_code": f.codigo, "item_name": f.nombre, "stock_uom": f.unidad, "item_group": f.grupo}
             for f in viejas
         },
-        precios={f.codigo: {"name": f"P-{f.codigo}", "price_list_rate": f.precio} for f in viejas},
+        precios={f.codigo: _precio(f) for f in viejas},
         stock={f.codigo: f.stock for f in viejas},
     )
 
@@ -293,7 +303,7 @@ def test_un_borrador_pendiente_no_se_vuelve_a_crear() -> None:
             f.codigo: {"item_code": f.codigo, "item_name": f.nombre, "stock_uom": f.unidad, "item_group": f.grupo}
             for f in filas
         },
-        precios={f.codigo: {"name": f"P-{f.codigo}", "price_list_rate": f.precio} for f in filas},
+        precios={f.codigo: _precio(f) for f in filas},
         ajustes={"LEC-ENT-1L": "MAT-RECO-2026-00001"},
     )
 
@@ -311,17 +321,18 @@ def test_un_precio_distinto_es_una_actualizacion_y_no_un_alta() -> None:
             for f in filas
         },
         precios={
-            "LEC-ENT-1L": {"name": "P-1", "price_list_rate": Decimal(1100)},
-            "QUE-CRE": {"name": "P-2", "price_list_rate": Decimal("9800.50")},
+            "LEC-ENT-1L": _precio(filas[0], Decimal(1100)),
+            "QUE-CRE": _precio(filas[1]),
         },
         stock={f.codigo: f.stock for f in filas},
     )
 
     plan = cargar.planificar(filas, actual)
 
-    assert [(f.codigo, str(vieja), nombre) for f, vieja, nombre in plan.precios_cambiados] == [
-        ("LEC-ENT-1L", "1100", "P-1")
-    ]
+    assert [
+        (c.fila.codigo, str(c.vigente), c.nombre, c.cambios)
+        for c in plan.precios_cambiados
+    ] == [("LEC-ENT-1L", "1100", "P-LEC-ENT-1L", {"price_list_rate": 1200.0})]
     assert [f.codigo for f in plan.precios_iguales] == ["QUE-CRE"]
     assert plan.precios_nuevos == []
 
@@ -332,7 +343,7 @@ def test_un_nombre_distinto_actualiza_solo_ese_campo() -> None:
         items={
             "LEC-ENT-1L": {"item_code": "LEC-ENT-1L", "item_name": "Leche vieja", "stock_uom": "Unidad", "item_group": "Lacteos"},
         },
-        precios={"LEC-ENT-1L": {"name": "P-1", "price_list_rate": Decimal(1200)}},
+        precios={"LEC-ENT-1L": _precio(filas[0])},
         stock={"LEC-ENT-1L": Decimal(400)},
     )
 
@@ -429,7 +440,7 @@ def test_aplicar_sobre_un_erpnext_que_ya_esta_igual_no_escribe(
                 f.codigo: {"item_code": f.codigo, "item_name": f.nombre, "stock_uom": f.unidad, "item_group": f.grupo}
                 for f in filas
             },
-            precios={f.codigo: {"name": f"P-{f.codigo}", "price_list_rate": f.precio} for f in filas},
+            precios={f.codigo: _precio(f) for f in filas},
             stock={f.codigo: f.stock for f in filas},
         ),
     )
@@ -481,7 +492,7 @@ def test_verificar_reporta_la_deriva_en_las_dos_direcciones(
         sin_red,
         _erp(
             items={"LEC-ENT-1L": {"item_code": "LEC-ENT-1L", "item_name": "Leche entera sachet 1 L", "stock_uom": "Unidad", "item_group": "Lacteos"}},
-            precios={"LEC-ENT-1L": {"name": "P-1", "price_list_rate": Decimal(999)}},
+            precios={"LEC-ENT-1L": _precio(_filas()[0], Decimal(999))},
         ),
     )
     lista = sin_red["get_list"]
@@ -586,3 +597,89 @@ def test_un_codigo_con_barra_se_actualiza_en_su_propia_ruta(
     admin.assert_called_once_with(
         "PUT", "/api/resource/Item/LEC%2F1L", {"item_name": "Leche"}
     )
+
+
+# ------------------------------------------- lo que trajo el rebase sobre #35
+
+
+def test_la_lista_se_lee_aunque_el_seed_la_tenga_en_una_constante(tmp_path: Path) -> None:
+    """#35 subió la lista a `LISTA_DE_PRECIOS` y este lector dejó de encontrarla.
+    Las dos formas son la misma decisión, así que se leen las dos."""
+    falso = tmp_path / "seed_dairy.py"
+    falso.write_text(
+        'LISTA_DE_PRECIOS = "Lista Mayorista"\n'
+        'erpnext.create_doc("Item Price", {"price_list": LISTA_DE_PRECIOS})\n',
+        encoding="utf-8",
+    )
+
+    assert cargar.lista_de_precios(falso) == "Lista Mayorista"
+
+
+def test_si_la_lista_se_vuelve_algo_que_no_se_puede_leer_falla_fuerte(
+    tmp_path: Path,
+) -> None:
+    """Cargar el catálogo del cliente en una lista inventada es peor que parar."""
+    falso = tmp_path / "seed_dairy.py"
+    falso.write_text(
+        'erpnext.create_doc("Item Price", {"price_list": elegir_lista()})\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(cargar.erpnext.ERPNextError):
+        cargar.lista_de_precios(falso)
+
+
+def test_el_precio_nuevo_lleva_unidad_y_moneda_explicitas(
+    monkeypatch: pytest.MonkeyPatch, sin_red: dict[str, Mock]
+) -> None:
+    """Sin `uom`, `policy._precio_autorizado` descarta el precio y el catálogo
+    entero no puede auto-confirmar nada. Es el mismo agujero que #35 tapó en el
+    seed, y acá se carga la lista REAL del cliente."""
+    plan = cargar.Plan(precios_nuevos=[_filas()[1]])
+    crear = sin_red["create_doc"]
+    crear.side_effect = None
+    crear.return_value = {"name": "P-QUE-CRE"}
+
+    cargar.aplicar(plan, "Dep - LP", "Lácteos Plus SA", "Standard Selling", Decimal(60), "ARS")
+
+    crear.assert_called_once_with("Item Price", {
+        "item_code": "QUE-CRE",
+        "price_list": "Standard Selling",
+        "price_list_rate": 9800.5,
+        "selling": 1,
+        "uom": "Kg",
+        "currency": "ARS",
+    })
+
+
+def test_un_precio_viejo_sin_unidad_se_corrige_sin_tocarle_el_numero() -> None:
+    """Un Item Price que ya existe sin unidad es un precio que el bot no puede
+    usar. Se arregla, y el número no se toca porque el número está bien."""
+    fila = _filas()[0]
+    actual = _erp(
+        items={fila.codigo: {"item_code": fila.codigo, "item_name": fila.nombre, "stock_uom": fila.unidad, "item_group": fila.grupo}},
+        precios={fila.codigo: {"name": "P-1", "price_list_rate": fila.precio}},
+        stock={fila.codigo: fila.stock},
+    )
+
+    plan = cargar.planificar([fila], actual, "ARS")
+
+    assert [c.cambios for c in plan.precios_cambiados] == [{"uom": "Unidad", "currency": "ARS"}]
+    assert plan.precios_cambiados[0].solo_el_precio is False
+    assert plan.precios_iguales == []
+
+
+def test_sin_saber_la_moneda_no_se_inventa_ninguna() -> None:
+    """`moneda_de` devuelve "" cuando no se puede leer la lista. Escribir una
+    moneda adivinada sería justo el error que esto previene."""
+    fila = _filas()[0]
+    actual = _erp(
+        items={fila.codigo: {"item_code": fila.codigo, "item_name": fila.nombre, "stock_uom": fila.unidad, "item_group": fila.grupo}},
+        precios={fila.codigo: {"name": "P-1", "price_list_rate": fila.precio, "uom": fila.unidad}},
+        stock={fila.codigo: fila.stock},
+    )
+
+    plan = cargar.planificar([fila], actual, "")
+
+    assert plan.precios_cambiados == []
+    assert [f.codigo for f in plan.precios_iguales] == [fila.codigo]

@@ -125,6 +125,20 @@ class EnErpnext:
     grupos: set[str] = field(default_factory=set)
 
 
+@dataclass(frozen=True)
+class CambioDePrecio:
+    """Un Item Price que ya existe y no dice lo que tiene que decir."""
+
+    fila: Fila
+    nombre: str        # cómo se llama en ERPNext
+    cambios: dict      # exactamente lo que se le va a escribir
+    vigente: Decimal   # lo que dice hoy, para que el plan lo muestre
+
+    @property
+    def solo_el_precio(self) -> bool:
+        return set(self.cambios) == {"price_list_rate"}
+
+
 @dataclass
 class Plan:
     """Todo lo que pasaría, separado por lo que el dueño necesita decidir."""
@@ -134,7 +148,7 @@ class Plan:
     items_cambiados: list[tuple[Fila, dict]] = field(default_factory=list)
     items_iguales: list[Fila] = field(default_factory=list)
     precios_nuevos: list[Fila] = field(default_factory=list)
-    precios_cambiados: list[tuple[Fila, Decimal, str]] = field(default_factory=list)
+    precios_cambiados: list[CambioDePrecio] = field(default_factory=list)
     precios_iguales: list[Fila] = field(default_factory=list)
     stock_a_cargar: list[Fila] = field(default_factory=list)
     stock_omitido: list[tuple[Fila, str]] = field(default_factory=list)
@@ -301,7 +315,8 @@ def lista_de_precios(fuente: Path | None = None) -> str:
     ERPNext, y esto tiene que poder contestar sin red.
     """
     fuente = fuente or Path(__file__).with_name("seed_dairy.py")
-    for nodo in ast.walk(ast.parse(fuente.read_text(encoding="utf-8"))):
+    arbol = ast.parse(fuente.read_text(encoding="utf-8"))
+    for nodo in ast.walk(arbol):
         if not isinstance(nodo, ast.Call) or len(nodo.args) != 2:
             continue
         doctype, payload = nodo.args
@@ -310,17 +325,46 @@ def lista_de_precios(fuente: Path | None = None) -> str:
         if not isinstance(payload, ast.Dict):
             continue
         for clave, valor in zip(payload.keys, payload.values, strict=False):
-            if (
-                isinstance(clave, ast.Constant)
-                and clave.value == "price_list"
-                and isinstance(valor, ast.Constant)
-                and str(valor.value).strip()
-            ):
-                return str(valor.value).strip()
+            if isinstance(clave, ast.Constant) and clave.value == "price_list":
+                lista = _literal(valor, arbol)
+                if lista:
+                    return lista
     raise erpnext.ERPNextError(
         f"no encontré en qué Price List escribe {fuente.name}: si dejó de crear "
         f"Item Price, decidí a mano en cuál va este catálogo antes de cargarlo."
     )
+
+
+def _literal(nodo: ast.expr, arbol: ast.Module) -> str:
+    """El texto de un nodo: la cadena misma, o la constante que la guarda.
+
+    El seed escribió la lista en línea hasta que la subió a una constante de
+    módulo (`LISTA_DE_PRECIOS`). Las dos formas son la misma decisión y las dos
+    tienen que leerse; si mañana la vuelve a mover, esto falla fuerte en vez de
+    cargar el catálogo en una lista inventada.
+    """
+    if isinstance(nodo, ast.Constant):
+        return str(nodo.value).strip()
+    if not isinstance(nodo, ast.Name):
+        return ""
+    for otro in arbol.body:
+        if not isinstance(otro, ast.Assign) or not isinstance(otro.value, ast.Constant):
+            continue
+        if any(
+            isinstance(destino, ast.Name) and destino.id == nodo.id
+            for destino in otro.targets
+        ):
+            return str(otro.value.value).strip()
+    return ""
+    for otro in arbol.body:
+        if not isinstance(otro, ast.Assign) or not isinstance(otro.value, ast.Constant):
+            continue
+        if any(
+            isinstance(destino, ast.Name) and destino.id == nodo.id
+            for destino in otro.targets
+        ):
+            return str(otro.value.value).strip()
+    return ""
 
 
 def moneda_de(lista: str) -> str:
@@ -377,7 +421,7 @@ def relevar(filas: list[Fila], deposito: str, lista: str) -> EnErpnext:
                 ["price_list", "=", lista],
                 ["selling", "=", 1],
             ],
-            fields=["name", "item_code", "price_list_rate"],
+            fields=["name", "item_code", "price_list_rate", "uom", "currency"],
             limit=len(tanda) * 2,
         ):
             actual.precios.setdefault(str(precio.get("item_code") or "").strip(), precio)
@@ -450,7 +494,7 @@ def problemas_contra_erpnext(filas: list[Fila], actual: EnErpnext) -> list[str]:
 # ---------------------------------------------------------------- el plan
 
 
-def planificar(filas: list[Fila], actual: EnErpnext) -> Plan:
+def planificar(filas: list[Fila], actual: EnErpnext, moneda: str = "") -> Plan:
     plan = Plan()
     for grupo in dict.fromkeys(f.grupo for f in filas):
         if grupo not in actual.grupos:
@@ -474,9 +518,20 @@ def planificar(filas: list[Fila], actual: EnErpnext) -> Plan:
             plan.precios_nuevos.append(fila)
         else:
             vigente = Decimal(str(precio.get("price_list_rate") or 0))
-            (plan.precios_iguales.append(fila) if vigente == fila.precio
+            cambios: dict = {}
+            if vigente != fila.precio:
+                cambios["price_list_rate"] = float(fila.precio)
+            # La unidad del precio NO es decorativa: `policy._precio_autorizado`
+            # descarta todo Item Price cuya `uom` no sea la de la línea del
+            # pedido, así que un precio sin unidad (o con otra) es un precio que
+            # el bot no puede usar para auto-confirmar NADA.
+            if str(precio.get("uom") or "").strip() != fila.unidad:
+                cambios["uom"] = fila.unidad
+            if moneda and str(precio.get("currency") or "").strip() != moneda:
+                cambios["currency"] = moneda
+            (plan.precios_iguales.append(fila) if not cambios
              else plan.precios_cambiados.append(
-                 (fila, vigente, str(precio.get("name") or ""))
+                 CambioDePrecio(fila, str(precio.get("name") or ""), cambios, vigente)
              ))
 
         if fila.stock <= 0:
@@ -515,7 +570,11 @@ def imprimir_plan(plan: Plan, lista: str, moneda: str, costo_pct: Decimal) -> No
     bloque(
         f"Precios (lista «{lista}»{f', {moneda}' if moneda else ''})",
         [f"+ {f.codigo}  {f.precio}" for f in plan.precios_nuevos]
-        + [f"~ {f.codigo}  {vieja} → {f.precio}" for f, vieja, _ in plan.precios_cambiados]
+        + [
+            f"~ {c.fila.codigo}  {c.vigente} → {c.fila.precio}" if c.solo_el_precio
+            else f"~ {c.fila.codigo}  {', '.join(f'{k}={v}' for k, v in c.cambios.items())}"
+            for c in plan.precios_cambiados
+        ]
         + [f"= {f.codigo}  {f.precio}" for f in plan.precios_iguales],
     )
     bloque(
@@ -534,7 +593,10 @@ def imprimir_plan(plan: Plan, lista: str, moneda: str, costo_pct: Decimal) -> No
 # --------------------------------------------------------------- escribir
 
 
-def aplicar(plan: Plan, deposito: str, empresa: str, lista: str, costo_pct: Decimal) -> None:
+def aplicar(
+    plan: Plan, deposito: str, empresa: str, lista: str, costo_pct: Decimal,
+    moneda: str = "",
+) -> None:
     for grupo in plan.grupos_nuevos:
         erpnext.create_doc("Item Group", {
             "item_group_name": grupo,
@@ -563,14 +625,19 @@ def aplicar(plan: Plan, deposito: str, empresa: str, lista: str, costo_pct: Deci
             "price_list": lista,
             "price_list_rate": float(fila.precio),
             "selling": 1,
+            # Las mismas dos que el seed escribe explícitas, por las mismas dos
+            # razones: sin `uom` el precio no matchea ninguna línea de pedido y
+            # el catálogo entero no puede auto-confirmar; sin `currency` hereda
+            # la de la lista, y una escala equivocada no da error, da precios.
+            "uom": fila.unidad,
+            **({"currency": moneda} if moneda else {}),
         })
-        print(f"  + precio {fila.codigo} = {fila.precio}")
-    for fila, vieja, nombre in plan.precios_cambiados:
+        print(f"  + precio {fila.codigo} = {fila.precio} {moneda} por {fila.unidad}")
+    for cambio in plan.precios_cambiados:
         cuentas.pedido_admin(
-            "PUT", cuentas.ruta_recurso("Item Price", nombre),
-            {"price_list_rate": float(fila.precio)},
+            "PUT", cuentas.ruta_recurso("Item Price", cambio.nombre), cambio.cambios
         )
-        print(f"  ~ precio {fila.codigo}: {vieja} → {fila.precio}")
+        print(f"  ~ precio {cambio.fila.codigo}: {', '.join(cambio.cambios)}")
 
     if not plan.stock_a_cargar:
         print("  = stock: no hay nada nuevo que cargar")
@@ -725,7 +792,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nNO CARGUÉ NADA. {desacuerdo}")
         return 1
 
-    plan = planificar(filas, actual)
+    plan = planificar(filas, actual, moneda)
     imprimir_plan(plan, lista, moneda, opciones.costo_pct)
     if not opciones.aplicar:
         print(
@@ -737,7 +804,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\nNo hay nada que escribir: ERPNext ya dice lo mismo que el archivo.")
         return 0
     print("\nEscribiendo:")
-    aplicar(plan, deposito, empresa, lista, opciones.costo_pct)
+    aplicar(plan, deposito, empresa, lista, opciones.costo_pct, moneda)
     print("\nListo.")
     return 0
 

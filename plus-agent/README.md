@@ -1139,6 +1139,13 @@ than what the seed writes to, the load is **refused**: the runtime reads only
 the configured list, so loading anywhere else produces a catalogue the bot
 cannot see a single price of.
 
+Every Item Price it writes carries an explicit `uom` and `currency`, for the
+same reason the seed does: `policy._precio_autorizado` discards any price whose
+UOM is not the order line's, so a catalogue loaded without one cannot
+auto-confirm a single order. A price that already exists without them is
+reported as an update and fixed on the next `--aplicar`, without touching the
+number.
+
 ## WhatsApp response and delivery contract
 
 The HTTP `200` returned to Meta acknowledges the webhook and is invisible to
