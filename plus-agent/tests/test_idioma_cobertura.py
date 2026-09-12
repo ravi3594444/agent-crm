@@ -755,3 +755,81 @@ def test_lo_permitido_se_recorta_aunque_el_mensaje_lo_haya_re_capitalizado():
     assert restos_en_espanol("Reason: No hay stock.", ("no hay stock",)) == []
     # Y ampliar el recorte no puede tapar un resto: sin el permitido, se marca.
     assert "sin" in restos_en_espanol("Held back: Sin stock 3")
+
+
+# --------------------------------------------------------------------------
+# LA DEMO, EN LOS DOS EJES A LA VEZ
+#
+# El brief termina en una verificación a mano: IDIOMA_GERENCIA=en, LOCALE=en_US,
+# el dataset inglés sembrado, y caminar la demo en el número de verdad. Eso no
+# se puede correr acá —hace falta un WhatsApp y un ERPNext— pero la parte que
+# SÍ se puede es la que importa y es la que se rompe sola: que los tres ejes
+# valgan AL MISMO TIEMPO en el mensaje que el dueño realmente recibe.
+#
+# Es la falla que la matriz de CI vino a buscar: cada mitad verde por separado
+# y la suma no. Los botones y la plata se probaron cada uno en su archivo; acá
+# se los mira juntos, en la salida de un solo envío.
+# --------------------------------------------------------------------------
+
+_SO_INGLES = {
+    "name": "SAL-ORD-2026-00042",
+    "customer_name": "Corner Grocery",
+    "grand_total": 1200.5,
+    "currency": "USD",
+    "delivery_date": "2026-09-20",
+    "items": [{"item_code": "BTR-200", "item_name": "Butter 200 g", "qty": 2}],
+}
+
+
+def test_un_dueno_en_ingles_no_ve_espanol_en_el_aviso_ni_en_sus_botones(monkeypatch):
+    """Los tres ejes juntos: idioma de gerencia, locale y datos en inglés."""
+    from unittest.mock import Mock
+
+    from app import formato, notificar
+
+    monkeypatch.setenv("LOCALE", "en_US")
+    monkeypatch.setattr(notificar, "STAFF", {"15551110001"})
+    monkeypatch.setattr(notificar, "window_open", lambda _: True)
+    monkeypatch.setattr(notificar, "_lengua_equipo", lambda: EN)
+    monkeypatch.setattr(notificar.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(notificar, "record_outbound", Mock())
+    enviados = Mock(return_value={"messages": [{"id": "wamid.demo"}]})
+    monkeypatch.setattr(notificar, "enviar_botones", enviados)
+
+    assert notificar.notificar_equipo(
+        "SAL-ORD-2026-00042", _SO_INGLES, auto=False, motivos="over the limit"
+    ) is True
+
+    _, cuerpo, botones = enviados.call_args.args
+    permitido = (*PERMITIDO_EN_SALIDA_INGLESA, "Butter", "Corner", "Grocery")
+    assert restos_en_espanol(cuerpo, permitido) == [], cuerpo
+    for boton in botones:
+        assert restos_en_espanol(boton["title"], permitido) == [], boton["title"]
+    assert [b["title"] for b in botones] == ["Confirm", "View details"]
+    # Y la plata, en el locale del despliegue: `$1,200.50` y no `$1.200,50`.
+    assert formato.pesos(_SO_INGLES["grand_total"], 2) == "$1,200.50"
+
+
+def test_el_mismo_aviso_en_castellano_sigue_saliendo_en_castellano(monkeypatch):
+    """El contrapeso: que el inglés funcione no puede haber roto el castellano."""
+    from unittest.mock import Mock
+
+    from app import formato, notificar
+
+    monkeypatch.setenv("LOCALE", "es_AR")
+    monkeypatch.setattr(notificar, "STAFF", {"5493511111111"})
+    monkeypatch.setattr(notificar, "window_open", lambda _: True)
+    monkeypatch.setattr(notificar, "_lengua_equipo", lambda: ES)
+    monkeypatch.setattr(notificar.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(notificar, "record_outbound", Mock())
+    enviados = Mock(return_value={"messages": [{"id": "wamid.demo"}]})
+    monkeypatch.setattr(notificar, "enviar_botones", enviados)
+
+    assert notificar.notificar_equipo(
+        "SAL-ORD-2026-00042", _SO_INGLES, auto=False, motivos="sin stock"
+    ) is True
+
+    _, cuerpo, botones = enviados.call_args.args
+    assert "Pedido pendiente" in cuerpo
+    assert [b["title"] for b in botones] == ["Confirmar", "Ver detalle"]
+    assert formato.pesos(1200.5, 2) == "$1.200,50"
