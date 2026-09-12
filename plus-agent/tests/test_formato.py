@@ -73,6 +73,10 @@ def test_pesos_redondea_a_entero_por_defecto() -> None:
 # implementación, corriendo la vieja: si alguna se mueve al cambiar el motor,
 # se movió algo que el dueño lee.
 #
+# CON UNA EXCEPCIÓN, Y ESTÁ ABAJO: ninguna de estas 38 filas cae justo en el
+# medio, así que lo que fijan es «byte a byte salvo los empates». Los empates
+# SÍ se movieron, a propósito, y tienen su propia mesa en `EMPATES`.
+#
 # Los montos no son inventados: son los que ya afirman los otros tests y los
 # que arma el seed (tests/test_autonomia.py, tests/test_etapa_2e.py,
 # tests/test_demo.py), más los bordes que ninguno tenía escritos — el medio
@@ -132,6 +136,48 @@ FIJADOS_ES_AR = [
 def test_pesos_fijado_byte_a_byte(monto, decimales, esperado) -> None:
     """La salida de HOY, byte a byte, para cada monto que alguien ya lee."""
     assert pesos(monto, decimales) == esperado
+
+
+# LOS EMPATES, que es donde la mesa de arriba NO es byte a byte — y el único
+# lugar donde el cambio de motor cambió lo que ve una persona.
+#
+# La mesa de fijación tiene 38 filas y ninguna caía justo en el medio, así que
+# «pasa byte a byte» se dijo sin haber probado el caso que podía moverse. Sí se
+# movió: `pesos(2.675, 2)` daba $2,67 y ahora da $2,68.
+#
+# ES A PROPÓSITO Y ES MEJOR, y por eso se fija con los valores NUEVOS en vez de
+# volver atrás. `f"{2.675:,.2f}"` no redondea 2,675: redondea el double más
+# cercano, que es 2,67499999999999982…, así que baja. `Decimal("2.675")`
+# redondea el número que alguien escribió, y al par: sube a 2,68. Un total que
+# el dueño calculó con la cabeza y le da .68 no puede salir .67 en la pantalla
+# porque el binario quedó dos milmillonésimas abajo.
+#
+# Dos de los tres empates famosos dan lo mismo en los dos motores, y están acá
+# igual: que coincidan hoy no es una propiedad, es una coincidencia de reglas,
+# y esta mesa existe para que se note si mañana dejan de coincidir.
+EMPATES = [
+    # (monto, decimales, lo que se ve AHORA, lo que daba el motor viejo)
+    (2.675, 2, "$2,68", "$2,67"),
+    (0.015, 2, "$0,02", "$0,01"),
+    # Éstos dos ya coincidían: el double cae por debajo del medio y el redondeo
+    # al par del Decimal también baja.
+    (1.005, 2, "$1,00", "$1,00"),
+    (0.125, 2, "$0,12", "$0,12"),
+]
+
+
+@pytest.mark.parametrize("monto, decimales, esperado, motor_viejo", EMPATES)
+def test_pesos_redondea_el_numero_escrito_y_no_el_binario(
+    monto, decimales, esperado, motor_viejo
+) -> None:
+    """El contrato NUEVO, escrito para que nadie lo "restaure" sin querer."""
+    assert pesos(monto, decimales) == esperado
+    # Y la forma vieja, calculada acá mismo, para que la diferencia se lea en el
+    # test en vez de tener que reconstruirla: si alguien vuelve a
+    # `f"{...:,.2f}"`, las dos primeras filas se caen.
+    crudo = f"{abs(float(monto)):,.{decimales}f}"
+    viejo = "$" + crudo.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+    assert viejo == motor_viejo
 
 
 def test_pesos_objeto_cualquiera_vale_cero() -> None:

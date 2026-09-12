@@ -65,7 +65,23 @@ def _texto_libre(
             pedido=nombre,
             cliente=so.get("customer_name") or so.get("customer") or "Cliente",
             detalle=detalle,
-            total=f"{float(so.get('grand_total') or 0):,.2f}",
+            # `pesos`, como TODA la plata que lee una persona. Era la única que
+            # quedaba escrita a mano: `f"{...:,.2f}"` da "1,200.50", que un
+            # argentino lee como un peso veinte, y sin símbolo — justo en el
+            # aviso con el que autoriza el pedido.
+            #
+            # Y CON EL CÓDIGO DE MONEDA DEL PEDIDO al lado, como los otros dos
+            # caminos que muestran un total (`texto_confirmacion` acá abajo y
+            # `avisos.texto_confirmacion_cliente`). El símbolo lo elige `LOCALE`
+            # —es la forma del número— y el código lo dice el pedido, que es el
+            # dato: un pedido en INR mostraba "$4.800,00" a secas y el mismo
+            # pedido, ya confirmado, "$4.800,00 INR". Dos respuestas distintas
+            # sobre cuánta plata es, y la primera es la pantalla donde se
+            # autoriza.
+            total=(
+                f"{pesos(so.get('grand_total'), 2)} "
+                f"{so.get('currency') or ''}"
+            ).strip(),
             entrega=so.get("delivery_date")
             or idioma_mod.t("gerencia.sin_fecha", lengua),
         ),

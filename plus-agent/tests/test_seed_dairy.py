@@ -335,6 +335,9 @@ def test_main_siembra_el_catalogo_que_le_dan(
     get_list = blocked_erpnext_network["get_list"]
     get_list.side_effect = None
     get_list.return_value = [{"name": "ya tiene precio"}]
+    get_doc = blocked_erpnext_network["get_doc"]
+    get_doc.side_effect = None
+    get_doc.return_value = {"name": "Standard Selling", "currency": "USD"}
     context = blocked_erpnext_network["default_context"]
     context.side_effect = None
     context.return_value = ("Dairy Plus LLC", "Finished Goods - DP")
@@ -353,3 +356,117 @@ def test_main_siembra_el_catalogo_que_le_dan(
     # nombra un producto del catálogo que se acaba de sembrar.
     assert "los precios son inventados" in salida
     assert "cream cheese" in salida
+
+
+# ------------------------------------------------- la moneda del catálogo
+# Un `Item Price` sin `currency` hereda la de la lista de precios. Los dos
+# catálogos son plausibles por separado —1.20 es un litro de leche en dólares y
+# 1200 lo es en pesos— así que sembrar el inglés contra una lista en ARS no da
+# ningún error: da trece precios mil veces más baratos, que la pantalla muestra
+# como `$1.20` con LOCALE=en_US mientras los libros leen un peso veinte.
+
+
+def _lista_en(moneda: str) -> Mock:
+    return Mock(return_value={"name": "Standard Selling", "currency": moneda})
+
+
+def test_el_catalogo_en_ingles_no_se_siembra_en_una_lista_en_pesos(
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_erpnext_network: dict[str, Mock],
+) -> None:
+    """El hallazgo, escrito como test: falla ANTES de escribir un solo precio."""
+    monkeypatch.setattr(seed, "_ensure", Mock())
+    get_doc = blocked_erpnext_network["get_doc"]
+    get_doc.side_effect = None
+    get_doc.return_value = {"name": "Standard Selling", "currency": "ARS"}
+
+    with pytest.raises(seed.MonedaEquivocada) as problema:
+        seed.main(seed.dataset("en"))
+
+    dicho = str(problema.value)
+    assert "ARS" in dicho and "USD" in dicho
+    # Y no se escribió NADA: ni un precio, ni el stock inicial.
+    blocked_erpnext_network["create_doc"].assert_not_called()
+
+
+def test_el_catalogo_en_espanol_en_una_lista_en_pesos_sigue_andando(
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_erpnext_network: dict[str, Mock],
+) -> None:
+    monkeypatch.setattr(seed, "_ensure", Mock())
+    monkeypatch.setattr(seed, "_existing_stock_reconciliation", Mock(return_value=None))
+    monkeypatch.setattr(
+        seed,
+        "_stock_reconciliation_payload",
+        Mock(return_value={"purpose": "Opening Stock", "items": []}),
+    )
+    get_doc = blocked_erpnext_network["get_doc"]
+    get_doc.side_effect = None
+    get_doc.return_value = {"name": "Standard Selling", "currency": "ARS"}
+    get_list = blocked_erpnext_network["get_list"]
+    get_list.side_effect = None
+    get_list.return_value = [{"name": "ya tiene precio"}]
+    context = blocked_erpnext_network["default_context"]
+    context.side_effect = None
+    context.return_value = ("Lácteos Plus SA", "Principal - LT")
+    create_doc = blocked_erpnext_network["create_doc"]
+    create_doc.side_effect = None
+    create_doc.return_value = {"name": "MAT-RECO-2026-00004"}
+
+    seed.main(seed.dataset("es"))
+
+
+def test_cada_precio_se_escribe_con_su_moneda_y_su_unidad(
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_erpnext_network: dict[str, Mock],
+) -> None:
+    """Las dos explícitas. `currency` porque si no se hereda la de la lista;
+    `uom` porque `policy._precio_autorizado` exige que la unidad del precio sea
+    la de la línea del pedido — un precio sin unidad no auto-confirma nada."""
+    monkeypatch.setattr(seed, "_ensure", Mock())
+    monkeypatch.setattr(seed, "_existing_stock_reconciliation", Mock(return_value=None))
+    monkeypatch.setattr(
+        seed,
+        "_stock_reconciliation_payload",
+        Mock(return_value={"purpose": "Opening Stock", "items": []}),
+    )
+    get_doc = blocked_erpnext_network["get_doc"]
+    get_doc.side_effect = None
+    get_doc.return_value = {"name": "Standard Selling", "currency": "USD"}
+    get_list = blocked_erpnext_network["get_list"]
+    get_list.side_effect = None
+    get_list.return_value = []  # ningún precio todavía
+    context = blocked_erpnext_network["default_context"]
+    context.side_effect = None
+    context.return_value = ("Dairy Plus LLC", "Finished Goods - DP")
+    create_doc = blocked_erpnext_network["create_doc"]
+    create_doc.side_effect = None
+    create_doc.return_value = {"name": "X"}
+
+    datos = seed.dataset("en")
+    seed.main(datos)
+
+    precios = [
+        c.args[1] for c in create_doc.call_args_list if c.args[0] == "Item Price"
+    ]
+    assert len(precios) == len(datos.productos)
+    unidades = {code: uom for code, _, uom, _ in datos.productos}
+    for pago in precios:
+        assert pago["currency"] == "USD", pago
+        assert pago["uom"] == unidades[pago["item_code"]], pago
+        assert pago["price_list"] == seed.LISTA_DE_PRECIOS
+
+
+def test_una_lista_de_precios_ilegible_no_frena_la_siembra(
+    monkeypatch: pytest.MonkeyPatch,
+    blocked_erpnext_network: dict[str, Mock],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Todavía no existe, o no se puede leer: se sigue, y el `currency` explícito
+    de cada precio hace que ERPNext rechace la mezcla si aparece con otra."""
+    get_doc = blocked_erpnext_network["get_doc"]
+    get_doc.side_effect = seed.erpnext.ERPNextError("no existe")
+
+    seed._revisar_moneda(seed.dataset("en"))
+
+    assert "no pude leer la moneda" in capsys.readouterr().out

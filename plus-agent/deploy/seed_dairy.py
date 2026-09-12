@@ -32,9 +32,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import erpnext  # noqa: E402
 
+# La lista de precios que se siembra. Es la misma que `AUTO_CONFIRM_PRICE_LIST`
+# apunta en un despliegue normal, y por eso importa en qué MONEDA está: ver
+# `_revisar_moneda`.
+LISTA_DE_PRECIOS = "Standard Selling"
+
 GRUPO = "Lacteos"
 GRUPOS_CLIENTE = ("Comercio", "Gastronomia")
 UNIDADES = ("Unidad", "Kg")
+MONEDA = "ARS"
 
 PRODUCTOS = [
     ("LEC-ENT-1L",  "Leche entera sachet 1 L",     "Unidad",  1200),
@@ -86,6 +92,7 @@ STOCK_INICIAL = {
 GRUPO_EN = "Dairy"
 GRUPOS_CLIENTE_EN = ("Retail", "Food service")
 UNIDADES_EN = ("Unit", "Kg")
+MONEDA_EN = "USD"
 
 PRODUCTOS_EN = [
     ("MILK-WHL-1L", "Whole milk pouch 1 L",          "Unit",  1.20),
@@ -134,6 +141,14 @@ class Datos:
     productos: list
     clientes: list
     stock: dict
+    # LA MONEDA DE ESTOS PRECIOS, y es un campo y no un detalle: 1.20 y 1200 son
+    # el mismo producto en dos monedas, y un Item Price sin `currency` hereda la
+    # de la lista de precios. Sembrar el catálogo en dólares contra una lista en
+    # pesos escribía «1,20 ARS» por litro de leche: la pantalla muestra $1.20 con
+    # LOCALE=en_US y parece bien, mientras los libros dicen un peso veinte. Y
+    # AUTO_CONFIRM_MAX es un monto en pesos, así que un catálogo mil veces más
+    # barato vuelve sin sentido la aritmética de TODOS los límites.
+    moneda: str
     # La frase con la que el operador prueba el bot al final. Nombra un
     # producto del catálogo que se acaba de sembrar, así que es del dataset.
     pregunta: str
@@ -172,6 +187,7 @@ def dataset(nombre: str | None = None) -> Datos:
             productos=PRODUCTOS_EN,
             clientes=CLIENTES_EN,
             stock=STOCK_INICIAL_EN,
+            moneda=MONEDA_EN,
             pregunta="hi, do you have cream cheese?",
         )
     # Se leen los globals AHORA y no al importar: son los mismos nombres de
@@ -184,6 +200,7 @@ def dataset(nombre: str | None = None) -> Datos:
         productos=PRODUCTOS,
         clientes=CLIENTES,
         stock=STOCK_INICIAL,
+        moneda=MONEDA,
         pregunta="hola, tenes queso cremoso?",
     )
 
@@ -199,6 +216,52 @@ def _ensure(doctype: str, name: str, payload: dict) -> str:
     doc = erpnext.create_doc(doctype, payload)
     print(f"  + {doctype} {doc['name']}")
     return doc["name"]
+
+
+class MonedaEquivocada(RuntimeError):
+    """La lista de precios no está en la moneda del catálogo que se pide."""
+
+
+def _moneda_de_la_lista(lista: str) -> str:
+    """La moneda que ERPNext tiene puesta en esa lista, o "" si no se puede leer."""
+    try:
+        doc = erpnext.get_doc("Price List", lista)
+    except erpnext.ERPNextError:
+        return ""
+    return str(doc.get("currency") or "").strip()
+
+
+def _revisar_moneda(datos: "Datos", lista: str = LISTA_DE_PRECIOS) -> None:
+    """Falla ANTES de escribir un solo precio si las monedas no coinciden.
+
+    Un `Item Price` sin `currency` hereda la de la lista, y las dos escalas son
+    plausibles por separado: 1.20 es un litro de leche en dólares y 1200 lo es
+    en pesos. Escritas en la lista equivocada no hay ningún error — hay un
+    catálogo mil veces más barato, que la pantalla muestra como `$1.20` y los
+    libros leen como un peso veinte. Y como `AUTO_CONFIRM_MAX` es un monto en
+    la moneda de la lista, todo tope queda comparando contra números de otra
+    escala: nada llega nunca al límite y todo se auto-confirma.
+
+    Por eso ABORTA en vez de avisar: sembrar es escribir en el ERPNext del
+    cliente, y trece precios mal cargados los borra una persona a mano.
+    """
+    de_la_lista = _moneda_de_la_lista(lista)
+    if not de_la_lista:
+        # Todavía no existe, o no se puede leer. No se inventa nada: el
+        # `currency` explícito de cada Item Price hace que ERPNext rechace la
+        # mezcla si la lista aparece después con otra moneda.
+        print(f"  ! no pude leer la moneda de «{lista}»: sigo con {datos.moneda}")
+        return
+    if de_la_lista != datos.moneda:
+        raise MonedaEquivocada(
+            f"la lista de precios «{lista}» está en {de_la_lista} y el catálogo "
+            f"«{datos.nombre}» tiene precios en {datos.moneda}. Un precio de "
+            f"{datos.productos[0][3]} escrito en una lista en {de_la_lista} no da "
+            f"error: da un catálogo en otra escala, y AUTO_CONFIRM_MAX es un monto "
+            f"en {de_la_lista}. Creá una lista en {datos.moneda} y apuntá "
+            f"AUTO_CONFIRM_PRICE_LIST a ella, o sembrá el catálogo en "
+            f"{'español' if datos.nombre == 'en' else 'inglés'}."
+        )
 
 
 def _account_by_type(company: str, account_type: str) -> str:
@@ -302,6 +365,8 @@ def main(datos: Datos | None = None) -> None:
         _ensure("UOM", u, {"uom_name": u})
 
     print("Productos...")
+    if datos.productos:
+        _revisar_moneda(datos)
     for code, nombre, uom, precio in datos.productos:
         _ensure("Item", code, {
             "item_code": code,
@@ -319,11 +384,19 @@ def main(datos: Datos | None = None) -> None:
         if not existentes:
             erpnext.create_doc("Item Price", {
                 "item_code": code,
-                "price_list": "Standard Selling",
+                "price_list": LISTA_DE_PRECIOS,
                 "price_list_rate": precio,
                 "selling": 1,
+                # LAS DOS EXPLÍCITAS, y ninguna es decorativa. Sin `currency`,
+                # ERPNext hereda la de la lista y un catálogo en dólares se
+                # guarda como pesos. Sin `uom`, el precio no matchea NINGUNA
+                # línea de pedido: `policy._precio_autorizado` exige que la
+                # unidad del precio sea la de la línea, así que un catálogo
+                # sembrado sin unidad no puede auto-confirmar nada.
+                "currency": datos.moneda,
+                "uom": uom,
             })
-            print(f"    precio {code}: ${precio:,}")
+            print(f"    precio {code}: {precio:,} {datos.moneda} por {uom}")
 
     print("Clientes...")
     for nombre, tel, grupo in datos.clientes:
@@ -395,4 +468,9 @@ def _pedido_en_la_linea(argv: list[str]) -> Datos:
 
 
 if __name__ == "__main__":
-    main(_pedido_en_la_linea(sys.argv[1:]))
+    try:
+        main(_pedido_en_la_linea(sys.argv[1:]))
+    except MonedaEquivocada as problema:
+        # Un traceback acá no le dice nada al que está sembrando un ERPNext.
+        print(f"\nABORTADO: {problema}")
+        raise SystemExit(2) from None

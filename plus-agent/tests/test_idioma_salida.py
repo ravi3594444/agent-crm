@@ -267,6 +267,78 @@ def test_la_alerta_de_pedido_pendiente_sale_en_el_idioma_del_equipo(lengua):
 
 
 @pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_total_del_aviso_lo_escribe_pesos_y_no_python(lengua, monkeypatch):
+    """El único monto del producto que no pasaba por `formato.pesos`.
+
+    Salía de un `f"{...:,.2f}"` escrito a mano, o sea "6,000.00": sin símbolo, y
+    con el punto y la coma al revés de como los lee un argentino — un peso
+    veinte en la pantalla en la que el dueño autoriza seis mil. Que sea el aviso
+    de pedido pendiente es lo que lo hace caro: es el único mensaje que recibe
+    sin haber escrito nada.
+
+    Se afirma con las DOS formas de número, porque una sola no distingue el bug:
+    con `LOCALE=en_US` los dígitos crudos coinciden con los correctos y lo único
+    que los separa es el símbolo.
+    """
+    from app import notificar
+
+    for locale, esperado, crudo in (
+        ("es_AR", "Total: $6.000,00 ARS", "6,000.00"),
+        ("en_US", "Total: $6,000.00 ARS", "Total: 6,000.00"),
+    ):
+        monkeypatch.setenv("LOCALE", locale)
+        texto = notificar._texto_libre(
+            PEDIDO, _SO, auto=False, motivos=MOTIVO,
+            detalle="5 x Whole Milk 1 L", lengua=lengua,
+        )
+        assert esperado in texto, texto
+        assert crudo not in texto, texto
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
+def test_el_aviso_dice_en_que_moneda_esta_el_pedido(lengua, monkeypatch):
+    """El símbolo lo elige LOCALE; el código de moneda lo dice el PEDIDO.
+
+    `pesos` escribe "$" para las dos formas de número que habla el producto, así
+    que un pedido en INR salía "$4.800,00" a secas en el aviso pendiente — y el
+    MISMO pedido, ya confirmado, "$4.800,00 INR" por `texto_confirmacion`. Dos
+    respuestas distintas sobre cuánta plata es, y la que no lo decía era la
+    pantalla en la que se autoriza.
+    """
+    from app import notificar
+
+    monkeypatch.setenv("LOCALE", "es_AR")
+    en_rupias = {**_SO, "currency": "INR", "grand_total": 4800}
+
+    texto = notificar._texto_libre(
+        PEDIDO, en_rupias, auto=False, motivos=MOTIVO,
+        detalle="5 x Whole Milk 1 L", lengua=lengua,
+    )
+
+    assert "Total: $4.800,00 INR" in texto, texto
+    # Y el confirmado dice exactamente lo mismo del mismo pedido.
+    assert "$4.800,00 INR" in notificar.texto_confirmacion(
+        en_rupias, "manual", momento="2026-09-05 16:14", lengua=lengua
+    )
+
+
+def test_un_pedido_sin_moneda_no_deja_un_espacio_colgando(monkeypatch):
+    """ERPNext siempre la trae, pero un dict de prueba o un pedido a medio armar
+    no: el total no puede terminar en un espacio suelto."""
+    from app import notificar
+
+    monkeypatch.setenv("LOCALE", "es_AR")
+    sin_moneda = {k: v for k, v in _SO.items() if k != "currency"}
+
+    texto = notificar._texto_libre(
+        PEDIDO, sin_moneda, auto=False, motivos=MOTIVO,
+        detalle="5 x Whole Milk 1 L", lengua=ES,
+    )
+
+    assert "Total: $6.000,00\n" in texto, texto
+
+
+@pytest.mark.parametrize("lengua", IDIOMAS)
 def test_la_alerta_de_auto_confirmado_no_pide_responder(lengua):
     from app import notificar
 
