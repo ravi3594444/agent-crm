@@ -15,25 +15,40 @@ from __future__ import annotations
 
 import sys
 import threading
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pytest
+import time_machine
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from conftest import FakeRedis
+from conftest import FakeRedis, RelojDePrueba
 
-from app import digest, locks, notificar, router, whatsapp
+from app import digest, locks, notificar, reloj, router, whatsapp
 
 # Captured before any fixture swaps it: the tests about composition need the
 # real resumen() with only its ERPNext-facing sections stubbed.
 _RESUMEN_REAL = digest.resumen
 
+# Igual que el de arriba, y por el mismo motivo: el fixture `mundo` reemplaza
+# `_ahora`, así que el test que prueba de qué reloj sale el DÍA necesita el real.
+# Capturarlo adentro del test capturaría el lambda del fixture.
+_AHORA_REAL = digest._ahora
+
 DUENO = "5493519999999"  # sorts AFTER the employee: the sorted-first rule picks the wrong one
 EMPLEADO = "5493511111111"
-HOY = date(2026, 9, 6)
+
+# EL DÍA QUE ESTE ARCHIVO NOMBRA, y ahora una sola vez. `HOY` era `date(2026, 9,
+# 6)` escrito acá y el fixture fijaba `digest._ahora` en las 18:00 **UTC** del
+# mismo día: dos relojes que TIENEN que dar la misma fecha —`enviar()` reclama el
+# día con `_ahora().date()` y los tests abren ese reclamo con `_clave(HOY)`— y
+# nada los obligaba. Coincidían por el offset de Buenos Aires y por nada más; con
+# el negocio bastante al este, las 18:00 UTC ya son el día siguiente y la mitad
+# del archivo probaría otra cosa en silencio. Ahora `HOY` sale del mismo reloj que
+# el `_ahora` del fixture, así que no pueden separarse.
+RELOJ = RelojDePrueba("2026-09-06")
+HOY = RELOJ.hoy
 
 
 class RedisAtomico(FakeRedis):
@@ -55,7 +70,8 @@ class RedisAtomico(FakeRedis):
 def mundo(monkeypatch):
     falso = RedisAtomico()
     monkeypatch.setattr(locks, "conexion", lambda: falso)
-    monkeypatch.setattr(digest, "_ahora", lambda: datetime(2026, 9, 6, 18, 0, tzinfo=ZoneInfo("UTC")))
+    # Las 18:00 DEL NEGOCIO, que es contra lo que `tick()` compara DIGEST_HORA.
+    monkeypatch.setattr(digest, "_ahora", lambda: RELOJ.a_las(18))
     monkeypatch.setattr(digest, "resumen", lambda dia=None: f"📋 Resumen del {HOY.isoformat()}\n(prueba)")
     monkeypatch.setenv("DIGEST_ACTIVO", "true")
     monkeypatch.setenv("DIGEST_HORA", "18:00")
@@ -124,6 +140,46 @@ def test_the_claim_is_taken_before_anything_is_composed(mundo, monkeypatch):
     assert digest.enviar() is False
     assert llamadas == []
     assert mundo["enviados"] == []
+
+
+def test_el_dia_que_se_reclama_es_el_del_negocio_y_no_el_del_servidor(
+    mundo, monkeypatch
+) -> None:
+    """UN instante, DOS zonas, DOS días del negocio — y por lo tanto dos resúmenes.
+
+    EL TEST QUE ESTE ARCHIVO NO PODÍA ESCRIBIR. `enviar()` toma `dia =
+    _ahora().date()` y `_clave(dia)` es la marca «este día ya salió», con un solo
+    intento por día. Si ese día fuera el del SERVIDOR, dos días del negocio que
+    caen dentro de la misma fecha UTC comparten la clave: el segundo encuentra el
+    día tomado, se calla, y el dueño pierde un resumen entero sin que nada lo
+    diga. `enviar()` devolvería False, que es lo mismo que devuelve cuando el
+    resumen ya salió de verdad.
+
+    No se podía escribir porque `HOY` estaba escrito a mano y el fixture fijaba
+    `_ahora` en las 18:00 de ese mismo día: un instante en el que la fecha del
+    negocio y la del servidor COINCIDEN. Todos los tests del reclamo se
+    ejercitaban con la única fecha en la que las dos lecturas dan lo mismo.
+
+    Acá el reloj NO se fija: se congela el mundo con `time_machine` y se deja que
+    `_ahora()` resuelva la zona, que es el camino real. A las 02:30 UTC del 7 son
+    las 23:30 del **6** en Buenos Aires y las 08:00 del **7** en Kolkata.
+    """
+    monkeypatch.setattr(digest, "_ahora", _AHORA_REAL)
+    cruce = datetime(2026, 9, 7, 2, 30, tzinfo=UTC)
+
+    with time_machine.travel(cruce, tick=False):
+        monkeypatch.setenv(reloj.VARIABLE, "America/Argentina/Buenos_Aires")
+        assert digest.enviar() is True
+        assert mundo["redis"].get(digest._clave(date(2026, 9, 6))) is not None
+
+        # El MISMO instante, con el negocio al este: es otro día del negocio, así
+        # que es otro reclamo y sale otro resumen. Con el día del servidor los
+        # dos caerían en el 7 y éste se perdería en silencio.
+        monkeypatch.setenv(reloj.VARIABLE, "Asia/Kolkata")
+        assert digest.enviar() is True
+        assert mundo["redis"].get(digest._clave(date(2026, 9, 7))) is not None
+
+    assert len(mundo["enviados"]) == 2
 
 
 def test_without_redis_nothing_is_claimed_and_nothing_is_sent(mundo):
