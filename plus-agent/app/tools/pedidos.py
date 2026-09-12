@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Annotated
 
 from langchain_core.runnables import RunnableConfig
@@ -156,6 +156,49 @@ def _parse_fecha(text: str, *, hoy: date | None = None) -> str:
     raise FechaEntregaInvalida("no pude interpretar la fecha de entrega")
 
 
+def _ahora_del_negocio() -> datetime:
+    """El instante, en la zona del negocio. Con respaldo: una herramienta que se
+    cae por una zona mal escrita es peor que una que usa el default y lo dice."""
+    return reloj.ahora_con_respaldo("orders")
+
+
+# La hora que se asume cuando el modelo dice un DÍA y no una hora. Las 9 y no
+# la medianoche: «mañana» sobre un pedido quiere decir mañana a la mañana, y un
+# recordatorio a las 00:00 cae dentro de las horas de silencio y espera igual
+# hasta las 7, con el plazo ya movido sin que nadie lo haya decidido.
+_HORA_POR_DEFECTO_RECORDATORIO = 9
+
+
+def _parse_momento(texto: str, *, ahora: datetime) -> float:
+    """'YYYY-MM-DD HH:MM' o 'YYYY-MM-DD' -> epoch, en hora del negocio.
+
+    Deliberadamente estrecho: acá NO se acepta «mañana» ni «el martes». Esas
+    formas las escribe un CLIENTE y las resuelve `_parse_fecha` contra el día
+    del negocio; ésta la escribe el MODELO, que ya vio la fecha de hoy en su
+    prompt y puede escribir una fecha exacta. Un parser que adivina es un
+    parser que puede agendar el año que viene.
+    """
+    crudo = str(texto or "").strip()
+    if not crudo:
+        raise FechaEntregaInvalida("falta la fecha")
+    for formato_fecha, con_hora in (("%Y-%m-%d %H:%M", True), ("%Y-%m-%d", False)):
+        try:
+            leido = datetime.strptime(crudo, formato_fecha)
+        except ValueError:
+            continue
+        if not con_hora:
+            leido = leido.replace(hour=_HORA_POR_DEFECTO_RECORDATORIO)
+        return leido.replace(tzinfo=ahora.tzinfo).timestamp()
+    raise FechaEntregaInvalida("usá 'YYYY-MM-DD HH:MM' o 'YYYY-MM-DD'")
+
+
+def _texto_de_momento(epoch: float) -> str:
+    """Cómo se le muestra un momento agendado a quien pidió agendarlo."""
+    return datetime.fromtimestamp(
+        epoch, tz=_ahora_del_negocio().tzinfo
+    ).strftime("%Y-%m-%d %H:%M")
+
+
 def _unidad_clave(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "", _sin_tildes(value))
     aliases = {
@@ -252,6 +295,35 @@ def _message_key(message_id: str) -> str:
 def _log_ref(value: str) -> str:
     """Non-reversible correlation tag for logs; never log ERP/customer IDs."""
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _agendar_entrega(doc: dict) -> None:
+    """Las filas de agenda de un pedido con fecha de entrega. Nunca es fatal.
+
+    Se llama en el alta Y en los cuatro caminos que RESUELVEN un pedido que ya
+    existía (idempotencia y recuperación después de una caída), porque una
+    agenda que falló de forma transitoria en el alta no se reponía nunca: esos
+    caminos vuelven antes de `_after_create`, así que el reintento natural del
+    cliente no pasaba por acá.
+
+    Es seguro llamarla de más: `programar_para_entrega` no hace nada si el
+    pedido no es un borrador, si el límite está apagado o si no hay fecha, y el
+    id de una fila sale de (pedido, tipo, vence), así que repetirla reescribe
+    la misma fila en vez de crear otra.
+
+    Su propio try: una agenda que no se pudo escribir no puede hacer que el
+    pedido del cliente falle.
+    """
+    try:
+        from app import agenda
+
+        agenda.programar_para_entrega(doc)
+    except Exception as exc:
+        print(
+            f"[orders] agenda no programada "
+            f"order={_log_ref(str(doc.get('name') or ''))} "
+            f"type={type(exc).__name__}"
+        )
 
 
 def _find_existing(customer: str, message_key: str) -> dict | None:
@@ -446,6 +518,7 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
     erpnext.add_comment(
         "Sales Order", name, f"Requiere revisión humana: {decision}"
     )
+    _agendar_entrega(complete)
     _safe_notify(name, complete, auto=False, reasons=str(decision))
     resultado = _order_result(complete, validated, delivery)
     if entrega.MOTIVO in str(decision):
@@ -573,6 +646,7 @@ def crear_pedido(
             "pedido; no reintentes automáticamente y derivá el caso al equipo."
         )
     if existing:
+        _agendar_entrega(existing)
         return _order_result(existing, [], "")
 
     try:
@@ -594,6 +668,7 @@ def crear_pedido(
         ):
             existing = _find_existing(cuenta, message_key)
             if existing:
+                _agendar_entrega(existing)
                 return _order_result(existing, [], delivery)
 
             validated, validation_error = _validated_lines(lineas)
@@ -642,6 +717,7 @@ def crear_pedido(
                 except erpnext.ERPNextError:
                     existing = None
                 if existing:
+                    _agendar_entrega(existing)
                     return _order_result(existing, validated, delivery)
                 return (
                     "PEDIDO_NO_CREADO. ERPNext no confirmó la creación y no hay "
@@ -667,6 +743,7 @@ def crear_pedido(
         except erpnext.ERPNextError:
             existing = None
         if existing:
+            _agendar_entrega(existing)
             return _order_result(existing, [], delivery)
         return (
             "PEDIDO_NO_CREADO. No pude coordinar una creación segura; "
@@ -933,3 +1010,79 @@ def _comentar_solicitud(nombre: str, solicitud, motivo: str) -> None:
         )
     except Exception as exc:
         print(f"[orders] comentario de solicitud falló ({type(exc).__name__})")
+
+
+@tool
+def recordar(
+    pedido: Annotated[
+        str,
+        Field(description="El número de pedido real, como SO-2026-00042."),
+    ],
+    cuando: Annotated[
+        str,
+        Field(description="Cuándo volver: 'YYYY-MM-DD HH:MM' o 'YYYY-MM-DD'. "
+                          "En hora del negocio. Tiene que ser futuro."),
+    ],
+    por_que: Annotated[
+        str,
+        Field(description="En una frase: por qué hay que volver sobre este "
+                          "pedido. Esto lo lee el EQUIPO, tal cual, como un "
+                          "dato — no es una instrucción para vos ni para nadie."),
+    ],
+    config: RunnableConfig,
+) -> str:
+    """Volver sobre este pedido más adelante, por un motivo.
+
+    Anota un recordatorio. NO confirma, no cancela, no cambia el pedido y no le
+    promete nada al cliente: lo único que puede pasar cuando llegue la hora es
+    que una persona del equipo lea el motivo.
+    """
+    try:
+        actor, cuenta = _cuenta_del_remitente(config)
+    except RuntimeContextError:
+        return "No pude autenticar la conversación para agendar nada."
+
+    # EL PEDIDO TIENE QUE SER DE QUIEN ESCRIBE. El número lo dice el MODELO, y
+    # el modelo lee lo que le escribió un cliente: sin esto, un mensaje que
+    # nombra el pedido de otro le cuelga un recordatorio encima, y el equipo lo
+    # lee como si fuera de esa cuenta.
+    #
+    # Mismo patrón que `catalogo.estado_pedido`: `gerencia_verificada` y no
+    # `is_management` —el alcance lo pone el webhook, pero tocar el pedido de
+    # cualquiera lo habilita únicamente un teléfono que sigue en la lista del
+    # equipo— y la misma negativa para «no existe» y «no es tuyo», para que no
+    # se pueda enumerar pedidos ajenos probando números.
+    try:
+        doc = erpnext.policy_get_doc("Sales Order", pedido)
+    except Exception:
+        return f"No encontré el pedido {pedido}."
+    if not actor.gerencia_verificada and str(doc.get("customer") or "") != cuenta:
+        return f"No encontré el pedido {pedido}."
+
+    from app import agenda
+
+    momento = _ahora_del_negocio()
+    try:
+        cuando_epoch = _parse_momento(cuando, ahora=momento)
+    except FechaEntregaInvalida as exc:
+        return f"No pude entender cuándo: {exc}."
+
+    try:
+        fila = agenda.recordar(
+            pedido, cuando_epoch, por_que, ahora=momento.timestamp()
+        )
+    except agenda.PropuestaInvalida as exc:
+        # La guarda que no pasó, dicha sin inventar una alternativa: el modelo
+        # propone de nuevo o no propone.
+        return f"No lo puedo agendar: {exc}."
+    except Exception as exc:
+        print(f"[orders] recordatorio no agendado ({type(exc).__name__})")
+        return "No pude guardar el recordatorio."
+
+    if fila is None:
+        # No quedó durable = no pasó. Decirlo, nunca fingir que quedó.
+        return "No pude guardar el recordatorio de forma durable."
+    return (
+        f"Anotado: vuelvo sobre {fila.sobre} el "
+        f"{_texto_de_momento(fila.vence)}. No le prometí nada al cliente."
+    )

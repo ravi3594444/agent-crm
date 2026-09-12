@@ -87,6 +87,22 @@ def _texto_libre(
         ),
     ]
     if not auto:
+        # El PLAZO, cuando hay uno. Va antes del motivo y no al final para que
+        # el recorte de 1024 de Meta, si alguna vez llega, no se coma la línea
+        # que dice cómo contestar. Vacío —límite apagado, pedido sin fecha de
+        # entrega o sin hora de reparto configurada— es una línea que no se
+        # agrega: el aviso sin plazo queda exactamente como estaba.
+        from app import agenda as agenda_mod
+
+        try:
+            plazo = agenda_mod.plazo_del_pedido(so)
+        except Exception as exc:
+            print(f"[staff-notify] plazo no legible ({type(exc).__name__})")
+            plazo = ""
+        if plazo:
+            lineas.append(
+                idioma_mod.t("gerencia.responder_antes_de", lengua, hora=plazo)
+            )
         sin_obs = idioma_mod.t("gerencia.sin_observaciones", lengua)
         lineas.append(
             idioma_mod.t(

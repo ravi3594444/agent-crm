@@ -63,6 +63,7 @@ from app.tools.pedidos import (
     crear_pedido,
     escalar_a_humano,
     pedir_excepcion_de_entrega,
+    recordar,
 )
 
 TOOLS_CLIENTES = [
@@ -74,6 +75,12 @@ TOOLS_CLIENTES = [
     # Pide una excepción de entrega. NO decide: o el dueño la dejó autorizada
     # de antemano, o abre una solicitud para una persona (app/solicitudes.py).
     pedir_excepcion_de_entrega,
+    # Anota una fila en app/agenda.py para volver sobre un pedido más tarde.
+    # PROPONE: el tipo lo fuerza Python a `seguimiento`, la fecha va acotada al
+    # horizonte y el motivo se guarda como DATO que lee una persona del equipo.
+    # Lo peor que puede causar es un mensaje al equipo que no hacía falta —
+    # nunca una confirmación, un submit, una cancelación ni plata.
+    recordar,
 ]
 
 TOOLS_GERENCIA = [

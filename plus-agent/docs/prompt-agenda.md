@@ -2,9 +2,22 @@
 
 Fresh session in `plus-agent/` of `agent-crm`. Everything needed is in this message.
 
-**First commit:** save this whole message as `docs/prompt-agenda.md` on a branch off `main`, push it.
+**First commit:** save this whole message as `docs/prompt-agenda.md` on a branch off `main`, push it. An older draft of that file is already in the repo — overwrite it, this message is the current one.
 
 **This replaces the plazos brief.** plazos ships as a row in the new mechanism, not as a fourth sweep.
+
+## Where things stand
+
+Branch off current `main`. Merged since this brief was first drafted, and all of it matters to you:
+
+- **`app/marcas.py`** (#30) — a typed registry for every durable ERPNext marker, with a test that fails when a marker's text changes and a parser derived from the registry row. Your `[agenda]` marker is registered **there**, not as a module-local constant. Read it before you write a single durable record.
+- **`app/reloj.py`** (#26) and **`RelojDePrueba`** in `tests/conftest.py` (#31) — one business clock, and test fixtures that name their own moment and zone. Your tests declare theirs; do not re-derive the clock from the code, and do not hardcode Buenos Aires.
+- **CI runs five cells** on every PR: default, `IDIOMA_DEFAULT=en`, `IDIOMA_GERENCIA=en`, `BUSINESS_TIMEZONE=Asia/Kolkata`, `LOCALE=en_US`. All five must be green.
+- **`CLAUDE.md` is at the repo root** — read it first. Its test rules are not optional: a double derives from what it is passed; a test is not done until one *targeted* mutation kills it and only it; and when one derived value feeds two consumers, mutate each consumer separately.
+
+**Another session is running on issue #9** — the remaining Spanish strings. It edits `app/limites.py`, `app/solicitudes.py`, `app/tools/operaciones.py` and `app/aprobacion.py`. Your only shared file is `app/idioma.py`, where you both only ADD keys; put yours at the end of the block and whoever merges second rebases. Read `solicitudes.py` as the reference pattern but **do not migrate it**.
+
+**Open a PR when green and tell the owner. Do not merge.** Let Qodo's review land before you call it ready — it has found something real on every PR in this repo.
 
 ---
 

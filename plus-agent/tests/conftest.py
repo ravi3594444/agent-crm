@@ -481,6 +481,10 @@ def limites_sin_redis(monkeypatch):
         "PENDIENTE_CIERRE_HORAS",
         "PENDIENTE_NOCHE_DESDE",
         "PENDIENTE_NOCHE_HASTA",
+        # El aviso antes de la entrega (una fila de app/agenda.py). Misma fuga:
+        # con un .env que lo encienda, `crear_pedido` escribiría filas de agenda
+        # en tests que no hablan de eso, y el barrido las despacharía.
+        "AVISO_ANTES_DE_ENTREGA_HORAS",
     ):
         monkeypatch.delenv(nombre, raising=False)
     vacio = FakeRedis()
