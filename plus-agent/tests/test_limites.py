@@ -2357,3 +2357,74 @@ def test_el_si_y_el_no_en_ingles_ya_se_entendian_y_se_siguen_entendiendo(
     esperado = "true" if dicho in ("yes", "y", "true", "on") else "false"
 
     assert limites.validar("ENTREGA_EXCEPCION_ACTIVA", dicho) == esperado
+
+
+def test_los_dias_que_enumera_el_error_son_los_que_el_parser_acepta() -> None:
+    """El error dice «van así: …» en cada idioma, y esa lista no se interpola:
+    está escrita en el catálogo. Si alguna vez se separa del parser, el mensaje
+    le ofrece al dueño días que no puede teclear — que es peor que no ofrecerle
+    ninguno. Esto las cruza."""
+    from app import idioma
+
+    for lengua in idioma.IDIOMAS:
+        texto = idioma.t("limite.dia_desconocido", lengua, valor="x")
+        nombrados = [
+            ficha.strip(" .,«»")
+            for ficha in texto.split(":")[-1].split(",")
+            if ficha.strip(" .,«»")
+        ]
+        assert len(nombrados) == 7, f"{lengua}: {nombrados}"
+        # Todos juntos tienen que validar: son exactamente la semana.
+        assert limites.validar("ENTREGA_DIAS", ",".join(nombrados)) == ",".join(
+            limites._ORDEN_DIAS
+        )
+
+
+def test_el_motivo_de_un_limite_lleva_sus_datos_en_los_dos_idiomas() -> None:
+    """`clave` sin datos alcanzaba para los cuatro errores del código, que son
+    los únicos sin nada que interpolar. El resto necesita decir QUÉ valor."""
+    from app import idioma
+
+    try:
+        limites.validar("AUTO_CONFIRM_MAX", "muchisimo")
+    except limites.LimiteError as exc:
+        assert exc.clave == "limite.no_es_numero"
+        assert exc.datos == {"ajuste": "monto maximo", "valor": "'muchisimo'"}
+        for lengua in idioma.IDIOMAS:
+            dicho = limites.motivo(exc, lengua)
+            assert "muchisimo" in dicho and "monto maximo" in dicho
+            assert "{" not in dicho
+
+
+def test_cada_raise_de_limites_dice_su_clave() -> None:
+    """El guard del arreglo: un `raise LimiteError` nuevo sin `clave` vuelve a
+    poner media frase en español adentro de un mensaje en inglés.
+
+    La única excepción es `_consultar_marca`, y tiene su motivo: su texto lo
+    arma el que llama, nunca sale por WhatsApp —los tres call sites lo miran o
+    lo loguean— y es la política de error de una consulta a ERPNext, no un
+    mensaje. Está nombrada acá para que se note el día que alguien la use para
+    contestarle a una persona.
+    """
+    import ast
+    from pathlib import Path as _Path
+
+    fuente = (_Path(__file__).resolve().parents[1] / "app" / "limites.py").read_text()
+    sin_clave = []
+    for nodo in ast.walk(ast.parse(fuente)):
+        if not isinstance(nodo, ast.Raise) or not isinstance(nodo.exc, ast.Call):
+            continue
+        if getattr(nodo.exc.func, "id", "") != "LimiteError":
+            continue
+        if not any(k.arg == "clave" for k in nodo.exc.keywords):
+            sin_clave.append(nodo.lineno)
+
+    fuera = [
+        n.lineno
+        for n in ast.walk(ast.parse(fuente))
+        if isinstance(n, ast.FunctionDef) and n.name == "_consultar_marca"
+    ]
+    assert len(sin_clave) == 1, f"raise sin clave: {sin_clave}"
+    assert fuera and fuera[0] < sin_clave[0] < fuera[0] + 25, (
+        f"el único raise sin clave ya no es el de _consultar_marca: {sin_clave}"
+    )

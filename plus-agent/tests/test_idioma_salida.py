@@ -738,33 +738,80 @@ def test_la_oferta_no_le_pide_apretar_un_boton_que_no_existe(lengua):
 # un test apagado. Ver el issue #15.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG ABIERTO: 33 de los 37 `raise LimiteError` de app/limites.py no "
-    "llevan `clave`, así que su motivo en español se interpola en el marco "
-    "inglés `codigo.ajuste_no_preparado` y sale textual a WhatsApp. Ver #15.",
-)
+# Este test era un `xfail(strict=True)` con el bug escrito en su motivo: «33 de
+# los 37 raise LimiteError no llevan clave». Ya lo llevan, así que el xfail se
+# fue — que es exactamente para lo que sirve un pendiente con fecha de
+# vencimiento.
+#
+# Y de paso el test pasa a probar algo: le pasaba ALIAS a `limites.validar`, que
+# toma el nombre canónico, así que levantaba KeyError antes de llegar a ninguna
+# aserción. El xfail se lo tragaba —un test que falla por la razón equivocada
+# parece estar esperando el arreglo— y por eso ahora se resuelve el alias con
+# `limites.definicion`, que es lo que hace el producto.
 def test_el_rechazo_de_un_cambio_de_limite_sale_entero_en_ingles() -> None:
     """Lo que el dueño lee en inglés cuando el valor que mandó no sirve.
 
-    El marco está traducido y el motivo no, así que sale
-    «I changed nothing: «monto maximo» no es un número: 'muchisimo'.» El
-    mecanismo para arreglarlo ya existe y ya se usa: `LimiteError` acepta
-    `clave` y los cuatro raise del camino de confirmación por código la llevan.
+    ENTERO quiere decir entero: el marco Y el motivo. Salía «I changed nothing:
+    «monto maximo» no es un número: 'muchisimo'.» —media frase en cada idioma—
+    porque `LimiteError` sólo llevaba `clave` en los cuatro raise del camino del
+    código, y los otros treinta y dos viajaban con su texto en español. El
+    mecanismo era el correcto y lo que faltaba era usarlo en todos, más los
+    datos que cada texto interpola.
+
+    Se prueban los tres tipos de validación que un dueño rompe de verdad —un
+    monto que no es número, un porcentaje por debajo del mínimo y un sí/no que
+    no lo es— y el que teclea un ajuste que no existe, que es el más común.
     """
     from app import limites
 
-    for limite, valor in (
-        ("tope", "muchisimo"),
-        ("colchon", "-5"),
-        ("descuentos", "puede ser"),
-    ):
+    casos = [
+        ("tope", "muchisimo", "is not a number"),
+        ("colchon", "-5", "cannot be lower than"),
+        ("descuentos", "puede ser", "has to be yes or no"),
+        ("días de reparto", "funday", "is not a weekday"),
+        ("hora de reparto", "tipo tarde", "has to be a time like"),
+    ]
+    for alias, valor, esperado in casos:
+        defi = limites.definicion(alias)
         try:
-            limites.validar(limite, valor)
+            limites.validar(defi.nombre, valor)
         except limites.LimiteError as exc:
-            motivo = idioma.t(exc.clave, EN) if getattr(exc, "clave", "") else str(exc)
-            respuesta = idioma.t("codigo.ajuste_no_preparado", EN, motivo=motivo)
-            assert restos_en_espanol(respuesta) == [], f"{limite}={valor}: {respuesta}"
+            respuesta = idioma.t(
+                "codigo.ajuste_no_preparado", EN, motivo=limites.motivo(exc, EN)
+            )
+            assert esperado in respuesta, f"{alias}={valor}: {respuesta}"
+            # Los datos sobreviven, y son dos: lo que tecleó el dueño y el
+            # NOMBRE DEL AJUSTE. El alias queda en español en los dos idiomas a
+            # propósito —es lo que él escribe para nombrarlo, o sea un comando,
+            # igual que «confirmar»— y por eso entra acá como dato permitido y
+            # no como un resto sin traducir. Los alias en inglés son otro
+            # trabajo, explícitamente fuera de esta rebanada.
+            assert restos_en_espanol(respuesta, (valor, defi.alias[0])) == [], respuesta
+            # Y nada quedó sin interpolar.
+            assert "{" not in respuesta, respuesta
+        else:
+            raise AssertionError(f"{alias}={valor} debería haber fallado")
+
+
+def test_el_mismo_rechazo_en_espanol_dice_lo_mismo_que_siempre() -> None:
+    """El idioma nuevo no puede costar el que ya andaba: el texto en español es
+    el de siempre, que además sigue siendo `str(exc)` para el log."""
+    from app import limites
+
+    try:
+        limites.validar(limites.definicion("tope").nombre, "muchisimo")
+    except limites.LimiteError as exc:
+        assert limites.motivo(exc, ES) == "«monto maximo» no es un número: 'muchisimo'"
+        assert str(exc) == "«monto maximo» no es un número: 'muchisimo'"
+
+
+def test_una_excepcion_sin_clave_sigue_saliendo_con_su_texto() -> None:
+    """`motivo` nunca devuelve vacío: una excepción de otro módulo, o una que
+    todavía no tenga clave, sale con lo que diga."""
+    from app import limites
+
+    assert limites.motivo(ValueError("algo pasó"), EN) == "algo pasó"
+    assert limites.motivo(limites.LimiteError("sin clave"), EN) == "sin clave"
 
 
 @pytest.mark.xfail(

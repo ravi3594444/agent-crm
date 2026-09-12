@@ -837,6 +837,155 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "Ese código no abre nada.",
         EN: "That code doesn't unlock anything.",
     },
+    "codigo.ya_confirmado": {
+        ES: "Ese cambio ya se confirmó.",
+        EN: "That change was already confirmed.",
+    },
+    "codigo.pendiente_no_legible": {
+        ES: "No pude leer el cambio pendiente.",
+        EN: "I couldn't read the pending change.",
+    },
+    "codigo.pendiente_ilegible": {
+        ES: "El cambio pendiente quedó ilegible.",
+        EN: "The pending change is unreadable.",
+    },
+    "codigo.ajuste_inexistente": {
+        ES: "El cambio pendiente apunta a un ajuste que no existe.",
+        EN: "The pending change points at a setting that doesn't exist.",
+    },
+    # ------------------------------------------------ por qué no se pudo
+    # EL MOTIVO DE UN LÍMITE QUE NO SE PUDO CAMBIAR, y por qué son claves y no
+    # el texto de la excepción.
+    #
+    # `app/ajustes.py` y `app/main.py` meten este motivo adentro de un mensaje
+    # que ya sale traducido: «I changed nothing: {motivo}». Con el motivo en
+    # español, el dueño que lee en inglés recibía media frase en cada idioma —
+    # «I changed nothing: «monto maximo» no es un número: 'abc'.» La sección 9
+    # del allowlist permitía excepciones en español SÓLO mientras no las leyera
+    # una persona, y nombraba el arreglo: «hay que darle una clave del
+    # catálogo; LimiteError ya soporta `clave` justamente para eso».
+    #
+    # LO QUE VA ENTRE «» ES UN DATO Y NO SE TRADUCE: el alias del ajuste es lo
+    # que el dueño teclea («monto maximo»), o sea un comando, y lo que él
+    # escribió se cita tal cual. Igual que el número de pedido o el código.
+    "limite.no_pude_leer": {
+        ES: "no pude leer los límites configurados",
+        EN: "I couldn't read the configured limits",
+    },
+    "limite.perdidos": {
+        ES: (
+            "los límites que configuró el dueño no están en el almacén, y "
+            "ERPNext tiene cambios registrados: hay que restaurarlos antes de "
+            "que algo se confirme solo"
+        ),
+        EN: (
+            "the limits the owner configured are not in the store, and ERPNext "
+            "has changes on record: they have to be restored before anything "
+            "confirms on its own"
+        ),
+    },
+    "limite.no_es_numero": {
+        ES: "«{ajuste}» no es un número: {valor}",
+        EN: "«{ajuste}» is not a number: {valor}",
+    },
+    "limite.no_es_numero_usable": {
+        ES: "«{ajuste}» no es un número usable: {valor}",
+        EN: "«{ajuste}» is not a usable number: {valor}",
+    },
+    "limite.minimo": {
+        ES: "«{ajuste}» no puede ser menor que {minimo}",
+        EN: "«{ajuste}» cannot be lower than {minimo}",
+    },
+    "limite.maximo": {
+        ES: "«{ajuste}» {valor} es imposible: el máximo es {maximo}",
+        EN: "«{ajuste}» {valor} is impossible: the maximum is {maximo}",
+    },
+    "limite.si_o_no": {
+        ES: "«{ajuste}» tiene que ser sí o no, no {valor}",
+        EN: "«{ajuste}» has to be yes or no, not {valor}",
+    },
+    "limite.dias_vacio": {
+        ES: "«{ajuste}» está vacío: decime qué días",
+        EN: "«{ajuste}» is empty: tell me which days",
+    },
+    # Cada idioma nombra las formas que DE VERDAD parsean en él. Las dos listas
+    # las acepta `limites._dias` desde el PR de inglés visible, y
+    # `test_limites.py` cruza esta lista contra el parser para que no se
+    # separen: un error que enumera días que no se pueden teclear es peor que
+    # no enumerar ninguno.
+    "limite.dia_desconocido": {
+        ES: (
+            "«{valor}» no es un día de la semana. Van así: lunes, martes, "
+            "miercoles, jueves, viernes, sabado, domingo"
+        ),
+        EN: (
+            "«{valor}» is not a weekday. They go like this: monday, tuesday, "
+            "wednesday, thursday, friday, saturday, sunday"
+        ),
+    },
+    "limite.localidades_vacio": {
+        ES: "«{ajuste}» está vacío: decime en qué localidades repartís",
+        EN: "«{ajuste}» is empty: tell me which towns you deliver to",
+    },
+    "limite.no_es_localidad": {
+        ES: "«{valor}» no es una localidad: no tiene ni una letra ni un número",
+        EN: "«{valor}» is not a town: it has neither a letter nor a digit",
+    },
+    "limite.cp_vacio": {
+        ES: "«{ajuste}» está vacío: decime qué códigos postales",
+        EN: "«{ajuste}» is empty: tell me which postcodes",
+    },
+    "limite.no_es_cp": {
+        ES: "«{valor}» no es un código postal",
+        EN: "«{valor}» is not a postcode",
+    },
+    "limite.hora_invalida": {
+        ES: "«{ajuste}» tiene que ser una hora tipo 08:00, no {valor}",
+        EN: "«{ajuste}» has to be a time like 08:00, not {valor}",
+    },
+    "limite.idioma_invalido": {
+        ES: "«{ajuste}» sólo puede ser español o inglés, no {valor}",
+        EN: "«{ajuste}» can only be Spanish or English, not {valor}",
+    },
+    "limite.cual": {
+        ES: "no me dijiste qué límite",
+        EN: "you didn't tell me which limit",
+    },
+    "limite.ambiguo": {
+        ES: "«{valor}» puede ser varias cosas: {opciones}. Decime cuál",
+        EN: "«{valor}» could be several things: {opciones}. Tell me which one",
+    },
+    # `{conocidos}` es la lista de alias, y queda en español en los dos idiomas
+    # a propósito: son los comandos que el dueño teclea (sección 4 del
+    # allowlist), no prosa. Los alias en inglés son otro trabajo.
+    "limite.ajuste_desconocido": {
+        ES: "no conozco el ajuste «{valor}». Hay: {conocidos}",
+        EN: "I don't know the setting «{valor}». There are: {conocidos}",
+    },
+    "limite.sin_quien_pide": {
+        ES: "no sé quién pide el cambio",
+        EN: "I don't know who is asking for the change",
+    },
+    "limite.sin_quien_confirma": {
+        ES: "no sé quién confirma el cambio",
+        EN: "I don't know who is confirming the change",
+    },
+    "limite.no_registre_propuesta": {
+        ES: "no pude registrar el cambio para confirmarlo",
+        EN: "I couldn't record the change to confirm it",
+    },
+    "limite.no_pude_guardar": {
+        ES: "no pude guardar el cambio",
+        EN: "I couldn't save the change",
+    },
+    "limite.no_registre_en_erpnext": {
+        ES: "no pude registrar el cambio en ERPNext, así que no lo apliqué",
+        EN: "I couldn't record the change in ERPNext, so I didn't apply it",
+    },
+    "limite.no_pude_leer_historial": {
+        ES: "no pude leer el historial de cambios",
+        EN: "I couldn't read the change history",
+    },
     # ------------------------------------------------ estado del sistema
     # El informe de estado. Los NOMBRES de los componentes (Redis, ERPNext,
     # WhatsApp) son propios y no se traducen; sí la prosa alrededor.

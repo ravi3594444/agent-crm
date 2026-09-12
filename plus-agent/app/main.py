@@ -528,8 +528,9 @@ def _codigo_de_ajuste(text: str, telefono: str) -> str | None:
     try:
         cambio = limites.aplicar(match.group(1), telefono)
     except limites.LimiteError as exc:
-        motivo = idioma.t(exc.clave, lengua) if getattr(exc, "clave", "") else str(exc)
-        return idioma.t("codigo.ajuste_no_aplicado", lengua, motivo=motivo)
+        return idioma.t(
+            "codigo.ajuste_no_aplicado", lengua, motivo=limites.motivo(exc, lengua)
+        )
     except Exception as error:
         print(f"[limites] confirmación falló type={_error_name(error)}")
         return idioma.t("codigo.ajuste_error", lengua)
