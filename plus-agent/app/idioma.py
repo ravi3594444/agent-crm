@@ -608,6 +608,21 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "OJO: no pude avisarle al cliente.",
         EN: "HEADS UP: I couldn't notify the customer.",
     },
+    # ------------------------------------------------------- botones
+    # EL ÚNICO CAMINO EN QUE EL DUEÑO NO ESCRIBIÓ NADA.
+    # Un botón no se responde en un idioma: se toca. Por eso era el resto de
+    # español más fácil de no ver — en todos los demás caminos el dueño ya
+    # había escrito algo, y con eso el sistema sabía en qué idioma contestarle.
+    # Acá no escribió nada, así que el idioma tiene que salir de
+    # `limites.idioma_gerencia()` y de ningún otro lado.
+    #
+    # CORTOS A PROPÓSITO: `whatsapp.enviar_botones` recorta el título a 20
+    # caracteres SIN AVISAR (ver el `[:20]` en app/whatsapp.py). Un título que
+    # se pasa no falla: llega cortado a la pantalla del dueño, que es peor.
+    # El más largo de acá son los 16 de «Confirmar conteo».
+    "boton.confirmar": {ES: "Confirmar", EN: "Confirm"},
+    "boton.ver_detalle": {ES: "Ver detalle", EN: "View details"},
+    "boton.confirmar_conteo": {ES: "Confirmar conteo", EN: "Confirm count"},
     # --------------------------------------------------- entrega / vencimiento
     "entrega.fuera_de_dia": {
         ES: "Esa entrega queda fuera de los días de reparto. La decide una persona.",

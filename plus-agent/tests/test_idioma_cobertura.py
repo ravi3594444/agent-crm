@@ -397,6 +397,138 @@ def test_ningun_punto_de_salida_recibe_un_literal_en_espanol():
     assert _literales_en_sinks() == []
 
 
+# --------------------------------------------------------------------------
+# LOS TÍTULOS DE LOS BOTONES
+#
+# «Confirmar», «Ver detalle» y «Confirmar conteo» vivieron como literales en
+# app/notificar.py con la suite entera en verde, y las DOS auditorías de
+# arriba los dejaban pasar, cada una por su motivo:
+#
+#   * la de EJECUCIÓN mira el TEXTO del mensaje. El título de un botón no está
+#     en el texto: viaja aparte, en la estructura interactiva.
+#   * la ESTÁTICA mira los argumentos de la llamada. El de los botones es una
+#     LISTA DE DICCIONARIOS, y `_texto_del_nodo` no baja ahí — sólo reconoce
+#     una constante o una f-string. Y aunque bajara, «Confirmar» está en
+#     COMANDOS_ES: el detector de español la recorta como comando permitido.
+#
+# Así que la regla acá no es «que no esté en español»: es que NO SEA UN
+# LITERAL, en ningún idioma. Un título es lo único que lee el dueño en el
+# único camino donde él no escribió nada, y por eso su idioma no se puede
+# deducir de un mensaje suyo: tiene que salir del catálogo o no sale bien.
+# Un título en inglés escrito a mano rompería el español exactamente igual.
+#
+# Es la aserción que habría agarrado el bug, que es la única clase de test que
+# vale la pena agregar cuando ya se sabe cuál era.
+# --------------------------------------------------------------------------
+
+# La forma de un botón de WhatsApp: un dict con `id` y `title`. La auditoría
+# se ancla en ESO y no en la llamada a `enviar_botones`, y la diferencia no es
+# cosmética — es el segundo agujero que tenía este guard. En app/notificar.py
+# la lista se arma en una variable y se pasa DESPUÉS (`enviar_botones(tel,
+# texto, botones)`), así que mirando los argumentos de la llamada los dos
+# títulos que motivaron todo esto seguían siendo invisibles. La forma viaja
+# con el dato; el call site no.
+_CLAVES_DE_BOTON = {"id", "title"}
+
+
+def _claves_constantes(dic: ast.Dict) -> set[str]:
+    return {
+        c.value
+        for c in dic.keys
+        if isinstance(c, ast.Constant) and isinstance(c.value, str)
+    }
+
+
+def _botones_del_arbol(arbol: ast.AST):
+    """Todo dict de app/ que tenga la forma de un botón."""
+    for nodo in ast.walk(arbol):
+        if isinstance(nodo, ast.Dict) and _CLAVES_DE_BOTON <= _claves_constantes(nodo):
+            yield nodo
+
+
+def _titulo_del_boton(dic: ast.Dict) -> ast.AST | None:
+    for clave, valor in zip(dic.keys, dic.values):
+        if isinstance(clave, ast.Constant) and clave.value == "title":
+            return valor
+    return None
+
+
+def _todos_los_botones() -> list[tuple[pathlib.Path, ast.Dict]]:
+    encontrados = []
+    for archivo in sorted(_APP.rglob("*.py")):
+        if "__pycache__" in str(archivo):
+            continue
+        for dic in _botones_del_arbol(ast.parse(archivo.read_text())):
+            encontrados.append((archivo, dic))
+    return encontrados
+
+
+def _titulos_literales() -> list[tuple[str, int, str]]:
+    """Títulos de botón escritos a mano en app/, con archivo y línea.
+
+    Lo que se acepta es cualquier cosa que se resuelva en tiempo de ejecución:
+    `idioma.t(...)` es una llamada, y una variable que ya lo llamó es un
+    nombre. Un literal —en el idioma que sea— no.
+    """
+    hallados: list[tuple[str, int, str]] = []
+    for archivo, dic in _todos_los_botones():
+        titulo = _titulo_del_boton(dic)
+        texto = _texto_del_nodo(titulo) if titulo is not None else None
+        if texto is not None:
+            hallados.append(
+                (str(archivo.relative_to(_APP.parent)), dic.lineno, texto[:40])
+            )
+    return hallados
+
+
+def test_la_auditoria_de_titulos_encuentra_los_botones_que_existen():
+    """El guard del guard: si no encuentra un solo título, no está mirando.
+
+    El número es una aserción y no un comentario por la misma razón que en
+    `test_la_auditoria_estatica_inspecciona_algo`: una auditoría que pasa por
+    vacía se lee igual que una que pasa por limpia. Anclada en la LLAMADA,
+    esta cuenta daba 1 —el único sitio que arma la lista en línea— y los dos
+    títulos del aviso de pedido, que son los que estaban mal, no se contaban.
+    """
+    botones = _todos_los_botones()
+    assert len(botones) >= 3, f"la auditoría de títulos ve {len(botones)}: no mira"
+    assert all(_titulo_del_boton(d) is not None for _, d in botones)
+
+
+def test_ningun_titulo_de_boton_es_un_literal():
+    """Todo título sale del catálogo. En ningún idioma se escribe a mano."""
+    assert _titulos_literales() == []
+
+
+@pytest.mark.parametrize(
+    "clave, es, en",
+    [
+        ("boton.confirmar", "Confirmar", "Confirm"),
+        ("boton.ver_detalle", "Ver detalle", "View details"),
+        ("boton.confirmar_conteo", "Confirmar conteo", "Confirm count"),
+    ],
+)
+def test_los_titulos_estan_en_los_dos_idiomas(clave, es, en):
+    assert idioma.t(clave, ES) == es
+    assert idioma.t(clave, EN) == en
+
+
+@pytest.mark.parametrize(
+    "clave",
+    ["boton.confirmar", "boton.ver_detalle", "boton.confirmar_conteo"],
+)
+@pytest.mark.parametrize("lengua", [ES, EN])
+def test_ningun_titulo_se_pasa_del_recorte_de_whatsapp(clave, lengua):
+    """20 caracteres, y `whatsapp.enviar_botones` recorta SIN avisar.
+
+    Un título que se pasa no falla en ninguna parte: llega cortado a la
+    pantalla del dueño. Por eso el límite se afirma acá y no se confía en que
+    alguien cuente las letras al traducir.
+    """
+    titulo = idioma.t(clave, lengua)
+    assert len(titulo) <= 20, f"{clave} en {lengua}: {len(titulo)} caracteres"
+
+
 def test_el_catalogo_esta_completo_en_los_dos_idiomas():
     assert idioma.claves_incompletas() == []
 

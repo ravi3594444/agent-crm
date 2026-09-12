@@ -34,6 +34,13 @@ def _lengua_equipo() -> str:
     return idioma_mod.gerencia()
 
 
+def _t(clave: str, lengua: str | None = None, /, **params: object) -> str:
+    """Un texto del catálogo. Importa adentro como el resto del módulo."""
+    from app import idioma as idioma_mod
+
+    return idioma_mod.t(clave, lengua, **params)
+
+
 def _texto_libre(
     nombre: str, so: dict, auto: bool, motivos: str, detalle: str,
     lengua: str | None = None,
@@ -108,13 +115,18 @@ def notificar_equipo(
     # A generic ERPNext Sales Order has no durable "rejected draft" state.
     # Offer only actions whose state transition we can enforce truthfully.
     acciones = None if auto else [f"ok:{nombre}", f"ver:{nombre}"]
-    texto = _texto_libre(nombre, so, auto, motivos, detalle, _lengua_equipo())
+    lengua = _lengua_equipo()
+    texto = _texto_libre(nombre, so, auto, motivos, detalle, lengua)
+    # Los títulos salen del catálogo, no de un literal. Éste es el único camino
+    # donde el dueño no escribió nada —toca un botón— así que el idioma no
+    # puede deducirse de su mensaje: sale de `limites.idioma_gerencia()`, que
+    # es lo que `_lengua_equipo` lee.
     botones = (
         None
         if auto
         else [
-            {"id": f"ok:{nombre}", "title": "Confirmar"},
-            {"id": f"ver:{nombre}", "title": "Ver detalle"},
+            {"id": f"ok:{nombre}", "title": _t("boton.confirmar", lengua)},
+            {"id": f"ver:{nombre}", "title": _t("boton.ver_detalle", lengua)},
         ]
     )
 
@@ -543,7 +555,10 @@ def pedir_confirmacion_conteo(telefono: str, nombre: str, texto: str) -> bool:
         whatsapp.enviar_botones(
             telefono,
             texto,
-            [{"id": f"conteo:{nombre}", "title": "Confirmar conteo"}],
+            [{
+                "id": f"conteo:{nombre}",
+                "title": _t("boton.confirmar_conteo", _lengua_equipo()),
+            }],
         )
         return True
     except Exception as exc:

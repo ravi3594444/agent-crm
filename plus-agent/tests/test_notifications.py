@@ -677,6 +677,57 @@ def test_pending_alert_without_template_uses_buttons_inside_staff_window(
     assert len(body) <= 1024
     assert [b["id"] for b in botones] == ["ok:SAL-ORD-2026-00008", "ver:SAL-ORD-2026-00008"]
     assert notificar.record_outbound.call_args.args[0] == "wamid.btn"
+    assert [b["title"] for b in botones] == ["Confirmar", "Ver detalle"]
+
+
+def test_los_botones_del_aviso_salen_en_el_idioma_de_la_gerencia(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Un dueño que lee en inglés toca botones en inglés.
+
+    Éste es el único camino en que él no escribió NADA: un botón se toca, no se
+    responde, así que el idioma no se puede espejar de un mensaje suyo. Tiene
+    que salir de `limites.idioma_gerencia()` o sale mal — y salía mal: los
+    títulos eran literales en español y el cuerpo del mismo mensaje ya venía
+    traducido, así que un aviso llegaba en inglés con dos botones en español.
+
+    La auditoría estática de tests/test_idioma_cobertura.py prohíbe el literal;
+    esto prueba que el que lo reemplazó está cableado al idioma correcto.
+    """
+    staff = "5491100000000"
+    monkeypatch.setattr(notificar, "STAFF", {staff})
+    monkeypatch.setattr(notificar, "window_open", lambda phone: True)
+    monkeypatch.setattr(notificar.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(notificar, "_lengua_equipo", lambda: "en")
+    buttons = Mock(return_value={"messages": [{"id": "wamid.btn"}]})
+    monkeypatch.setattr(notificar, "enviar_botones", buttons)
+
+    assert notificar.notificar_equipo(
+        "SAL-ORD-2026-00008", _SO, auto=False, motivos="no stock"
+    ) is True
+
+    _, _, botones = buttons.call_args.args
+    assert [b["title"] for b in botones] == ["Confirm", "View details"]
+    # Los ids son datos: los parsea el router cuando vuelve el toque, y no
+    # cambian de idioma nunca.
+    assert [b["id"] for b in botones] == [
+        "ok:SAL-ORD-2026-00008", "ver:SAL-ORD-2026-00008"
+    ]
+
+
+def test_el_boton_de_conteo_sale_en_el_idioma_de_la_gerencia(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(notificar, "_lengua_equipo", lambda: "en")
+    from app import whatsapp as whatsapp_mod
+
+    botones = Mock(return_value={"messages": [{"id": "wamid.conteo"}]})
+    monkeypatch.setattr(whatsapp_mod, "enviar_botones", botones)
+
+    assert notificar.pedir_confirmacion_conteo(
+        "5491100000000", "SAL-ORD-2026-00008", "Confirm the count"
+    ) is True
+    assert botones.call_args.args[2][0]["title"] == "Confirm count"
 
 
 def test_confirmed_alert_without_template_uses_plain_text_inside_staff_window(
