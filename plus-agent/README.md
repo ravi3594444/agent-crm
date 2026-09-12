@@ -43,7 +43,7 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `app/outbound_status.py` | Delivery tracking of every outbound message (sent / delivered / read / failed) |
 | `app/whatsapp.py` | Outbound messages and templates |
 | `app/briefing.py` | 07:00 WhatsApp morning briefing (`deploy/crontab`) |
-| `deploy/seed_dairy.py` | Demo catalog and customers for an empty staging ERPNext |
+| `deploy/seed_dairy.py` | Demo catalog and customers for an empty staging ERPNext, Spanish or English (`--dataset en`) |
 | `deploy/crontab` | Host cron line for the briefing |
 | `docker-compose.yml` | Agent + Redis Stack (+ `briefing` on demand) |
 | `Dockerfile`, `Makefile`, `.env.example`, `pyproject.toml` | Build, shortcuts, configuration, lint config |
@@ -1050,6 +1050,13 @@ setup user with more permissions than any runtime identity. Inject that user's
 store them in the service `.env`. The stock reconciliation remains a draft for
 a person to review and submit, and reruns reuse an identical non-cancelled
 reconciliation instead of creating duplicates.
+
+It seeds the Spanish catalog by default and the English one with
+`--dataset en` (or `SEED_DATASET=en`): the same thirteen items, seven
+customers and quantities, with English names, codes and round dollar prices.
+Prices are invented in both — ask the client for his real ones. The dataset
+only changes the DATA: an English demo also needs `IDIOMA_GERENCIA=en` (what
+the owner reads) and `LOCALE=en_US` (the shape of a number).
 
 ## WhatsApp response and delivery contract
 
