@@ -156,8 +156,14 @@ jobs:
           cache-dependency-path: plus-agent/requirements-dev.txt
       - name: Instalar dependencias
         run: pip install -r requirements-dev.txt
+      # `deploy` entró a la lista con los scripts de datos reales (#…,
+      # docs/prompt-datos-reales.md). Estaba afuera y no era una decisión: era
+      # un `extend-exclude` en pyproject.toml que nadie volvió a mirar. Los
+      # scripts de deploy son los que corren contra el ERPNext del cliente con
+      # credenciales de Administrator; que sean los únicos sin lint era al
+      # revés de como tendría que ser.
       - name: Lint
-        run: ruff check app demo tests
+        run: ruff check app demo tests deploy
 
   imagen:
     runs-on: ubuntu-latest
