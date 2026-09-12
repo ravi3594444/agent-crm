@@ -297,6 +297,35 @@ def _log_ref(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
+def _agendar_entrega(doc: dict) -> None:
+    """Las filas de agenda de un pedido con fecha de entrega. Nunca es fatal.
+
+    Se llama en el alta Y en los cuatro caminos que RESUELVEN un pedido que ya
+    existía (idempotencia y recuperación después de una caída), porque una
+    agenda que falló de forma transitoria en el alta no se reponía nunca: esos
+    caminos vuelven antes de `_after_create`, así que el reintento natural del
+    cliente no pasaba por acá.
+
+    Es seguro llamarla de más: `programar_para_entrega` no hace nada si el
+    pedido no es un borrador, si el límite está apagado o si no hay fecha, y el
+    id de una fila sale de (pedido, tipo, vence), así que repetirla reescribe
+    la misma fila en vez de crear otra.
+
+    Su propio try: una agenda que no se pudo escribir no puede hacer que el
+    pedido del cliente falle.
+    """
+    try:
+        from app import agenda
+
+        agenda.programar_para_entrega(doc)
+    except Exception as exc:
+        print(
+            f"[orders] agenda no programada "
+            f"order={_log_ref(str(doc.get('name') or ''))} "
+            f"type={type(exc).__name__}"
+        )
+
+
 def _find_existing(customer: str, message_key: str) -> dict | None:
     rows = erpnext.get_list(
         "Sales Order",
@@ -489,27 +518,7 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
     erpnext.add_comment(
         "Sales Order", name, f"Requiere revisión humana: {decision}"
     )
-    # La agenda, ANTES del aviso: si el pedido tiene fecha de entrega y el dueño
-    # encendió `AVISO_ANTES_DE_ENTREGA_HORAS`, quedan dos filas —el aviso al
-    # cliente antes de la entrega y UN re-ping al dueño— que despacha el barrido
-    # de `app/agenda.py` a su hora. Con el límite apagado no escribe nada.
-    #
-    # Va sólo por acá, el camino de revisión humana, y no en el de
-    # auto-confirmación: un pedido que se confirmó solo no necesita que le avisen
-    # que no está confirmado.
-    #
-    # Su propio try: una agenda que no se pudo escribir no puede hacer que el
-    # pedido del cliente falle. Y es idempotente —el id sale de
-    # (pedido, tipo, vence)— así que un reintento reescribe la misma fila.
-    try:
-        from app import agenda
-
-        agenda.programar_para_entrega(complete)
-    except Exception as exc:
-        print(
-            f"[orders] agenda no programada order={_log_ref(name)} "
-            f"type={type(exc).__name__}"
-        )
+    _agendar_entrega(complete)
     _safe_notify(name, complete, auto=False, reasons=str(decision))
     resultado = _order_result(complete, validated, delivery)
     if entrega.MOTIVO in str(decision):
@@ -637,6 +646,7 @@ def crear_pedido(
             "pedido; no reintentes automáticamente y derivá el caso al equipo."
         )
     if existing:
+        _agendar_entrega(existing)
         return _order_result(existing, [], "")
 
     try:
@@ -658,6 +668,7 @@ def crear_pedido(
         ):
             existing = _find_existing(cuenta, message_key)
             if existing:
+                _agendar_entrega(existing)
                 return _order_result(existing, [], delivery)
 
             validated, validation_error = _validated_lines(lineas)
@@ -706,6 +717,7 @@ def crear_pedido(
                 except erpnext.ERPNextError:
                     existing = None
                 if existing:
+                    _agendar_entrega(existing)
                     return _order_result(existing, validated, delivery)
                 return (
                     "PEDIDO_NO_CREADO. ERPNext no confirmó la creación y no hay "
@@ -731,6 +743,7 @@ def crear_pedido(
         except erpnext.ERPNextError:
             existing = None
         if existing:
+            _agendar_entrega(existing)
             return _order_result(existing, [], delivery)
         return (
             "PEDIDO_NO_CREADO. No pude coordinar una creación segura; "
@@ -1025,9 +1038,26 @@ def recordar(
     que una persona del equipo lea el motivo.
     """
     try:
-        actor_context(config)
+        actor, cuenta = _cuenta_del_remitente(config)
     except RuntimeContextError:
         return "No pude autenticar la conversación para agendar nada."
+
+    # EL PEDIDO TIENE QUE SER DE QUIEN ESCRIBE. El número lo dice el MODELO, y
+    # el modelo lee lo que le escribió un cliente: sin esto, un mensaje que
+    # nombra el pedido de otro le cuelga un recordatorio encima, y el equipo lo
+    # lee como si fuera de esa cuenta.
+    #
+    # Mismo patrón que `catalogo.estado_pedido`: `gerencia_verificada` y no
+    # `is_management` —el alcance lo pone el webhook, pero tocar el pedido de
+    # cualquiera lo habilita únicamente un teléfono que sigue en la lista del
+    # equipo— y la misma negativa para «no existe» y «no es tuyo», para que no
+    # se pueda enumerar pedidos ajenos probando números.
+    try:
+        doc = erpnext.policy_get_doc("Sales Order", pedido)
+    except Exception:
+        return f"No encontré el pedido {pedido}."
+    if not actor.gerencia_verificada and str(doc.get("customer") or "") != cuenta:
+        return f"No encontré el pedido {pedido}."
 
     from app import agenda
 

@@ -86,6 +86,14 @@ def mundo(monkeypatch: pytest.MonkeyPatch) -> dict:
     def registrar_comentario(doctype, name, texto):
         if "escribir" in caidas:
             raise erpnext.ERPNextError("ERPNext no acepta comentarios")
+        # Y una falla SELECTIVA: `escribir:<texto>` rompe sólo las escrituras
+        # que lo contienen. Hace falta para escribir «esta escritura entró y
+        # esta otra no», que es el caso que distingue un orden de operaciones
+        # del otro; con un interruptor que rompe todo, los dos órdenes se ven
+        # iguales y el test no puede discrepar con el código.
+        for caida in caidas:
+            if caida.startswith("escribir:") and caida[9:] in str(texto):
+                raise erpnext.ERPNextError("ERPNext no acepta este comentario")
         n["i"] += 1
         comentarios.append(
             {
@@ -216,7 +224,7 @@ def test_una_fila_vencida_cuyo_pedido_se_confirmo_en_el_medio_no_hace_nada(
 
 
 def test_una_fila_que_vence_a_las_23_sale_a_las_7_y_no_de_madrugada(
-    mundo, marcas_sin_redis
+    mundo, marcas_sin_redis, entrega_a_las_17, monkeypatch
 ) -> None:
     """Horas de silencio: se POSTERGA, nunca se saltea.
 
@@ -224,7 +232,13 @@ def test_una_fila_que_vence_a_las_23_sale_a_las_7_y_no_de_madrugada(
     23:30 es la mitad fácil; que SÍ salga a la mañana es la que convierte
     «posponer» en algo distinto de «descartar», y sin ella un barrido que
     tirara la fila a la basura pasaría este test igual.
+
+    El pedido lleva su fecha de entrega porque el handler RE-LEE el plazo antes
+    de hablar: sin ella no habría plazo vigente y la fila se cerraría sin
+    mandar nada, que es correcto pero es otra regla y la probamos aparte.
     """
+    monkeypatch.setattr(agenda, "horas_de_aviso", lambda: 3.0)
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "delivery_date": "2026-09-08"}
     agenda.crear(
         PEDIDO,
         agenda.AVISO_ANTES_DE_ENTREGA,
@@ -442,3 +456,246 @@ def test_la_marca_agenda_sale_del_registro_y_no_de_un_literal() -> None:
     """
     assert marcas.texto("agenda") == agenda.MARCA
     assert marcas.marca("agenda").parser is not None
+
+
+# ===========================================================================
+# 5. Lo que encontró la revisión de Qodo. Un test por arreglo: un arreglo sin
+#    test es el mismo defecto mudado de lugar.
+# ===========================================================================
+
+
+def _config_cliente(cuenta: str = "CLI-001") -> dict:
+    return {
+        "configurable": {
+            "thread_id": "cli:thread",
+            "actor_scope": "customer",
+            "customer_code": cuenta,
+            "actor_phone": "5493510000000",
+            "inbound_message_id": "wamid.test-agenda",
+        }
+    }
+
+
+def test_un_cliente_no_puede_agendar_sobre_el_pedido_de_otro(mundo, monkeypatch) -> None:
+    """El número de pedido lo dice el MODELO, y el modelo lee lo que le escribió
+    un cliente. Sin esta guarda, nombrar el pedido de otro le cuelga encima un
+    recordatorio que el equipo lee como si fuera de esa cuenta.
+
+    La negativa es la MISMA que la de un pedido inexistente, a propósito: dos
+    respuestas distintas dejan enumerar pedidos ajenos probando números.
+    """
+    # La herramienta también tiene su reloj, y tampoco lee el de verdad: sin
+    # esto el test caduca solo el día que «2026-09-09» pasa a ser pasado.
+    monkeypatch.setattr(tools_pedidos, "_ahora_del_negocio", lambda: momento(9))
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "customer": "CLI-001"}
+
+    ajeno = tools_pedidos.recordar.func(
+        pedido=PEDIDO,
+        cuando="2026-09-09 15:00",
+        por_que="x",
+        config=_config_cliente("CLI-OTRO"),
+    )
+
+    assert PEDIDO in ajeno and "no encontré" in ajeno.lower()
+    # Y lo que importa: NO quedó escrito nada. Una negativa que igual agenda es
+    # una negativa decorativa.
+    assert agenda.vivas(PEDIDO, agenda.SEGUIMIENTO) == []
+
+    # El dueño de la cuenta SÍ puede: la guarda no rompe el caso normal, que es
+    # la otra mitad — una guarda que prohíbe todo también pasaría la primera.
+    propio = tools_pedidos.recordar.func(
+        pedido=PEDIDO,
+        cuando="2026-09-09 15:00",
+        por_que="x",
+        config=_config_cliente("CLI-001"),
+    )
+
+    assert "anotado" in propio.lower()
+    assert len(agenda.vivas(PEDIDO, agenda.SEGUIMIENTO)) == 1
+
+
+def test_sin_plazo_vigente_no_se_manda_el_aviso_con_la_hora_vieja(
+    mundo, marcas_sin_redis, entrega_a_las_17, monkeypatch
+) -> None:
+    """La hora guardada al crear la fila es justo la que pudo dejar de ser cierta.
+
+    Si al pedido le sacaron la fecha de entrega, el plazo no existe: mandarle al
+    cliente «no te lo confirmé para las 17» nombra una hora que ya no está
+    prometida. Fallar cerrado es no mandar nada.
+    """
+    monkeypatch.setattr(agenda, "horas_de_aviso", lambda: 3.0)
+    agenda.crear(
+        PEDIDO,
+        agenda.AVISO_ANTES_DE_ENTREGA,
+        epoch(14),
+        params={"horas": 3.0, "hora": "17"},
+        ahora=epoch(9),
+    )
+    # El pedido del `mundo` no tiene delivery_date: se la sacaron.
+    agenda.tick(ahora=epoch(15))
+
+    assert _en_cola(marcas_sin_redis) == []
+
+
+def test_el_aviso_al_dueno_recalcula_el_plazo_en_vez_de_leer_el_guardado(
+    mundo, marcas_sin_redis, entrega_a_las_17, monkeypatch
+) -> None:
+    """Una excepción de entrega aceptada reescribe la fecha DESPUÉS de la fila.
+
+    Decirle al dueño «contestá antes de las 14» cuando el plazo pasó a ser otro
+    día es peor que no decirle nada: contesta tarde creyendo que llegó.
+    """
+    monkeypatch.setattr(agenda, "horas_de_aviso", lambda: 3.0)
+    # La fila se creó con la entrega del día 8 (plazo 14:00)...
+    agenda.crear(
+        PEDIDO,
+        agenda.RECORDATORIO_PLAZO_DUENO,
+        epoch(13),
+        params={"hora": "14:00"},
+        ahora=epoch(9),
+    )
+    # ...y después el cliente aceptó una contraoferta para el día 9.
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "delivery_date": "2026-09-09"}
+
+    agenda.tick(ahora=epoch(14))
+
+    # No se le avisó con el plazo viejo: la fila se corrió al plazo nuevo.
+    assert mundo["al_dueno"] == []
+    viva = agenda.vivas(PEDIDO, agenda.RECORDATORIO_PLAZO_DUENO)
+    assert len(viva) == 1
+    assert viva[0].params["hora"] == "14:00"  # las 14 del día 9, no del 8
+    assert viva[0].vence == epoch(13, dia=9)
+
+
+def test_el_re_ping_al_dueno_tambien_espera_a_la_manana(
+    mundo, marcas_sin_redis, entrega_a_las_17, monkeypatch
+) -> None:
+    """Una entrega temprana lo despertaría de madrugada, y eso no se contesta.
+
+    El aviso al CLIENTE de ese mismo plazo ya está postergado hasta las 07:00,
+    así que tocarle el hombro al dueño a las 3 no compra el plazo: sólo lo
+    despierta.
+    """
+    # Entrega 17:00 menos catorce horas de aviso: el plazo cae a las 03:00, y
+    # el re-ping una hora antes. Ése es el caso que las horas de silencio
+    # existen para atrapar.
+    monkeypatch.setattr(agenda, "horas_de_aviso", lambda: 14.0)
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "delivery_date": "2026-09-08"}
+    agenda.crear(
+        PEDIDO,
+        agenda.RECORDATORIO_PLAZO_DUENO,
+        epoch(2),
+        params={"hora": "03:00"},
+        ahora=epoch(1),
+    )
+
+    agenda.tick(ahora=epoch(3, 30))
+    assert mundo["al_dueno"] == []
+
+    agenda.tick(ahora=epoch(7, 30))
+    assert len(mundo["al_dueno"]) == 1
+
+
+def test_un_seguimiento_nuevo_no_borra_el_viejo_si_no_se_pudo_escribir(
+    mundo, marcas_sin_redis
+) -> None:
+    """Se crea PRIMERO y se cancela después, y por eso nunca quedan cero.
+
+    Al revés, una escritura fallida después de una cancelación exitosa dejaba el
+    pedido sin ningún recordatorio. Lo peor de este orden es que queden dos
+    —ruido—; lo peor del otro era un olvido.
+    """
+    primero = agenda.recordar(PEDIDO, epoch(15, dia=9), "el primero", ahora=epoch(9))
+    assert primero is not None
+
+    # Falla SÓLO la creación del nuevo. La cancelación del viejo entraría sin
+    # problema — y ésa es justamente la diferencia entre los dos órdenes: con
+    # «cancelar primero» el viejo ya estaría muerto a esta altura.
+    mundo["caidas"].add("escribir:el segundo")
+    assert agenda.recordar(PEDIDO, epoch(16, dia=9), "el segundo", ahora=epoch(9)) is None
+
+    mundo["caidas"].discard("escribir:el segundo")
+    vivas = agenda.vivas(PEDIDO, agenda.SEGUIMIENTO)
+    assert [f.id for f in vivas] == [primero.id]
+
+
+def test_no_se_agenda_un_seguimiento_sin_poder_leer_los_que_ya_hay(mundo) -> None:
+    """«Uno vivo por pedido» no puede depender de una lectura que falló.
+
+    Crear igual sería crear un SEGUNDO seguimiento vivo sin saberlo, y justo
+    cuando ERPNext no contesta — o sea, la regla se caía sola en el único
+    momento en que hacía falta.
+    """
+    mundo["caidas"].add("comentarios")
+
+    with pytest.raises(agenda.PropuestaInvalida):
+        agenda.recordar(PEDIDO, epoch(15, dia=9), "x", ahora=epoch(9))
+
+
+def test_un_borrador_ya_cerrado_termina_su_fila_en_vez_de_reintentar_para_siempre(
+    mundo, marcas_sin_redis, monkeypatch
+) -> None:
+    """Las tres respuestas de la marca son tres cosas, y sólo una es «reintentá».
+
+    Con True aplastado contra None, un borrador ya cerrado dejaba la fila viva
+    para siempre: el handler contestaba «no pude» en cada barrido y la fila no
+    llegaba nunca a un estado terminal.
+    """
+    from app import pendientes
+
+    monkeypatch.setattr(pendientes, "_tiene_marca", lambda pedido, nombre: True)
+
+    assert agenda.ejecutar_ahora(
+        agenda.CIERRE_BORRADOR, PEDIDO, epoch(15), params={"horas": 4.0}
+    ) is True
+    assert agenda.vivas(PEDIDO, agenda.CIERRE_BORRADOR) == []
+
+
+def test_una_cache_a_medias_obliga_a_reconstruir_aunque_el_indice_no_este_vacio(
+    mundo, marcas_sin_redis, monkeypatch
+) -> None:
+    """El evento durable YA quedó, así que puede haber una fila fuera del índice.
+
+    `_toca_reconstruir` sólo mira si el índice está VACÍO, y con otra fila
+    adentro no lo está: sin la deuda anotada, esa fila no se despachaba nunca.
+    """
+    agenda.crear(PEDIDO, agenda.SEGUIMIENTO, epoch(15), ahora=epoch(9))
+    assert agenda._toca_reconstruir() is False  # índice sano y no vacío
+
+    def zadd_roto(*a, **k):
+        raise RuntimeError("Redis no toma la escritura")
+
+    monkeypatch.setattr(marcas_sin_redis, "zadd", zadd_roto)
+    agenda.crear("SO-2026-00043", agenda.SEGUIMIENTO, epoch(16), ahora=epoch(9))
+
+    assert agenda._toca_reconstruir() is True
+
+
+def test_el_aviso_al_dueno_nombra_el_plazo_recalculado_y_no_el_que_traia_la_fila(
+    mundo, marcas_sin_redis, entrega_a_las_17, monkeypatch
+) -> None:
+    """El otro consumidor del plazo recalculado: el TEXTO, no sólo el horario.
+
+    El test de al lado prueba que la fila se corre cuando el plazo se mueve, y
+    pasa igual aunque el mensaje siga armándose con la hora guardada — porque en
+    ese caso no se manda ninguno. Éste es el caso en que SÍ se manda: el plazo
+    ya venció, así que no hay reprogramación que tape el texto.
+    """
+    monkeypatch.setattr(agenda, "horas_de_aviso", lambda: 3.0)
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "delivery_date": "2026-09-08"}
+    # La fila trae una hora que quedó vieja (el pedido se movió y volvió, o la
+    # hora de reparto cambió). El plazo de verdad, hoy, son las 14:00.
+    agenda.crear(
+        PEDIDO,
+        agenda.RECORDATORIO_PLAZO_DUENO,
+        epoch(13),
+        params={"hora": "09:30"},
+        ahora=epoch(9),
+    )
+
+    agenda.tick(ahora=epoch(15))
+
+    assert len(mundo["al_dueno"]) == 1
+    _, cuerpo = mundo["al_dueno"][0]
+    assert "14:00" in cuerpo
+    assert "09:30" not in cuerpo

@@ -125,8 +125,17 @@ _LOCKS = {
 # Los tipos que le hablan a una PERSONA y por lo tanto esperan a la mañana.
 # `cierre_borrador` está adentro porque le dice al cliente que su pedido no se
 # confirmó, y eso no son las 3 de la mañana.
+#
+# `recordatorio_plazo_dueno` también, y la decisión no es obvia: el aviso existe
+# para que el dueño llegue a contestar ANTES del plazo, así que postergarlo
+# puede hacerlo llegar tarde. Entra igual, por dos razones. Una entrega a las
+# 08:00 con tres horas de aviso lo despertaría a las 04:00, y un WhatsApp a esa
+# hora no se contesta: se apaga. Y el aviso al CLIENTE de ese mismo plazo ya
+# está postergado hasta las 07:00, así que un aviso al dueño de madrugada no
+# compra el plazo — sólo lo despierta. El que sale a las 07:00 todavía sirve
+# para una entrega del día.
 _HABLAN_CON_ALGUIEN = frozenset(
-    {CIERRE_BORRADOR, AVISO_ANTES_DE_ENTREGA, SEGUIMIENTO}
+    {CIERRE_BORRADOR, AVISO_ANTES_DE_ENTREGA, RECORDATORIO_PLAZO_DUENO, SEGUIMIENTO}
 )
 
 # Cuántas filas se despachan por tick. Acotado para que un atraso no trabe el
@@ -302,17 +311,30 @@ def _cachear(fila: Fila) -> None:
     Toda transición pasa por acá, así que es esto lo que tiene que saber si la
     fila sigue teniendo plazo — no cada uno de los llamadores que pueden
     terminarla.
+
+    La pertenencia al índice va PRIMERO y el blob después, y no al revés: el
+    índice es lo único que hace que la fila se despache, y el blob es sólo un
+    atajo que `leer` sabe suplir yendo a ERPNext. Si sólo una de las dos
+    escrituras entra, que sea la que no se puede reconstruir barato.
+
+    Y si algo falla se anota la DEUDA: el evento durable ya quedó escrito, así
+    que una fila puede existir sin estar en el índice. `_toca_reconstruir` sólo
+    mira si el índice está VACÍO, y con otra fila adentro no lo está — sin esta
+    marca la fila quedaba escrita y no se despachaba nunca.
     """
+    global _cache_incompleta
+
     cuerpo = json.dumps(fila.como_dict(), ensure_ascii=False, separators=(",", ":"))
     try:
         cliente = _redis()
-        cliente.set(_clave_cache(fila.sobre, fila.id), cuerpo, ex=CACHE_TTL_SEGUNDOS)
         if fila.con_plazo:
             cliente.zadd(CLAVE_INDICE, {_miembro(fila): fila.vence})
         else:
             cliente.zrem(CLAVE_INDICE, _miembro(fila))
+        cliente.set(_clave_cache(fila.sobre, fila.id), cuerpo, ex=CACHE_TTL_SEGUNDOS)
     except Exception as exc:
         print(f"[agenda] {fila.sobre}: caché no guardada ({type(exc).__name__})")
+        _cache_incompleta = True
 
 
 def _desde_cache(sobre: str, identificador: str) -> Fila | None:
@@ -375,15 +397,21 @@ def leer(sobre: str, identificador: str) -> Fila | None:
     return durable
 
 
-def vivas(sobre: str, tipo: str = "") -> list[Fila]:
+def vivas(sobre: str, tipo: str = "") -> list[Fila] | None:
     """Las filas con plazo de un pedido, opcionalmente de un tipo.
 
     Lee ERPNext, no el índice: la usa `recordar` para hacer valer «un
     seguimiento vivo por pedido», y esa regla no puede depender de un caché.
-    Una lectura fallida devuelve [] y el llamador la trata como «no pude», no
-    como «no hay».
+
+    None es «NO PUDE LEER» y es distinto de `[]`, que es «no hay ninguna».
+    Aplastar los dos en una lista vacía dejaba a `recordar` creando un
+    seguimiento nuevo mientras el viejo seguía vivo, justo cuando ERPNext no
+    contestaba — o sea, la regla de «uno por pedido» se caía sola en el único
+    momento en que hacía falta.
     """
     eventos = _eventos(sobre)
+    if eventos is None:
+        return None
     if not eventos:
         return []
     ultimas: dict[str, Fila] = {}
@@ -470,6 +498,10 @@ def _indice_vacio() -> bool:
 
 _reconstruccion_truncada: bool = False
 _reconstruccion_reintento_desde: float = 0.0
+# Una escritura de caché que no entró entera. El evento durable SÍ quedó, así
+# que hay una fila que puede no estar en el índice: hay que reconstruir aunque
+# el índice tenga otras cosas adentro y por lo tanto no esté vacío.
+_cache_incompleta: bool = False
 
 
 def reconstruccion_incompleta() -> bool:
@@ -483,10 +515,13 @@ def _toca_reconstruir() -> bool:
     Un índice vacío pasa por el mismo enfriamiento, porque una reconstrucción
     truncada que no recuperó ni una fila deja el índice vacío igual y si no
     fuera por esto machacaría ERPNext lo mismo.
+
+    `_cache_incompleta` es la tercera puerta y no sobra: un índice NO vacío al
+    que le falta una fila es invisible para las otras dos.
     """
     if _reloj() < _reconstruccion_reintento_desde:
         return False
-    return _indice_vacio() or _reconstruccion_truncada
+    return _indice_vacio() or _reconstruccion_truncada or _cache_incompleta
 
 
 def reconstruir_indice() -> int:
@@ -498,6 +533,12 @@ def reconstruir_indice() -> int:
     actual.
     """
     global _reconstruccion_truncada, _reconstruccion_reintento_desde
+    global _cache_incompleta
+
+    # Se limpia ANTES de leer, no después: si una escritura de caché vuelve a
+    # fallar durante esta misma reconstrucción, la deuda tiene que quedar
+    # armada de nuevo y no borrada por el final de esta función.
+    _cache_incompleta = False
     ultimas: dict[tuple[str, str], Fila] = {}
     truncada = False
     for pagina in range(MAX_PAGINAS_RECONSTRUCCION):
@@ -662,9 +703,13 @@ def _despachar(sobre: str, identificador: str, ahora: float) -> bool:
         return False
 
     if resultado.reprogramar is not None:
-        movida = registrar(
-            fila, "reprogramada", ahora=ahora, vence=float(resultado.reprogramar)
-        )
+        # Los params van CON el `vence`, no después: la hora que el mensaje va a
+        # nombrar sale del mismo plazo que decide cuándo dispara. Moverle uno
+        # solo es cómo se manda un aviso puntual que dice la hora de ayer.
+        cambios = {"vence": float(resultado.reprogramar)}
+        if resultado.params is not None:
+            cambios["params"] = dict(resultado.params)
+        movida = registrar(fila, "reprogramada", ahora=ahora, **cambios)
         return movida is not None
 
     # FUERA del lock: el teléfono de una persona no puede estar en el camino
@@ -778,6 +823,8 @@ class Resultado:
     ya_paso: bool = False
     # La fecha de entrega se movió: correr la fila en vez de dispararla.
     reprogramar: float | None = None
+    # Los params que van con ese `vence` nuevo. None = dejarlos como estaban.
+    params: dict | None = None
 
 
 def _sello(ahora: float) -> str:
@@ -848,10 +895,17 @@ def _cerrar_borrador(fila: Fila, ahora: float) -> Resultado | None:
     sobre = fila.sobre
     horas = float(fila.params.get("horas") or 0.0)
 
-    # `is not False` y no truthiness: None es «no pude saber», y aplastarlo
-    # contra False re-manda un mensaje terminal cada vez que ERPNext tose.
-    if pendientes._tiene_marca(sobre, "pendiente_cierre") is not False:
-        return None
+    # Las TRES respuestas de `_tiene_marca` son tres cosas distintas y cada una
+    # termina distinto. Aplastar True contra None dejaba la fila viva para
+    # siempre: el borrador ya estaba cerrado, así que el handler contestaba
+    # «no pude» en cada barrido y la fila no llegaba nunca a un estado terminal.
+    marca = pendientes._tiene_marca(sobre, "pendiente_cierre")
+    if marca is None:
+        return None  # no pude saber: la próxima ronda vuelve a preguntar
+    if marca:
+        # Ya estaba cerrado. No hay nada que hacer y no se le habla a nadie,
+        # pero la fila SÍ se cierra: es la que converge.
+        return Resultado(detalle="el borrador ya estaba cerrado")
     if pendientes._sigue_esperando(sobre) is None:
         # Una persona lo decidió entre el listado y acá. No se le dice nada al
         # cliente, y la fila se cierra: no hay nada que hacer con ella.
@@ -928,9 +982,24 @@ def _avisar_antes_de_entrega(fila: Fila, ahora: float) -> Resultado | None:
         return Resultado(detalle="el pedido ya no es un borrador")
 
     nuevo = vence_antes_de_entrega(doc, fila.params.get("horas"))
-    if nuevo is not None and nuevo > ahora + 60:
-        # La entrega se corrió para más adelante: se corre la fila también.
-        return Resultado(detalle="la entrega se movió", reprogramar=nuevo)
+    if nuevo is None:
+        # El pedido ya no tiene un plazo legible —le sacaron la fecha de
+        # entrega, o quedó mal escrita, o no hay hora de reparto configurada—.
+        # NO se manda el aviso con la hora que se guardó al crear la fila: ésa
+        # es exactamente la hora que puede haber dejado de ser cierta. Se cierra
+        # la fila: el pedido sin fecha ya está cubierto por el plazo plano de
+        # `PENDIENTE_AVISO_HORAS`.
+        return Resultado(detalle="el pedido ya no tiene un plazo legible")
+
+    hora = texto_de_la_hora(doc)
+    if nuevo > ahora + 60:
+        # La entrega se movió: se corre la fila Y se corrige la hora que el
+        # mensaje va a nombrar. Las dos salen del mismo plazo recalculado.
+        return Resultado(
+            detalle="la entrega se movió",
+            reprogramar=nuevo,
+            params={**dict(fila.params or {}), "hora": hora},
+        )
 
     try:
         telefono = str(decisiones.telefono_del_cliente(fila.sobre) or "")
@@ -940,7 +1009,6 @@ def _avisar_antes_de_entrega(fila: Fila, ahora: float) -> Resultado | None:
     if not telefono:
         return Resultado(detalle="el cliente no tiene teléfono")
 
-    hora = str(fila.params.get("hora") or "")
     return Resultado(
         detalle="avisado antes de la entrega",
         avisos=(
@@ -974,8 +1042,25 @@ def _recordar_al_dueno(fila: Fila, ahora: float) -> Resultado | None:
     if int(doc.get("docstatus") or 0) != 0:
         return Resultado(detalle="ya lo decidieron")
 
+    # El plazo se RECALCULA, no se lee de la fila: una excepción de entrega
+    # aceptada reescribe `delivery_date` después de que la fila se creó, y
+    # entonces la hora guardada es la de un plazo que ya no existe. Decirle al
+    # dueño «contestá antes de las 14» cuando el plazo pasó a ser las 17 es
+    # peor que no decirle nada: contesta tarde creyendo que llegó.
+    plazo = vence_antes_de_entrega(doc)
+    if plazo is None:
+        return Resultado(detalle="el pedido ya no tiene un plazo legible")
+    if plazo > ahora + 60:
+        # El plazo se corrió: este aviso se corre con él, una hora antes.
+        nuevo = plazo - RE_PING_DUENO_HORAS * 3600.0
+        return Resultado(
+            detalle="el plazo se movió",
+            reprogramar=nuevo,
+            params={**dict(fila.params or {}), "hora": texto_del_plazo(plazo)},
+        )
+
     asunto, cuerpo = recordatorio_plazo(
-        fila.sobre, str(fila.params.get("hora") or ""), idioma.gerencia()
+        fila.sobre, texto_del_plazo(plazo), idioma.gerencia()
     )
     try:
         avisado = bool(
@@ -1169,6 +1254,15 @@ def programar_para_entrega(doc: dict, ahora: float | None = None) -> list[Fila]:
     sobre = str(doc.get("name") or "").strip()
     if not sobre:
         return []
+    # Sólo un BORRADOR. Un pedido ya confirmado no necesita que le avisen que no
+    # está confirmado, y un cancelado menos. Va acá y no en cada llamador para
+    # que llamarla de más sea inofensivo: es lo que la vuelve segura de reponer
+    # en los caminos de reintento, donde el pedido ya existe.
+    try:
+        if int(doc.get("docstatus") or 0) != 0:
+            return []
+    except (TypeError, ValueError):
+        return []
     horas = horas_de_aviso()
     if horas is None:
         return []  # apagado: desplegar esto no cambia nada de lo que ve nadie
@@ -1212,6 +1306,43 @@ def programar_para_entrega(doc: dict, ahora: float | None = None) -> list[Fila]:
         if fila_dueno is not None:
             creadas.append(fila_dueno)
     return creadas
+
+
+def reconciliar_entrega(sobre: str, ahora: float | None = None) -> list[Fila]:
+    """Rehace las filas de entrega de un pedido cuya fecha cambió.
+
+    `programar_para_entrega` corre una sola vez, al crear el pedido, pero
+    `policy_aplicar_terminos` reescribe `delivery_date` cada vez que un cliente
+    acepta una contraoferta. Las filas viejas se re-leen al dispararse y saben
+    correrse hacia ADELANTE — pero una entrega que se adelanta las deja
+    despertando tarde, y a esa altura el aviso ya no llega antes de nada.
+
+    Cancelar primero y crear después es seguro acá, al revés que en `recordar`:
+    lo que se cancela es una fila cuyo plazo ya no existe, así que perderla no
+    pierde nada. Y es idempotente: con la fecha sin cambios, el id vuelve a ser
+    el mismo y la fila se reescribe en lugar de duplicarse.
+    """
+    sobre = str(sobre or "").strip()
+    if not sobre:
+        return []
+    momento = _ahora() if ahora is None else ahora
+
+    doc = _documento(sobre)
+    if doc is None:
+        return []  # ilegible: no se toca nada
+    nuevo = vence_antes_de_entrega(doc)
+
+    abiertas = vivas(sobre)
+    if abiertas is None:
+        return []  # no pude leer: no se toca nada
+    for fila in abiertas:
+        if fila.tipo not in (AVISO_ANTES_DE_ENTREGA, RECORDATORIO_PLAZO_DUENO):
+            continue
+        if nuevo is not None and fila.vence == nuevo:
+            continue  # ya apunta al plazo vigente
+        cancelar(fila, "la fecha de entrega cambió", ahora=momento)
+
+    return programar_para_entrega(doc, ahora=momento)
 
 
 def ejecutar_ahora(
@@ -1292,10 +1423,19 @@ def recordar(
     momento = _ahora() if ahora is None else ahora
     pedido, vence, motivo = validar_recordatorio(sobre, cuando, por_que, momento)
 
-    for anterior in vivas(pedido, SEGUIMIENTO):
-        cancelar(anterior, "reemplazado por un seguimiento nuevo", ahora=momento)
+    anteriores = vivas(pedido, SEGUIMIENTO)
+    if anteriores is None:
+        # No se pudo leer qué había. Crear igual sería crear un SEGUNDO
+        # seguimiento vivo sin saberlo, que es justo lo que la regla prohíbe, y
+        # además pasaría en el peor momento: con ERPNext sin contestar.
+        raise PropuestaInvalida("no pude leer los recordatorios que ya tiene")
 
-    return crear(
+    # Se crea PRIMERO y se cancela después. Al revés, una escritura fallida
+    # después de una cancelación exitosa dejaba el pedido sin ningún
+    # recordatorio: el viejo ya terminal y el nuevo nunca escrito. De este lado,
+    # lo peor que puede pasar es que queden dos —dos mensajes al equipo, que es
+    # ruido— y nunca cero, que es un olvido.
+    nueva = crear(
         pedido,
         # Forzado, no elegido: ver el docstring.
         SEGUIMIENTO,
@@ -1303,3 +1443,16 @@ def recordar(
         params={"por_que": motivo},
         ahora=momento,
     )
+    if nueva is None:
+        # No quedó durable = no pasó. El anterior sigue vivo, que es correcto.
+        return None
+
+    for anterior in anteriores:
+        if anterior.id == nueva.id:
+            continue  # el mismo (pedido, tipo, vence): se reescribió, no se duplica
+        if cancelar(anterior, "reemplazado por un seguimiento nuevo", ahora=momento) is None:
+            print(
+                f"[agenda] {pedido}: no pude cancelar el seguimiento anterior "
+                f"{anterior.id}; quedan dos vivos"
+            )
+    return nueva

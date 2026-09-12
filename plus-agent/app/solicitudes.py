@@ -2713,6 +2713,22 @@ def _aplicar_terminos(pedido: str, solicitud: Solicitud) -> tuple[bool, str]:
         print(f"[solicitudes] {pedido}: no pude aplicar los términos ({type(exc).__name__})")
         return False, "no pude escribir la fecha o el descuento acordados en el pedido"
 
+    # La fecha de entrega acaba de cambiar, así que las filas de agenda que
+    # dependen de ella apuntan a un plazo que ya no existe. Se rehacen acá y no
+    # al dispararse: una fila sabe correrse hacia ADELANTE cuando despierta,
+    # pero una entrega que se ADELANTA la deja despertando tarde, y para
+    # entonces el aviso ya no llega antes de nada.
+    #
+    # Su propio try y nunca fatal: los términos YA quedaron escritos y son lo
+    # que el cliente aceptó. Una agenda que no se pudo rehacer no puede
+    # deshacer eso.
+    try:
+        from app import agenda
+
+        agenda.reconciliar_entrega(pedido)
+    except Exception as exc:
+        print(f"[solicitudes] {pedido}: agenda no reconciliada ({type(exc).__name__})")
+
     if cargo <= 0:
         return True, ""
     cuenta = excepciones.cuenta_cargo()
