@@ -31,6 +31,12 @@ from app import avisos, erpnext, locks, outbound_status, router, solicitudes
 from app.graph import TOOLS_CLIENTES, TOOLS_GERENCIA
 from app.runtime_context import SIN_PERMISO, ActorContext, actor_context
 
+# Este archivo afirma las negativas TEXTUALES de cada herramienta, así que
+# declara su idioma en vez de heredarlo. Hasta este PR no hacía falta para las
+# dos de app/tools/operaciones.py: su negativa era una constante de módulo en
+# español, o sea que no podía salir en otro idioma — que era justamente el bug.
+pytestmark = pytest.mark.idioma("es")
+
 GERENTE = "5493511234567"
 CLIENTE = "5493510000000"
 DESCONOCIDO = "5493519999999"

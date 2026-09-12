@@ -129,57 +129,23 @@ PERMITIDO_EN_SALIDA_INGLESA = (
 
 
 # --------------------------------------------------------------------------
-# 10. FILTRACIONES CONOCIDAS QUE ARREGLA OTRA RAMA. Esto NO es una excepción
-#     como las nueve de arriba, y la diferencia es lo único que hace que esta
-#     sección se pueda defender: las de arriba son textos que quedan en
-#     español A PROPÓSITO y para siempre. Éstas son BUGS, con dueño y con
-#     fecha de vencimiento.
+# 11. EL MOTIVO DURABLE DE UNA DECISIÓN, CITADO. Es el primo de la sección 8.
 #
-#     Existe porque ensanchar el detector es una lámpara, no un arreglo:
-#     prende y muestra filtraciones que ya estaban. Cuando el archivo que hay
-#     que tocar es de otra rama en vuelo, hay tres salidas y dos son malas:
-#     angostar el detector de vuelta, o sacar el constructor del registro.
-#     Las dos dejan el audit ciego para siempre y en silencio. La tercera es
-#     anotar la filtración exacta —qué palabra, en qué constructor, por qué no
-#     se arregla acá, y quién la arregla— y que un test se muera cuando se
-#     arregle.
+#     Los avisos al equipo interpolan un `{detalle}` —«el borrador quedó
+#     cerrado y ya no compromete stock», «no pude cerrar el borrador»— que NO se
+#     escribe para ese mensaje: es el motivo que se guarda en el registro
+#     durable y se escribe como comentario en ERPNext, o sea el rastro de
+#     auditoría, y el aviso lo CITA. Traducirlo en el origen sería traducir la
+#     auditoría (sección 6) o tener dos vocabularios para un mismo hecho, que es
+#     peor que tener uno en el idioma equivocado.
 #
-#     NO es un permiso general. Cada entrada vale para ESAS palabras y ESE
-#     constructor: cualquier otra palabra en español en el mismo constructor
-#     sigue siendo un rojo, y esas mismas palabras en cualquier otro
-#     constructor también.
-#
-#     Las cuidan dos tests en test_idioma_cobertura.py:
-#       * `test_las_filtraciones_en_handoff_siguen_filtrando` exige que cada
-#         entrada SIGA haciendo falta. Cuando la filtración se arregla, el
-#         test se cae y obliga a borrar la entrada — un allowlist que no se
-#         puede vencer es un allowlist que se queda para siempre.
-#       * `test_cada_filtracion_en_handoff_dice_quien_la_arregla` exige el
-#         motivo, el archivo que hay que tocar y el issue. Sin eso esto sería
-#         exactamente el problema que vino a arreglar el issue: una lista muda
-#         donde nadie distingue una razón de una pereza.
+#     Así que el MARCO del aviso se traduce y el motivo citado va como dato, con
+#     la misma regla que el texto del cliente: es lo que pasó, no prosa escrita
+#     para quien lee. Si algún día se decide que el dueño tiene que leerlo en su
+#     idioma, el arreglo NO es traducirlo al mostrarlo: es que
+#     `solicitudes.soltar_reserva`, `_respaldar` y `revalidar` devuelvan CLAVES
+#     y que cada lugar lo diga en el idioma que corresponde —el español para
+#     ERPNext y el registro, el del lector para WhatsApp—, que es exactamente lo
+#     que se hizo con los días de reparto.
 # --------------------------------------------------------------------------
-ISSUE_HANDOFF = "https://github.com/ravi3594444/agent-crm/issues/9"
-
-FILTRACIONES_EN_HANDOFF = {
-    "autonomia.texto": {
-        "palabras": ("de", "sin"),
-        "arregla": "app/autonomia.py",
-        "issue": ISSUE_HANDOFF,
-        "motivo": (
-            "Los dos restos que motivaron el issue, y los dos se arman en "
-            "Python en vez de salir del CATALOGO. `de`: el separador del "
-            "conteo de frescura, `f\"{frescos} de {mirados}\"` en "
-            "`autonomia.texto`, que sale como «fresh counts: 5 de 6» incluso "
-            "con el resumen en inglés. `sin`: las etiquetas de las cubetas de "
-            "la tabla `_GRUPOS` («sin stock», «sin conteo de stock»), que "
-            "`_linea_grupos` formatea tal cual dentro de `frenos`. El arreglo "
-            "real es el separador al CATALOGO y las etiquetas traducidas "
-            "ANTES de formatear, con la tabla siempre en un solo lugar — que "
-            "es la razón por la que la tabla existe. No se hace en este PR "
-            "porque app/autonomia.py es de otra rama en vuelo; este PR sólo "
-            "ensancha el detector, justamente para que el arreglo se pueda "
-            "probar con un test que no escribió."
-        ),
-    },
-}
+MOTIVO_DURABLE_CITADO = "el `{detalle}` de los avisos de app/solicitudes.py"

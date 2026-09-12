@@ -1721,9 +1721,14 @@ def texto_para_equipo(solicitud: Solicitud, lengua: str | None = None) -> str:
         )
     else:
         lineas.append(f"  aprobar {solicitud.pedido}")
-    lineas.append(f"  contraoferta {solicitud.pedido} <fecha> <hora> <cargo>")
-    lineas.append(f"  retiro {solicitud.pedido} <fecha> <hora>")
-    lineas.append(f"  rechazar-solicitud {solicitud.pedido} <motivo>")
+    # EL COMANDO EN ESPAÑOL Y EL HUECO TRADUCIDO. `contraoferta` es lo que el
+    # router parsea y no se toca; `<fecha>` no se teclea nunca — dice qué hay
+    # que poner ahí, así que es prosa. Es la misma forma que ya usa
+    # `gerencia.pendientes_cuerpo`: «Reply «confirmar <order>»».
+    lineas.append(idioma.t("equipo.decision_contraoferta", lengua, pedido=solicitud.pedido))
+    lineas.append(idioma.t("equipo.decision_retiro", lengua, pedido=solicitud.pedido))
+    lineas.append(idioma.t("equipo.decision_rechazar", lengua, pedido=solicitud.pedido))
+    # Sin huecos: comando y dato, iguales en los dos idiomas.
     lineas.append(f"  ver {solicitud.pedido}")
     return "\n".join(lineas)[:3500]
 

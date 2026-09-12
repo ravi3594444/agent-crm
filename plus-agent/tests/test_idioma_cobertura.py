@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from idioma_allowlist import FILTRACIONES_EN_HANDOFF, PERMITIDO_EN_SALIDA_INGLESA
+from idioma_allowlist import PERMITIDO_EN_SALIDA_INGLESA
 from idioma_captura import restos_en_espanol
 
 from app import idioma
@@ -142,6 +142,10 @@ def _todos_los_constructores(lengua):
         # 4. excepciones de entrega y vencimientos
         ("solicitudes.texto_oferta_cliente",
          solicitudes.texto_oferta_cliente(sol, lengua)),
+        # La tabla sobre la que el dueño DECIDE. No estaba en este registro y
+        # tampoco tomaba idioma, así que ningún audit podía verla.
+        ("solicitudes.texto_para_equipo",
+         solicitudes.texto_para_equipo(sol, lengua)),
         ("solicitudes.texto_rechazo_cliente",
          solicitudes.texto_rechazo_cliente(sol, lengua)),
         ("solicitudes.texto_vencida_cliente",
@@ -160,18 +164,18 @@ def _todos_los_constructores(lengua):
 
 
 def _restos(nombre: str, texto: str) -> list[str]:
-    """Los restos de ese constructor, menos los que están en handoff.
+    """Los restos de ese constructor. Sin descuentos.
 
-    El descuento es por CONSTRUCTOR y por PALABRA: una filtración anotada en
-    `autonomia.texto` no permite nada en ningún otro constructor, y no permite
-    ninguna otra palabra en ése. Ver la sección 10 de idioma_allowlist.py.
+    Había un descuento por constructor —la sección 10 del allowlist, las
+    filtraciones anotadas «hasta que la arregle la rama que tiene el archivo»—
+    y se fue con su última entrada: la de `autonomia.texto`, que es la que abrió
+    el issue #9 y que este PR arregló. El propio test que la cuidaba pedía
+    borrar la sección cuando quedara vacía, para que un permiso sin nadie que lo
+    use no se quede esperando a que alguien lo aproveche.
     """
-    en_handoff = FILTRACIONES_EN_HANDOFF.get(nombre, {}).get("palabras", ())
-    return [
-        resto
-        for resto in restos_en_espanol(texto, DATOS + PERMITIDO_EN_SALIDA_INGLESA)
-        if resto not in en_handoff
-    ]
+    del nombre  # ya no hay descuentos por constructor; el parámetro se queda
+    # para que la firma siga diciendo de dónde salió cada resto.
+    return restos_en_espanol(texto, DATOS + PERMITIDO_EN_SALIDA_INGLESA)
 
 
 def test_la_auditoria_final_no_encuentra_espanol_con_el_idioma_en_ingles():
@@ -182,62 +186,6 @@ def test_la_auditoria_final_no_encuentra_espanol_con_el_idioma_en_ingles():
         if restos:
             sucios[nombre] = restos
     assert sucios == {}, f"mensajes con español sin justificar: {sucios}"
-
-
-def test_las_filtraciones_en_handoff_siguen_filtrando():
-    """Cada entrada del handoff tiene que seguir HACIENDO FALTA.
-
-    Es la fecha de vencimiento de la sección 10 del allowlist. Cuando la rama
-    que tiene el archivo arregle la filtración, este test se cae y obliga a
-    borrar la entrada. Sin esto, un permiso escrito «hasta que otro lo
-    arregle» se queda para siempre y el audit vuelve a estar ciego en ese
-    constructor, esta vez con la bendición de un comentario.
-
-    La comparación es por igualdad y no por contención a propósito: si en ese
-    constructor aparece una palabra NUEVA, el handoff no la cubre y esto
-    también se cae.
-    """
-    textos = dict(_todos_los_constructores(EN))
-    for nombre, entrada in FILTRACIONES_EN_HANDOFF.items():
-        assert nombre in textos, (
-            f"{nombre} está en el handoff pero ya no está en el registro de "
-            "constructores: sacar el constructor del audit no es arreglar la "
-            "filtración"
-        )
-        restos = set(restos_en_espanol(textos[nombre], DATOS + PERMITIDO_EN_SALIDA_INGLESA))
-        esperadas = set(entrada["palabras"])
-        assert restos == esperadas, (
-            f"el handoff de {nombre} dice {sorted(esperadas)} y el detector "
-            f"encuentra {sorted(restos)}. Si ya no filtra, borrar la entrada de "
-            f"idioma_allowlist.py::FILTRACIONES_EN_HANDOFF ({entrada['issue']})"
-        )
-
-
-def test_cada_filtracion_en_handoff_dice_quien_la_arregla():
-    """Un handoff sin motivo es el mismo bug que un detector con hueco.
-
-    En los dos casos la próxima persona no puede distinguir una razón de una
-    pereza. Así que el motivo, el archivo y el issue son obligatorios, y el
-    motivo tiene que ser una explicación y no una etiqueta.
-    """
-    assert FILTRACIONES_EN_HANDOFF, (
-        "si no queda ninguna filtración en handoff, borrar la sección 10 del "
-        "allowlist y este test con ella"
-    )
-    for nombre, entrada in FILTRACIONES_EN_HANDOFF.items():
-        assert entrada.get("palabras"), f"{nombre}: sin palabras, no permite nada"
-        assert entrada.get("arregla", "").endswith(".py"), (
-            f"{nombre}: falta el archivo que hay que tocar"
-        )
-        assert entrada.get("issue", "").startswith("https://"), (
-            f"{nombre}: falta el issue donde se sigue"
-        )
-        motivo = entrada.get("motivo", "")
-        assert len(motivo) > 120, f"{nombre}: el motivo tiene que explicar, no etiquetar"
-        # El motivo tiene que decir DÓNDE, no sólo que existe.
-        assert entrada["arregla"] in motivo, (
-            f"{nombre}: el motivo no nombra el archivo que hay que tocar"
-        )
 
 
 def test_cada_constructor_dice_algo_distinto_en_cada_idioma():

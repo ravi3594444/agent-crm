@@ -1267,6 +1267,52 @@ CATALOGO: dict[str, dict[str, str]] = {
     # traducida terminaba con un «y» en el medio de una frase en inglés. Va sin
     # espacios porque `t` los recorta: los pone quien la usa.
     "terminos.y": {ES: "y", EN: "and"},
+    # ------------------------------------------ el desglose de frenos
+    # CÓMO SE LLAMA CADA CUBETA del resumen de autonomía. La tabla `_GRUPOS` de
+    # app/autonomia.py sigue teniendo los nombres en español y ésos son la
+    # CLAVE: se cuentan, se suman entre fuentes y se ordenan por cuenta, así que
+    # traducirlos ahí partiría una cubeta en dos el día que cambie el idioma.
+    # Acá está sólo cómo se muestran, igual que con los días de reparto.
+    #
+    # Es la mitad visible del bug que abrió el issue #9: `_linea_grupos`
+    # formateaba estos nombres tal cual dentro de un resumen en inglés, y el
+    # detector no los veía porque `sin` no estaba en la lista de palabras.
+    "grupo.auto_apagada": {
+        ES: "auto-confirmación apagada",
+        EN: "auto-confirm off",
+    },
+    "grupo.limites_ilegibles": {ES: "límites ilegibles", EN: "limits unreadable"},
+    "grupo.inventario_apagado": {ES: "inventario apagado", EN: "inventory off"},
+    "grupo.tope_del_pedido": {ES: "tope del pedido", EN: "order ceiling"},
+    "grupo.cliente_nuevo": {ES: "cliente nuevo", EN: "new customer"},
+    "grupo.sobre_el_promedio": {
+        ES: "muy por encima de su promedio",
+        EN: "well above their average",
+    },
+    "grupo.historial_ilegible": {ES: "historial ilegible", EN: "history unreadable"},
+    "grupo.deuda_vencida": {ES: "deuda vencida", EN: "overdue debt"},
+    "grupo.sin_conteo": {ES: "sin conteo de stock", EN: "no stock count"},
+    "grupo.sin_stock": {ES: "sin stock", EN: "out of stock"},
+    "grupo.zona_de_entrega": {ES: "zona de entrega", EN: "delivery area"},
+    "grupo.fecha_de_entrega": {ES: "fecha de entrega", EN: "delivery date"},
+    "grupo.cantidad_por_producto": {
+        ES: "cantidad por producto",
+        EN: "quantity per item",
+    },
+    "grupo.descuento": {ES: "descuento", EN: "discount"},
+    "grupo.lista_o_moneda": {ES: "lista o moneda", EN: "price list or currency"},
+    "grupo.pedido_incompleto": {ES: "pedido incompleto", EN: "incomplete order"},
+    "grupo.otros": {ES: "otros", EN: "other"},
+    # Las dos puertas de postura (app/policy.py). Son tokens cortos y estables
+    # que se cuentan, no prosa interpolada, y por eso también se agrupan.
+    "grupo.postura_tope": {ES: "tope", EN: "ceiling"},
+    "grupo.postura_stock": {ES: "stock apagado", EN: "stock off"},
+    # El separador del conteo de frescura: «5 de 6». Es el `de` que motivó el
+    # issue: se armaba en Python y salía igual en un resumen en inglés.
+    "gerencia.autonomia_conteos": {
+        ES: "{frescos} de {mirados}",
+        EN: "{frescos} of {mirados}",
+    },
     # -------------------------------------------- los avisos al equipo
     # LOS MENSAJES QUE EL BOT LE MANDA AL EQUIPO SOLO, sobre una solicitud que
     # nadie contestó, un cliente que contestó tarde o un borrador que no se pudo
@@ -1468,6 +1514,18 @@ CATALOGO: dict[str, dict[str, str]] = {
     "equipo.decision_responde": {
         ES: "Respondé con uno de estos, tal cual:",
         EN: "Reply with one of these, exactly:",
+    },
+    "equipo.decision_contraoferta": {
+        ES: "  contraoferta {pedido} <fecha> <hora> <cargo>",
+        EN: "  contraoferta {pedido} <date> <time> <charge>",
+    },
+    "equipo.decision_retiro": {
+        ES: "  retiro {pedido} <fecha> <hora>",
+        EN: "  retiro {pedido} <date> <time>",
+    },
+    "equipo.decision_rechazar": {
+        ES: "  rechazar-solicitud {pedido} <motivo>",
+        EN: "  rechazar-solicitud {pedido} <reason>",
     },
     "equipo.decision_sin_aprobar": {
         ES: (
