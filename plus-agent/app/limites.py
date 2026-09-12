@@ -679,7 +679,7 @@ _durable_cache_entrega: tuple[float, bool] | None = None
 _durable_cache_idioma: tuple[float, bool] | None = None
 
 
-def _consultar_marca(nombre: str, queja: str) -> bool:
+def _consultar_marca(nombre: str, queja: str, clave: str = "") -> bool:
     """¿Hay en ERPNext algún comentario de auditoría con esa marca?
 
     Sin cachear: los tres que preguntan tienen su propio caché, porque una marca
@@ -695,7 +695,12 @@ def _consultar_marca(nombre: str, queja: str) -> bool:
     try:
         return marcas.existe(nombre)
     except erpnext.ERPNextError as exc:
-        raise LimiteError(queja) from exc
+        # `clave` la pone quien llama, igual que `queja`, y por el mismo motivo:
+        # los tres contestan distinto al «no pude averiguarlo». El de LÍMITES es
+        # el único que LEVANTA, y su excepción llega hasta `ajustes.preparar`,
+        # que la mete adentro de una respuesta ya traducida — así que necesita
+        # su clave. Los otros dos la miran y la loguean, y por eso no la traen.
+        raise LimiteError(queja, clave=clave) from exc
 
 
 def _hubo_cambios_durables() -> bool:
@@ -716,6 +721,7 @@ def _hubo_cambios_durables() -> bool:
     hubo = _consultar_marca(
         "limite",
         "no pude verificar en ERPNext si los límites se configuraron antes",
+        clave="limite.marca_no_verificable",
     )
     _durable_cache = (ahora + DURABLE_CACHE_SEGUNDOS, hubo)
     return hubo

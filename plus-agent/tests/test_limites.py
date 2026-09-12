@@ -2400,11 +2400,14 @@ def test_cada_raise_de_limites_dice_su_clave() -> None:
     """El guard del arreglo: un `raise LimiteError` nuevo sin `clave` vuelve a
     poner media frase en español adentro de un mensaje en inglés.
 
-    La única excepción es `_consultar_marca`, y tiene su motivo: su texto lo
-    arma el que llama, nunca sale por WhatsApp —los tres call sites lo miran o
-    lo loguean— y es la política de error de una consulta a ERPNext, no un
-    mensaje. Está nombrada acá para que se note el día que alguien la use para
-    contestarle a una persona.
+    Son TODOS, sin excepción. La de `_consultar_marca` estaba exceptuada —su
+    texto lo arma quien llama y se suponía que no salía por WhatsApp— y era
+    falso: el que pregunta por la marca de LÍMITES levanta, y esa excepción
+    viaja `proponer` -> `vigente` -> `_almacen` -> `_hubo_cambios_durables` y
+    termina adentro de la respuesta traducida de `ajustes.preparar`. Lo
+    encontró Qodo revisando este PR. Ahora la clave la pasa quien llama, igual
+    que el texto, porque los tres que preguntan contestan distinto al «no pude
+    averiguarlo» y sólo uno de ellos le habla a una persona.
     """
     import ast
     from pathlib import Path as _Path
@@ -2419,12 +2422,4 @@ def test_cada_raise_de_limites_dice_su_clave() -> None:
         if not any(k.arg == "clave" for k in nodo.exc.keywords):
             sin_clave.append(nodo.lineno)
 
-    fuera = [
-        n.lineno
-        for n in ast.walk(ast.parse(fuente))
-        if isinstance(n, ast.FunctionDef) and n.name == "_consultar_marca"
-    ]
-    assert len(sin_clave) == 1, f"raise sin clave: {sin_clave}"
-    assert fuera and fuera[0] < sin_clave[0] < fuera[0] + 25, (
-        f"el único raise sin clave ya no es el de _consultar_marca: {sin_clave}"
-    )
+    assert sin_clave == [], f"raise sin clave en las líneas {sin_clave}"

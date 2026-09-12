@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -389,6 +390,82 @@ def test_el_origen_de_una_confirmacion_sale_en_el_idioma(
         ) == [], texto
     else:
         assert en_espanol in texto
+
+
+@pytest.mark.parametrize(
+    "clave, en_espanol",
+    [
+        ("gerencia.fuente_automatica", "automática (política)"),
+        ("gerencia.fuente_manual", "manual (confirmación humana)"),
+        ("gerencia.fuente_solicitud", "solicitud aprobada y aceptada"),
+    ],
+)
+def test_la_clave_del_origen_no_sale_cruda_por_ninguna_de_las_tres_puertas(
+    clave, en_espanol, monkeypatch
+):
+    """HALLAZGO DE QODO. El valor que entra es una clave, así que TODO lugar que
+    la escriba sin resolver le muestra «gerencia.fuente_manual» a una persona —
+    o peor, la deja escrita para siempre en la auditoría de ERPNext.
+
+    Son tres puertas y sólo una estaba cubierta: el texto libre. Faltaban el
+    parámetro 7 de la plantilla de Meta —que se usa justamente cuando la
+    plantilla ESTÁ configurada, o sea en el despliegue real— y el comentario
+    durable que se escribe después de avisar.
+    """
+    from unittest.mock import Mock
+
+    from app import notificar
+
+    staff = "5491100000000"
+    monkeypatch.setenv("IDIOMA_GERENCIA", EN)
+    monkeypatch.setenv("WHATSAPP_STAFF_CONFIRMED_TEMPLATE", "confirmado_v1")
+    monkeypatch.setenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR")
+    monkeypatch.setattr(notificar, "STAFF", {staff})
+    monkeypatch.setattr(notificar, "claim_once", lambda *a, **k: True)
+    monkeypatch.setattr(notificar, "record_outbound", Mock())
+    comentarios = Mock()
+    monkeypatch.setattr(notificar.erpnext, "add_comment", comentarios)
+    plantilla = Mock(return_value={"messages": [{"id": "wamid.tpl"}]})
+    monkeypatch.setattr(notificar, "enviar_plantilla", plantilla)
+
+    assert notificar.notificar_confirmacion(_SO, clave) is True
+
+    parametros = plantilla.call_args.args[3]
+    origen = next(p for p in parametros if p.startswith("Origen:"))
+    assert clave not in origen, origen
+    # La plantilla la tiene Meta registrada en es_AR, y sus otros seis
+    # parámetros están escritos en ése: el origen va en el mismo idioma.
+    assert en_espanol in origen, origen
+
+    escrito = comentarios.call_args.args[2]
+    assert clave not in escrito, escrito
+    # La auditoría durable es española siempre: ya está escrita así en los
+    # ERPNext de los despliegues.
+    assert en_espanol in escrito, escrito
+
+
+def test_el_origen_de_la_plantilla_sigue_el_idioma_en_que_meta_la_tiene(monkeypatch):
+    """Si la plantilla está registrada en inglés, su parámetro también."""
+    from unittest.mock import Mock
+
+    from app import notificar
+
+    monkeypatch.setenv("IDIOMA_GERENCIA", ES)
+    monkeypatch.setenv("WHATSAPP_STAFF_CONFIRMED_TEMPLATE", "confirmed_v1")
+    monkeypatch.setenv("WHATSAPP_TEMPLATE_LANGUAGE", "en_US")
+    monkeypatch.setattr(notificar, "STAFF", {"5491100000000"})
+    monkeypatch.setattr(notificar, "claim_once", lambda *a, **k: True)
+    monkeypatch.setattr(notificar, "record_outbound", Mock())
+    monkeypatch.setattr(notificar.erpnext, "add_comment", Mock())
+    plantilla = Mock(return_value={"messages": [{"id": "wamid.tpl"}]})
+    monkeypatch.setattr(notificar, "enviar_plantilla", plantilla)
+
+    notificar.notificar_confirmacion(_SO, "gerencia.fuente_manual")
+
+    origen = next(
+        p for p in plantilla.call_args.args[3] if p.startswith("Origen:")
+    )
+    assert "manual (human confirmation)" in origen, origen
 
 
 def test_un_origen_que_no_es_una_clave_sale_como_vino():
@@ -1028,6 +1105,87 @@ def test_el_rechazo_de_un_cambio_de_limite_sale_entero_en_ingles() -> None:
             assert "{" not in respuesta, respuesta
         else:
             raise AssertionError(f"{alias}={valor} debería haber fallado")
+
+
+def test_un_erpnext_caido_tampoco_deja_espanol_adentro_del_ingles(monkeypatch):
+    """HALLAZGO DE QODO, y el más difícil de ver: este motivo no nace de lo que
+    tecleó el dueño.
+
+    `_consultar_marca` levanta cuando no puede preguntarle a ERPNext si los
+    límites se configuraron antes, y ese camino —`proponer` -> `vigente` ->
+    `_almacen` -> `_hubo_cambios_durables`— termina adentro de la respuesta que
+    arma `ajustes.preparar`, que ya sale traducida. Era el único `raise` sin
+    clave y estaba exceptuado por escrito con el motivo equivocado: «no sale por
+    WhatsApp». Sale.
+
+    La cadena se prueba en sus TRES eslabones, porque el fixture `limites_sin_redis`
+    cortocircuita `_hubo_cambios_durables` en toda la suite —a propósito: ningún
+    test le pregunta a ERPNext— y con él en el medio ningún test de punta a punta
+    tocaría la línea que importa. Los tres eslabones son: que la marca ilegible
+    levante CON su clave, que el call site se la pase, y que el handler la diga
+    en inglés.
+    """
+    from app import ajustes, erpnext, limites, marcas
+
+    monkeypatch.setattr(
+        marcas, "existe", Mock(side_effect=erpnext.ERPNextError("503"))
+    )
+
+    # 1. El eslabón que Qodo encontró suelto.
+    try:
+        limites._consultar_marca(
+            "limite", "no pude verificar", clave="limite.marca_no_verificable"
+        )
+    except limites.LimiteError as exc:
+        assert exc.clave == "limite.marca_no_verificable"
+        assert limites.motivo(exc, EN) == (
+            "I couldn't check in ERPNext whether the limits were configured before"
+        )
+        assert restos_en_espanol(limites.motivo(exc, EN)) == []
+        # Y el español sigue siendo el de siempre, que es lo que va al log.
+        assert limites.motivo(exc, ES) == str(exc) or "verificar" in limites.motivo(
+            exc, ES
+        )
+    else:
+        raise AssertionError("una marca ilegible tiene que levantar")
+
+    # 2. Que el call site la pase: sin esto el eslabón 1 no sirve de nada, y es
+    #    justo lo que estaba mal. Se mira el fuente porque el fixture autouse
+    #    reemplaza esta función en toda la suite.
+    import ast
+    from pathlib import Path as _Path
+
+    fuente = (_Path(__file__).resolve().parents[1] / "app" / "limites.py").read_text()
+    consultas = [
+        nodo
+        for nodo in ast.walk(ast.parse(fuente))
+        if isinstance(nodo, ast.Call)
+        and getattr(nodo.func, "id", "") == "_consultar_marca"
+        and nodo.args
+        and getattr(nodo.args[0], "value", "") == "limite"
+    ]
+    assert consultas, "no encontré la consulta de la marca de límites"
+    assert all(
+        any(k.arg == "clave" for k in nodo.keywords) for nodo in consultas
+    ), "la consulta de la marca de LÍMITES tiene que pasar su clave: es la que levanta"
+
+    # 3. Y que el handler la diga en el idioma del dueño.
+    monkeypatch.setenv("IDIOMA_GERENCIA", EN)
+    monkeypatch.setattr(
+        limites,
+        "proponer",
+        Mock(
+            side_effect=limites.LimiteError(
+                "no pude verificar en ERPNext si los límites se configuraron antes",
+                clave="limite.marca_no_verificable",
+            )
+        ),
+    )
+
+    respuesta = ajustes.preparar("tope", "30000", "5491100000000")
+
+    assert "I couldn't check in ERPNext" in respuesta, respuesta
+    assert restos_en_espanol(respuesta) == [], respuesta
 
 
 def test_el_mismo_rechazo_en_espanol_dice_lo_mismo_que_siempre() -> None:

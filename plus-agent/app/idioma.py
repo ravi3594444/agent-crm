@@ -889,6 +889,14 @@ CATALOGO: dict[str, dict[str, str]] = {
     # LO QUE VA ENTRE «» ES UN DATO Y NO SE TRADUCE: el alias del ajuste es lo
     # que el dueño teclea («monto maximo»), o sea un comando, y lo que él
     # escribió se cita tal cual. Igual que el número de pedido o el código.
+    # El «no pude preguntarle a ERPNext si esto ya se configuró antes». Es el
+    # único LimiteError que no nace de lo que tecleó el dueño, y llega igual a su
+    # pantalla: `proponer` -> `vigente` -> `_almacen` -> `_hubo_cambios_durables`,
+    # y de ahí a `ajustes.preparar`, que lo mete adentro de un mensaje traducido.
+    "limite.marca_no_verificable": {
+        ES: "no pude verificar en ERPNext si los límites se configuraron antes",
+        EN: "I couldn't check in ERPNext whether the limits were configured before",
+    },
     "limite.no_pude_leer": {
         ES: "no pude leer los límites configurados",
         EN: "I couldn't read the configured limits",
