@@ -2229,3 +2229,183 @@ def test_the_closer_caps_at_one_week_not_thirty_days():
     de 720 h se contradecía a sí mismo.
     """
     assert limites.LIMITES["PENDIENTE_CIERRE_HORAS"].maximo == 168.0
+
+
+# ---------------------------------------------------------------------------
+# LOS DÍAS EN INGLÉS
+#
+# `delivery days monday,friday` fallaba entero. No es que saliera mal: un dueño
+# que lee en inglés no tenía NINGUNA forma de configurar ENTREGA_DIAS,
+# ENTREGA_EXCEPCION_DIAS ni RETIRO_LOCAL_DIAS, porque la única forma aceptada
+# era la castellana.
+#
+# Lo que NO cambia es lo que se guarda: sigue siendo "lunes,viernes". Ese valor
+# lo leen `_indices` y app/excepciones.py, así que un almacén con las dos
+# formas adentro sería un valor que valida de un lado y no matchea del otro —
+# y nada de lo ya guardado tendría que migrar para que esto funcione.
+# ---------------------------------------------------------------------------
+
+_DIAS = limites.TODOS["ENTREGA_DIAS"]
+
+
+@pytest.mark.parametrize(
+    "dicho, guardado",
+    [
+        # La frase del brief, tal cual.
+        ("monday,friday", "lunes,viernes"),
+        # Los siete, con el nombre entero.
+        ("monday", "lunes"),
+        ("tuesday", "martes"),
+        ("wednesday", "miercoles"),
+        ("thursday", "jueves"),
+        ("friday", "viernes"),
+        ("saturday", "sabado"),
+        ("sunday", "domingo"),
+        # Las abreviaturas que escribe una persona.
+        ("mon,wed,fri", "lunes,miercoles,viernes"),
+        ("tue,thu", "martes,jueves"),
+        ("tues,thurs", "martes,jueves"),
+        ("weds", "miercoles"),
+        ("thur", "jueves"),
+        ("sat,sun", "sabado,domingo"),
+        # Mayúsculas y espacios, como llegan de un teclado de verdad.
+        ("Monday, Friday", "lunes,viernes"),
+        ("MONDAY FRIDAY", "lunes,viernes"),
+        ("  monday ,  friday  ", "lunes,viernes"),
+        # "and" separa igual que "y": es la misma frase en el otro idioma.
+        ("monday and friday", "lunes,viernes"),
+        ("mon, wed and fri", "lunes,miercoles,viernes"),
+        # Y el castellano sigue entrando por donde entraba.
+        ("martes y viernes", "martes,viernes"),
+        ("miércoles", "miercoles"),
+        ("lunes,viernes", "lunes,viernes"),
+        # Mezclados: no es una configuración que alguien vaya a escribir, pero
+        # tampoco hay razón para rechazarla, y rechazarla sería una regla más.
+        ("saturday,domingo", "sabado,domingo"),
+    ],
+)
+def test_los_dias_en_ingles_se_guardan_en_castellano(dicho, guardado) -> None:
+    assert limites._dias(_DIAS, dicho) == guardado
+
+
+def test_el_orden_guardado_es_el_de_la_semana_y_no_el_que_se_tecleo() -> None:
+    """Es lo que hacía antes y lo que `_indices` espera. No cambió."""
+    assert limites._dias(_DIAS, "friday,monday") == "lunes,viernes"
+    assert limites._dias(_DIAS, "sunday,saturday") == "sabado,domingo"
+
+
+def test_un_dia_repetido_se_cuenta_una_vez_aunque_venga_en_dos_idiomas() -> None:
+    assert limites._dias(_DIAS, "monday,lunes,mon") == "lunes"
+
+
+@pytest.mark.parametrize("basura", ["caturday", "lunez", "jueevs", "octubre", "mo"])
+def test_lo_que_no_es_un_dia_se_sigue_rechazando_por_su_nombre(basura) -> None:
+    """Dejar caer en silencio lo que no se entiende agenda un reparto que nadie pidió."""
+    with pytest.raises(limites.LimiteError) as exc:
+        limites._dias(_DIAS, basura)
+    assert basura in str(exc.value)
+
+
+def test_validar_acepta_el_ingles_y_es_idempotente_sobre_lo_guardado() -> None:
+    """`validar(tecleado=False)` re-lee lo guardado: tiene que dar lo mismo."""
+    guardado = limites.validar("ENTREGA_DIAS", "monday,friday")
+    assert guardado == "lunes,viernes"
+    assert limites.validar("ENTREGA_DIAS", guardado, tecleado=False) == guardado
+
+
+@pytest.mark.parametrize(
+    "limite", ["ENTREGA_DIAS", "ENTREGA_EXCEPCION_DIAS", "RETIRO_LOCAL_DIAS"]
+)
+def test_los_tres_limites_de_dias_aceptan_ingles(limite) -> None:
+    """Los tres que un dueño en inglés no podía configurar de ninguna manera."""
+    assert limites.validar(limite, "monday,friday") == "lunes,viernes"
+
+
+def test_el_ingles_llega_a_los_indices_que_lee_excepciones() -> None:
+    """Lo que se teclea en inglés tiene que terminar en el mismo día de la semana.
+
+    `_indices` traduce el valor guardado a los índices de `date.weekday()`, que
+    es lo que app/excepciones.py usa para calcular la próxima fecha. Si el
+    inglés entrara por otro camino, un reparto podría quedar agendado un día
+    distinto del que el dueño pidió.
+    """
+    assert limites._indices(limites.validar("ENTREGA_DIAS", "monday,friday")) == (0, 4)
+    assert limites._indices(limites.validar("ENTREGA_DIAS", "sunday")) == (6,)
+
+
+@pytest.mark.parametrize(
+    "guardado, en_ingles",
+    [
+        ("lunes,viernes", "Monday,Friday"),
+        ("miercoles", "Wednesday"),
+        ("sabado,domingo", "Saturday,Sunday"),
+    ],
+)
+def test_los_dias_se_muestran_en_el_idioma_de_quien_pregunta(guardado, en_ingles) -> None:
+    assert limites.mostrar("ENTREGA_DIAS", guardado, "en") == en_ingles
+
+
+def test_en_castellano_se_muestra_el_dia_bien_escrito_y_no_la_clave() -> None:
+    """La forma guardada es SIN TILDES, y eso no es castellano: es una clave.
+
+    Se guarda sin tildes para que «Miércoles» y «miercoles» sean un solo día al
+    compararlos. Mostrarla tal cual le hacía leer al dueño el artefacto de esa
+    normalización. Traducir de salida es exactamente para esto, y por eso el
+    castellano también pasa por el catálogo en vez de salir derecho.
+
+    Se une con la MISMA coma sin espacio con la que se guarda: el separador sí
+    es el que él ya vio en sus propuestas y en su historial.
+    """
+    assert limites.mostrar("ENTREGA_DIAS", "miercoles", "es") == "miércoles"
+    assert limites.mostrar("ENTREGA_DIAS", "sabado,domingo", "es") == "sábado,domingo"
+    # Los cinco días sin tilde salen byte a byte como estaban.
+    assert limites.mostrar("ENTREGA_DIAS", "lunes,viernes", "es") == "lunes,viernes"
+    assert limites.mostrar("ENTREGA_DIAS", "martes", "es") == "martes"
+
+
+def test_lo_que_se_muestra_se_puede_volver_a_tipear() -> None:
+    """Un valor mostrado tiene que poder volver a entrar por el parser.
+
+    Si no, el dueño lee «miércoles», lo copia para cambiar otra cosa de la
+    lista, y se lo rebotan por el mismo texto que el sistema le acaba de
+    escribir. `_sin_tildes` ya cubre esto en la entrada; acá se afirma que las
+    dos mitades siguen de acuerdo.
+    """
+    for lengua in ("es", "en"):
+        mostrado = limites.mostrar("ENTREGA_DIAS", "miercoles,sabado", lengua)
+        assert limites.validar("ENTREGA_DIAS", mostrado) == "miercoles,sabado"
+
+
+def test_mostrar_no_inventa_nada_cuando_no_hay_dias() -> None:
+    assert limites.mostrar("ENTREGA_DIAS", limites.NINGUNO, "en") == limites.NINGUNO
+    assert limites.mostrar("ENTREGA_DIAS", "", "en") == ""
+    # Un valor que no está en la tabla sale tal cual: mostrarlo raro es mejor
+    # que esconderlo.
+    assert limites.mostrar("ENTREGA_DIAS", "lunez", "en") == "lunez"
+
+
+# ---------------------------------------------------------------------------
+# EL SÍ Y EL NO
+#
+# El brief pedía CONFIRMAR que las formas inglesas que un dueño teclea de
+# verdad ya estuvieran cubiertas. Lo están, así que lo que se agrega no es
+# vocabulario: es la afirmación, para que dejen de estarlo sea una falla y no
+# un descubrimiento en una demo.
+# ---------------------------------------------------------------------------
+
+_BOOLEANO = limites.TODOS["AUTO_CONFIRM_SOMBRA"]
+
+
+@pytest.mark.parametrize("dicho", ["yes", "y", "true", "on", "1", "Yes", "YES", " yes "])
+def test_el_si_en_ingles_ya_estaba_cubierto(dicho) -> None:
+    assert limites._bool(_BOOLEANO, dicho) is True
+
+
+@pytest.mark.parametrize("dicho", ["no", "n", "false", "off", "0", "No", "NO", " no "])
+def test_el_no_en_ingles_ya_estaba_cubierto(dicho) -> None:
+    assert limites._bool(_BOOLEANO, dicho) is False
+
+
+@pytest.mark.parametrize("dicho", ["si", "sí", "Sí", "SI"])
+def test_y_el_castellano_sigue_igual(dicho) -> None:
+    assert limites._bool(_BOOLEANO, dicho) is True

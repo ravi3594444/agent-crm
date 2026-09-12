@@ -569,6 +569,38 @@ _ORDEN_DIAS = (
     "domingo",
 )
 _DIAS_SEMANA = {nombre: indice for indice, nombre in enumerate(_ORDEN_DIAS)}
+
+# CÓMO LO ESCRIBE UNA PERSONA, Y POR QUÉ LO GUARDADO SIGUE EN CASTELLANO.
+# `delivery days monday,friday` fallaba entero: un dueño que lee en inglés no
+# podía configurar ENTREGA_DIAS, ENTREGA_EXCEPCION_DIAS ni RETIRO_LOCAL_DIAS
+# de ninguna manera, porque la única forma aceptada era la castellana.
+#
+# Esto es un diccionario de ENTRADA, no un segundo vocabulario. La forma que
+# se guarda sigue siendo la de `_ORDEN_DIAS` —"lunes,viernes"— y eso no es
+# conservadurismo: es que el valor guardado lo leen `_indices` y
+# app/excepciones.py, así que un almacén con las dos formas adentro sería un
+# valor que valida acá y no matchea allá. Nada de lo ya guardado migra, y un
+# dueño que vuelve al castellano lee lo que había escrito.
+#
+# Lo que ve el dueño sale por `mostrar`, que lo traduce al salir.
+#
+# Se compara SIN TILDES y en minúsculas, con el mismo `_sin_tildes` de este
+# módulo: un segundo normalizador es una segunda definición de "miércoles".
+_DIA_DICHO = {}
+for _indice, _canonico in enumerate(_ORDEN_DIAS):
+    _DIA_DICHO[_canonico] = _canonico
+for _canonico, _dichos in {
+    "lunes": ("monday", "mon"),
+    "martes": ("tuesday", "tue", "tues"),
+    "miercoles": ("wednesday", "wed", "weds"),
+    "jueves": ("thursday", "thu", "thur", "thurs"),
+    "viernes": ("friday", "fri"),
+    "sabado": ("saturday", "sat"),
+    "domingo": ("sunday", "sun"),
+}.items():
+    for _dicho in _dichos:
+        _DIA_DICHO[_dicho] = _canonico
+del _indice, _canonico, _dichos, _dicho
 _HORA_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
@@ -866,18 +898,19 @@ def _dias(defi: Definicion, crudo: str) -> str:
     person writes a list. Anything that is not a weekday is refused by name:
     silently dropping it would schedule a round the owner did not ask for.
     """
-    texto = _sin_tildes(crudo).replace(" y ", ",")
+    texto = _sin_tildes(crudo).replace(" y ", ",").replace(" and ", ",")
     partes = [parte for parte in re.split(r"[,\s]+", texto) if parte]
     if not partes:
         raise LimiteError(f"«{defi.alias[0]}» está vacío: decime qué días")
     elegidos: set[str] = set()
     for parte in partes:
-        if parte not in _DIAS_SEMANA:
+        canonico = _DIA_DICHO.get(parte)
+        if canonico is None:
             raise LimiteError(
                 f"«{parte}» no es un día de la semana. Van así: "
                 f"{', '.join(_ORDEN_DIAS)}"
             )
-        elegidos.add(parte)
+        elegidos.add(canonico)
     return ",".join(dia for dia in _ORDEN_DIAS if dia in elegidos)
 
 
@@ -992,6 +1025,21 @@ def mostrar(nombre: str, valor: object, en_idioma: str | None = None) -> str:
         elegido = idioma_mod.normalizar(crudo)
         if elegido:
             return idioma_mod.nombre(elegido, en_idioma)
+    # Los días son el otro caso en que el valor guardado NO es el que se lee.
+    # Se guarda "lunes,viernes" —lo que leen `_indices` y app/excepciones.py—
+    # y se muestra en el idioma de quien pregunta. Un día que no esté en la
+    # tabla sale tal cual: mostrar un valor raro es mejor que esconderlo.
+    if defi is not None and defi.tipo == DIAS and crudo and crudo != NINGUNO:
+        from app import idioma as idioma_mod
+
+        # Se une con la MISMA coma sin espacio con que se guarda: en castellano
+        # esto tiene que salir byte a byte igual que antes, porque es el texto
+        # que el dueño ya vio en sus propuestas y en su historial de cambios.
+        return ",".join(
+            idioma_mod.t(f"dia.{parte}", en_idioma) if parte in _DIAS_SEMANA else parte
+            for parte in (p.strip() for p in crudo.split(","))
+            if parte
+        )
     return crudo
 
 

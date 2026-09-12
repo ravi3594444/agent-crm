@@ -623,6 +623,20 @@ CATALOGO: dict[str, dict[str, str]] = {
     "boton.confirmar": {ES: "Confirmar", EN: "Confirm"},
     "boton.ver_detalle": {ES: "Ver detalle", EN: "View details"},
     "boton.confirmar_conteo": {ES: "Confirmar conteo", EN: "Confirm count"},
+    # --------------------------------------------------------- días
+    # La forma GUARDADA de un día es siempre la castellana (ver `_DIA_DICHO`
+    # en app/limites.py): la leen `_indices` y app/excepciones.py, y un
+    # almacén con las dos formas adentro sería un valor que valida de un lado
+    # y no matchea del otro. Éstas son la traducción DE SALIDA, y la usa
+    # `limites.mostrar`. Un dueño que lee en inglés escribe «monday,friday» y
+    # lee «Monday, Friday»; lo que quedó guardado no se movió.
+    "dia.lunes": {ES: "lunes", EN: "Monday"},
+    "dia.martes": {ES: "martes", EN: "Tuesday"},
+    "dia.miercoles": {ES: "miércoles", EN: "Wednesday"},
+    "dia.jueves": {ES: "jueves", EN: "Thursday"},
+    "dia.viernes": {ES: "viernes", EN: "Friday"},
+    "dia.sabado": {ES: "sábado", EN: "Saturday"},
+    "dia.domingo": {ES: "domingo", EN: "Sunday"},
     # --------------------------------------------------- entrega / vencimiento
     "entrega.fuera_de_dia": {
         ES: "Esa entrega queda fuera de los días de reparto. La decide una persona.",
