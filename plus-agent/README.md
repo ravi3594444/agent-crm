@@ -1045,6 +1045,18 @@ store them in the service `.env`. The stock reconciliation remains a draft for
 a person to review and submit, and reruns reuse an identical non-cancelled
 reconciliation instead of creating duplicates.
 
+It ships two datasets. The default is the Argentine one it has always seeded;
+`--dataset en` (or `SEED_DATASET=en`) seeds an English-named catalogue with the
+same shape, for demoing to a prospect who does not read Spanish. The item codes
+of the two do not overlap, so seeding both into one ERPNext gives two
+catalogues rather than one half-translated one. Prices are placeholders in
+both.
+
+```bash
+ERPNEXT_API_KEY=… ERPNEXT_API_SECRET=… make seed              # Argentine
+ERPNEXT_API_KEY=… ERPNEXT_API_SECRET=… make seed-en           # English
+```
+
 ## WhatsApp response and delivery contract
 
 The HTTP `200` returned to Meta acknowledges the webhook and is invisible to

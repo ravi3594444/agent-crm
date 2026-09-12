@@ -6,7 +6,7 @@ PY     := $(VENV)/bin/python
 PIP    := $(VENV)/bin/pip
 PUERTO ?= 8081
 
-.PHONY: help install test lint fmt check check-env check-env-offline verificar-modelos build up down logs autonomia decisiones briefing demo demo-gemini seed
+.PHONY: help install test lint fmt check check-env check-env-offline verificar-modelos build up down logs autonomia decisiones briefing demo demo-gemini seed seed-en
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -74,3 +74,6 @@ demo-gemini: install ## Lo mismo pero con Gemini de verdad, por un relevo aislad
 
 seed: install ## Cargar catálogo y clientes de demo en ERPNext (staging; usa credenciales temporales, ver README)
 	$(PY) deploy/seed_dairy.py
+
+seed-en: install ## Lo mismo con el catálogo en inglés, para una demo a un prospecto que no lee español
+	$(PY) deploy/seed_dairy.py --dataset en

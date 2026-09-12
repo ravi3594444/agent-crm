@@ -442,12 +442,12 @@ def _claves_constantes(dic: ast.Dict) -> set[str]:
 def _botones_del_arbol(arbol: ast.AST):
     """Todo dict de app/ que tenga la forma de un botón."""
     for nodo in ast.walk(arbol):
-        if isinstance(nodo, ast.Dict) and _CLAVES_DE_BOTON <= _claves_constantes(nodo):
+        if isinstance(nodo, ast.Dict) and _claves_constantes(nodo) >= _CLAVES_DE_BOTON:
             yield nodo
 
 
 def _titulo_del_boton(dic: ast.Dict) -> ast.AST | None:
-    for clave, valor in zip(dic.keys, dic.values):
+    for clave, valor in zip(dic.keys, dic.values, strict=False):
         if isinstance(clave, ast.Constant) and clave.value == "title":
             return valor
     return None
