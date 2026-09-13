@@ -18,7 +18,8 @@ import uuid
 from typing import Any
 
 from app import erpnext
-from app.voz import herramientas, identidad, prompt as prompt_voz
+from app.voz import herramientas, identidad
+from app.voz import prompt as prompt_voz
 
 
 def _con_credencial_de_cliente(configurable: dict[str, str]):
@@ -63,14 +64,40 @@ def para_llamada(configurable: dict[str, str]):
     )
 
 
-def desde_navegador():
-    """El agente de una llamada del navegador: anónimo, sin cuenta.
+def desde_navegador(parametros: dict[str, str] | None = None):
+    """`AGENT_FACTORY`: el agente de UNA conexión del navegador.
 
-    Es lo que usa la demo. `AGENT_FACTORY` apunta acá, y el relay la llama una
-    vez por conexión — de ahí sale el id, y de ahí que dos pestañas abiertas a
-    la vez no compartan ni identidad ni idempotencia.
+    El relay la llama una vez por conexión y le pasa los parámetros de la URL
+    del websocket. De ahí sale el id de llamada, y de ahí que dos pestañas
+    abiertas a la vez no compartan ni identidad ni idempotencia.
+
+    `?telefono=` sólo significa algo con `VOZ_NUMERO_POR_PARAMETRO` encendido,
+    que es demo y está apagado por default. Sin eso —y sin el parámetro— el que
+    llama es un desconocido: catálogo, stock y alta, que es exactamente lo que
+    puede hacer un desconocido por WhatsApp.
+
+    NUNCA LEVANTA, y no es prolijidad. El relay trata un factory que falla como
+    «servime el agente de fábrica», y el de fábrica es el de RESTAURANTE. Con
+    ERPNext caído un segundo, el que llama a la distribuidora de lácteos
+    escuchaba a una recepcionista ofreciéndole mesa para dos. Lo encontró un
+    arranque de verdad del servidor, no un test — los tests tenían el lookup
+    mockeado, así que ninguno podía ver la excepción que subía.
+
+    La degradación correcta es atender SIN cuenta: el que llama pregunta
+    precios y lo suyo lo ve una persona.
     """
-    return para_llamada(identidad.de_navegador(id_llamada=uuid.uuid4().hex))
+    id_llamada = uuid.uuid4().hex
+    declarado = str((parametros or {}).get("telefono") or "").strip()
+    if declarado:
+        try:
+            return para_llamada(identidad.de_parametro(declarado, id_llamada=id_llamada))
+        except identidad.IdentidadDeclaradaApagada:
+            print("[voz] llegó ?telefono= y VOZ_NUMERO_POR_PARAMETRO está apagado")
+        except identidad.LlamadaDeEquipo:
+            print("[voz] llegó ?telefono= de un número del equipo: se atiende anónimo")
+        except Exception as exc:
+            print(f"[voz] no se pudo resolver ?telefono=: {type(exc).__name__}: {exc}")
+    return para_llamada(identidad.de_navegador(id_llamada=id_llamada))
 
 
 def desde_telefono(numero: str, *, id_llamada: str = ""):

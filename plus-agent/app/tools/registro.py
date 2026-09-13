@@ -65,7 +65,6 @@ from app.tools.pedidos import (
     recordar,
 )
 
-
 TOOLS_CLIENTES = [
     buscar_producto, consultar_stock, estado_pedido, pedido_habitual,
     # crear_cliente da de alta al REMITENTE con el teléfono del webhook: no

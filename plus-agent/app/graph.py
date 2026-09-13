@@ -22,6 +22,7 @@ from app.conversacion import (
     recortar_historial,
     texto_plano,
 )
+
 # QUIÉN puede llamar a QUÉ vive en app/tools/registro.py, con los comentarios
 # que explican cada permiso. Se movió cuando apareció el segundo canal
 # (app/voz/): dos canales que arman su propia lista se desincronizan, y este

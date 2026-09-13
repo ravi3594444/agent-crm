@@ -286,3 +286,221 @@ def test_el_agente_de_voz_declara_las_herramientas_del_cliente():
     definicion = agente.para_llamada(identidad.de_navegador(id_llamada="c1"))
     assert [t["name"] for t in definicion.tools] == [t.name for t in TOOLS_CLIENTES]
     assert "REGLAS QUE NO PODÉS ROMPER" in definicion.build_prompt()
+
+
+# --- Un número que llega por parámetro (demo) ------------------------------
+
+
+def _con_parametro(monkeypatch, encendido=True):
+    monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "1" if encendido else "")
+    monkeypatch.setattr(router, "es_equipo", lambda numero: False)
+
+
+def test_un_numero_por_parametro_no_vale_si_no_esta_encendido(monkeypatch):
+    """Apagado es el default, y es lo que tiene que estar en producción."""
+    _con_parametro(monkeypatch, encendido=False)
+    with pytest.raises(identidad.IdentidadDeclaradaApagada):
+        identidad.de_parametro(CLIENTE, id_llamada="c1")
+
+
+def test_encendido_da_teléfono_pero_no_cuenta_de_otro(monkeypatch):
+    """Da de alta y pide para SÍ MISMO: `actor_phone` sí, `customer_code` no."""
+    _con_parametro(monkeypatch)
+    monkeypatch.setattr(clientes, "buscar_por_telefono", lambda n, get_list=None: None)
+    contexto = identidad.de_parametro(CLIENTE, id_llamada="c1")
+    assert contexto["actor_phone"] == _telefono.normalizar(CLIENTE)
+    assert contexto["customer_code"] == ""
+    assert contexto["actor_scope"] == "customer"
+
+
+def test_un_numero_declarado_no_abre_la_cuenta_de_un_cliente_que_ya_existe(monkeypatch):
+    """La diferencia con `de_telefono`: acá el número lo eligió quien abrió la
+    página. Resolver una cuenta existente dejaría a cualquiera escribir el
+    número de la panadería y leerle los pedidos."""
+    _con_parametro(monkeypatch)
+    monkeypatch.setattr(
+        clientes,
+        "buscar_por_telefono",
+        lambda n, get_list=None: {"name": "CUST-0001", "customer_name": "Panadería"},
+    )
+    contexto = identidad.de_parametro(CLIENTE, id_llamada="c1")
+    assert contexto["customer_code"] == ""
+    # Y tampoco se queda con el teléfono: si no es su cuenta, no es su número.
+    assert contexto["actor_phone"] == ""
+
+
+def test_un_numero_del_equipo_por_parametro_tampoco_entra(monkeypatch):
+    monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "1")
+    monkeypatch.setattr(router, "es_equipo", lambda numero: True)
+    with pytest.raises(identidad.LlamadaDeEquipo):
+        identidad.de_parametro(EQUIPO, id_llamada="c1")
+
+
+# --- El factory que arma el agente de una conexión -------------------------
+
+
+def test_el_factory_sin_parametros_atiende_anonimo():
+    pytest.importorskip("calling_agent")
+    definicion = agente.desde_navegador({})
+    assert "no tiene cuenta de cliente registrada" in definicion.build_prompt()
+
+
+def test_el_factory_ignora_un_telefono_si_la_demo_esta_apagada(monkeypatch):
+    """Un parámetro que llega con la demo apagada no es un error: es anónimo."""
+    pytest.importorskip("calling_agent")
+    monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "")
+    definicion = agente.desde_navegador({"telefono": CLIENTE})
+    assert "no tiene cuenta de cliente registrada" in definicion.build_prompt()
+
+
+def test_el_factory_nunca_levanta_con_un_numero_del_equipo(monkeypatch):
+    """Si levantara, el relay serviría el agente de restaurante de fábrica —
+    peor que atender sin cuenta."""
+    pytest.importorskip("calling_agent")
+    monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "1")
+    monkeypatch.setattr(router, "es_equipo", lambda numero: True)
+    definicion = agente.desde_navegador({"telefono": EQUIPO})
+    assert "no tiene cuenta de cliente registrada" in definicion.build_prompt()
+
+
+# --- Lo que el prompt tiene que decir sobre datos dictados ------------------
+
+
+def test_el_prompt_pide_los_datos_de_a_uno_y_los_repite():
+    texto = prompt_voz.construir(customer_code="")
+    assert "DATOS QUE TE DICTAN" in texto
+    assert "dígito por dígito" in texto.lower()
+
+
+def test_el_prompt_no_pide_el_telefono_por_voz():
+    """`crear_cliente` no acepta un teléfono y no puede: si el modelo lo
+    pidiera, el cliente daría uno y el agente no tendría dónde ponerlo."""
+    texto = prompt_voz.construir(customer_code="")
+    assert "No pidas el teléfono" in texto
+
+
+def test_el_factory_con_la_demo_encendida_le_da_el_telefono_al_agente(monkeypatch):
+    """El camino feliz del parámetro, que faltaba.
+
+    Sin este test, un factory que ignorara `?telefono=` por completo dejaba los
+    29 tests en verde: los otros tres sólo miran que NO se use el número
+    —apagado, equipo, cuenta existente— y todos pasan también si nunca se usa.
+    Acá se comprueba que el teléfono llega a la herramienta, que es lo único
+    que hace que `crear_cliente` pueda dar de alta al que llama.
+    """
+    pytest.importorskip("calling_agent")
+    monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "1")
+    monkeypatch.setattr(router, "es_equipo", lambda numero: False)
+    monkeypatch.setattr(clientes, "buscar_por_telefono", lambda n, get_list=None: None)
+
+    recibidos = []
+    monkeypatch.setattr(
+        herramientas,
+        "ejecutar",
+        lambda nombre, args, *, configurable: (
+            recibidos.append(configurable),
+            ("ok", False),
+        )[1],
+    )
+    definicion = agente.desde_navegador({"telefono": CLIENTE})
+    definicion.run_tool("buscar_producto", {})
+    assert recibidos[0]["actor_phone"] == _telefono.normalizar(CLIENTE)
+    assert recibidos[0]["customer_code"] == ""
+
+
+def test_dos_conexiones_con_numeros_distintos_no_se_mezclan(monkeypatch):
+    """Dos pestañas abiertas a la vez son dos clientes, no uno."""
+    pytest.importorskip("calling_agent")
+    monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "1")
+    monkeypatch.setattr(router, "es_equipo", lambda numero: False)
+    monkeypatch.setattr(clientes, "buscar_por_telefono", lambda n, get_list=None: None)
+
+    recibidos = []
+    monkeypatch.setattr(
+        herramientas,
+        "ejecutar",
+        lambda nombre, args, *, configurable: (
+            recibidos.append(configurable),
+            ("ok", False),
+        )[1],
+    )
+    otro = "+5493514444444"
+    uno = agente.desde_navegador({"telefono": CLIENTE})
+    dos = agente.desde_navegador({"telefono": otro})
+    uno.run_tool("buscar_producto", {})
+    dos.run_tool("buscar_producto", {})
+    assert [c["actor_phone"] for c in recibidos] == [
+        _telefono.normalizar(CLIENTE),
+        _telefono.normalizar(otro),
+    ]
+    # Y cada una con su propio id de idempotencia, o un pedido de una taparía
+    # el de la otra (`tools/pedidos.py::_message_key`).
+    assert recibidos[0]["inbound_message_id"] != recibidos[1]["inbound_message_id"]
+
+
+# --- ERPNext caído: degradar, nunca caerse ---------------------------------
+
+
+def _erpnext_caido(monkeypatch):
+    def explota(*args, **kwargs):
+        raise erpnext.ERPNextError("ERPNext no disponible durante la consulta de Customer")
+
+    monkeypatch.setattr(clientes, "buscar_por_telefono", explota)
+
+
+def test_erpnext_caido_no_le_da_el_agente_de_restaurante_al_que_llama(monkeypatch):
+    """Lo encontró un arranque de verdad, no un test: los tests mockeaban el
+    lookup, así que ninguno veía la excepción subir hasta el relay — que la
+    trata como «este factory no sirve» y sirve el suyo, el de restaurante."""
+    pytest.importorskip("calling_agent")
+    monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "1")
+    monkeypatch.setattr(router, "es_equipo", lambda numero: False)
+    _erpnext_caido(monkeypatch)
+    definicion = agente.desde_navegador({"telefono": CLIENTE})
+    assert definicion.name == "plus-clientes"
+    assert "REGLAS QUE NO PODÉS ROMPER" in definicion.build_prompt()
+
+
+def test_erpnext_caido_no_es_lo_mismo_que_no_tener_cuenta(monkeypatch):
+    """Un número declarado con ERPNext caído no puede darse de alta: no se pudo
+    descartar que la cuenta exista, y entregarle el teléfono sería entregarle
+    uno que puede ser de otro."""
+    monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "1")
+    monkeypatch.setattr(router, "es_equipo", lambda numero: False)
+    _erpnext_caido(monkeypatch)
+    contexto = identidad.de_parametro(CLIENTE, id_llamada="c1")
+    assert contexto["actor_phone"] == ""
+    assert contexto["customer_code"] == ""
+
+
+def test_con_caller_id_una_caida_no_le_saca_el_telefono_al_que_llama(monkeypatch):
+    """La dirección contraria, y por eso son dos funciones: acá el número lo
+    puso la red, así que sigue valiendo y le permite darse de alta. Queda sin
+    `customer_code`, que es lo único que ERPNext no pudo contestar."""
+    monkeypatch.setattr(router, "es_equipo", lambda numero: False)
+    _erpnext_caido(monkeypatch)
+    contexto = identidad.de_telefono(CLIENTE, id_llamada="c1")
+    assert contexto["actor_phone"] == _telefono.normalizar(CLIENTE)
+    assert contexto["customer_code"] == ""
+
+
+def test_el_factory_aguanta_cualquier_fallo_al_resolver_el_numero(monkeypatch):
+    """La red de seguridad de último recurso, y la única forma de probarla.
+
+    Los fallos que ya sabemos nombrar los atrapa `identidad`. Éste es el que no
+    sabemos nombrar todavía —un bug nuevo en el lookup, un Redis que se cayó
+    adentro de `es_equipo`— y lo que está en juego es siempre lo mismo: si sube
+    hasta el relay, el que llama escucha al agente de restaurante.
+
+    Sin este test, sacar el `except Exception` del factory deja los 34 verdes.
+    """
+    pytest.importorskip("calling_agent")
+
+    def explota(*args, **kwargs):
+        raise RuntimeError("un fallo que todavía no sabemos nombrar")
+
+    monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "1")
+    monkeypatch.setattr(identidad, "de_parametro", explota)
+    definicion = agente.desde_navegador({"telefono": CLIENTE})
+    assert definicion.name == "plus-clientes"
+    assert "REGLAS QUE NO PODÉS ROMPER" in definicion.build_prompt()

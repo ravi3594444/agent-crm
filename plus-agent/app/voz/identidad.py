@@ -25,7 +25,10 @@ desconocido por WhatsApp—.
 """
 from __future__ import annotations
 
-from app import clientes, erpnext, router, telefono as _telefono
+import os
+
+from app import clientes, erpnext, router
+from app import telefono as _telefono
 
 # Lo que viaja al contexto de las herramientas. Es el mismo diccionario que
 # arma `app/graph.py` para WhatsApp; las herramientas no distinguen el canal, y
@@ -35,6 +38,32 @@ _ALCANCE = "customer"
 
 class LlamadaDeEquipo(RuntimeError):
     """Un número del equipo llamó al canal de clientes."""
+
+
+class IdentidadDeclaradaApagada(RuntimeError):
+    """Llegó un número por parámetro y `VOZ_NUMERO_POR_PARAMETRO` está apagado."""
+
+
+def numero_por_parametro_habilitado() -> bool:
+    """Si un número que llega por parámetro de conexión vale como identidad.
+
+    **Apagado por default, y así tiene que quedar en producción.** Un número
+    que llega por la URL lo eligió el que abre la página: no lo firmó Meta ni
+    lo puso la red telefónica. Sirve para una demo del dueño —es la única forma
+    de mostrar un pedido de punta a punta desde el navegador, donde no hay
+    `caller_id` de ninguna clase— y para nada más.
+
+    Lo que NO puede hacer, ni con esto encendido, está en `de_parametro`: no
+    abre la cuenta de un cliente que ya existe. Un número declarado da de alta
+    y pide para SÍ MISMO; nunca lee lo de otro.
+    """
+    return os.getenv("VOZ_NUMERO_POR_PARAMETRO", "").strip().lower() in {
+        "1",
+        "true",
+        "si",
+        "sí",
+        "yes",
+    }
 
 
 def de_telefono(numero: str, *, id_llamada: str) -> dict[str, str]:
@@ -53,7 +82,7 @@ def de_telefono(numero: str, *, id_llamada: str) -> dict[str, str]:
     if canonico:
         # Mismo lookup que `main._contexto`, y por eso tolera los formatos
         # tipeados a mano que hay en las fichas (+54 9 351 …, 0351 15 …).
-        ficha = clientes.buscar_por_telefono(canonico, get_list=erpnext.get_list)
+        ficha = _ficha_o_none(canonico)
         if ficha:
             customer_code = str(ficha["name"])
     return _configurable(customer_code=customer_code, actor_phone=canonico, id_llamada=id_llamada)
@@ -74,6 +103,35 @@ def de_navegador(*, id_llamada: str) -> dict[str, str]:
     return _configurable(customer_code="", actor_phone="", id_llamada=id_llamada)
 
 
+def _ficha_y_si_se_pudo(canonico: str) -> tuple[dict | None, bool]:
+    """(ficha, se_pudo_leer). Un ERPNext caído NO es «no tiene cuenta».
+
+    Los dos son `None` para el que pregunta «¿tiene cuenta?», y confundirlos
+    tiene costos opuestos según quién llama, así que la respuesta trae las dos
+    cosas y decide cada llamador. Esto salió de correr el servidor de verdad:
+    con ERPNext apagado, la excepción subía hasta el relay, que la trata como
+    «este factory no sirve» y sirve SU agente de fábrica — el de restaurante.
+    Un cliente de una distribuidora de lácteos escuchando a una recepcionista
+    de restaurante es peor que cualquier degradación.
+    """
+    try:
+        return clientes.buscar_por_telefono(canonico, get_list=erpnext.get_list), True
+    except erpnext.ERPNextError as exc:
+        print(f"[voz] no se pudo leer la ficha del que llama: {exc}")
+        return None, False
+
+
+def _ficha_o_none(canonico: str) -> dict | None:
+    """Para `de_telefono`, donde el número lo puso la red y sigue valiendo.
+
+    Sin ficha el que llama queda sin `customer_code` —no puede consultar ni
+    pedir sobre una cuenta— pero conserva su teléfono verificado, que es lo
+    que le permite darse de alta. Degradar eso también sería castigar al
+    cliente por una caída que no es suya.
+    """
+    return _ficha_y_si_se_pudo(canonico)[0]
+
+
 def _configurable(*, customer_code: str, actor_phone: str, id_llamada: str) -> dict[str, str]:
     return {
         "actor_scope": _ALCANCE,
@@ -87,3 +145,45 @@ def _configurable(*, customer_code: str, actor_phone: str, id_llamada: str) -> d
         "inbound_message_id": f"voz:{id_llamada}" if id_llamada else "",
         "thread_id": f"voz:{id_llamada}" if id_llamada else "",
     }
+
+
+def de_parametro(numero: str, *, id_llamada: str) -> dict[str, str]:
+    """Contexto para un número que llegó por parámetro de conexión. DEMO.
+
+    El número NO sale de la conversación y el modelo no lo ve: viaja como
+    parámetro de la URL del websocket, se fija antes de que el que llama diga
+    una palabra y ninguna herramienta lo acepta como argumento. Por eso un
+    cliente no puede hablar para cambiarlo — que es la propiedad que hace que
+    esto sea una demo floja y no un agujero.
+
+    Tres cosas que no hace:
+
+    * no corre si `VOZ_NUMERO_POR_PARAMETRO` está apagado, que es el default;
+    * no atiende un número del equipo, igual que `de_telefono`;
+    * **no abre la cuenta de un cliente que ya existe**. Ésa es la diferencia
+      con `de_telefono`, donde el número lo puso la red. Acá lo eligió quien
+      abrió la página, así que resolver una cuenta existente sería dejar que
+      cualquiera escriba el número de la panadería y le lea los pedidos. Un
+      número declarado que ya tiene cuenta se atiende como desconocido: puede
+      preguntar precios, y para lo suyo lo ve una persona.
+    """
+    if not numero_por_parametro_habilitado():
+        raise IdentidadDeclaradaApagada(
+            "VOZ_NUMERO_POR_PARAMETRO no está encendido"
+        )
+    canonico = _telefono.normalizar(numero)
+    if not canonico:
+        return de_navegador(id_llamada=id_llamada)
+    if router.es_equipo(canonico):
+        raise LlamadaDeEquipo(canonico)
+    ficha, se_pudo_leer = _ficha_y_si_se_pudo(canonico)
+    if ficha or not se_pudo_leer:
+        # Ya tiene cuenta: anónimo, porque un número declarado nunca abre una
+        # cuenta que ya existe. Y si ERPNext no contestó, TAMBIÉN anónimo: no
+        # se pudo descartar que exista, y la dirección segura es la de no
+        # entregarle un teléfono que a lo mejor es de otro.
+        print("[voz] número por parámetro sin alta posible: se atiende anónimo")
+        return de_navegador(id_llamada=id_llamada)
+    return _configurable(
+        customer_code="", actor_phone=canonico, id_llamada=id_llamada
+    )

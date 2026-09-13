@@ -1,0 +1,52 @@
+# El servicio de voz: el relay de AssemblyAI sirviendo el agente de clientes.
+#
+# Es una imagen aparte de la del `agente` a propósito. Esa imagen atiende el
+# webhook de WhatsApp y corre los cuatro hilos de barrido, y no tiene por qué
+# cargar el relay ni necesitar `git` para instalarlo. Ésta sólo relaya audio.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /srv
+
+# El relay se CLONA en vez de instalarse pelado desde git porque la interfaz
+# del navegador (`static/`) no viaja en el wheel: vive en la raíz del repo, no
+# adentro del paquete. `calling_agent.main` la busca en STATIC_DIR, así que el
+# clon queda y se le apunta. `git` se saca en la misma capa: lo necesita pip,
+# no el proceso.
+ARG CALLING_AGENT_SHA=edc2ecdf23b13a9356958acb12dac4f92c007a70
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && git clone https://github.com/ravi3594444/the-calling-agent /opt/calling-agent \
+ && git -C /opt/calling-agent checkout "${CALLING_AGENT_SHA}" \
+ && pip install --no-cache-dir /opt/calling-agent \
+ && rm -rf /opt/calling-agent/.git \
+ && apt-get purge -y --auto-remove git \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV STATIC_DIR=/opt/calling-agent/static
+
+# Las del CRM. requirements-voz.txt ya trae requirements.txt adentro, pero el
+# pin del relay se saca con --no-deps porque acá se instaló desde el clon.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+
+# `AGENT_FACTORY` es lo que hace que el relay sirva ESTE agente y no el de
+# restaurante que trae de fábrica. Se llama una vez por conexión.
+ENV AGENT_FACTORY=app.voz.agente:desde_navegador \
+    PYTHONPATH=/srv \
+    PORT=8082
+
+RUN useradd --create-home --uid 10002 voz && chown -R voz:voz /srv
+USER voz
+
+EXPOSE 8082
+
+# El relay no tiene cola durable ni lease: cada llamada es un websocket y vive
+# en el proceso que la atendió. Un solo worker igual, porque el estado de una
+# llamada (la sesión upstream) no se comparte entre procesos.
+CMD ["uvicorn", "calling_agent.main:app", "--host", "0.0.0.0", "--port", "8082", \
+     "--no-access-log", "--proxy-headers", "--forwarded-allow-ips", "*"]

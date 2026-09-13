@@ -13,17 +13,30 @@ llama.
 El relay y la interfaz del navegador viven en el repo `the-calling-agent`. Este
 repo aporta el agente; aquél lo sirve.
 
+En el servidor, es un servicio más del compose, con su propio perfil:
+
 ```bash
-pip install -r requirements.txt          # trae `calling-agent`, pinneado
+docker compose --profile voz up -d --build voz     # http://localhost:8082
+```
+
+En local:
+
+```bash
+pip install -r requirements-voz.txt      # requirements.txt + el relay, pinneado
 export ASSEMBLYAI_API_KEY=...            # el único secreto que agrega la voz
 export AGENT_FACTORY=app.voz.agente:desde_navegador
-export PYTHONPATH=/srv/agent-crm/plus-agent
+export PYTHONPATH=$PWD
 python -m calling_agent.main
 ```
 
-`http://localhost:8080` y **Start conversation**. `localhost` es el único origen
-que los navegadores eximen de HTTPS para el micrófono; en cualquier otro lado
-hace falta un certificado de verdad.
+**El relay va aparte de la imagen del `agente`, a propósito.** Esa imagen
+atiende el webhook de WhatsApp y corre los cuatro hilos de barrido; no tiene por
+qué cargar el relay ni tener `git` para instalarlo desde un pin de commit. Por
+eso `requirements-voz.txt` existe y `requirements.txt` no lo menciona.
+
+Abrí la página y tocá **Start conversation**. `localhost` es el único origen que
+los navegadores eximen de HTTPS para el micrófono; en cualquier otro lado hace
+falta un certificado de verdad.
 
 `AGENT_FACTORY` es un `módulo:función` que el relay llama **una vez por
 conexión**. Por eso cada llamada tiene su identidad y su id de idempotencia, y
@@ -35,6 +48,7 @@ por eso dos pestañas abiertas a la vez no se pisan.
 | `AGENT_FACTORY` | `app.voz.agente:desde_navegador`. Vacío = el agente de restaurante del otro repo. |
 | `VOZ_AGENTE` | Voz de AssemblyAI. Default `diego` (multilingüe, español rioplatense). |
 | `NOMBRE_NEGOCIO` | Sale en el saludo. |
+| `VOZ_NUMERO_POR_PARAMETRO` | **Demo. Apagado por default.** Ver abajo. |
 
 ---
 
@@ -67,9 +81,38 @@ y en telefonía se falsifica sin equipo especial. De ahí las dos reglas de
 
 En el navegador no hay número de ninguna clase. `de_navegador()` no le da cuenta
 a nadie: catálogo, stock y alta, que es exactamente lo que puede hacer un
-desconocido por WhatsApp. **Dar cuenta por un número tipeado sería identidad
-declarada por el que llama**, que es el único tipo que este sistema nunca aceptó
-—cualquiera escribiría el número de otro y leería sus pedidos—.
+desconocido por WhatsApp.
+
+### El número por parámetro (`VOZ_NUMERO_POR_PARAMETRO`), que es de demo
+
+Sin número no se puede tomar un pedido: `crear_cliente` da de alta al que llama
+con su teléfono verificado, y sin teléfono no hay a quién dar de alta. Así que
+para mostrar un pedido de punta a punta desde el navegador hay una sola puerta,
+y está apagada por default:
+
+```
+http://localhost:8082/?telefono=5493511234567
+```
+
+El parámetro viaja en la URL del websocket. **No sale de la conversación y el
+modelo no lo ve**: se fija antes de que el que llama diga una palabra, ninguna
+herramienta lo acepta como argumento, y por eso nadie puede hablar para
+cambiarlo. Es la misma forma que tiene el número en WhatsApp —de afuera del
+mensaje— con una firma mucho peor: ahí lo firma Meta, acá lo escribió el que
+abrió la página.
+
+De ahí las tres cosas que no hace, ni encendido:
+
+* no corre con el flag apagado, que es el default y lo que va en producción;
+* no atiende un número del equipo;
+* **no abre la cuenta de un cliente que ya existe.** Ésta es la que importa: si
+  la abriera, cualquiera escribiría el número de la panadería y le leería los
+  pedidos. Un número declarado da de alta y pide para sí mismo, nunca lee lo de
+  otro. Con ERPNext caído tampoco da de alta, porque no se pudo descartar que la
+  cuenta exista.
+
+Para un cliente de verdad esto se apaga y el número lo trae el `caller_id` de la
+telefonía (`agente.desde_telefono`), que es de la red y no del que llama.
 
 ---
 
@@ -104,6 +147,28 @@ del tope y lo mira una persona. Un error que **achica** el pedido pasa igual —
 por eso la repetición es obligatoria, no un lujo de prolijidad.
 
 ---
+
+## Una caída de ERPNext no cambia de agente
+
+Lo encontró un arranque de verdad del servidor, no un test: con ERPNext apagado
+un segundo, la excepción del lookup subía hasta el relay, que trata un factory
+que falla como «servime el agente de fábrica» — **y el de fábrica es el de
+restaurante**. El que llamaba a una distribuidora de lácteos escuchaba a una
+recepcionista ofreciéndole mesa para dos.
+
+Ahora una caída degrada, no cambia de agente: el que llama queda sin cuenta —
+pregunta precios, y lo suyo lo ve una persona. Con `caller_id` conserva además
+su teléfono, porque ése lo puso la red y sigue valiendo; lo único que se pierde
+es el `customer_code`, que es lo que ERPNext no pudo contestar.
+
+## Cómo se piden los datos que se dictan
+
+Un nombre, una calle y un código postal dichos por teléfono son lo que peor se
+entiende: la línea va en 8 kHz y «Laprida» y «la brida» suenan igual. El bloque
+`DATOS QUE TE DICTAN` del prompt sigue lo que hace la industria para esto: un
+dato por turno, repetir cada uno antes de seguir, el número de la calle aparte
+del nombre, el código postal dígito por dígito y despacio, y deletrear la
+palabra dudosa en vez de volver a pedir la dirección entera.
 
 ## Lo que sigue
 

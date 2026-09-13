@@ -114,7 +114,7 @@ def ejecutar(
         resultado = herramienta.invoke(
             dict(argumentos or {}), config={"configurable": dict(configurable)}
         )
-    except Exception as exc:  # noqa: BLE001 - un fallo no puede cortar la llamada
+    except Exception as exc:
         print(f"[voz] herramienta {nombre} falló: {type(exc).__name__}")
         return ERROR_DE_HERRAMIENTA, True
     return str(resultado), False
