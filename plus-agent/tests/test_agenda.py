@@ -987,7 +987,10 @@ def test_una_solicitud_terminal_no_frena_la_baja(
 
     respuesta = _dar_de_baja()
 
-    assert "dado de baja" in respuesta.lower()
+    assert "baja tomada" in respuesta.lower()
+    # Y NO afirma que el borrador ya esté cerrado: eso lo hace el barrido
+    # después y puede fallar. Lo probado acá es que la baja quedó tomada.
+    assert "cerrado" not in respuesta.lower()
     assert len(agenda.vivas(PEDIDO, agenda.BAJA_DE_PEDIDO)) == 1
 
 
@@ -1018,12 +1021,21 @@ def test_la_baja_suelta_la_reserva_escribe_la_marca_y_encadena_el_aviso_al_dueno
     from app import solicitudes
 
     monkeypatch.setattr(
-        solicitudes, "soltar_reserva", lambda p: (True, "el borrador quedó cerrado")
+        solicitudes,
+        "soltar_reserva",
+        lambda p: (True, solicitudes.LO_CERRO_ESTA_LLAMADA),
     )
     _dar_de_baja()
 
+    # Ronda 1: suelta la reserva y ANOTA la fase. Todavía no hay marca — y la
+    # fila sigue viva, que es lo que impide que un fallo de acá en adelante se
+    # lleve el rastro puesto.
     agenda.tick(ahora=epoch(9, 1))
+    assert not marcas.existe("baja_cliente", PEDIDO)
+    assert len(agenda.vivas(PEDIDO, agenda.BAJA_DE_PEDIDO)) == 1
 
+    # Ronda 2: la marca y el aviso, y recién ahí la fila se cierra.
+    agenda.tick(ahora=epoch(9, 2))
     assert marcas.existe("baja_cliente", PEDIDO)
     assert agenda.vivas(PEDIDO, agenda.BAJA_DE_PEDIDO) == []
     assert len(agenda.vivas(PEDIDO, agenda.AVISO_BAJA_AL_DUENO)) == 1
@@ -1071,14 +1083,16 @@ def test_una_segunda_baja_del_mismo_pedido_no_escribe_una_segunda_marca(
         herramienta_con_reloj["docs"][PEDIDO] = {
             **_borrador_de(), "status": "Closed"
         }
-        return True, "el borrador quedó cerrado"
+        return True, solicitudes.LO_CERRO_ESTA_LLAMADA
 
     monkeypatch.setattr(solicitudes, "soltar_reserva", soltar)
 
     _dar_de_baja()
-    agenda.tick(ahora=epoch(9, 1))
+    agenda.tick(ahora=epoch(9, 1))   # suelta
+    agenda.tick(ahora=epoch(9, 2))   # marca y aviso
     _dar_de_baja()
-    agenda.tick(ahora=epoch(9, 2))
+    agenda.tick(ahora=epoch(9, 3))   # la segunda no encuentra nada que hacer
+    agenda.tick(ahora=epoch(9, 4))   # y el aviso de la primera sale
 
     # Una sola liberación, UNA sola marca, y al dueño se le dijo UNA vez.
     # Las tres mitades: `soltar_reserva` es idempotente por su cuenta, pero
@@ -1110,16 +1124,18 @@ def test_soltar_la_reserva_NO_espera_a_la_manana_y_el_aviso_al_dueno_SI(
     def soltar(pedido):
         soltadas.append(1.0)
         herramienta_con_reloj["docs"][PEDIDO] = {**_borrador_de(), "status": "Closed"}
-        return True, "el borrador quedó cerrado"
+        return True, solicitudes.LO_CERRO_ESTA_LLAMADA
 
     monkeypatch.setattr(solicitudes, "soltar_reserva", soltar)
     monkeypatch.setattr(tools_pedidos, "_ahora_del_negocio", lambda: momento(23))
 
     _dar_de_baja()
 
-    # 23:30, plena madrugada: la reserva se suelta IGUAL.
+    # 23:30, plena madrugada: la reserva se suelta IGUAL. Y la ronda siguiente
+    # —también de madrugada— escribe la marca y agenda el aviso.
     agenda.tick(ahora=epoch(23, 30))
     assert soltadas == [1.0]
+    agenda.tick(ahora=epoch(23, 31))
     assert marcas.existe("baja_cliente", PEDIDO)
     assert len(agenda.vivas(PEDIDO, agenda.AVISO_BAJA_AL_DUENO)) == 1
 
@@ -1138,3 +1154,197 @@ def test_soltar_la_reserva_NO_espera_a_la_manana_y_el_aviso_al_dueno_SI(
     agenda.tick(ahora=epoch(7, 30, dia=9))
     assert len(herramienta_con_reloj["al_dueno"]) == 1
     assert PEDIDO in herramienta_con_reloj["al_dueno"][0][0]
+
+
+# --------------------------------------------- lo que encontró la revisión de Qodo
+#
+# Cinco hallazgos High sobre esta función, y tres eran la MISMA raíz: soltar la
+# reserva es irreversible, lo de después puede fallar solo, y la fila terminaba
+# igual — así que un fallo transitorio se llevaba puesto el rastro o el aviso y
+# el reintento ya no podía distinguirse de una baja nueva.
+
+
+def test_un_cierre_del_equipo_en_el_medio_NO_se_le_atribuye_al_cliente(
+    herramienta_con_reloj, marcas_sin_redis, monkeypatch
+) -> None:
+    """`soltar_reserva` contesta True para un borrador que cerró CUALQUIERA.
+
+    Entre el `_documento` del handler y la lectura de `soltar_reserva` el equipo
+    puede rechazar el pedido. Si esa rama se toma como propia, el rastro del
+    pedido termina diciendo «lo dio de baja su cliente» sobre un cierre que hizo
+    una persona — un dato falso en la auditoría, que es peor que no tener nada.
+    """
+    from app import solicitudes
+
+    monkeypatch.setattr(
+        solicitudes,
+        "soltar_reserva",
+        lambda p: (True, solicitudes.YA_ESTABA_CERRADO),
+    )
+    _dar_de_baja()
+
+    agenda.tick(ahora=epoch(9, 1))
+    agenda.tick(ahora=epoch(9, 2))
+
+    # Ni marca, ni aviso al dueño: no fue una baja del cliente.
+    assert not marcas.existe("baja_cliente", PEDIDO)
+    assert agenda.vivas(PEDIDO, agenda.AVISO_BAJA_AL_DUENO) == []
+    # Y la fila se cierra: es un final convergente, no una falla que reintentar.
+    assert agenda.vivas(PEDIDO, agenda.BAJA_DE_PEDIDO) == []
+
+
+def test_si_la_marca_no_queda_la_fila_sigue_viva_en_vez_de_perder_el_rastro(
+    herramienta_con_reloj, marcas_sin_redis, monkeypatch
+) -> None:
+    """La reserva ya está suelta y es irreversible; la marca todavía no.
+
+    Terminar la fila acá perdería para siempre el único rastro de que la baja la
+    pidió el cliente, y ningún reintento podría reconstruirlo: para entonces el
+    borrador está cerrado y esa rama —correctamente— no escribe marca.
+    """
+    from app import solicitudes
+
+    monkeypatch.setattr(
+        solicitudes,
+        "soltar_reserva",
+        lambda p: (True, solicitudes.LO_CERRO_ESTA_LLAMADA),
+    )
+    _dar_de_baja()
+    agenda.tick(ahora=epoch(9, 1))          # suelta y anota la fase
+
+    herramienta_con_reloj["caidas"].add("escribir:[baja-por-cliente]")
+    agenda.tick(ahora=epoch(9, 2))          # la marca no entra
+
+    assert not marcas.existe("baja_cliente", PEDIDO)
+    assert len(agenda.vivas(PEDIDO, agenda.BAJA_DE_PEDIDO)) == 1
+
+    # Y cuando ERPNext vuelve, la fila termina lo suyo SIN volver a soltar nada.
+    herramienta_con_reloj["caidas"].clear()
+    agenda.tick(ahora=epoch(9, 3))
+
+    assert marcas.existe("baja_cliente", PEDIDO)
+    assert agenda.vivas(PEDIDO, agenda.BAJA_DE_PEDIDO) == []
+    assert len(agenda.vivas(PEDIDO, agenda.AVISO_BAJA_AL_DUENO)) == 1
+
+
+def test_la_fase_soltada_no_vuelve_a_soltar_la_reserva(
+    herramienta_con_reloj, marcas_sin_redis, monkeypatch
+) -> None:
+    """Un reintento de la segunda fase no puede re-ejecutar la primera.
+
+    Es la otra mitad del test de arriba: que la fila siga viva sólo sirve si lo
+    que reintenta es lo que faltaba. Volver a llamar `soltar_reserva` sobre un
+    borrador ya cerrado devolvería «ya estaba cerrado» y la baja perdería su
+    marca justo en el reintento que existía para escribirla.
+    """
+    from app import solicitudes
+
+    llamadas = {"n": 0}
+
+    def soltar(pedido):
+        llamadas["n"] += 1
+        return True, solicitudes.LO_CERRO_ESTA_LLAMADA
+
+    monkeypatch.setattr(solicitudes, "soltar_reserva", soltar)
+    _dar_de_baja()
+
+    agenda.tick(ahora=epoch(9, 1))
+    herramienta_con_reloj["caidas"].add("escribir:[baja-por-cliente]")
+    agenda.tick(ahora=epoch(9, 2))
+    herramienta_con_reloj["caidas"].clear()
+    agenda.tick(ahora=epoch(9, 3))
+
+    assert llamadas["n"] == 1
+    assert marcas.existe("baja_cliente", PEDIDO)
+
+
+def test_si_el_aviso_al_dueno_no_queda_agendado_la_fila_no_se_cierra(
+    herramienta_con_reloj, marcas_sin_redis, monkeypatch
+) -> None:
+    """El dueño tiene que enterarse de que le sacaron un pedido de la cola.
+
+    Si la fila terminara con el aviso sin agendar, no quedaría nada vivo que lo
+    reintentara y el dueño no se enteraría nunca.
+    """
+    from app import solicitudes
+
+    monkeypatch.setattr(
+        solicitudes,
+        "soltar_reserva",
+        lambda p: (True, solicitudes.LO_CERRO_ESTA_LLAMADA),
+    )
+    _dar_de_baja()
+    agenda.tick(ahora=epoch(9, 1))
+
+    monkeypatch.setattr(agenda, "crear", lambda *a, **k: None)
+    agenda.tick(ahora=epoch(9, 2))
+
+    assert len(agenda.vivas(PEDIDO, agenda.BAJA_DE_PEDIDO)) == 1
+
+
+def test_una_decision_que_aparece_despues_del_turno_frena_la_baja_en_el_barrido(
+    herramienta_con_reloj, marcas_sin_redis, monkeypatch
+) -> None:
+    """La comprobación de la herramienta no alcanza: pasaron 60 s sin lock.
+
+    La herramienta mira la solicitud en el turno del cliente y el barrido cierra
+    el borrador al menos un minuto después, con otro lock (`pendiente:`) que el
+    de la aceptación (`solicitud:`). En ese hueco se puede abrir una decisión, o
+    el cliente puede aceptar una contraoferta — y cerrar el borrador ahí es cómo
+    un pedido dado de baja termina con un «acepto» y un Submit encima.
+    """
+    from app import solicitudes
+
+    solto = {"n": 0}
+
+    def soltar(pedido):
+        solto["n"] += 1
+        return True, solicitudes.LO_CERRO_ESTA_LLAMADA
+
+    monkeypatch.setattr(solicitudes, "soltar_reserva", soltar)
+    _dar_de_baja()
+
+    # La decisión aparece DESPUÉS de que la herramienta contestó.
+    monkeypatch.setattr(
+        solicitudes, "leer", lambda pedido: type("S", (), {"estado": "pendiente"})()
+    )
+    agenda.tick(ahora=epoch(9, 1))
+
+    assert solto["n"] == 0
+    assert not marcas.existe("baja_cliente", PEDIDO)
+    # Y no termina en silencio: al cliente ya se le dijo que quedaba dado de
+    # baja, así que esto lo tiene que ver una persona.
+    assert len(herramienta_con_reloj["al_dueno"]) == 1
+
+
+def test_dos_workers_sobre_el_mismo_pedido_no_escriben_dos_marcas(
+    herramienta_con_reloj, marcas_sin_redis, monkeypatch
+) -> None:
+    """El lease del lock son 60 s y `soltar_reserva` puede gastar tres esperas
+    HTTP, así que dos workers pueden llegar a la segunda fase del mismo pedido.
+    Ni la marca ni la fila del aviso se protegen solas: `marcas.escribir` es un
+    `add_comment` pelado y `crear` con otro `ahora` da otro id.
+    """
+    from app import solicitudes
+
+    monkeypatch.setattr(
+        solicitudes,
+        "soltar_reserva",
+        lambda p: (True, solicitudes.LO_CERRO_ESTA_LLAMADA),
+    )
+    _dar_de_baja()
+    agenda.tick(ahora=epoch(9, 1))
+
+    (fila,) = agenda.vivas(PEDIDO, agenda.BAJA_DE_PEDIDO)
+    # Los dos workers corren el HANDLER, no `_despachar`: con el lease vencido
+    # los dos re-leyeron la fila mientras seguía viva, así que los dos entran a
+    # la segunda fase. Por `_despachar` esto no se puede escribir — el primero
+    # termina la fila y el segundo se va sin llamar al handler, que es el motivo
+    # por el que la primera versión de este test no mataba ninguna mutación:
+    # lo que lo hacía pasar era el estado terminal de la fila, no la dedup.
+    agenda._baja_de_pedido(fila, epoch(9, 2))
+    agenda._baja_de_pedido(fila, epoch(9, 3))
+
+    marcadas = marcas.filas("baja_cliente", PEDIDO, campos=["name"], techo=10)
+    assert len(marcadas) == 1
+    assert len(agenda.vivas(PEDIDO, agenda.AVISO_BAJA_AL_DUENO)) == 1

@@ -1187,9 +1187,17 @@ def dar_de_baja_pedido(
         # No quedó durable = no pasó. Se dice, nunca se finge.
         return "No pude dar de baja el pedido de forma durable."
 
-    # Al cliente: lo que es verdad AHORA y nada más. El pedido está dado de
-    # baja y no se prepara. Sin cuándo, sin qué pasa después, sin «listo».
+    # Lo que es verdad AHORA, para el MODELO, que es quien lee esto.
+    #
+    # Lo durable en este punto es la BAJA, no el cierre: el borrador lo cierra
+    # el barrido después, y puede tardar o fallar (ahí lo ve una persona). Así
+    # que acá no se afirma que el pedido ya esté cerrado ni que el stock esté
+    # libre — se afirma lo único probado, que la baja quedó tomada y que el
+    # pedido no se va a preparar, que es el compromiso del negocio y no un
+    # estado de ERPNext.
+    #
+    # Sin cuándo, sin qué pasa después y sin «listo».
     return (
-        f"El pedido {pedido} queda dado de baja y no se prepara. "
-        "Decíselo sin prometer nada más."
+        f"Baja tomada para el pedido {pedido}: no se va a preparar. "
+        "Decíselo en una línea, sin prometer nada más y sin hablar de tiempos."
     )

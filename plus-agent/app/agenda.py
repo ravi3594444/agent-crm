@@ -1249,6 +1249,9 @@ def _seguimiento(fila: Fila, ahora: float) -> Resultado | None:
 BAJA_ESPERA_SEGUNDOS = 300.0
 BAJA_INTENTOS = 5
 
+# La fase que la fila guarda entre rondas: «la reserva ya la solté yo».
+BAJA_SOLTADA = "soltada"
+
 
 def _baja_de_pedido(fila: Fila, ahora: float) -> Resultado | None:
     """El cliente se dio de baja su propio borrador: soltar la reserva.
@@ -1259,10 +1262,25 @@ def _baja_de_pedido(fila: Fila, ahora: float) -> Resultado | None:
     llama `policy_*` explícito, así que el `update_status` lo hace la identidad
     de política y ninguna herramienta la toca. Ésa es toda la razón de que esto
     sea una fila y no las últimas diez líneas de la herramienta.
+
+    DOS FASES, y la fila guarda en cuál está. Soltar la reserva es
+    irreversible; la marca y el aviso al dueño vienen después y pueden fallar
+    solos. Si la fila terminara igual, un fallo transitorio de ERPNext borraría
+    para siempre el rastro de la baja o el aviso — y el reintento no puede
+    distinguirse de una baja nueva, porque para entonces el borrador ya está
+    cerrado. Así que la fila NO se cierra hasta que las dos cosas quedaron
+    durables, y `fase="soltada"` es lo que dice que la reserva ya se soltó y no
+    hay que volver a tocarla.
     """
-    from app import marcas, solicitudes
+    from app import solicitudes
 
     sobre = fila.sobre
+
+    # Fase 2: la reserva YA la soltó esta fila en una ronda anterior. No se
+    # re-lee el documento ni se vuelve a soltar nada: sólo falta lo de después.
+    if fila.params.get("fase") == BAJA_SOLTADA:
+        return _completar_baja(fila, ahora, str(fila.params.get("frase") or ""))
+
     doc = _documento(sobre)
     if doc is None:
         # No pude leer. La próxima ronda vuelve a preguntar: fallar cerrado es
@@ -1276,41 +1294,145 @@ def _baja_de_pedido(fila: Fila, ahora: float) -> Resultado | None:
         # escribe la marca. «Cerrado por alguien» no es «lo dio de baja su
         # cliente», y escribirla acá pondría esa frase en el rastro de un
         # borrador que rechazó una persona.
-        #
-        # Esta rama ES la idempotencia de la marca: una segunda baja del mismo
-        # pedido llega hasta acá y se va sin escribir nada. Por eso no hace
-        # falta un `marcas.existe` antes de escribir — `escribir` es un
-        # `add_comment` pelado, sin dedup, y lo que lo hace exactamente-una-vez
-        # es que abajo sólo se llega con el borrador todavía abierto.
         return Resultado(detalle=muerto)
+
+    # La solicitud se RE-LEE acá, no alcanza con la que miró la herramienta.
+    # Entre aquel turno y esta ronda pasaron al menos 60 s sin ningún lock
+    # compartido, y en ese hueco se pudo abrir una decisión —o el cliente pudo
+    # aceptar una contraoferta— sobre este mismo pedido. Cerrar el borrador
+    # mientras una decisión corre es cómo un pedido dado de baja termina con un
+    # «acepto» y un Submit encima.
+    en_curso = _hay_decision_en_curso(sobre)
+    if en_curso is None:
+        return None  # no pude saber: la próxima ronda vuelve a preguntar
+    if en_curso:
+        return _baja_que_decide_una_persona(fila, ahora)
 
     ok, frase = solicitudes.soltar_reserva(sobre)
     if not ok:
         return _baja_sin_prueba(fila, ahora, frase)
+    if frase == solicitudes.YA_ESTABA_CERRADO:
+        # Éxito, pero NO de esta fila: `soltar_reserva` contesta lo mismo para
+        # un borrador que cerró cualquier otro, y entre el `_documento` de
+        # arriba y su propia lectura el equipo pudo rechazarlo. Atribuirle al
+        # cliente el cierre que hizo una persona es escribir un dato falso en
+        # el rastro del pedido, así que esto termina como lo que es: convergente
+        # y sin marca.
+        return Resultado(detalle="el borrador ya estaba cerrado cuando fui a soltarlo")
 
-    # De acá para abajo la reserva está SUELTA y comprobada (`soltar_reserva`
-    # re-lee después de escribir), así que `ya_paso=True`: pase lo que pase con
-    # la marca o con el aviso, la fila no vuelve a intentar cerrar un borrador
-    # que ya está cerrado.
+    # La reserva está suelta, comprobada, y la soltó ESTA fila. Se anota la
+    # fase ANTES de lo que puede fallar, para que un reintento sepa que no
+    # tiene que volver a cerrar nada.
+    return Resultado(
+        detalle=f"reserva soltada; {frase}",
+        reprogramar=ahora,
+        params={**dict(fila.params or {}), "fase": BAJA_SOLTADA, "frase": frase},
+    )
+
+
+def _completar_baja(fila: Fila, ahora: float, frase: str) -> Resultado | None:
+    """Lo que va DESPUÉS de una reserva ya soltada: la marca y el aviso.
+
+    Las dos son idempotentes por su cuenta, y tienen que serlo: `_despachar`
+    toma el lock con un lease de 60 s y `soltar_reserva` puede gastar tres
+    esperas HTTP, así que dos workers pueden llegar acá sobre el mismo pedido.
+    `marcas.escribir` es un `add_comment` pelado, sin dedup, y `crear` con otro
+    `ahora` da otro id — o sea que ninguna de las dos se protege sola.
+
+    La fila no termina hasta que las dos quedaron: mientras falte una, esto
+    devuelve `None` y la próxima ronda vuelve por la que falta.
+    """
+    from app import marcas
+
+    sobre = fila.sobre
+
     try:
-        marcas.escribir("baja_cliente", sobre, f"{_sello(ahora)} {frase}")
+        ya_marcado = marcas.existe("baja_cliente", sobre)
     except Exception as exc:
-        # Su propio try, igual que en `_cerrar_borrador`: la baja YA ocurrió y
-        # esta ronda es la última que mira esta fila, así que si este fallo se
-        # comiera el aviso de abajo nadie se enteraría nunca.
-        print(f"[agenda] {sobre}: baja hecha, pero la marca no quedó ({type(exc).__name__})")
+        print(f"[agenda] {sobre}: no pude leer la marca de baja ({type(exc).__name__})")
+        return None
+    if not ya_marcado:
+        try:
+            marcas.escribir(
+                "baja_cliente", sobre, f"{_sello(ahora)} {frase}", exigir=True
+            )
+        except Exception as exc:
+            # `exigir=True` LEVANTA si no quedó escrito, y acá eso importa: la
+            # marca es el único rastro de que la baja la pidió el cliente. La
+            # fila sigue viva y vuelve por ella.
+            print(f"[agenda] {sobre}: la marca de baja no quedó ({type(exc).__name__})")
+            return None
 
-    cliente = str(doc.get("customer_name") or doc.get("customer") or "")
+    if vivas(sobre, AVISO_BAJA_AL_DUENO):
+        # Ya está agendado —esta fila lo creó en una ronda anterior, o lo creó
+        # el otro worker—. No se crea un segundo.
+        return Resultado(detalle=f"baja pedida por el cliente; {frase}")
+
     aviso = crear(
-        sobre, AVISO_BAJA_AL_DUENO, ahora, params={"cliente": cliente}, ahora=ahora
+        sobre,
+        AVISO_BAJA_AL_DUENO,
+        ahora,
+        params={"cliente": _nombre_del_cliente(sobre)},
+        ahora=ahora,
     )
     if aviso is None:
-        # No quedó durable = no pasó. Se dice, no se finge: el stock está
-        # liberado igual y eso es lo que no podía esperar, pero el dueño se
-        # queda sin el aviso y el log es lo único que lo cuenta.
-        print(f"[agenda] {sobre}: baja hecha, pero el aviso al dueño no quedó agendado")
+        # No quedó durable = no pasó. La fila NO se cierra: si se cerrara, el
+        # dueño no se enteraría nunca de que le sacaron un pedido de la cola, y
+        # no habría nada vivo que lo reintentara.
+        print(f"[agenda] {sobre}: el aviso de baja al dueño no quedó agendado")
+        return None
 
-    return Resultado(detalle=f"baja pedida por el cliente; {frase}", ya_paso=True)
+    return Resultado(detalle=f"baja pedida por el cliente; {frase}")
+
+
+def _nombre_del_cliente(sobre: str) -> str:
+    """Para el aviso al dueño. Un nombre que no se pudo leer no frena nada."""
+    doc = _documento(sobre)
+    if doc is None:
+        return ""
+    return str(doc.get("customer_name") or doc.get("customer") or "")
+
+
+def _hay_decision_en_curso(sobre: str) -> bool | None:
+    """¿Hay una solicitud NO terminal sobre este pedido? None = no pude saber.
+
+    Tres respuestas, porque las tres terminan distinto: sí frena, no sigue, y
+    «no sé» no hace nada — que es fallar cerrado sobre algo irreversible.
+    """
+    from app import solicitudes
+
+    try:
+        solicitud = solicitudes.leer(sobre)
+    except Exception as exc:
+        print(f"[agenda] {sobre}: no pude leer la solicitud ({type(exc).__name__})")
+        return None
+    return solicitud is not None and solicitud.estado not in solicitudes.TERMINALES
+
+
+def _baja_que_decide_una_persona(fila: Fila, ahora: float) -> Resultado | None:
+    """Apareció una decisión entre el turno del cliente y esta ronda.
+
+    No se suelta nada: el borrador puede estar por confirmarse. Al cliente ya
+    se le dijo que quedaba dado de baja, así que esto NO puede terminar en
+    silencio — lo tiene que resolver una persona, y se le dice con el mismo
+    aviso que usa una baja trabada.
+    """
+    from app import idioma, notificar
+
+    sobre = fila.sobre
+    asunto, cuerpo = baja_trabada(
+        sobre, "apareció una decisión en curso sobre el pedido", idioma.gerencia()
+    )
+    try:
+        avisado = bool(
+            notificar.avisar_dueno(
+                asunto, cuerpo, plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE"
+            )
+        )
+    except Exception as exc:
+        print(f"[agenda] {sobre}: aviso de baja con decisión falló ({type(exc).__name__})")
+        return None
+    return Resultado(detalle="hay una decisión en curso; lo ve una persona") if avisado else None
 
 
 def _baja_sin_prueba(fila: Fila, ahora: float, frase: str) -> Resultado | None:
