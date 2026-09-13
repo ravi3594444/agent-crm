@@ -19,6 +19,11 @@ from demo import falso_erpnext as fe
 from demo import falso_meta as fm
 from demo import falso_modelo as md
 
+# El piloto corre en un almacén argentino: los montos que afirma este archivo
+# tienen forma argentina, y lo declara en vez de heredarlo del entorno. Ver
+# `_locale_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.locale("es_AR")
+
 AGENTE = "token demo-agente-key:demo-agente-secret"
 GERENCIA = "token demo-gerencia-key:demo-gerencia-secret"
 POLITICA = "token demo-politica-key:demo-politica-secret"

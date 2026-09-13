@@ -23,6 +23,10 @@ from unittest.mock import Mock
 import pytest
 
 from app import acciones, aprobacion, erpnext, locks, main, notificar, router, solicitudes
+
+# Afirma texto que lee el dueño, así que declara su idioma en vez de heredarlo.
+# El resumen de decisión que devuelve `main` ya sale en el idioma del equipo.
+pytestmark = pytest.mark.idioma("es")
 from app.graph import TOOLS_CLIENTES, TOOLS_GERENCIA
 from app.runtime_context import SIN_PERMISO
 

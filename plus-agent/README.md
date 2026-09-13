@@ -50,7 +50,9 @@ LangGraph is one line in `requirements.txt`. Everything else here is yours.
 | `app/outbound_status.py` | Delivery tracking of every outbound message (sent / delivered / read / failed) |
 | `app/whatsapp.py` | Outbound messages and templates |
 | `app/briefing.py` | 07:00 WhatsApp morning briefing (`deploy/crontab`) |
-| `deploy/seed_dairy.py` | Demo catalog and customers for an empty staging ERPNext |
+| `deploy/seed_dairy.py` | Demo catalog and customers for an empty staging ERPNext, Spanish or English (`--dataset en`) |
+| `deploy/cuentas_inventario.py` | Sets the company's inventory and stock-adjustment accounts, which is what the stock step needs to stop answering `417` |
+| `deploy/cargar_catalogo.py` | The client's REAL catalogue from a CSV: items, prices and opening stock. Dry run by default |
 | `deploy/crontab` | Host cron line for the briefing |
 | `docker-compose.yml` | Agent + Redis Stack (+ `briefing` on demand) |
 | `Dockerfile`, `Makefile`, `.env.example`, `pyproject.toml` | Build, shortcuts, configuration, lint config |
@@ -789,6 +791,12 @@ confirming the order.
    authorized ERPNext selling price list and currency. Auto-confirmation fails
    closed if either is missing or if a line has a different UOM, rate, validity
    window, customer-specific price or discount.
+   Set `LOCALE` next to them to the shape a person reads a number in: `es_AR`
+   gives `$12.000` and `$1.500,50`, `en_US` gives `$12,000` and `$1,500.50`.
+   It is **not** the language of the prose — an Argentine store whose owner
+   reads English uses English with `es_AR` — and it never arrives by WhatsApp:
+   a number's shape is not an owner limit. Unset or unknown means `es_AR`,
+   which is what the code wrote before the variable existed.
 6. `make up` — brings up the agent and Redis Stack on port **8081** (8080 is
    ERPNext) and waits for `/health`. To run inside the existing ERPNext stack
    instead, copy the `agente` and `redis` services from `docker-compose.yml`
@@ -1051,6 +1059,99 @@ setup user with more permissions than any runtime identity. Inject that user's
 store them in the service `.env`. The stock reconciliation remains a draft for
 a person to review and submit, and reruns reuse an identical non-cancelled
 reconciliation instead of creating duplicates.
+
+It seeds the Spanish catalog by default and the English one with
+`--dataset en` (or `SEED_DATASET=en`): the same thirteen items, seven
+customers and quantities, with English names, codes and round dollar prices.
+Prices are invented in both — ask the client for his real ones. The dataset
+only changes the DATA: an English demo also needs `IDIOMA_GERENCIA=en` (what
+the owner reads) and `LOCALE=en_US` (the shape of a number).
+
+**Each dataset declares its currency** (`ARS` for the Spanish one, `USD` for
+the English one) and writes it on every Item Price, along with the UOM. The
+script **refuses to seed** when the price list is in another currency, because
+nothing about that combination raises an error by itself: 1.20 in a peso list
+is a plausible price, and the catalog silently becomes a thousand times
+cheaper than every ceiling in `AUTO_CONFIRM_MAX`. Seed the English dataset
+against a USD price list, and point `AUTO_CONFIRM_PRICE_LIST` at it.
+
+### The client's real catalogue
+
+The seed is a demo. Two deploy scripts take a deployment from demo data to the
+client's own, and both are run by a person with Administrator credentials
+passed per process, exactly like the seed above — never from a tool, never
+from the service `.env`, and never anywhere near the three runtime identities.
+
+**First, make the stock step work at all.** On a fresh ERPNext the company has
+no Default Inventory Account and no Stock Adjustment Account, so every Stock
+Reconciliation is refused with a Frappe `ValidationError` — HTTP `417`. Until
+that is fixed no opening stock has ever loaded, and `STOCK_CONFIABLE=true`
+would be a promise with nothing behind it.
+
+Both scripts run **on the host from `plus-agent/`, with the project venv** —
+the same way `make seed` runs the seed. The production image only copies
+`app/`, so `/srv/deploy` does not exist inside the container, and putting
+Administrator-capable scripts in the service image would widen exactly what
+the identity split exists to keep narrow.
+
+```
+ERPNEXT_API_KEY=… ERPNEXT_API_SECRET=… \
+    .venv/bin/python deploy/cuentas_inventario.py                    # look
+ERPNEXT_API_KEY=… ERPNEXT_API_SECRET=… \
+    .venv/bin/python deploy/cuentas_inventario.py --aplicar --probar # fix, and prove it
+```
+
+If all you have is the container, mount the directory for that one run:
+
+```
+docker compose run --rm -v "$PWD/deploy:/srv/deploy:ro" \
+    -e ERPNEXT_API_KEY=… -e ERPNEXT_API_SECRET=… \
+    agente python /srv/deploy/cuentas_inventario.py --aplicar --probar
+```
+
+It finds the accounts by `account_type`, not by name, because a chart of
+accounts is in whatever language it was installed in. It creates what is
+missing under a group of the same type. It never picks between candidates: if
+no account of that type exists, or if several do, it lists them and stops —
+`--cuenta-inventario` / `--cuenta-ajuste` name the account to use,
+`--padre-inventario` / `--padre-ajuste` the group to create it under. `--probar`
+creates a draft Stock Reconciliation and deletes it again: the validation that
+raised the `417` runs on save, so saving is the only honest proof.
+
+**Then load the real list.** `cargar_catalogo.py` reads a CSV the owner fills
+in from whatever the client sends — `codigo, nombre, unidad, precio,
+stock_inicial, grupo` — and writes Items, Item Prices and one draft Stock
+Reconciliation. `--ejemplo` writes the template.
+
+```
+.venv/bin/python deploy/cargar_catalogo.py --ejemplo
+ERPNEXT_API_KEY=… ERPNEXT_API_SECRET=… \
+    .venv/bin/python deploy/cargar_catalogo.py catalogo.csv             # plan only
+ERPNEXT_API_KEY=… ERPNEXT_API_SECRET=… \
+    .venv/bin/python deploy/cargar_catalogo.py catalogo.csv --aplicar
+ERPNEXT_API_KEY=… ERPNEXT_API_SECRET=… \
+    .venv/bin/python deploy/cargar_catalogo.py catalogo.csv --verificar
+```
+
+A dry run is the default: without `--aplicar` it prints the whole plan and
+writes nothing. Every row is validated — against the file and against ERPNext —
+before anything is written, and a file with problems is refused whole, with a
+numbered list naming the line, because a half-loaded catalogue is worse than an
+unloaded one. Re-running with the same file changes nothing; re-running with
+three new rows adds three items. Prices go into the same price list the seed
+uses, read out of `seed_dairy.py` itself rather than written down twice.
+`--verificar` compares in both directions and reports price drift. If
+`AUTO_CONFIRM_PRICE_LIST` (or `AUTO_CONFIRM_CURRENCY`) names something other
+than what the seed writes to, the load is **refused**: the runtime reads only
+the configured list, so loading anywhere else produces a catalogue the bot
+cannot see a single price of.
+
+Every Item Price it writes carries an explicit `uom` and `currency`, for the
+same reason the seed does: `policy._precio_autorizado` discards any price whose
+UOM is not the order line's, so a catalogue loaded without one cannot
+auto-confirm a single order. A price that already exists without them is
+reported as an update and fixed on the next `--aplicar`, without touching the
+number.
 
 ## WhatsApp response and delivery contract
 

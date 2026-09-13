@@ -9,13 +9,23 @@ El cliente escribió "para mañana, 2 de septiembre" y el bot respondió
 """
 from __future__ import annotations
 
-from datetime import date
-
 import pytest
+from conftest import RelojDePrueba
 
 from app.tools.pedidos import FechaEntregaInvalida, _parse_fecha
 
-HOY = date(2026, 9, 1)
+# EL DÍA EN QUE SE VIO EL BUG, y por eso no se puede mover ni un día: «1 de
+# Septiembre» tiene que resolver a hoy, «30 de agosto» al año que viene y
+# «mañana» al 2. Es un dato del incidente, no una preferencia — lo dice el
+# docstring de arriba. Lo que cambia es de dónde sale: declarado por `RELOJ`, el
+# archivo aparece en `grep -rn RelojDePrueba tests/` junto a los otros que
+# dependen del reloj, en vez de esconder su fecha en un `date(...)` suelto.
+#
+# Este archivo ya hacía lo correcto —le PASA la fecha a `_parse_fecha(hoy=…)` en
+# vez de dejarlo leer el reloj—, así que acá no había nada que arreglar: es la
+# forma que los otros cinco copiaron.
+RELOJ = RelojDePrueba("2026-09-01")
+HOY = RELOJ.hoy
 
 
 @pytest.mark.parametrize(

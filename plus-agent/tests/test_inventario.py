@@ -16,25 +16,32 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
+from conftest import RelojDePrueba
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import erpnext, inventario
+from app import erpnext, inventario, reloj
 
-ZONA = ZoneInfo("America/Argentina/Buenos_Aires")
-AHORA = datetime(2026, 9, 2, 8, 0, tzinfo=ZONA)
+# EL DÍA Y LA HORA QUE ESTE ARCHIVO NOMBRA. Antes eran `ZONA` + `AHORA`, con
+# Buenos Aires escrito a mano — la misma zona en la que `inventario._momento`
+# lee el sello. Las dos puntas de la comparación salían del mismo literal, así
+# que la edad daba bien por construcción: es exactamente por qué el bug de #16
+# fue invisible justo acá. Ahora las 08:00 son hora DE PARED del negocio y el
+# sello se escribe con `RELOJ.sello_partido`, que es el que sabe en qué zona lo
+# escribe ERPNext — y por eso se le puede pedir OTRA.
+RELOJ = RelojDePrueba("2026-09-02")
 DEPOSITO = "Depósito A - LP"
 
 
 @pytest.fixture(autouse=True)
 def reloj_y_maestra(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(inventario, "_ahora", lambda: AHORA)
+    monkeypatch.setattr(inventario, "_ahora", lambda: RELOJ.a_las(8))
     monkeypatch.setenv("STOCK_CONFIABLE", "true")
     monkeypatch.setenv("STOCK_CONFIABLE_HORAS", "24")
 
@@ -54,8 +61,8 @@ def _conteos(
     documentos: list[dict] = []
     if hace_horas is not None or posting is not None:
         if posting is None:
-            momento = AHORA - timedelta(hours=hace_horas or 0)
-            posting = (momento.date().isoformat(), momento.strftime("%H:%M:%S"))
+            momento = RELOJ.a_las(8) - timedelta(hours=hace_horas or 0)
+            posting = RELOJ.sello_partido(momento)
         renglones = [
             {
                 "parent": "SR-0001",
@@ -238,8 +245,8 @@ def test_the_newest_confirmed_count_is_the_one_that_counts(
 ) -> None:
     """Several counts of the same product: the most recent decides, not the
     first row ERPNext happens to return."""
-    viejo = AHORA - timedelta(hours=40)
-    nuevo = AHORA - timedelta(hours=2)
+    viejo = RELOJ.a_las(8) - timedelta(hours=40)
+    nuevo = RELOJ.a_las(8) - timedelta(hours=2)
 
     def policy_get_list(
         doctype, filters=None, fields=None, limit=20, parent=None, order_by=None, start=0
@@ -332,14 +339,19 @@ def test_a_count_from_an_erpnext_in_another_timezone_is_trusted_when_it_is_stale
     las dos zonas coincidan. Quien lo cambie por una conversión en runtime
     tiene que hacerlo fallar a propósito, y ahí es cuando hay que releer por
     qué se eligió exigir en vez de convertir.
+
+    LAS DOS ZONAS SE NOMBRAN ACÁ, y es lo único de este archivo que las nombra.
+    El número que el test afirma —21,5 h— es la resta de los dos offsets, así
+    que la zona del negocio no puede venir del entorno: con la celda
+    `BUSINESS_TIMEZONE=Asia/Kolkata` de CI las dos serían la misma y el defecto
+    que este test mide no existiría. Es el patrón de `test_reloj.py`: un
+    instante y dos zonas escritas, cada una porque el assert la usa.
     """
+    monkeypatch.setenv(reloj.VARIABLE, "America/Argentina/Buenos_Aires")
+
     # Un conteo de hace 30 h, con la ventana en 24: vencido, sin discusión.
-    real = AHORA - timedelta(hours=30)
-    en_erpnext = real.astimezone(ZoneInfo("Asia/Kolkata"))
-    _conteos(
-        monkeypatch,
-        posting=(en_erpnext.date().isoformat(), en_erpnext.strftime("%H:%M:%S")),
-    )
+    real = RELOJ.a_las(8) - timedelta(hours=30)
+    _conteos(monkeypatch, posting=RELOJ.sello_partido(real, en=ZoneInfo("Asia/Kolkata")))
 
     # 30 h reales menos las 8:30 de offset = 21.5 h, que entra en la ventana.
     assert inventario.confiable("LECHE-1L", DEPOSITO) == (True, "")

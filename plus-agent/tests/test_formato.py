@@ -16,7 +16,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import aprobacion, whatsapp
-from app.formato import cantidad, pesos, whatsapp_texto
+from app.formato import cantidad, locale_configurado, pesos, whatsapp_texto
+
+# Este archivo afirma montos con forma argentina, así que la declara en vez de
+# heredarla del entorno. Los tests de `en_US` fijan el suyo en la llamada. Ver
+# `_locale_declarado` en tests/conftest.py.
+pytestmark = pytest.mark.locale("es_AR")
 
 # --- pesos ------------------------------------------------------------------
 
@@ -54,6 +59,207 @@ def test_pesos_none_y_basura_no_explotan() -> None:
 def test_pesos_redondea_a_entero_por_defecto() -> None:
     assert pesos(12000.4) == "$12.000"
     assert pesos(12000.6) == "$12.001"
+
+
+# LA MESA DE FIJACIÓN. Cada fila es UNA salida que hoy ve una persona en su
+# pantalla, escrita como literal y no como cuenta: es lo que hace que un cambio
+# de implementación sea un cambio de implementación y no un cambio de producto.
+#
+# Existe porque `pesos` está por dejar de dar vuelta los separadores a mano y
+# pasar a `babel.numbers.format_currency`. Un test que dice «los miles van con
+# punto» no alcanza para eso: la diferencia entre las dos implementaciones no es
+# el separador, es el redondeo del medio, el cero negativo y el `$` pegado o
+# separado del número. Por eso las filas se escribieron ANTES de tocar la
+# implementación, corriendo la vieja: si alguna se mueve al cambiar el motor,
+# se movió algo que el dueño lee.
+#
+# CON UNA EXCEPCIÓN, Y ESTÁ ABAJO: ninguna de estas 38 filas cae justo en el
+# medio, así que lo que fijan es «byte a byte salvo los empates». Los empates
+# SÍ se movieron, a propósito, y tienen su propia mesa en `EMPATES`.
+#
+# Los montos no son inventados: son los que ya afirman los otros tests y los
+# que arma el seed (tests/test_autonomia.py, tests/test_etapa_2e.py,
+# tests/test_demo.py), más los bordes que ninguno tenía escritos — el medio
+# exacto, el negativo que redondea a cero y la basura.
+FIJADOS_ES_AR = [
+    # (monto, decimales, lo que se ve)
+    (12000, 0, "$12.000"),
+    (98000, 0, "$98.000"),
+    (1234567, 0, "$1.234.567"),
+    (1000, 0, "$1.000"),
+    (999, 0, "$999"),
+    (200, 0, "$200"),
+    (50, 0, "$50"),
+    (19, 0, "$19"),
+    (4, 0, "$4"),
+    (1, 0, "$1"),
+    (0, 0, "$0"),
+    (9000, 0, "$9.000"),
+    (85000, 0, "$85.000"),
+    (8450, 0, "$8.450"),
+    (5000, 0, "$5.000"),
+    (30000, 0, "$30.000"),
+    (13000, 0, "$13.000"),
+    # Con decimales: el separador decimal es la coma.
+    (1500.5, 2, "$1.500,50"),
+    (1200.5, 2, "$1.200,50"),
+    (4800, 2, "$4.800,00"),
+    (1234567.89, 2, "$1.234.567,89"),
+    (0.5, 2, "$0,50"),
+    (0, 2, "$0,00"),
+    # Negativos: el signo va ANTES del símbolo.
+    (-12000, 0, "-$12.000"),
+    (-1500.5, 2, "-$1.500,50"),
+    (-0.5, 2, "-$0,50"),
+    # Redondeo. `12000,5` a cero decimales da $12.000 y no $12.001: es el
+    # redondeo al par de Python, y queda fijado acá porque un motor nuevo bien
+    # puede redondear el medio para arriba.
+    (12000.4, 0, "$12.000"),
+    (12000.5, 0, "$12.000"),
+    (12000.6, 0, "$12.001"),
+    (12001.5, 0, "$12.002"),
+    (1200.5, 0, "$1.200"),
+    # Un negativo que redondea a cero sigue mostrando el signo. Es feo y es lo
+    # que hay hoy: si un día se decide que no, se decide acá y a propósito.
+    (0.4, 0, "$0"),
+    (-0.4, 0, "-$0"),
+    (-0.6, 0, "-$1"),
+    # Lo que no es un número no rompe un mensaje: vale cero.
+    (None, 0, "$0"),
+    ("", 0, "$0"),
+    ("abc", 0, "$0"),
+    ("12000", 0, "$12.000"),
+]
+
+
+@pytest.mark.parametrize("monto, decimales, esperado", FIJADOS_ES_AR)
+def test_pesos_fijado_byte_a_byte(monto, decimales, esperado) -> None:
+    """La salida de HOY, byte a byte, para cada monto que alguien ya lee."""
+    assert pesos(monto, decimales) == esperado
+
+
+# LOS EMPATES, que es donde la mesa de arriba NO es byte a byte — y el único
+# lugar donde el cambio de motor cambió lo que ve una persona.
+#
+# La mesa de fijación tiene 38 filas y ninguna caía justo en el medio, así que
+# «pasa byte a byte» se dijo sin haber probado el caso que podía moverse. Sí se
+# movió: `pesos(2.675, 2)` daba $2,67 y ahora da $2,68.
+#
+# ES A PROPÓSITO Y ES MEJOR, y por eso se fija con los valores NUEVOS en vez de
+# volver atrás. `f"{2.675:,.2f}"` no redondea 2,675: redondea el double más
+# cercano, que es 2,67499999999999982…, así que baja. `Decimal("2.675")`
+# redondea el número que alguien escribió, y al par: sube a 2,68. Un total que
+# el dueño calculó con la cabeza y le da .68 no puede salir .67 en la pantalla
+# porque el binario quedó dos milmillonésimas abajo.
+#
+# Dos de los tres empates famosos dan lo mismo en los dos motores, y están acá
+# igual: que coincidan hoy no es una propiedad, es una coincidencia de reglas,
+# y esta mesa existe para que se note si mañana dejan de coincidir.
+EMPATES = [
+    # (monto, decimales, lo que se ve AHORA, lo que daba el motor viejo)
+    (2.675, 2, "$2,68", "$2,67"),
+    (0.015, 2, "$0,02", "$0,01"),
+    # Éstos dos ya coincidían: el double cae por debajo del medio y el redondeo
+    # al par del Decimal también baja.
+    (1.005, 2, "$1,00", "$1,00"),
+    (0.125, 2, "$0,12", "$0,12"),
+]
+
+
+@pytest.mark.parametrize("monto, decimales, esperado, motor_viejo", EMPATES)
+def test_pesos_redondea_el_numero_escrito_y_no_el_binario(
+    monto, decimales, esperado, motor_viejo
+) -> None:
+    """El contrato NUEVO, escrito para que nadie lo "restaure" sin querer."""
+    assert pesos(monto, decimales) == esperado
+    # Y la forma vieja, calculada acá mismo, para que la diferencia se lea en el
+    # test en vez de tener que reconstruirla: si alguien vuelve a
+    # `f"{...:,.2f}"`, las dos primeras filas se caen.
+    crudo = f"{abs(float(monto)):,.{decimales}f}"
+    viejo = "$" + crudo.replace(",", "\x00").replace(".", ",").replace("\x00", ".")
+    assert viejo == motor_viejo
+
+
+def test_pesos_objeto_cualquiera_vale_cero() -> None:
+    """Fuera de la mesa porque `object()` no se puede escribir como literal."""
+    assert pesos(object()) == "$0"
+
+
+# --- pesos en_US ------------------------------------------------------------
+
+# El mismo monto, para la otra persona. `$1.200,50` le dice a un estadounidense
+# "un dólar veinte": no es una preferencia de estilo, es otra cifra.
+FIJADOS_EN_US = [
+    (1200.5, 2, "$1,200.50"),
+    (12000, 0, "$12,000"),
+    (1234567, 0, "$1,234,567"),
+    (1500.5, 2, "$1,500.50"),
+    (0.5, 2, "$0.50"),
+    (999, 0, "$999"),
+    (0, 0, "$0"),
+    (-12000, 0, "-$12,000"),
+    (-1500.5, 2, "-$1,500.50"),
+    (None, 0, "$0"),
+    ("abc", 0, "$0"),
+]
+
+
+@pytest.mark.parametrize("monto, decimales, esperado", FIJADOS_EN_US)
+def test_pesos_en_us(monkeypatch: pytest.MonkeyPatch, monto, decimales, esperado) -> None:
+    monkeypatch.setenv("LOCALE", "en_US")
+    assert pesos(monto, decimales) == esperado
+
+
+def test_el_locale_lo_decide_el_despliegue_y_se_lee_en_cada_llamada(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No hay estado de proceso: `babel` toma el locale por llamada.
+
+    Es la diferencia con el módulo `locale` de la stdlib, y es la razón por la
+    que esto se puede usar en un servidor con hilos de barrido. Si algún día
+    alguien lo cambia por `locale.setlocale`, este test se cae.
+    """
+    monkeypatch.setenv("LOCALE", "en_US")
+    assert pesos(1200.5, 2) == "$1,200.50"
+    monkeypatch.setenv("LOCALE", "es_AR")
+    assert pesos(1200.5, 2) == "$1.200,50"
+
+
+@pytest.mark.parametrize(
+    "crudo, esperado",
+    [
+        ("en_US", "en_US"),
+        ("en-US", "en_US"),
+        ("EN_us", "en_US"),
+        ("es_AR", "es_AR"),
+        ("", "es_AR"),
+        ("   ", "es_AR"),
+        # Un locale que existe pero que este producto no habla, y uno que no
+        # existe: los dos caen al de por defecto en vez de romper un mensaje.
+        ("pt_BR", "es_AR"),
+        ("no-es-un-locale", "es_AR"),
+    ],
+)
+def test_locale_configurado_nunca_queda_vacio_ni_levanta(
+    monkeypatch: pytest.MonkeyPatch, crudo: str, esperado: str
+) -> None:
+    monkeypatch.setenv("LOCALE", crudo)
+    assert locale_configurado() == esperado
+
+
+def test_sin_LOCALE_en_el_entorno_es_el_de_por_defecto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Un despliegue que ya existe no migra: sin la variable, todo sigue igual."""
+    monkeypatch.delenv("LOCALE", raising=False)
+    assert locale_configurado() == "es_AR"
+    assert pesos(12000) == "$12.000"
+
+
+def test_un_monto_que_no_es_un_numero_finito_no_llega_a_la_pantalla() -> None:
+    """`$inf` en la pantalla en la que alguien aprueba un pedido es peor que $0."""
+    assert pesos(float("inf")) == "$0"
+    assert pesos(float("nan"), 2) == "$0,00"
 
 
 def test_cantidad_sin_ceros_y_con_coma_decimal() -> None:

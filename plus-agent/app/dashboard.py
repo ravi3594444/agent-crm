@@ -143,14 +143,107 @@ def order_detail(order_id: str) -> dict:
         return result
 
 
-def authorized(header: str) -> bool:
-    expected = os.getenv("DASHBOARD_API_TOKEN", "")
-    supplied = header.removeprefix("Bearer ")
+TOKEN_MINIMO = 32
+
+# Un token anónimo está autenticado pero no es NADIE: mira y no toca.
+ANONIMO = ""
+
+
+def _tokens_por_persona() -> dict[str, str]:
+    """`DASHBOARD_TOKENS` -> {token: teléfono}. Entradas rotas se ignoran.
+
+    Formato: ``<token>:<teléfono>,<token>:<teléfono>``. El teléfono se
+    normaliza acá una vez, con el mismo `telefono.normalizar` que usa el
+    webhook, así que `+54 9 11 …` y `5491…` son la misma persona en los dos
+    lados. Un token más corto que TOKEN_MINIMO no entra: adivinable no es
+    autenticación.
+    """
+    from app import telefono as telefonos
+
+    pares: dict[str, str] = {}
+    for entrada in os.getenv("DASHBOARD_TOKENS", "").split(","):
+        entrada = entrada.strip()
+        if ":" not in entrada:
+            continue
+        token, _, numero = entrada.partition(":")
+        token, numero = token.strip(), telefonos.normalizar(numero)
+        if len(token) >= TOKEN_MINIMO and numero:
+            pares[token] = numero
+    return pares
+
+
+def quien(header: str) -> str | None:
+    """Quién está mirando: TRES respuestas, y hay que distinguir las tres.
+
+    - ``None``  -> el token no sirve. No pasa.
+    - ``ANONIMO`` (``""``) -> el token compartido `DASHBOARD_API_TOKEN`.
+      Autenticado, pero no es nadie en particular: sólo lectura.
+    - un teléfono -> un token de `DASHBOARD_TOKENS`, que dice de quién es.
+
+    La idea entera del dashboard cabe en una línea: **un token es una forma
+    de probar «soy este teléfono» sin WhatsApp.** No inventa un sistema de
+    permisos nuevo — lo que ese teléfono puede hacer lo siguen decidiendo
+    `router.es_equipo` y las mismas guardas que valen sobre el webhook
+    firmado, que es lo único que las herramientas de decisión verifican.
+
+    Compará con ``is None`` y no por verdad: ``ANONIMO`` es falsy y es un
+    token VÁLIDO. La misma trampa que `pendientes._tiene_marca`.
+    """
+    if not header.startswith("Bearer "):
+        return None
+    supplied = header.removeprefix("Bearer ").encode()
+
+    # Sin `break`: recorrer todas las entradas siempre cuesta lo mismo, así
+    # que el tiempo de respuesta no dice en qué posición estaba el token.
+    encontrado: str | None = None
+    for token, numero in _tokens_por_persona().items():
+        if hmac.compare_digest(supplied, token.encode()):
+            encontrado = numero
+    if encontrado is not None:
+        return encontrado
+
+    compartido = os.getenv("DASHBOARD_API_TOKEN", "")
+    if len(compartido) >= TOKEN_MINIMO and hmac.compare_digest(
+        supplied, compartido.encode()
+    ):
+        return ANONIMO
+    return None
+
+
+def puede_decidir(mirando: str | None) -> bool:
+    """¿Este token puede tocar un pedido, o sólo mirarlo?
+
+    `decisiones.confirmar`, `rechazar`, `preparar`, `despachar` y
+    `aprobar_solicitud` **no verifican quién llama**: confían en que el
+    llamador ya lo hizo, y hoy ese llamador es `aprobacion.manejar_boton`,
+    que exige `es_equipo` sobre el webhook FIRMADO de Meta. Un dashboard que
+    llame a cualquiera de ellas es el único control entre un token y un
+    Submit, así que la verificación vive acá y no se saltea en ninguna ruta.
+
+    El token compartido nunca alcanza: no nombra a una persona, y una
+    decisión sin nombre no se puede auditar.
+    """
+    from app import router
+
+    return bool(mirando) and router.es_equipo(mirando)
+
+
+def hay_acceso_configurado() -> bool:
+    """¿Hay ALGUNA forma de entrar? Sin esto, 503 y ningún dato de negocio.
+
+    Cualquiera de las dos alcanza: el token compartido o al menos un token
+    por persona. Mirar sólo `DASHBOARD_API_TOKEN` dejaba el dashboard en 503
+    para una instalación configurada entera con `DASHBOARD_TOKENS`.
+    """
     return (
-        len(expected) >= 32
-        and header.startswith("Bearer ")
-        and hmac.compare_digest(supplied.encode(), expected.encode())
+        len(os.getenv("DASHBOARD_API_TOKEN", "")) >= TOKEN_MINIMO
+        or bool(_tokens_por_persona())
     )
+
+
+def authorized(header: str) -> bool:
+    """Compatibilidad: ¿el token sirve para LEER? Las escrituras usan `quien`."""
+    return quien(header) is not None
 
 
 def allowed_origin(origin: str) -> bool:
@@ -312,7 +405,7 @@ class DashboardAPI:
         if path == "/config" and scope["method"] == "GET":
             # No company, model, origin, or business data is returned before auth.
             await reply(200, {"service": "plus-agent", "apiVersion": 1,
-                              "configured": len(os.getenv("DASHBOARD_API_TOKEN", "")) >= 32})
+                              "configured": hay_acceso_configurado()})
             return
         if path not in readers and not detail_match:
             await reply(404, {"error": "Not found"})
@@ -323,10 +416,12 @@ class DashboardAPI:
         if scope["method"] != "GET":
             await reply(405, {"error": "This dashboard is read-only"})
             return
-        if len(os.getenv("DASHBOARD_API_TOKEN", "")) < 32:
+        if not hay_acceso_configurado():
             await reply(503, {"error": "Live dashboard access is not configured"})
             return
-        if not authorized(headers.get("authorization", "")):
+        # `quien` tiene TRES respuestas y ANONIMO es falsy: `is None` y no verdad.
+        mirando = quien(headers.get("authorization", ""))
+        if mirando is None:
             response_headers.append((b"www-authenticate", b"Bearer"))
             await reply(401, {"error": "A valid dashboard access token is required"})
             return

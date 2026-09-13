@@ -26,10 +26,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import app  # noqa: F401  (carga .env antes de leer os.environ)
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
+import app  # noqa: F401  (carga .env antes de leer os.environ)
 from app import modelos
 
 # El único "dato" de toda la prueba, y es inventado acá.

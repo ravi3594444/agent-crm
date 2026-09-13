@@ -34,6 +34,19 @@ def _lengua_equipo() -> str:
     return idioma_mod.gerencia()
 
 
+def _boton(clave: str, lengua: str | None = None) -> str:
+    """La etiqueta de un botón, en el idioma del equipo y ya recortada.
+
+    Meta corta el título en 20 caracteres y `whatsapp.enviar_botones` lo hace
+    también, las dos veces en silencio. Recortar acá no arregla eso: lo que lo
+    arregla es que las etiquetas entren, y `tests/test_idioma_salida.py` lo
+    exige para las dos versiones de cada una.
+    """
+    from app import idioma as idioma_mod
+
+    return idioma_mod.t(clave, lengua if lengua is not None else _lengua_equipo())
+
+
 def _texto_libre(
     nombre: str, so: dict, auto: bool, motivos: str, detalle: str,
     lengua: str | None = None,
@@ -52,12 +65,44 @@ def _texto_libre(
             pedido=nombre,
             cliente=so.get("customer_name") or so.get("customer") or "Cliente",
             detalle=detalle,
-            total=f"{float(so.get('grand_total') or 0):,.2f}",
+            # `pesos`, como TODA la plata que lee una persona. Era la única que
+            # quedaba escrita a mano: `f"{...:,.2f}"` da "1,200.50", que un
+            # argentino lee como un peso veinte, y sin símbolo — justo en el
+            # aviso con el que autoriza el pedido.
+            #
+            # Y CON EL CÓDIGO DE MONEDA DEL PEDIDO al lado, como los otros dos
+            # caminos que muestran un total (`texto_confirmacion` acá abajo y
+            # `avisos.texto_confirmacion_cliente`). El símbolo lo elige `LOCALE`
+            # —es la forma del número— y el código lo dice el pedido, que es el
+            # dato: un pedido en INR mostraba "$4.800,00" a secas y el mismo
+            # pedido, ya confirmado, "$4.800,00 INR". Dos respuestas distintas
+            # sobre cuánta plata es, y la primera es la pantalla donde se
+            # autoriza.
+            total=(
+                f"{pesos(so.get('grand_total'), 2)} "
+                f"{so.get('currency') or ''}"
+            ).strip(),
             entrega=so.get("delivery_date")
             or idioma_mod.t("gerencia.sin_fecha", lengua),
         ),
     ]
     if not auto:
+        # El PLAZO, cuando hay uno. Va antes del motivo y no al final para que
+        # el recorte de 1024 de Meta, si alguna vez llega, no se coma la línea
+        # que dice cómo contestar. Vacío —límite apagado, pedido sin fecha de
+        # entrega o sin hora de reparto configurada— es una línea que no se
+        # agrega: el aviso sin plazo queda exactamente como estaba.
+        from app import agenda as agenda_mod
+
+        try:
+            plazo = agenda_mod.plazo_del_pedido(so)
+        except Exception as exc:
+            print(f"[staff-notify] plazo no legible ({type(exc).__name__})")
+            plazo = ""
+        if plazo:
+            lineas.append(
+                idioma_mod.t("gerencia.responder_antes_de", lengua, hora=plazo)
+            )
         sin_obs = idioma_mod.t("gerencia.sin_observaciones", lengua)
         lineas.append(
             idioma_mod.t(
@@ -108,13 +153,19 @@ def notificar_equipo(
     # A generic ERPNext Sales Order has no durable "rejected draft" state.
     # Offer only actions whose state transition we can enforce truthfully.
     acciones = None if auto else [f"ok:{nombre}", f"ver:{nombre}"]
-    texto = _texto_libre(nombre, so, auto, motivos, detalle, _lengua_equipo())
+    lengua = _lengua_equipo()
+    texto = _texto_libre(nombre, so, auto, motivos, detalle, lengua)
+    # El `id` es el payload que parsea el router y NO se traduce nunca; el
+    # `title` es lo único que lee el dueño, y es lo que estaba en español aunque
+    # el cuerpo del aviso saliera en inglés. Éste es además el único camino del
+    # producto en que él recibe algo sin haber escrito nada, así que su idioma no
+    # puede salir de lo que tecleó: sale del ajuste.
     botones = (
         None
         if auto
         else [
-            {"id": f"ok:{nombre}", "title": "Confirmar"},
-            {"id": f"ver:{nombre}", "title": "Ver detalle"},
+            {"id": f"ok:{nombre}", "title": _boton("boton.confirmar", lengua)},
+            {"id": f"ver:{nombre}", "title": _boton("boton.ver_detalle", lengua)},
         ]
     )
 
@@ -273,24 +324,42 @@ def texto_confirmacion(
     total = f"{pesos(so.get('grand_total'), 2)} {so.get('currency') or ''}".strip()
     from app import idioma as idioma_mod
 
+    lengua_final = lengua if lengua is not None else _lengua_equipo()
     return idioma_mod.t(
         "gerencia.confirmado_detalle",
-        lengua if lengua is not None else _lengua_equipo(),
+        lengua_final,
         pedido=so.get("name"),
         cliente=so.get("customer_name") or so.get("customer") or "Cliente",
         detalle=_renglones(so),
         total=total,
         entrega=entrega_txt,
-        fuente=fuente,
+        fuente=_fuente(fuente, lengua_final),
         momento=momento or _momento_negocio(),
         horas=os.getenv("CANCELACION_HORAS", "24"),
     )[:3500]
 
 
+def _fuente(fuente: str, lengua: str | None = None) -> str:
+    """De dónde salió la confirmación, dicho en el idioma del equipo.
+
+    ``fuente`` es una CLAVE del catálogo (`gerencia.fuente_*`). Era el literal
+    en español que arma cada camino que confirma, y salía tal cual adentro del
+    mensaje traducido: «Source: manual (confirmación humana)».
+
+    Un valor que no es una clave sale como vino. Es a propósito: el MISMO string
+    se escribe también en el registro durable de ERPNext, que no se traduce, así
+    que un llamador que todavía pase el texto no se queda sin «Origen».
+    """
+    from app import idioma as idioma_mod
+
+    return idioma_mod.t(fuente, lengua) if fuente in idioma_mod.CATALOGO else fuente
+
+
 def notificar_confirmacion(so: dict, fuente: str) -> bool:
     """Tell the human manager an order is confirmed — exactly once per order.
 
-    ``fuente`` is "automática (política)" or "manual (confirmación humana)".
+    ``fuente`` is a catalogue key: ``gerencia.fuente_automatica``,
+    ``gerencia.fuente_manual`` or ``gerencia.fuente_solicitud``.
     Returns True when Meta accepted it for at least one staff phone, or when
     the order was already notified. Never raises.
     """
@@ -308,6 +377,21 @@ def notificar_confirmacion(so: dict, fuente: str) -> bool:
     texto = texto_confirmacion(so, fuente, momento)
     plantilla = os.getenv("WHATSAPP_STAFF_CONFIRMED_TEMPLATE", "").strip()
     locale_plantilla = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"
+    # LA CLAVE SE RESUELVE EN LAS TRES SALIDAS, no sólo en el texto libre.
+    #
+    # `fuente` es una clave del catálogo, así que cualquier lugar que la escriba
+    # sin resolver le muestra «gerencia.fuente_manual» a una persona. Son tres y
+    # cada uno tiene su idioma:
+    #   * el texto libre, en el del equipo — lo hace `texto_confirmacion`;
+    #   * el parámetro de la PLANTILLA, en el idioma en que Meta la tiene
+    #     registrada (`WHATSAPP_TEMPLATE_LANGUAGE`), porque los otros seis
+    #     parámetros están escritos en ése;
+    #   * el comentario durable de ERPNext, SIEMPRE en español, porque es
+    #     auditoría y ya está escrito así en los despliegues.
+    from app import idioma as _idioma
+
+    fuente_plantilla = _fuente(fuente, _idioma.valido(locale_plantilla.split("_")[0]))
+    fuente_auditoria = _fuente(fuente, _idioma.ES)
     parametros = [
         nombre,
         "Confirmado",
@@ -318,7 +402,7 @@ def notificar_confirmacion(so: dict, fuente: str) -> bool:
             p for p in (_direccion_de_entrega(so), str(so.get("delivery_date") or "")) if p
         )[:1000]
         or "a coordinar",
-        f"Origen: {fuente}; confirmado {momento}"[:1000],
+        f"Origen: {fuente_plantilla}; confirmado {momento}"[:1000],
     ]
 
     if not STAFF:
@@ -363,7 +447,8 @@ def notificar_confirmacion(so: dict, fuente: str) -> bool:
         erpnext.add_comment(
             "Sales Order",
             nombre,
-            f"Aviso de pedido confirmado ({fuente}) aceptado por Meta para {enviados} integrante(s).",
+            f"Aviso de pedido confirmado ({fuente_auditoria}) aceptado por Meta "
+            f"para {enviados} integrante(s).",
         )
         return True
 
@@ -543,7 +628,7 @@ def pedir_confirmacion_conteo(telefono: str, nombre: str, texto: str) -> bool:
         whatsapp.enviar_botones(
             telefono,
             texto,
-            [{"id": f"conteo:{nombre}", "title": "Confirmar conteo"}],
+            [{"id": f"conteo:{nombre}", "title": _boton("boton.confirmar_conteo")}],
         )
         return True
     except Exception as exc:

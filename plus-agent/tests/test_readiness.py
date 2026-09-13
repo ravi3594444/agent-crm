@@ -170,6 +170,30 @@ def _correr(env, http=_http_sano, limites=_limites_ok):
     return reporte
 
 
+def test_un_LOCALE_mal_escrito_se_dice_en_el_arranque() -> None:
+    """`formato.pesos` cae al de por defecto en silencio, a propósito: un monto
+    mal formateado no puede dejar un mensaje sin salir. El precio de esa
+    decisión es que nadie se entera, así que el chequeo de arranque lo dice."""
+    reporte = _correr({**BASE, "LOCALE": "en-UK"})
+
+    assert not reporte.listo
+    assert "no es ninguno de es_AR, en_US" in reporte.texto()
+
+
+def test_un_LOCALE_valido_se_reporta_con_su_forma_normal() -> None:
+    for crudo, normal in (("en_US", "en_US"), ("en-us", "en_US"), ("es_AR", "es_AR")):
+        reporte = _correr({**BASE, "LOCALE": crudo})
+        assert reporte.listo, reporte.texto()
+        assert f"montos con forma {normal}" in reporte.texto()
+
+
+def test_sin_LOCALE_el_arranque_sigue_listo() -> None:
+    """Un despliegue que ya existe no tiene la variable, y no migra por esto."""
+    reporte = _correr(BASE)
+    assert reporte.listo
+    assert "los montos se escriben es_AR" in reporte.texto()
+
+
 def test_a_complete_environment_is_ready_and_the_report_exposes_no_value() -> None:
     reporte = _correr(BASE)
     texto = reporte.texto()
@@ -476,6 +500,24 @@ def test_with_neither_a_round_nor_a_pickup_the_owner_is_warned() -> None:
     assert reporte.listo, texto
 
 
+def test_los_dias_del_informe_salen_de_limites_mostrar_y_no_del_valor_crudo() -> None:
+    """Una sola ortografía para un día, en todo el producto.
+
+    El informe armaba «reparto miercoles,sabado» interpolando el valor guardado,
+    que es una segunda forma de escribir lo mismo: `limites.mostrar` es quien
+    decide cómo se le muestra un día a una persona, y el que le contesta al
+    dueño por WhatsApp ya pasaba por ahí. Dos ortografías del mismo dato es la
+    clase de diferencia que nadie nota hasta que una de las dos cambia.
+    """
+    def con_tildes():
+        return _entrega(ENTREGA_DIAS="miercoles,sabado", ENTREGA_HORA="09:00")
+
+    texto = _correr(BASE, limites=con_tildes).texto()
+
+    assert "reparto miércoles,sábado a las 09:00" in texto
+    assert "miercoles,sabado" not in texto
+
+
 def test_a_pickup_counter_alone_is_enough_of_a_fallback() -> None:
     def solo_retiro():
         return _entrega(
@@ -488,7 +530,10 @@ def test_a_pickup_counter_alone_is_enough_of_a_fallback() -> None:
 
     texto = _correr(BASE, limites=solo_retiro).texto()
 
-    assert "retiro sabado a las 10:00" in texto
+    # «sábado» y no «sabado»: el informe muestra el día como lo escribe
+    # `limites.mostrar`, que es quien decide eso para todo el producto. Lo
+    # guardado sigue siendo la forma sin tilde.
+    assert "retiro sábado a las 10:00" in texto
     assert "Respaldo de vencimiento" not in texto
 
 
