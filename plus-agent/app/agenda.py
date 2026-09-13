@@ -1252,6 +1252,10 @@ BAJA_INTENTOS = 5
 # La fase que la fila guarda entre rondas: «la reserva ya la solté yo».
 BAJA_SOLTADA = "soltada"
 
+# Centinela, no un texto: se compara con `is`, así que ninguna frase que
+# devuelva ERPNext puede hacerse pasar por esto.
+_BAJA_LA_DECIDE_UNA_PERSONA = object()
+
 
 def _baja_de_pedido(fila: Fila, ahora: float) -> Resultado | None:
     """El cliente se dio de baja su propio borrador: soltar la reserva.
@@ -1296,19 +1300,39 @@ def _baja_de_pedido(fila: Fila, ahora: float) -> Resultado | None:
         # borrador que rechazó una persona.
         return Resultado(detalle=muerto)
 
-    # La solicitud se RE-LEE acá, no alcanza con la que miró la herramienta.
-    # Entre aquel turno y esta ronda pasaron al menos 60 s sin ningún lock
-    # compartido, y en ese hueco se pudo abrir una decisión —o el cliente pudo
-    # aceptar una contraoferta— sobre este mismo pedido. Cerrar el borrador
-    # mientras una decisión corre es cómo un pedido dado de baja termina con un
-    # «acepto» y un Submit encima.
-    en_curso = _hay_decision_en_curso(sobre)
-    if en_curso is None:
-        return None  # no pude saber: la próxima ronda vuelve a preguntar
-    if en_curso:
-        return _baja_que_decide_una_persona(fila, ahora)
+    # La solicitud se re-lee Y se suelta la reserva BAJO EL MISMO LOCK que usan
+    # las decisiones, que es lo único que hace atómico «no hay decisión» +
+    # «cerrá el borrador». Re-leer sin el lock sólo achica la ventana: la
+    # aceptación de una contraoferta corre bajo `solicitud:{pedido}` y puede
+    # hacer Submit entre la lectura y el cierre, y así un pedido dado de baja
+    # termina confirmado.
+    #
+    # ORDEN DE LOCKS: `_despachar` ya tiene `pendiente:{sobre}` y acá se pide
+    # `solicitud:{sobre}` adentro. Es una sola dirección y por eso no hay
+    # abrazo mortal: `pendiente:` se toma ÚNICAMENTE en este módulo (las dos
+    # filas de `_LOCKS`), y ninguna función que tome `solicitud:` llega a
+    # despachar una fila de agenda. Si alguna vez una lo hace, el orden se
+    # invierte y esto se traba: por eso queda escrito acá.
+    from app.locks import CoordinationError, distributed_lock
 
-    ok, frase = solicitudes.soltar_reserva(sobre)
+    try:
+        with distributed_lock(f"solicitud:{sobre}", lease_seconds=120, wait_seconds=10):
+            en_curso = _hay_decision_en_curso(sobre)
+            if en_curso is None:
+                return None  # no pude saber: la próxima ronda vuelve a preguntar
+            if en_curso:
+                # Se contesta AFUERA del lock: avisarle a una persona son dos
+                # llamadas HTTP y el teléfono de nadie va adentro de un lock.
+                ok, frase = False, _BAJA_LA_DECIDE_UNA_PERSONA
+            else:
+                ok, frase = solicitudes.soltar_reserva(sobre)
+    except CoordinationError:
+        # La decisión de este pedido la tiene otro ahora mismo. Ronda salteada,
+        # nunca un cambio a medias: la fila sigue vencida el minuto que viene.
+        return None
+
+    if frase is _BAJA_LA_DECIDE_UNA_PERSONA:
+        return _baja_que_decide_una_persona(fila, ahora)
     if not ok:
         return _baja_sin_prueba(fila, ahora, frase)
     if frase == solicitudes.YA_ESTABA_CERRADO:

@@ -1348,3 +1348,38 @@ def test_dos_workers_sobre_el_mismo_pedido_no_escriben_dos_marcas(
     marcadas = marcas.filas("baja_cliente", PEDIDO, campos=["name"], techo=10)
     assert len(marcadas) == 1
     assert len(agenda.vivas(PEDIDO, agenda.AVISO_BAJA_AL_DUENO)) == 1
+
+
+def test_la_baja_suelta_la_reserva_bajo_EL_MISMO_lock_que_usan_las_decisiones(
+    herramienta_con_reloj, marcas_sin_redis, monkeypatch
+) -> None:
+    """Re-leer sin el lock sólo achica la ventana; no la cierra.
+
+    La aceptación de una contraoferta corre bajo `solicitud:{pedido}` y puede
+    hacer Submit entre la lectura y el cierre. Lo único que vuelve atómico «no
+    hay decisión» + «cerrá el borrador» es tomar ESE lock, y por eso se afirma
+    cuál se tomó y no sólo que el resultado haya salido bien.
+
+    Y se afirma el ORDEN: `pendiente:` antes que `solicitud:`, una sola
+    dirección. Al revés, esto se abraza con cualquier camino que tome primero
+    la decisión y después despache una fila.
+    """
+    from app import solicitudes
+
+    tomados_al_soltar: list[list[str]] = []
+
+    def soltar(pedido):
+        tomados_al_soltar.append(list(herramienta_con_reloj["locks"]))
+        return True, solicitudes.LO_CERRO_ESTA_LLAMADA
+
+    monkeypatch.setattr(solicitudes, "soltar_reserva", soltar)
+    _dar_de_baja()
+
+    agenda.tick(ahora=epoch(9, 1))
+
+    # La reserva se soltó CON el lock de la decisión ya tomado.
+    (tomados,) = tomados_al_soltar
+    assert f"solicitud:{PEDIDO}" in tomados
+    # Y en el orden que no se traba: primero el de la fila, después el de la
+    # decisión.
+    assert tomados.index(f"pendiente:{PEDIDO}") < tomados.index(f"solicitud:{PEDIDO}")
