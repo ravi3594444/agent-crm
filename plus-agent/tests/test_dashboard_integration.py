@@ -63,10 +63,11 @@ def connected(monkeypatch):
     manager.close()
 
 
-def create_order(almacen, *, days=0, company=EMPRESA, docstatus=0):
+def create_order(almacen, *, days=0, company=EMPRESA, docstatus=0, customer=None):
+    customer = customer or datos.CLIENTE_HABITUAL
     return almacen.crear("Sales Order", {
-        "company": company, "customer": datos.CLIENTE_HABITUAL,
-        "customer_name": datos.CLIENTE_HABITUAL,
+        "company": company, "customer": customer,
+        "customer_name": customer,
         "transaction_date": (TODAY - timedelta(days=days)).isoformat(),
         "delivery_date": (TODAY + timedelta(days=1)).isoformat(),
         "docstatus": docstatus, "status": "Draft" if not docstatus else "To Deliver and Bill",
@@ -97,6 +98,12 @@ def test_live_snapshot_reads_real_repository_contract_and_old_pending(connected)
     recent = create_order(almacen, docstatus=1)
     old = create_order(almacen, days=60)
     other = create_order(almacen, company="Other Company")
+    # Un cliente que SÓLO le compra a la otra empresa. `Customer` es un maestro
+    # global en ERPNext —no tiene campo `company`—, así que preguntar por
+    # clientes a secas lo devolvía igual.
+    ajeno = create_order(
+        almacen, company="Other Company", customer=datos.CLIENTE_MOROSO
+    )
     response = client.get("/api/dashboard/snapshot")
     assert response.status_code == 200
     result = response.json()
@@ -111,7 +118,13 @@ def test_live_snapshot_reads_real_repository_contract_and_old_pending(connected)
     milk = next(p for p in result["products"] if p["id"] == "LECHE-ENT-1L")
     assert milk["stock"] == 400 and milk["available"] == 400
     assert milk["name"] == "Leche entera sachet 1 L"
-    assert len(result["customers"]) == 3
+    # Los clientes salen de los pedidos de ESTA empresa, así que el que sólo le
+    # compra a la otra no está — y el que sí nos compra, está. Las dos mitades:
+    # afirmar sólo la ausencia lo cumple también una lista vacía.
+    nombres = {c["id"] for c in result["customers"]}
+    assert datos.CLIENTE_HABITUAL in nombres
+    assert datos.CLIENTE_MOROSO not in nombres
+    assert ajeno["name"] not in {o["id"] for o in result["pendingOrders"]}
     assert all(r.extensions["timeout"]["read"] == 3 for r in calls)
     assert response.headers["cache-control"] == "no-store"
 

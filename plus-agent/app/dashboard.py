@@ -320,11 +320,37 @@ def snapshot() -> dict:
                      ["status", "not in", ["Closed", "Cancelled", "On Hold"]]],
             fields=ORDER_FIELDS, order_by="creation asc, name asc",
         )
-        customers = read(
-            "customers", "Customer", filters=[["disabled", "=", 0]],
-            fields=["name", "customer_name", "customer_group", "territory"],
-            order_by="modified desc, name desc",
+        # LOS CLIENTES SALEN DE LOS PEDIDOS, y los pedidos ya están acotados a
+        # `company`. Preguntar por `Customer` a secas devolvía TODOS los
+        # habilitados del sitio: en un ERPNext con más de una empresa, un token
+        # de este dashboard veía nombres, grupos y territorios de clientes de
+        # otra. `Customer` es un maestro GLOBAL en ERPNext —no tiene campo
+        # `company`—, así que no hay un filtro directo: la única pertenencia
+        # real es «le vendimos algo», y eso son los Sales Orders.
+        #
+        # Es además lo que la pantalla ya dice ser: «las personas y negocios
+        # detrás de tus pedidos». Un cliente sin un solo pedido en la ventana no
+        # aparece, y está bien: no hay nada que mostrar de él.
+        #
+        # Si los pedidos no se pudieron leer, los clientes tampoco. Fallar
+        # cerrado: la alternativa es ensanchar la lectura justo cuando no se
+        # puede acotar, que es el bug de arriba otra vez.
+        cuentas = sorted(
+            {str(x.get("customer") or "") for x in (orders or []) + (pending or [])}
+            - {""}
         )
+        customers: list[dict] | None = None
+        if orders is None or pending is None:
+            errors.append("customers")
+        elif cuentas:
+            customers = read(
+                "customers", "Customer",
+                filters=[["name", "in", cuentas], ["disabled", "=", 0]],
+                fields=["name", "customer_name", "customer_group", "territory"],
+                order_by="modified desc, name desc",
+            )
+        else:
+            customers = []
         warehouse = erpnext.default_warehouse()
         bins = read(
             "inventory", "Bin", filters=[["warehouse", "=", warehouse]],
