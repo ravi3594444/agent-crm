@@ -11,12 +11,26 @@ import json
 import math
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from html import unescape
 from urllib.parse import quote, unquote, urlsplit
 
 LIMIT = 250
 READ_TIMEOUT = 3.0
+
+# EL PANEL TIENE SUS PROPIOS HILOS, y no es una optimización.
+#
+# `asyncio.to_thread` usa el executor por DEFECTO, que es el mismo que usa
+# `main._run_sync` para meter el webhook de WhatsApp en la cola. Ese pool son
+# `min(32, cpu+4)` hilos —seis en la VM de 2 vCPU— y `erpnext._client` espera
+# hasta 20 s. Seis lecturas lentas del panel ocupaban los seis hilos y el
+# webhook se quedaba esperando: Meta recibe 503 y reintenta el mensaje del
+# cliente. O sea, alguien mirando el panel podía frenar las ventas.
+#
+# Con un pool propio y acotado, la peor lectura del panel sólo hace esperar a
+# otra lectura del panel.
+_HILOS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="dashboard")
 ORDER_FIELDS = [
     "name", "customer", "customer_name", "transaction_date", "delivery_date",
     "grand_total", "currency", "status", "docstatus",
@@ -141,6 +155,333 @@ def order_detail(order_id: str) -> dict:
             if public_erp_origin() else ""
         )
         return result
+
+
+# ---------------------------------------------------------------- conversaciones
+
+# Cuántos mensajes devuelve una conversación: los más NUEVOS, que es lo que
+# alguien abre a mirar. Un hilo de un año son miles y ninguno de los de arriba
+# se lee.
+CONVERSACION_MAX = 60
+
+
+def _hilo_del_telefono(telefono: str) -> str:
+    """El id de hilo del webhook, importado y NO reescrito.
+
+    `app/main.py` arma `wa:{sha256(teléfono)}` y este módulo tiene que buscar
+    exactamente ese. Copiar el sha acá serían dos definiciones de la misma
+    cosa que nadie obliga a coincidir: el día que una cambie, las
+    conversaciones dejan de encontrarse y no falla nada —devuelve vacío—, que
+    es la peor forma de romperse.
+    """
+    from app.main import _thread_tag
+
+    return f"cli:{_thread_tag(telefono)}"
+
+
+def _mensajes_visibles(mensajes: list) -> list[dict]:
+    """Lo que una PERSONA puede ver de un hilo del agente.
+
+    Tres reglas, y cada una tapa algo que se vería sin ella:
+
+    * un `ToolMessage` lleva la salida cruda de una herramienta —`stock de
+      leche: 12`—, así que se convierte en una línea neutra y su CONTENIDO NO
+      SALE. El dueño tiene que saber que el agente hizo algo entre dos
+      mensajes; no necesita ver con qué.
+    * un `AIMessage` sin texto es el turno en que el modelo llamó a la
+      herramienta. Mostrarlo son globos vacíos en la pantalla.
+    * cualquier otro tipo (un `SystemMessage` que se colara) no se muestra. La
+      lista blanca es la que decide, no una lista negra: un tipo nuevo de
+      LangChain aparece como invisible, no como una fuga.
+    """
+    visibles: list[dict] = []
+    for m in mensajes:
+        tipo = type(m).__name__
+        texto = str(getattr(m, "content", "") or "").strip()
+        if tipo == "HumanMessage" and texto:
+            visibles.append({"role": "customer", "text": texto})
+        elif tipo == "AIMessage" and texto:
+            visibles.append({"role": "agent", "text": texto})
+        elif tipo == "ToolMessage":
+            if visibles and visibles[-1]["role"] == "note":
+                continue  # dos consultas seguidas son UNA línea, no dos
+            visibles.append({"role": "note", "text": "The agent looked something up."})
+    return visibles
+
+
+def conversation(customer_id: str) -> dict:
+    """El hilo de WhatsApp de UN cliente de esta empresa.
+
+    LA DIRECCIÓN IMPORTA Y ES LA ÚNICA QUE HAY. El hilo se guarda bajo
+    `sha256(teléfono)`, que no se puede invertir, así que no existe «listar las
+    conversaciones»: se llega cliente -> `mobile_no` -> hash -> hilo. Eso hace
+    que toda transcripción se alcance a través de un cliente que este token ya
+    tiene derecho a ver, y el derecho lo decide lo mismo que en el resto del
+    panel: que el cliente le haya comprado a ESTA empresa.
+
+    `Customer` es un maestro GLOBAL en ERPNext —no tiene campo `company`—, así
+    que la pertenencia se comprueba contra sus pedidos, igual que en
+    `snapshot`. Sin eso, un token de este panel leería las conversaciones de
+    los clientes de otra empresa del mismo ERPNext.
+
+    El teléfono NO sale en la respuesta. Se usa para encontrar el hilo y se
+    descarta.
+    """
+    from app import erpnext
+    from app import telefono as telefonos
+
+    with erpnext.manager_scope():
+        try:
+            doc = erpnext.get_doc("Customer", customer_id, timeout=READ_TIMEOUT)
+        except erpnext.ERPNextError as exc:
+            if exc.status_code in {403, 404}:
+                raise RecordNotFound from exc
+            raise
+        suyos = erpnext.get_list(
+            "Sales Order",
+            filters=[["company", "=", erpnext.default_company()],
+                     ["customer", "=", customer_id]],
+            fields=["name"], limit=1, timeout=READ_TIMEOUT,
+        )
+        if not suyos:
+            raise RecordNotFound
+        nombre = str(doc.get("customer_name") or customer_id)
+        numero = telefonos.normalizar(doc.get("mobile_no"))
+
+    base = {
+        "customerId": customer_id,
+        "customerName": nombre,
+        "reachable": bool(numero),
+        "messages": [],
+        "truncated": False,
+        "retentionDays": _dias_de_retencion(),
+        "lastAt": "",
+    }
+    if not numero:
+        # NO es un error: un cliente cargado a mano puede no tener WhatsApp.
+        return base
+
+    hilo = _leer_hilo(_hilo_del_telefono(numero))
+    if hilo is None:
+        return base
+    mensajes, base["lastAt"] = hilo
+    visibles = _mensajes_visibles(mensajes)
+    base["truncated"] = len(visibles) > CONVERSACION_MAX
+    base["messages"] = visibles[-CONVERSACION_MAX:]
+    return base
+
+
+def _dias_de_retencion() -> int:
+    """Lo que dice el .env, para no prometer un archivo que no existe."""
+    try:
+        return max(1, int(os.getenv("CONVERSATION_TTL_DAYS", "30")))
+    except ValueError:
+        return 30
+
+
+def _leer_hilo(thread_id: str) -> tuple[list, str] | None:
+    """Los mensajes de un hilo y cuándo se escribió por última vez.
+
+    None es «no hay hilo» y también «no lo pude leer», y acá las dos cosas se
+    pueden aplastar a propósito: la pantalla dice lo mismo en los dos casos
+    —no hay nada que mostrar— y distinguirlas le contaría al que mira algo
+    sobre la infraestructura que no le sirve.
+    """
+    try:
+        from app.graph import checkpointer
+
+        tupla = checkpointer().get_tuple({"configurable": {"thread_id": thread_id}})
+    except Exception as exc:
+        print(f"[dashboard] no pude leer un hilo ({type(exc).__name__})")
+        return None
+    if tupla is None:
+        return None
+    valores = tupla.checkpoint.get("channel_values") or {}
+    return list(valores.get("messages") or []), str(tupla.checkpoint.get("ts") or "")
+
+
+# ----------------------------------------------------------------------- hoy
+
+# Cuántos clientes se miran para armar «hoy». Acotado porque cada uno es una
+# lectura de Redis: sin tope, un catálogo de clientes grande vuelve la pantalla
+# de apertura la más cara del panel.
+HOY_MAX_CLIENTES = 120
+
+
+def today() -> dict:
+    """Con quién habló el agente hoy, y quién de esos NO compró.
+
+    La fila que vale es la de `orderId: null`: alguien que escribió y no
+    terminó comprando. Es lo único de esta pantalla que el dueño no puede
+    sacar de ninguna otra —los pedidos ya los ve— y es una venta que se
+    estaba perdiendo sin que quedara registro en ninguna parte.
+
+    De dónde sale cada mitad, porque no es simétrico: los pedidos salen de
+    ERPNext y las conversaciones de Redis. Un cliente sólo entra si le compró
+    algo a esta empresa alguna vez —es la misma comprobación de pertenencia
+    que `conversation`, y por el mismo motivo—, así que «habló hoy» acá
+    significa «un cliente conocido habló hoy». Alguien que escribió por primera
+    vez y todavía no tiene pedido no aparece; aparece en cuanto lo tenga.
+    """
+    from app import erpnext, reloj
+    from app import telefono as telefonos
+
+    ahora = reloj.ahora()
+    hoy = ahora.date().isoformat()
+    truncated: list[str] = []
+    errors: list[str] = []
+
+    with erpnext.manager_scope():
+        empresa = erpnext.default_company()
+        try:
+            pedidos = erpnext.get_list(
+                "Sales Order",
+                filters=[["company", "=", empresa], ["transaction_date", "=", hoy]],
+                fields=ORDER_FIELDS, limit=LIMIT, order_by="creation desc, name desc",
+                timeout=READ_TIMEOUT,
+            )
+        except Exception:
+            errors.append("orders")
+            pedidos = []
+        # Los candidatos a «habló hoy» son los clientes de esta empresa, y se
+        # los busca por pedidos recientes: es el mismo recorte que `snapshot`.
+        try:
+            recientes = erpnext.get_list(
+                "Sales Order",
+                filters=[["company", "=", empresa]],
+                fields=["customer"], limit=LIMIT,
+                order_by="transaction_date desc, name desc", timeout=READ_TIMEOUT,
+            )
+        except Exception:
+            errors.append("customers")
+            recientes = []
+        cuentas = sorted({str(x.get("customer") or "") for x in recientes} - {""})
+        if len(cuentas) > HOY_MAX_CLIENTES:
+            truncated.append("conversations")
+            cuentas = cuentas[:HOY_MAX_CLIENTES]
+        fichas = []
+        if cuentas:
+            try:
+                fichas = erpnext.get_list(
+                    "Customer", filters=[["name", "in", cuentas]],
+                    fields=["name", "customer_name", "mobile_no"],
+                    limit=len(cuentas), timeout=READ_TIMEOUT,
+                )
+            except Exception:
+                errors.append("customers")
+
+    pedido_de = {}
+    for fila in pedidos:
+        pedido_de.setdefault(str(fila.get("customer") or ""), str(fila.get("name") or ""))
+
+    conversaciones = []
+    for ficha in fichas:
+        numero = telefonos.normalizar(ficha.get("mobile_no"))
+        if not numero:
+            continue
+        hilo = _leer_hilo(_hilo_del_telefono(numero))
+        if hilo is None:
+            continue
+        mensajes, sello = hilo
+        if not sello.startswith(hoy):
+            continue  # habló, pero no hoy
+        visibles = _mensajes_visibles(mensajes)
+        del_cliente = [m for m in visibles if m["role"] == "customer"]
+        if not del_cliente:
+            continue
+        cuenta = str(ficha.get("name") or "")
+        conversaciones.append({
+            "customerId": cuenta,
+            "customerName": str(ficha.get("customer_name") or cuenta),
+            "turns": len(del_cliente),
+            "lastAt": sello,
+            "lastLine": del_cliente[-1]["text"][:280],
+            "orderId": pedido_de.get(cuenta) or None,
+        })
+    conversaciones.sort(key=lambda c: c["lastAt"], reverse=True)
+
+    return {
+        "date": hoy,
+        "generatedAt": ahora.isoformat(),
+        "conversations": conversaciones,
+        "orders": [order_row(x) for x in pedidos],
+        "errors": errors,
+        "truncated": truncated,
+    }
+
+
+# --------------------------------------------------------------------- la cola
+
+COLA_MAX = 50
+
+
+def queue() -> dict:
+    """Lo que el agente VA a hacer, que hoy no se ve en ninguna parte.
+
+    Después de que la agenda pasó a ser filas durables, el agente tiene trabajo
+    futuro —avisarle a un cliente antes de la entrega, recordarle un plazo al
+    dueño, cerrar un borrador que nadie decidió— y el dueño no tiene forma de
+    saber qué le va a decir a sus clientes esta noche. Ésa es la pregunta que
+    alguien hace antes de confiarle el teléfono a un agente.
+
+    SALE DEL ÍNDICE DE REDIS, que es un caché y no la verdad. Está bien para
+    una pantalla —lo peor que pasa después de un flush es que muestre de menos
+    hasta que el barrido reconstruya— y está dicho acá para que nadie lo use
+    como fuente para decidir nada.
+
+    `que` se arma ACÁ y no en el navegador: los tipos de fila se agregan, y un
+    `switch` del lado del cliente se queda viejo sin que nadie se entere.
+    """
+    from app import agenda, avisos, outbound_status
+
+    cliente = outbound_status.cliente()
+    ahora = agenda._ahora()
+    proximas: list[dict] = []
+    try:
+        crudos = cliente.zrangebyscore(
+            agenda.CLAVE_INDICE, f"{ahora:.3f}", "+inf"
+        )[:COLA_MAX]
+    except Exception:
+        crudos = []
+    for miembro in crudos:
+        sobre, identificador = agenda._partir(miembro)
+        fila = agenda.leer(sobre, identificador)
+        if fila is None or not fila.con_plazo:
+            continue
+        proximas.append({
+            "id": fila.id,
+            "orderId": sobre,
+            "type": fila.tipo,
+            "dueAt": agenda._momento(fila.vence).isoformat(),
+            "what": _que_va_a_hacer(fila),
+        })
+
+    pendientes_avisos = avisos.pendientes()
+    return {
+        "generatedAt": agenda._momento(ahora).isoformat(),
+        "upcoming": proximas,
+        "undelivered": {
+            "replies": int(cliente.llen("wa:{inbound}:dead")),
+            "notices": int(cliente.llen(outbound_status.DEAD_NOTIFY_KEY)),
+        },
+        "queuedNotices": pendientes_avisos if pendientes_avisos >= 0 else None,
+        "source": "working index",
+    }
+
+
+def _que_va_a_hacer(fila) -> str:
+    """Una oración terminada por tipo de fila, en inglés, armada en el server."""
+    from app import agenda
+
+    return {
+        agenda.CIERRE_BORRADOR: "Release the stock this draft is holding",
+        agenda.AVISO_CIERRE: "Tell the customer their draft was closed",
+        agenda.AVISO_ANTES_DE_ENTREGA: "Remind the customer before their delivery",
+        agenda.RECORDATORIO_PLAZO_DUENO: "Remind you that this order's deadline is close",
+        agenda.SEGUIMIENTO: "Follow up with the team about this order",
+        agenda.BAJA_DE_PEDIDO: "Release the stock of an order the customer took back",
+        agenda.AVISO_BAJA_AL_DUENO: "Tell you a customer took their order back",
+    }.get(fila.tipo, "Scheduled work on this order")
 
 
 TOKEN_MINIMO = 32
@@ -400,6 +741,13 @@ def snapshot() -> dict:
     }
 
 
+async def _en_hilo(funcion, *args):
+    """Corre una lectura en el pool DEL PANEL, no en el del proceso."""
+    return await asyncio.get_running_loop().run_in_executor(
+        _HILOS, funcion, *args
+    )
+
+
 class DashboardAPI:
     """Authenticated read endpoints, mounted only at /api/dashboard."""
 
@@ -427,13 +775,17 @@ class DashboardAPI:
 
         path = scope.get("path", "").removeprefix(scope.get("root_path", ""))
         detail_match = re.fullmatch(r"/orders/([^/]{1,140})", path)
-        readers = {"/snapshot": snapshot, "/controls": controls, "/operations": operations}
+        conversation_match = re.fullmatch(r"/customers/([^/]{1,140})/conversation", path)
+        readers = {
+            "/snapshot": snapshot, "/controls": controls, "/operations": operations,
+            "/today": today, "/queue": queue,
+        }
         if path == "/config" and scope["method"] == "GET":
             # No company, model, origin, or business data is returned before auth.
             await reply(200, {"service": "plus-agent", "apiVersion": 1,
                               "configured": hay_acceso_configurado()})
             return
-        if path not in readers and not detail_match:
+        if path not in readers and not detail_match and not conversation_match:
             await reply(404, {"error": "Not found"})
             return
         if scope["method"] == "OPTIONS":
@@ -462,9 +814,14 @@ class DashboardAPI:
                 order_id = unquote(detail_match[1])
                 if "/" in order_id or "\\" in order_id or order_id in {".", ".."}:
                     raise RecordNotFound
-                data = await asyncio.to_thread(order_detail, order_id)
+                data = await _en_hilo(order_detail, order_id)
+            elif conversation_match:
+                customer_id = unquote(conversation_match[1])
+                if "/" in customer_id or "\\" in customer_id or customer_id in {".", ".."}:
+                    raise RecordNotFound
+                data = await _en_hilo(conversation, customer_id)
             else:
-                data = await asyncio.to_thread(readers[path])
+                data = await _en_hilo(readers[path])
         except RecordNotFound:
             await reply(404, {"error": "Order not found in this workspace"})
             return

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -261,3 +262,125 @@ def test_setup_preserves_agent_configuration_and_does_not_rotate_token(tmp_path)
     assert path.stat().st_mode & 0o777 == 0o600
     path.write_text(f'DASHBOARD_API_TOKEN="{token}" # preserve this existing token\n')
     assert module.configure(path) is None
+
+
+@pytest.fixture
+def almacen_con_cliente(connected):
+    """El cliente habitual, con un pedido de ESTA empresa y su WhatsApp.
+
+    El pedido no es decorado: la pertenencia de un `Customer` —que en ERPNext
+    es un maestro global sin campo `company`— se comprueba contra sus pedidos,
+    así que sin uno este cliente no es nuestro y la ruta contesta 404.
+    """
+    client, almacen, _ = connected
+    create_order(almacen, docstatus=1)
+    return client, {
+        "cliente": datos.CLIENTE_HABITUAL,
+        "telefono": datos.TELEFONO_HABITUAL,
+        "almacen": almacen,
+    }
+
+
+def _hilo(monkeypatch, mensajes, ts="2026-09-10T12:00:00+00:00"):
+    """Un checkpointer de mentira que HONRA el thread_id que le pasan.
+
+    Devuelve mensajes sólo para el hilo del teléfono que se le declara, así que
+    un código que buscara otro hilo —o que se armara el sha por su cuenta y se
+    le fuera un byte— recibe vacío y el test cae. Un doble que contestara lo
+    mismo para cualquier id no podría discrepar con el código sobre la única
+    cosa que esta función hace: encontrar el hilo correcto.
+    """
+    from types import SimpleNamespace
+
+    from app import graph
+
+    esperado = {}
+
+    def registrar(telefono):
+        from app.main import _thread_tag
+
+        esperado["id"] = f"cli:{_thread_tag(telefono)}"
+
+    def get_tuple(config):
+        if config["configurable"]["thread_id"] != esperado.get("id"):
+            return None
+        return SimpleNamespace(
+            checkpoint={"channel_values": {"messages": mensajes}, "ts": ts}
+        )
+
+    monkeypatch.setattr(graph, "checkpointer", lambda: SimpleNamespace(get_tuple=get_tuple))
+    return registrar
+
+
+def test_una_transcripcion_no_muestra_lo_que_el_agente_hace_por_dentro(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """Las dos mitades: la conversación SE VE, y lo de adentro NO.
+
+    Un `ToolMessage` trae la salida cruda de la herramienta y un `AIMessage`
+    vacío es el turno en que el modelo la llamó. Devolver la lista tal cual le
+    mostraba al dueño el stock interno y globos en blanco. Afirmar sólo que el
+    texto crudo no está lo cumpliría también una respuesta vacía, que es la
+    otra forma de estar roto.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    client, registrar = almacen_con_cliente
+    registrar_hilo = _hilo(monkeypatch, [
+        HumanMessage(content="cuánta leche hay?"),
+        AIMessage(content=""),
+        ToolMessage(content="stock de leche: 12", tool_call_id="t1"),
+        AIMessage(content="Hay 12 de leche."),
+    ])
+    registrar_hilo(registrar["telefono"])
+
+    cuerpo = client.get(
+        f"/api/dashboard/customers/{registrar['cliente']}/conversation"
+    ).json()
+
+    assert cuerpo["reachable"] is True
+    assert [m["role"] for m in cuerpo["messages"]] == ["customer", "note", "agent"]
+    assert cuerpo["messages"][0]["text"] == "cuánta leche hay?"
+    assert cuerpo["messages"][2]["text"] == "Hay 12 de leche."
+    # Lo de adentro no sale, ni el número del stock ni el globo vacío.
+    assert "stock de leche" not in json.dumps(cuerpo)
+    assert all(m["text"].strip() for m in cuerpo["messages"])
+    # Y el teléfono tampoco: se usa para encontrar el hilo y se descarta.
+    assert registrar["telefono"] not in json.dumps(cuerpo)
+
+
+def test_la_conversacion_de_un_cliente_de_otra_empresa_no_se_lee(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """`Customer` es un maestro GLOBAL: existe aunque no sea nuestro.
+
+    La pertenencia se comprueba contra los pedidos de ESTA empresa, igual que
+    en `snapshot`. Sin eso, un token de este panel leería las conversaciones de
+    los clientes de otra empresa del mismo ERPNext — que es peor que ver sus
+    nombres, porque son sus mensajes.
+    """
+    client, _ = almacen_con_cliente
+    _hilo(monkeypatch, [])
+
+    respuesta = client.get(
+        f"/api/dashboard/customers/{datos.CLIENTE_MOROSO}/conversation"
+    )
+
+    assert respuesta.status_code == 404
+
+
+def test_un_cliente_sin_whatsapp_no_es_un_error(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """Un cliente cargado a mano puede no tener número, y eso es un estado."""
+    client, registrar = almacen_con_cliente
+    _hilo(monkeypatch, [])
+    registrar["almacen"].docs["Customer"][registrar["cliente"]]["mobile_no"] = ""
+
+    cuerpo = client.get(
+        f"/api/dashboard/customers/{registrar['cliente']}/conversation"
+    ).json()
+
+    assert cuerpo["reachable"] is False
+    assert cuerpo["messages"] == []
+    assert cuerpo["retentionDays"] >= 1
