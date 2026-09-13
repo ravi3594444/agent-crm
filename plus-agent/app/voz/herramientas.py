@@ -23,10 +23,17 @@ llamada mientras el cliente está hablando, así que todo fallo se convierte en 
 resultado normal, con el MISMO texto que recibe el agente de WhatsApp
 (`ERROR_DE_HERRAMIENTA`): la salida correcta ante un fallo —escalar y no hablar
 de sistemas— no puede depender de por dónde entró el cliente.
+
+Y se LOGUEA entero, con traceback. Lo que el cliente oye es genérico a
+propósito; lo que queda en el log es la única copia que existe de por qué falló,
+porque acá la excepción muere. Un log con el nombre de la clase y nada más deja
+«ERPNextError» para una caída, un 404, un permiso y un campo mal escrito.
 """
 from __future__ import annotations
 
 import copy
+import sys
+import traceback
 from typing import Any
 
 from app.tools.registro import (
@@ -115,6 +122,14 @@ def ejecutar(
             dict(argumentos or {}), config={"configurable": dict(configurable)}
         )
     except Exception as exc:
-        print(f"[voz] herramienta {nombre} falló: {type(exc).__name__}")
+        # El mensaje Y el traceback: acá la excepción se muere, así que esto es
+        # lo único que va a quedar de ella. Los ARGUMENTOS no se loguean —son
+        # las palabras del cliente— y el hilo se identifica por el id de
+        # llamada, que no es un teléfono.
+        print(
+            f"[voz] herramienta {nombre} falló en "
+            f"{configurable.get('thread_id', '?')}: {type(exc).__name__}: {exc}"
+        )
+        traceback.print_exc(file=sys.stdout)
         return ERROR_DE_HERRAMIENTA, True
     return str(resultado), False

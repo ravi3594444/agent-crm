@@ -30,11 +30,28 @@ def _con_credencial_de_cliente(configurable: dict[str, str]):
     y no puede hacer Submit— para el hilo que atiende la llamada. Sin esto, un
     hilo sin scope cae en la clave de cliente igual, pero por defecto y no por
     decisión; que sea explícito es lo que hace que se lea en el código.
+
+    EL `inbound_message_id` SE ARMA POR TOOL CALL, NO POR LLAMADA.
+    `crear_pedido` lo hashea en `po_no` y ésa es su idempotencia
+    (`tools/pedidos.py::_message_key`): dos escrituras con el mismo valor son
+    «la misma escritura». En WhatsApp eso es exacto —un mensaje entrante, un
+    id— pero una llamada tiene muchos tool calls, así que un id por llamada
+    hace que el SEGUNDO pedido del cliente devuelva el primero, y encima antes
+    de mirar las líneas nuevas: pidió dos cosas distintas y se lleva una.
+    Lo cazó una review sobre este PR.
+
+    El `call_id` del relay es exactamente la distinción que falta: un reintento
+    del mismo tool call lo repite, y dos pedidos distintos traen dos. Si el
+    proveedor no lo manda, se cae al id de la llamada, que es el
+    comportamiento anterior — peor, pero nunca crea dos pedidos donde había uno.
     """
 
-    def correr(nombre: str, argumentos: dict[str, Any]) -> tuple[str, bool]:
+    def correr(nombre: str, argumentos: dict[str, Any], call_id: str = "") -> tuple[str, bool]:
+        del_turno = dict(configurable)
+        if call_id:
+            del_turno["inbound_message_id"] = f"{configurable['inbound_message_id']}:{call_id}"
         with erpnext.customer_scope():
-            return herramientas.ejecutar(nombre, argumentos, configurable=configurable)
+            return herramientas.ejecutar(nombre, argumentos, configurable=del_turno)
 
     return correr
 

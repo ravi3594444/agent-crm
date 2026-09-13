@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import clientes, erpnext, router
 from app.tools import pedidos
 from app.voz import herramientas, identidad
+from tests import fakes
 
 TELEFONO = "+5493511234567"
 HOY = date(2026, 9, 14)
@@ -71,7 +72,13 @@ class _ErpDeLaLlamada:
                 }
             ]
         if doctype == "Customer":
-            return [dict(c) for c in self.customers.values()]
+            return fakes.listar(
+                [dict(c) for c in self.customers.values()],
+                filters,
+                limit=limit,
+                order_by=order_by,
+                start=start,
+            )
         if doctype == "Dynamic Link":
             cliente = next(f[2] for f in filters if f[0] == "link_name")
             return [
@@ -80,7 +87,18 @@ class _ErpDeLaLlamada:
                 if doc["_cliente"] == cliente
             ]
         if doctype == "Sales Order":
-            return [dict(p) for p in self.pedidos.values()]
+            # HONRA LOS FILTROS, y es el punto. `crear_pedido` es idempotente
+            # por `po_no`, así que un doble que devolviera todos los pedidos
+            # pase lo que pase no puede discrepar con el código sobre la clave:
+            # con él, «dos pedidos distintos en una llamada» daba un pedido y
+            # el bug quedaba invisible. Pasó exactamente eso al escribir esto.
+            return fakes.listar(
+                [dict(p) for p in self.pedidos.values()],
+                filters,
+                limit=limit,
+                order_by=order_by,
+                start=start,
+            )
         return []
 
     def get_doc(self, doctype, name):
@@ -303,3 +321,104 @@ def test_una_llamada_anonima_no_puede_dar_de_alta_a_nadie(erp, locks):
     assert not erp.customers
     assert es_error is False  # un resultado normal, no una excepción
     assert "no registré la cuenta" in texto
+
+
+# --- Dos pedidos en una llamada, y un reintento --------------------------
+
+
+def _agente_de_la_llamada(contexto: dict):
+    pytest.importorskip("calling_agent")
+    from app.voz import agente
+
+    return agente.para_llamada(contexto)
+
+
+def _dar_de_alta(contexto: dict) -> None:
+    _llamar(
+        "crear_cliente",
+        {
+            "nombre": "Almacén Don José",
+            "direccion": {
+                "calle": "Laprida 420",
+                "localidad": "Córdoba",
+                "codigo_postal": "5000",
+                "referencia": "",
+            },
+        },
+        contexto,
+    )
+
+
+def test_dos_pedidos_distintos_en_una_llamada_son_dos_pedidos(erp, locks, contexto):
+    """El cliente pide la muzzarella y, más adelante en la MISMA llamada, otra
+    cosa para otro día. Son dos pedidos.
+
+    Antes no lo eran: el id de idempotencia era el de la llamada, así que
+    `crear_pedido` encontraba el primero por `po_no` y lo devolvía —sin mirar
+    las líneas nuevas—. El cliente pedía dos cosas y se llevaba una.
+    """
+    _dar_de_alta(contexto)
+    agente = _agente_de_la_llamada(contexto)
+
+    primero, error = agente.run_tool(
+        "crear_pedido",
+        {
+            "lineas": [{"item_code": "MUZZA-1K", "cantidad": 15, "unidad": "Kg"}],
+            "fecha_entrega": "2026-09-17",
+        },
+        "tool-call-1",
+    )
+    assert not error, primero
+    segundo, error = agente.run_tool(
+        "crear_pedido",
+        {
+            "lineas": [{"item_code": "MUZZA-1K", "cantidad": 30, "unidad": "Kg"}],
+            "fecha_entrega": "2026-09-24",
+        },
+        "tool-call-2",
+    )
+    assert not error, segundo
+
+    assert len(erp.pedidos) == 2, "el segundo pedido no se creó"
+    numeros = sorted(erp.pedidos)
+    assert numeros[0] in primero and numeros[1] in segundo
+    # Y el segundo lleva lo que pidió el segundo, no una copia del primero.
+    fechas = {p["delivery_date"] for p in erp.pedidos.values()}
+    assert fechas == {"2026-09-17", "2026-09-24"}
+
+
+def test_el_reintento_del_mismo_tool_call_no_duplica_el_pedido(erp, locks, contexto):
+    """La otra mitad, y la razón por la que la clave no puede ser un contador:
+    el mismo tool call repetido es la MISMA escritura, y tiene que seguir
+    devolviendo el pedido que ya existe."""
+    _dar_de_alta(contexto)
+    agente = _agente_de_la_llamada(contexto)
+
+    argumentos = {
+        "lineas": [{"item_code": "MUZZA-1K", "cantidad": 15, "unidad": "Kg"}],
+        "fecha_entrega": "2026-09-17",
+    }
+    primero, _ = agente.run_tool("crear_pedido", argumentos, "tool-call-1")
+    repetido, _ = agente.run_tool("crear_pedido", argumentos, "tool-call-1")
+
+    assert len(erp.pedidos) == 1, "un reintento creó un segundo pedido"
+    (numero,) = erp.pedidos
+    assert numero in primero and numero in repetido
+
+
+def test_sin_call_id_se_cae_al_id_de_la_llamada(erp, locks, contexto):
+    """El proveedor puede no mandarlo. Sin él se pierde la distinción y vuelve
+    el comportamiento viejo —el segundo pedido devuelve el primero— que es
+    peor, pero nunca crea dos pedidos donde había uno."""
+    _dar_de_alta(contexto)
+    agente = _agente_de_la_llamada(contexto)
+
+    agente.run_tool(
+        "crear_pedido",
+        {
+            "lineas": [{"item_code": "MUZZA-1K", "cantidad": 15, "unidad": "Kg"}],
+            "fecha_entrega": "2026-09-17",
+        },
+        "",
+    )
+    assert len(erp.pedidos) == 1

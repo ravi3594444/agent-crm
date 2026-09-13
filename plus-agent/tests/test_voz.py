@@ -183,6 +183,9 @@ def test_el_navegador_no_le_da_cuenta_a_nadie():
 
 
 def test_el_telefono_conocido_resuelve_su_cuenta(monkeypatch):
+    """CON el permiso del dueño. Sin él, un caller_id no es nadie: ver
+    `test_un_caller_id_no_es_nadie_mientras_el_dueno_no_lo_diga`."""
+    monkeypatch.setenv("VOZ_CONFIA_EN_CALLER_ID", "1")
     monkeypatch.setattr(router, "es_equipo", lambda numero: False)
     monkeypatch.setattr(
         clientes, "buscar_por_telefono", lambda n, get_list=None: {"name": "CUST-0001"}
@@ -474,9 +477,11 @@ def test_erpnext_caido_no_es_lo_mismo_que_no_tener_cuenta(monkeypatch):
 
 
 def test_con_caller_id_una_caida_no_le_saca_el_telefono_al_que_llama(monkeypatch):
+    # Con el permiso del dueño: es la única situación donde el caller_id vale.
     """La dirección contraria, y por eso son dos funciones: acá el número lo
     puso la red, así que sigue valiendo y le permite darse de alta. Queda sin
     `customer_code`, que es lo único que ERPNext no pudo contestar."""
+    monkeypatch.setenv("VOZ_CONFIA_EN_CALLER_ID", "1")
     monkeypatch.setattr(router, "es_equipo", lambda numero: False)
     _erpnext_caido(monkeypatch)
     contexto = identidad.de_telefono(CLIENTE, id_llamada="c1")
@@ -591,3 +596,127 @@ def test_el_verificador_atrapa_un_factory_que_falla_con_el_nombre_bien(monkeypat
     problemas = verificador.verificar()
     assert len(problemas) == 1
     assert "restaurante" in problemas[0]
+
+
+# --- Un caller_id falsificado no es una identidad --------------------------
+
+
+def test_un_caller_id_no_es_nadie_mientras_el_dueno_no_lo_diga(monkeypatch):
+    """`VOZ_CONFIA_EN_CALLER_ID` apagado es el default y lo que va de fábrica.
+
+    Un `caller_id` se falsifica sin equipo especial. Mientras el dueño no
+    decida que el de su operador alcanza, una llamada telefónica se atiende
+    como un desconocido.
+    """
+    monkeypatch.delenv("VOZ_CONFIA_EN_CALLER_ID", raising=False)
+    monkeypatch.setattr(router, "es_equipo", lambda numero: False)
+    monkeypatch.setattr(
+        clientes,
+        "buscar_por_telefono",
+        lambda n, get_list=None: {"name": "CUST-0001", "customer_name": "Panadería"},
+    )
+    contexto = identidad.de_telefono(CLIENTE, id_llamada="c1")
+    assert contexto["customer_code"] == ""
+    assert contexto["actor_phone"] == ""
+
+
+def test_un_numero_falsificado_no_llega_a_los_pedidos_de_su_dueno(monkeypatch):
+    """Lo que de verdad está en juego, probado sobre las herramientas.
+
+    NO alcanzaba con no darle el `customer_code`: `_cuenta_del_remitente`
+    resuelve la cuenta POR TELÉFONO cuando no hay código, así que entregar el
+    número es entregar la cuenta. Por eso el default no entrega ninguno de los
+    dos, y esto lo comprueba donde se nota — leyendo y escribiendo.
+    """
+    monkeypatch.delenv("VOZ_CONFIA_EN_CALLER_ID", raising=False)
+    monkeypatch.setattr(router, "es_equipo", lambda numero: False)
+    # El número ES de un cliente real: es exactamente el caso del impostor.
+    monkeypatch.setattr(
+        clientes,
+        "buscar_por_telefono",
+        lambda n, get_list=None: {"name": "CUST-0001", "customer_name": "Panadería"},
+    )
+    monkeypatch.setattr(
+        erpnext,
+        "get_doc",
+        lambda doctype, nombre: {
+            "name": "SAL-ORD-2026-00042",
+            "customer": "CUST-0001",
+            "docstatus": 1,
+            "grand_total": 15400,
+        },
+    )
+    impostor = identidad.de_telefono(CLIENTE, id_llamada="c1")
+
+    lectura, _ = herramientas.ejecutar(
+        "estado_pedido", {"numero_pedido": "SAL-ORD-2026-00042"}, configurable=impostor
+    )
+    assert lectura == "No encontré el pedido SAL-ORD-2026-00042."
+
+    habitual, _ = herramientas.ejecutar("pedido_habitual", {}, configurable=impostor)
+    assert "CUST-0001" not in habitual
+    assert "MUZZA" not in habitual
+
+    escritura, _ = herramientas.ejecutar(
+        "crear_pedido",
+        {
+            "lineas": [{"item_code": "MUZZA-1K", "cantidad": 15, "unidad": "Kg"}],
+            "fecha_entrega": "2026-09-17",
+        },
+        configurable=impostor,
+    )
+    assert escritura.startswith("PEDIDO_NO_CREADO")
+
+
+def test_con_el_permiso_del_dueno_el_caller_id_si_resuelve(monkeypatch):
+    """La otra mitad: encendido, un cliente conocido pide sin repetir quién es.
+    Sin este test, apagar la función entera pasaría desapercibido."""
+    monkeypatch.setenv("VOZ_CONFIA_EN_CALLER_ID", "1")
+    monkeypatch.setattr(router, "es_equipo", lambda numero: False)
+    monkeypatch.setattr(
+        clientes, "buscar_por_telefono", lambda n, get_list=None: {"name": "CUST-0001"}
+    )
+    contexto = identidad.de_telefono(CLIENTE, id_llamada="c1")
+    assert contexto["customer_code"] == "CUST-0001"
+    assert contexto["actor_phone"] == _telefono.normalizar(CLIENTE)
+
+
+def test_el_fallo_de_una_herramienta_queda_entero_en_el_log(monkeypatch, capsys):
+    """Lo que el cliente oye es genérico; lo que queda en el log es la única
+    copia que existe de por qué falló, porque acá la excepción se muere.
+
+    Con sólo el nombre de la clase, «ERPNextError» es a la vez una caída, un
+    404, un permiso mal puesto y un campo con el nombre cambiado: cuatro causas
+    distintas y una sola línea de log para las cuatro.
+    """
+    def explota(*args, **kwargs):
+        raise erpnext.ERPNextError("Field 'delivery_date' is mandatory")
+
+    monkeypatch.setattr(erpnext, "get_list", explota)
+    texto, es_error = herramientas.ejecutar(
+        "buscar_producto",
+        {"consulta": "muzzarella"},
+        configurable={"actor_scope": "customer", "thread_id": "voz:abc"},
+    )
+    assert es_error is True
+    assert texto == ERROR_DE_HERRAMIENTA  # al cliente, lo de siempre
+
+    log = capsys.readouterr().out
+    assert "Field 'delivery_date' is mandatory" in log
+    assert "buscar_producto" in log
+    assert "voz:abc" in log  # correlación sin teléfono
+    assert "Traceback" in log
+
+
+def test_el_log_de_un_fallo_no_lleva_lo_que_dijo_el_cliente(monkeypatch, capsys):
+    """Los argumentos son las palabras del cliente y no van al log."""
+    def explota(*args, **kwargs):
+        raise erpnext.ERPNextError("caída")
+
+    monkeypatch.setattr(erpnext, "get_list", explota)
+    herramientas.ejecutar(
+        "buscar_producto",
+        {"consulta": "muzzarella para el cumpleaños de mi hija"},
+        configurable={"actor_scope": "customer", "thread_id": "voz:abc"},
+    )
+    assert "cumpleaños" not in capsys.readouterr().out

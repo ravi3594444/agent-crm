@@ -49,6 +49,7 @@ por eso dos pestañas abiertas a la vez no se pisan.
 | `VOZ_AGENTE` | Voz de AssemblyAI. Default `diego` (multilingüe, español rioplatense). |
 | `NOMBRE_NEGOCIO` | Sale en el saludo. |
 | `VOZ_NUMERO_POR_PARAMETRO` | **Demo. Apagado por default.** Ver abajo. |
+| `VOZ_CONFIA_EN_CALLER_ID` | Si el número de la telefonía alcanza para SER un cliente. **Apagado por default.** Ver abajo. |
 
 ---
 
@@ -71,13 +72,32 @@ el código viaje por la voz del que llama, esto es sólo de clientes.
 ## La identidad es más débil acá, y el código lo sabe
 
 En WhatsApp el número lo firma Meta. En una llamada lo pone la red del que llama,
-y en telefonía se falsifica sin equipo especial. De ahí las dos reglas de
+y en telefonía se falsifica sin equipo especial. De ahí las tres reglas de
 `app/voz/identidad.py`:
 
-* el alcance es **siempre** `customer`, sin parámetro para cambiarlo. Un
-  `caller_id` falsificado consigue, como mucho, lo que consigue un cliente;
+* el alcance es **siempre** `customer`, sin parámetro para cambiarlo;
 * un número del equipo **no entra**: `LlamadaDeEquipo`. Al equipo lo atiende
-  WhatsApp, con el router determinista y los códigos.
+  WhatsApp, con el router determinista y los códigos;
+* **un `caller_id` no es nadie mientras el dueño no lo diga**
+  (`VOZ_CONFIA_EN_CALLER_ID`, apagado por default).
+
+### Por qué el caller_id no alcanza solo
+
+Este módulo decía que el número se falsifica y después lo usaba igual para
+resolver la cuenta. Con eso, un desconocido que marcaba el número de la
+panadería le leía los pedidos y le cargaba otros. Lo cazó una review.
+
+Y no alcanzaba con no darle el `customer_code`:
+`tools/pedidos.py::_cuenta_del_remitente` resuelve la cuenta **por teléfono**
+cuando no hay código, así que entregar el número es entregar la cuenta. Son las
+dos cosas o ninguna, y el default es ninguna.
+
+Encenderlo es decidir que el `caller_id` de tu operador alcanza — una decisión
+del dueño, como el tope de auto-confirmación. Lo que se gana es que un cliente
+conocido pida sin repetir quién es; lo que se arriesga es que cualquiera que
+sepa su número pueda hacerlo por él. Para un pedido que igual revisa una
+persona puede valer la pena; con `AUTO_CONFIRM_MAX` arriba de cero, mucho
+menos.
 
 En el navegador no hay número de ninguna clase. `de_navegador()` no le da cuenta
 a nadie: catálogo, stock y alta, que es exactamente lo que puede hacer un

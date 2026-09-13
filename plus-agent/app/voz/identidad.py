@@ -57,17 +57,41 @@ def numero_por_parametro_habilitado() -> bool:
     abre la cuenta de un cliente que ya existe. Un número declarado da de alta
     y pide para SÍ MISMO; nunca lee lo de otro.
     """
-    return os.getenv("VOZ_NUMERO_POR_PARAMETRO", "").strip().lower() in {
-        "1",
-        "true",
-        "si",
-        "sí",
-        "yes",
-    }
+    return _encendido("VOZ_NUMERO_POR_PARAMETRO")
+
+
+def _encendido(variable: str) -> bool:
+    return os.getenv(variable, "").strip().lower() in {"1", "true", "si", "sí", "yes"}
+
+
+def caller_id_confiable() -> bool:
+    """Si el número que trae la telefonía alcanza para SER un cliente.
+
+    **Apagado por default.** Un `caller_id` se falsifica sin equipo especial, y
+    acá no alcanza con no darle el `customer_code`: `_cuenta_del_remitente`
+    (tools/pedidos.py) resuelve la cuenta POR TELÉFONO cuando no hay código, así
+    que entregar el número es entregar la cuenta. Las dos cosas o ninguna.
+
+    Con esto apagado, una llamada telefónica se atiende como un desconocido:
+    catálogo, precios y stock, y lo suyo lo ve una persona. Encenderlo es
+    decidir que el `caller_id` de tu operador alcanza —una decisión del dueño,
+    como el tope de auto-confirmación—, y lo que se gana es que el cliente
+    conocido pida sin repetir quién es.
+
+    Lo cazó una review sobre este PR. El módulo decía que el número se falsifica
+    y después lo usaba igual para resolver la cuenta, que es la contradicción
+    más cara posible: un desconocido que marca el número de la panadería le
+    leía los pedidos y le cargaba otros.
+    """
+    return _encendido("VOZ_CONFIA_EN_CALLER_ID")
 
 
 def de_telefono(numero: str, *, id_llamada: str) -> dict[str, str]:
     """Contexto de autorización para una llamada con número de origen.
+
+    Da identidad **sólo** con `VOZ_CONFIA_EN_CALLER_ID` encendido, que está
+    apagado por default. Sin eso devuelve el contexto de un desconocido, que es
+    lo que un número falsificable vale mientras nadie decida lo contrario.
 
     Levanta `LlamadaDeEquipo` si el número está en `TELEFONOS_EQUIPO`. No es
     para proteger al dueño de sí mismo: es para que una llamada del equipo no
@@ -78,6 +102,10 @@ def de_telefono(numero: str, *, id_llamada: str) -> dict[str, str]:
     canonico = _telefono.normalizar(numero)
     if canonico and router.es_equipo(canonico):
         raise LlamadaDeEquipo(canonico)
+    if not caller_id_confiable():
+        # Sin el permiso explícito del dueño, un caller_id no es nadie. Ver
+        # `caller_id_confiable`: entregar el teléfono ya entrega la cuenta.
+        return de_navegador(id_llamada=id_llamada)
     customer_code = ""
     if canonico:
         # Mismo lookup que `main._contexto`, y por eso tolera los formatos
