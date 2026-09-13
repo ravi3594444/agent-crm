@@ -318,3 +318,34 @@ test('a rate response after sign-out cannot apply to another session', async () 
   assert.equal(w.run('state.fxLoading'), false);
   assert.equal(w.preferences.size, 0);
 });
+
+test('a revoked token during refresh ends the session instead of leaving CRM data on screen', async () => {
+  // A 502 is transient: the snapshot stays, marked stale (covered above). A 401
+  // is not — the token stopped working — and keeping orders, customers and
+  // inventory visible until someone reloads by hand is the security half.
+  const w = workspace();
+  w.live();
+  assert.equal(w.run('data.mode'), 'live');
+  w.context.fetch = async () => ({ ok: false, status: 401 });
+  await w.run('refresh()');
+  assert.equal(w.run('data.mode'), 'disconnected');
+  assert.equal(w.run('data.orders'), null);
+  assert.equal(w.run('data.customers'), null);
+  assert.equal(w.run('state.connection'), null);
+  // And NOT the stale path: a stale flag with no data is a different screen.
+  assert.equal(w.run('state.stale'), false);
+});
+
+test('the sidebar names the connected workspace, never a hard-coded person', async () => {
+  // Every deployment showed "Ravi / Workspace owner / ADMIN". No token and no
+  // snapshot field supports that, so it was a false claim about who is looking.
+  const w = workspace();
+  w.live();
+  const sidebar = w.nodes.app.innerHTML;
+  assert.doesNotMatch(sidebar, /Ravi/);
+  assert.doesNotMatch(sidebar, /Workspace owner/);
+  // What it says instead comes from the snapshot, and is escaped.
+  const company = w.run('data.company');
+  assert.ok(company);
+  assert.match(sidebar, new RegExp(company.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});

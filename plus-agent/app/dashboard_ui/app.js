@@ -97,11 +97,11 @@ function shell() {
       <nav>${nav.map(([key,label])=>`<a href="#${key}" data-view="${key}" class="nav-item ${state.view===key?'active':''}" ${state.view===key?'aria-current="page"':''}>${icon(key)}<span>${label}</span>${key==='orders'&&pending?`<span class="nav-count">${pending}</span>`:''}${key==='agents'?'<span class="new-tag">AI</span>':''}</a>`).join('')}</nav>
       <div class="sidebar-bottom"><div class="sidebar-note">${icon('shield')}<strong>You set the rules.</strong><p>Your agents work within the limits you approve.</p><button class="text-link" data-view="agents">View agent controls ${icon('arrow')}</button></div>
       <a href="#settings" data-view="settings" class="nav-item ${state.view==='settings'?'active':''}">${icon('settings')}<span>Settings</span></a>
-      <div class="profile"><span class="avatar owner">R</span><div><strong>Ravi</strong><span>Workspace owner</span></div><span class="profile-label">ADMIN</span></div></div>
+      <div class="profile"><span class="avatar owner">${escape((data.company||'?').trim().charAt(0).toUpperCase())}</span><div><strong>${escape(data.company||'Not connected')}</strong><span>${data.mode==='demo'?'Demo workspace':data.mode==='disconnected'?'Not connected':'Connected workspace'}</span></div></div></div>
     </aside>
     <div class="main-wrap">
       <header class="topbar"><div class="breadcrumbs"><button class="icon-button menu-button" data-action="menu" aria-label="Open navigation" aria-expanded="${state.menu}">${icon('menu')}</button><span>Workspace</span><span class="crumb-slash">/</span><strong>${title}</strong></div>
-      <div class="top-actions"><span class="mode-chip ${data.mode==='live'?'live-chip':''}">${icon(data.mode==='demo'?'overview':'link')}${data.mode==='demo'?'Demo workspace':data.mode==='disconnected'?'Not connected':state.stale?'Connection interrupted':'Live data'}</span><button class="icon-button notification-button" data-action="pending" aria-label="View ${pending} orders awaiting review">${icon('bell')}${pending?'<span class="notification-dot"></span>':''}</button><span class="avatar owner small">R</span></div></header>
+      <div class="top-actions"><span class="mode-chip ${data.mode==='live'?'live-chip':''}">${icon(data.mode==='demo'?'overview':'link')}${data.mode==='demo'?'Demo workspace':data.mode==='disconnected'?'Not connected':state.stale?'Connection interrupted':'Live data'}</span><button class="icon-button notification-button" data-action="pending" aria-label="View ${pending} orders awaiting review">${icon('bell')}${pending?'<span class="notification-dot"></span>':''}</button><span class="avatar owner small">${escape((data.company||'?').trim().charAt(0).toUpperCase())}</span></div></header>
       <main id="main" tabindex="-1">
         ${state.stale?'<div class="notice error-notice">Connection interrupted. The last snapshot remains visible; refresh to try again.</div>':''}
         ${data.errors.length?`<div class="notice error-notice">Some data could not be read: ${escape(data.errors.join(', '))}. Missing information is shown as unavailable.</div>`:''}
@@ -251,8 +251,27 @@ function validateSnapshot(value) {
 }
 async function fetchData(connection) {
   const response=await fetch(connection.base+'/api/dashboard/snapshot',{headers:{Authorization:'Bearer '+connection.token},cache:'no-store',credentials:'omit',redirect:'error',signal:AbortSignal.timeout(45000)});
-  if(!response.ok)throw new Error(({401:'The dashboard token was not accepted.',403:'This dashboard’s origin is not allowed by the service.',404:'The dashboard API is not installed at this address.',503:'Enable dashboard access on your agent service first.'})[response.status] || 'The agent service could not return a snapshot.');
+  if(!response.ok){
+    // El STATUS viaja con el error. Sin esto el que refresca no puede
+    // distinguir «no se pudo leer ahora» de «este token ya no sirve», y las
+    // dos cosas terminaban igual: los datos del CRM en pantalla.
+    const error=new Error(({401:'The dashboard token was not accepted.',403:'This dashboard’s origin is not allowed by the service.',404:'The dashboard API is not installed at this address.',503:'Enable dashboard access on your agent service first.'})[response.status] || 'The agent service could not return a snapshot.');
+    error.status=response.status;
+    throw error;
+  }
   return validateSnapshot(await response.json());
+}
+function cerrarSesion(aviso) {
+  // El reseteo de sesión, escrito UNA vez. Lo usan Disconnect y el 401 del
+  // refresco: dos salidas con dos copias del reseteo son dos salidas que se
+  // desincronizan, y la que se olvide de limpiar `data` deja el CRM visible.
+  state.connectRequest++;
+  document.querySelectorAll('dialog[open]').forEach(d=>d.close());
+  state.connection=null;state.session++;state.busy=false;
+  state.detailRequest++;state.fxRequest++;state.fxLoading=false;state.fxError='';
+  data=disconnectedData();state.stale=false;
+  state.extrasBusy=false;state.extrasError='';
+  render();toast(aviso);
 }
 async function refresh(silent=false) {
   if(!state.connection||state.busy)return;
@@ -263,7 +282,17 @@ async function refresh(silent=false) {
     if(state.session!==session)return;
     data=snapshot;state.stale=false;if(state.displayCurrency&&Date.now()-(state.fx?.fetchedAt||0)>=3600000)setDisplayCurrency(state.displayCurrency);if(!silent)toast('Dashboard refreshed.');
     if(state.view==='agents')loadExtras(true);
-  }catch(e){if(state.session===session){state.stale=true;if(!silent)toast(e.message||'Could not refresh the dashboard.');}}
+  }catch(e){
+    if(state.session===session){
+      // Un 401 NO es un fallo pasajero: el token dejó de servir. Guardar la
+      // foto anterior y marcarla «vieja» dejaba pedidos, clientes, inventario
+      // y datos de los agentes a la vista hasta que alguien recargara a mano.
+      // Se cierra la sesión con el MISMO reseteo que Disconnect, para que no
+      // haya dos formas de salir que se puedan desincronizar.
+      if(e&&e.status===401){cerrarSesion('Your dashboard access is no longer valid. Sign in again.');return;}
+      state.stale=true;if(!silent)toast(e.message||'Could not refresh the dashboard.');
+    }
+  }
   finally{if(state.session===session){state.busy=false;render();}}
 }
 function exportOrders() {
@@ -294,7 +323,7 @@ document.addEventListener('click',async e=>{
   if(action==='pending'){goto('orders');state.filter='pending';state.range=30;render();}
   if(action==='export')exportOrders();
   if(action==='prev'||action==='next'){state.page+=action==='next'?1:-1;render();}
-  if(action==='disconnect'){state.connectRequest++;document.querySelectorAll('dialog[open]').forEach(d=>d.close());state.connection=null;state.session++;state.busy=false;state.detailRequest++;state.fxRequest++;state.fxLoading=false;state.fxError='';data=disconnectedData();state.stale=false;state.extrasBusy=false;state.extrasError='';render();toast('Signed out of your CRM.');}
+  if(action==='disconnect'){cerrarSesion('Signed out of your CRM.');}
 });
 document.addEventListener('input',e=>{
   if(e.target.id==='search'){
