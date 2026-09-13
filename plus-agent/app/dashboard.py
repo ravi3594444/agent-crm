@@ -179,7 +179,7 @@ def _hilo_del_telefono(telefono: str) -> str:
     return f"cli:{_thread_tag(telefono)}"
 
 
-def _mensajes_visibles(mensajes: list) -> list[dict]:
+def _mensajes_visibles(mensajes: list, sellos: list[str]) -> list[dict]:
     """Lo que una PERSONA puede ver de un hilo del agente.
 
     Tres reglas, y cada una tapa algo que se vería sin ella:
@@ -195,17 +195,22 @@ def _mensajes_visibles(mensajes: list) -> list[dict]:
       LangChain aparece como invisible, no como una fuga.
     """
     visibles: list[dict] = []
-    for m in mensajes:
+    for indice, m in enumerate(mensajes):
         tipo = type(m).__name__
         texto = str(getattr(m, "content", "") or "").strip()
+        cuando = sellos[indice] if indice < len(sellos) else ""
+        if not cuando:
+            continue  # sin hora propia no se muestra: ver `_leer_hilo`
         if tipo == "HumanMessage" and texto:
-            visibles.append({"role": "customer", "text": texto})
+            visibles.append({"role": "customer", "text": texto, "at": cuando})
         elif tipo == "AIMessage" and texto:
-            visibles.append({"role": "agent", "text": texto})
+            visibles.append({"role": "agent", "text": texto, "at": cuando})
         elif tipo == "ToolMessage":
             if visibles and visibles[-1]["role"] == "note":
                 continue  # dos consultas seguidas son UNA línea, no dos
-            visibles.append({"role": "note", "text": "The agent looked something up."})
+            visibles.append({
+                "role": "note", "text": "The agent looked something up.", "at": cuando,
+            })
     return visibles
 
 
@@ -264,9 +269,10 @@ def conversation(customer_id: str) -> dict:
     hilo = _leer_hilo(_hilo_del_telefono(numero))
     if hilo is None:
         return base
-    mensajes, base["lastAt"] = hilo
-    visibles = _mensajes_visibles(mensajes)
-    base["truncated"] = len(visibles) > CONVERSACION_MAX
+    mensajes, sellos, cortado = hilo
+    visibles = _mensajes_visibles(mensajes, sellos)
+    base["lastAt"] = visibles[-1]["at"] if visibles else ""
+    base["truncated"] = cortado or len(visibles) > CONVERSACION_MAX
     base["messages"] = visibles[-CONVERSACION_MAX:]
     return base
 
@@ -279,8 +285,27 @@ def _dias_de_retencion() -> int:
         return 30
 
 
-def _leer_hilo(thread_id: str) -> tuple[list, str] | None:
-    """Los mensajes de un hilo y cuándo se escribió por última vez.
+# Cuántos checkpoints se recorren para fechar los mensajes. Cada turno escribe
+# unos pocos, así que esto cubre holgadamente los `CONVERSACION_MAX` últimos
+# mensajes; lo que quede antes se reporta como truncado en vez de inventarle
+# una hora.
+HISTORIA_MAX = 400
+
+
+def _leer_hilo(thread_id: str) -> tuple[list, list[str], bool] | None:
+    """Los mensajes de un hilo, CUÁNDO llegó cada uno, y si se cortó atrás.
+
+    DE DÓNDE SALE LA HORA. Un mensaje de LangChain no trae timestamp, así que
+    la primera versión de esto no devolvía ninguno. Pero el historial sí: cada
+    checkpoint tiene su `ts` y su lista de mensajes, y la lista crece. El
+    mensaje que aparece por primera vez en el checkpoint N pasó en el `ts` de
+    N —el momento en que el turno se persistió, que está a milisegundos de
+    cuando se manejó—. Es un dato real, no una estimación, y por eso se puede
+    mostrar.
+
+    Un mensaje que no se pueda fechar NO se devuelve: se corta la punta vieja y
+    se dice `truncado`. Rellenar con la hora del vecino sería inventar la única
+    cosa que esta función aporta.
 
     None es «no hay hilo» y también «no lo pude leer», y acá las dos cosas se
     pueden aplastar a propósito: la pantalla dice lo mismo en los dos casos
@@ -290,14 +315,34 @@ def _leer_hilo(thread_id: str) -> tuple[list, str] | None:
     try:
         from app.graph import checkpointer
 
-        tupla = checkpointer().get_tuple({"configurable": {"thread_id": thread_id}})
+        historia = list(
+            checkpointer().list(
+                {"configurable": {"thread_id": thread_id}}, limit=HISTORIA_MAX
+            )
+        )
     except Exception as exc:
         print(f"[dashboard] no pude leer un hilo ({type(exc).__name__})")
         return None
-    if tupla is None:
+    if not historia:
         return None
-    valores = tupla.checkpoint.get("channel_values") or {}
-    return list(valores.get("messages") or []), str(tupla.checkpoint.get("ts") or "")
+
+    # `list` devuelve del más NUEVO al más viejo; fechar necesita el orden
+    # inverso, porque lo que fecha un mensaje es la primera vez que aparece.
+    historia.reverse()
+    sellos: list[str] = []
+    mensajes: list = []
+    for tupla in historia:
+        actuales = list((tupla.checkpoint.get("channel_values") or {}).get("messages") or [])
+        sello = str(tupla.checkpoint.get("ts") or "")
+        if len(actuales) >= len(mensajes):
+            mensajes = actuales
+        while len(sellos) < len(mensajes):
+            sellos.append(sello)
+    # Si la historia se cortó, los primeros mensajes no tienen fecha propia.
+    sin_fecha = len(mensajes) - len(sellos)
+    if sin_fecha > 0:
+        mensajes = mensajes[sin_fecha:]
+    return mensajes, sellos, sin_fecha > 0
 
 
 # ----------------------------------------------------------------------- hoy
@@ -382,28 +427,52 @@ def today() -> dict:
         hilo = _leer_hilo(_hilo_del_telefono(numero))
         if hilo is None:
             continue
-        mensajes, sello = hilo
-        if not sello.startswith(hoy):
-            continue  # habló, pero no hoy
-        visibles = _mensajes_visibles(mensajes)
+        mensajes, sellos, _ = hilo
+        visibles = _mensajes_visibles(mensajes, sellos)
         del_cliente = [m for m in visibles if m["role"] == "customer"]
-        if not del_cliente:
-            continue
+        if not del_cliente or not del_cliente[-1]["at"].startswith(hoy):
+            continue  # no habló, o habló pero no hoy
         cuenta = str(ficha.get("name") or "")
         conversaciones.append({
             "customerId": cuenta,
             "customerName": str(ficha.get("customer_name") or cuenta),
             "turns": len(del_cliente),
-            "lastAt": sello,
+            "lastAt": del_cliente[-1]["at"],
             "lastLine": del_cliente[-1]["text"][:280],
             "orderId": pedido_de.get(cuenta) or None,
         })
     conversaciones.sort(key=lambda c: c["lastAt"], reverse=True)
 
+    # QUIÉN ES NUEVO: el que compró hoy y no había comprado NUNCA antes. Se
+    # pregunta al revés —quiénes SÍ tienen un pedido anterior— porque eso es
+    # una sola consulta acotada, y el complemento es la respuesta. Preguntar
+    # «¿es nuevo?» por cliente serían N llamadas para lo mismo.
+    de_hoy = sorted({str(x.get("customer") or "") for x in pedidos} - {""})
+    con_historia: set[str] = set()
+    if de_hoy:
+        with erpnext.manager_scope():
+            try:
+                anteriores = erpnext.get_list(
+                    "Sales Order",
+                    filters=[["company", "=", empresa], ["customer", "in", de_hoy],
+                             ["transaction_date", "<", hoy]],
+                    fields=["customer"], limit=LIMIT, timeout=READ_TIMEOUT,
+                )
+                con_historia = {str(x.get("customer") or "") for x in anteriores}
+            except Exception:
+                # Sin poder comprobarlo, NADIE es nuevo. Marcar de nuevo a un
+                # cliente viejo es decirle al dueño que ganó una cuenta que ya
+                # tenía; el error al revés sólo omite una fila.
+                errors.append("new customers")
+                con_historia = set(de_hoy)
+    nuevos = [c for c in conversaciones
+              if c["orderId"] and c["customerId"] not in con_historia]
+
     return {
         "date": hoy,
         "generatedAt": ahora.isoformat(),
         "conversations": conversaciones,
+        "newCustomers": nuevos,
         "orders": [order_row(x) for x in pedidos],
         "errors": errors,
         "truncated": truncated,
@@ -456,10 +525,62 @@ def queue() -> dict:
             "what": _que_va_a_hacer(fila),
         })
 
+    # DE QUÉ CLIENTE ES CADA UNA. La fila de agenda sólo guarda el pedido, y
+    # «SAL-ORD-2026-00042 a las 17:00» no le dice nada a una persona. Los
+    # nombres se traen en UNA consulta para todos los pedidos nombrados, no uno
+    # por fila.
+    esperando: list[dict] = []
+    from app import erpnext
+
+    with erpnext.manager_scope():
+        empresa = erpnext.default_company()
+        nombres: dict[str, str] = {}
+        pedidos_citados = sorted({p["orderId"] for p in proximas})
+        if pedidos_citados:
+            try:
+                for fila_so in erpnext.get_list(
+                    "Sales Order",
+                    filters=[["company", "=", empresa], ["name", "in", pedidos_citados]],
+                    fields=["name", "customer", "customer_name"],
+                    limit=len(pedidos_citados), timeout=READ_TIMEOUT,
+                ):
+                    nombres[str(fila_so.get("name"))] = str(
+                        fila_so.get("customer_name") or fila_so.get("customer") or ""
+                    )
+            except Exception:
+                nombres = {}
+        # LO QUE ESPERA A UNA PERSONA: el dueño es el cuello de botella de esto
+        # y hoy no lo ve en ninguna parte. Son los borradores todavía abiertos,
+        # que es la misma consulta que `snapshot` ya hace para `pendingOrders`.
+        try:
+            abiertos = erpnext.get_list(
+                "Sales Order",
+                filters=[["company", "=", empresa], ["docstatus", "=", 0],
+                         ["status", "not in", ["Closed", "Cancelled", "On Hold"]]],
+                fields=["name", "customer", "customer_name", "creation"],
+                limit=COLA_MAX, order_by="creation asc, name asc", timeout=READ_TIMEOUT,
+            )
+        except Exception:
+            abiertos = []
+        for fila_so in abiertos:
+            desde = _momento_iso(fila_so.get("creation"))
+            if not desde:
+                continue  # sin fecha legible no se inventa una
+            esperando.append({
+                "orderId": str(fila_so.get("name") or ""),
+                "customer": str(fila_so.get("customer_name") or fila_so.get("customer") or ""),
+                "since": desde,
+                "what": "Waiting for someone to confirm or reject it",
+            })
+
+    for p in proximas:
+        p["customer"] = nombres.get(p["orderId"], "")
+
     pendientes_avisos = avisos.pendientes()
     return {
         "generatedAt": agenda._momento(ahora).isoformat(),
         "upcoming": proximas,
+        "waitingOnAPerson": esperando,
         "undelivered": {
             "replies": int(cliente.llen("wa:{inbound}:dead")),
             "notices": int(cliente.llen(outbound_status.DEAD_NOTIFY_KEY)),
@@ -467,6 +588,23 @@ def queue() -> dict:
         "queuedNotices": pendientes_avisos if pendientes_avisos >= 0 else None,
         "source": "working index",
     }
+
+
+def _momento_iso(valor: object) -> str:
+    """El `creation` de ERPNext como ISO con zona, o "" si no se entiende.
+
+    Frappe devuelve sellos SIN zona. `reloj.de_erpnext` es la única lectura de
+    eso en el repo y por eso se usa ésta y no un `fromisoformat` suelto: dos
+    formas de leer el mismo sello se desincronizan y la pantalla muestra horas
+    corridas.
+    """
+    from app import reloj
+
+    try:
+        momento = reloj.de_erpnext(str(valor or ""))
+    except Exception:
+        return ""
+    return momento.isoformat() if momento else ""
 
 
 def _que_va_a_hacer(fila) -> str:

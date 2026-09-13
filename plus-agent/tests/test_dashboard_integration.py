@@ -281,7 +281,7 @@ def almacen_con_cliente(connected):
     }
 
 
-def _hilo(monkeypatch, mensajes, ts="2026-09-10T12:00:00+00:00"):
+def _hilo(monkeypatch, mensajes, sellos=None):
     """Un checkpointer de mentira que HONRA el thread_id que le pasan.
 
     Devuelve mensajes sólo para el hilo del teléfono que se le declara, así que
@@ -294,6 +294,9 @@ def _hilo(monkeypatch, mensajes, ts="2026-09-10T12:00:00+00:00"):
 
     from app import graph
 
+    sellos = sellos or [
+        f"2026-09-10T12:0{i}:00+00:00" for i in range(len(mensajes))
+    ]
     esperado = {}
 
     def registrar(telefono):
@@ -301,14 +304,27 @@ def _hilo(monkeypatch, mensajes, ts="2026-09-10T12:00:00+00:00"):
 
         esperado["id"] = f"cli:{_thread_tag(telefono)}"
 
-    def get_tuple(config):
-        if config["configurable"]["thread_id"] != esperado.get("id"):
-            return None
-        return SimpleNamespace(
-            checkpoint={"channel_values": {"messages": mensajes}, "ts": ts}
-        )
+    def listar(config, limit=None):
+        """El historial como lo devuelve LangGraph: del más NUEVO al más viejo.
 
-    monkeypatch.setattr(graph, "checkpointer", lambda: SimpleNamespace(get_tuple=get_tuple))
+        Un checkpoint por mensaje, con la lista creciendo, que es la forma real
+        —y es la que hace que la fecha de cada mensaje sea la del checkpoint
+        donde aparece por primera vez—. Un doble que devolviera un solo
+        checkpoint con todo adentro no podría discrepar con el código sobre
+        ese fechado, que es justo lo que el código hace.
+        """
+        if config["configurable"]["thread_id"] != esperado.get("id"):
+            return []
+        historia = [
+            SimpleNamespace(checkpoint={
+                "channel_values": {"messages": mensajes[: i + 1]},
+                "ts": sellos[i],
+            })
+            for i in range(len(mensajes))
+        ]
+        return list(reversed(historia))
+
+    monkeypatch.setattr(graph, "checkpointer", lambda: SimpleNamespace(list=listar))
     return registrar
 
 
@@ -342,6 +358,14 @@ def test_una_transcripcion_no_muestra_lo_que_el_agente_hace_por_dentro(
     assert [m["role"] for m in cuerpo["messages"]] == ["customer", "note", "agent"]
     assert cuerpo["messages"][0]["text"] == "cuánta leche hay?"
     assert cuerpo["messages"][2]["text"] == "Hay 12 de leche."
+    # Y CADA MENSAJE TRAE SU HORA, que sale del checkpoint donde apareció por
+    # primera vez: el `AIMessage` vacío se saltea, así que la nota hereda la
+    # hora del ToolMessage —la tercera— y no la del globo que no se muestra.
+    assert [m["at"] for m in cuerpo["messages"]] == [
+        "2026-09-10T12:00:00+00:00",
+        "2026-09-10T12:02:00+00:00",
+        "2026-09-10T12:03:00+00:00",
+    ]
     # Lo de adentro no sale, ni el número del stock ni el globo vacío.
     assert "stock de leche" not in json.dumps(cuerpo)
     assert all(m["text"].strip() for m in cuerpo["messages"])
