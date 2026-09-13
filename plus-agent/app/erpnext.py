@@ -36,6 +36,10 @@ _credential_scope: ContextVar[str] = ContextVar(
 class ERPNextError(RuntimeError):
     """A sanitized ERPNext failure safe to pass through internal tool logic."""
 
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
 
 def _manager() -> httpx.Client:
     """Build the broad management client lazily and fail closed if absent."""
@@ -100,7 +104,8 @@ def _request(
         raise ERPNextError(f"ERPNext no disponible durante {operation}") from exc
     if response.status_code >= 400:
         raise ERPNextError(
-            f"ERPNext rechazó {operation} (estado {response.status_code})"
+            f"ERPNext rechazó {operation} (estado {response.status_code})",
+            status_code=response.status_code,
         )
     try:
         body = response.json()
@@ -176,16 +181,18 @@ def get_list(
     parent: str | None = None,
     order_by: str | None = None,
     start: int = 0,
+    timeout: float | None = None,
 ) -> list[dict]:
-    return _list(_active_client(), doctype, filters, fields, limit, parent, order_by, start)
+    return _list(_active_client(), doctype, filters, fields, limit, parent, order_by, start, timeout)
 
 
-def get_doc(doctype: str, name: str) -> dict:
+def get_doc(doctype: str, name: str, *, timeout: float | None = None) -> dict:
     body = _request(
         _active_client(),
         "GET",
         _resource_path(doctype, name),
         operation=f"la lectura de {doctype}",
+        **({"timeout": timeout} if timeout else {}),
     )
     data = body.get("data")
     if not isinstance(data, dict):

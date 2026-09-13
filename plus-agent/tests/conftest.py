@@ -485,6 +485,13 @@ def limites_sin_redis(monkeypatch):
         # con un .env que lo encienda, `crear_pedido` escribiría filas de agenda
         # en tests que no hablan de eso, y el barrido las despacharía.
         "AVISO_ANTES_DE_ENTREGA_HORAS",
+        # Los tokens del dashboard. Un `.env` de desarrollo que los tenga
+        # haría pasar un test de «sin acceso configurado» por la razón
+        # equivocada — y peor: uno que afirma que un token NO sirve podría
+        # estar probando contra un token real que sí.
+        "DASHBOARD_API_TOKEN",
+        "DASHBOARD_TOKENS",
+        "DASHBOARD_ALLOWED_ORIGINS",
     ):
         monkeypatch.delenv(nombre, raising=False)
     vacio = FakeRedis()

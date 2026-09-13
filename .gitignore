@@ -10,3 +10,8 @@
 # logs de verificaciones corridas a mano
 *.log
 __pycache__/
+
+# Dashboard static export and local execution state
+/dist/
+/node_modules/
+/.openai/*.local.json
