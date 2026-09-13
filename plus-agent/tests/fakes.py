@@ -11,6 +11,7 @@ drops a customer's confirmation.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 
@@ -125,6 +126,35 @@ class FakeMarcas:
         self._vivo()
         keys = [str(k) for k in args[:numkeys]]
         argv = [a.decode() if isinstance(a, bytes) else str(a) for a in args[numkeys:]]
+
+        if "cjson.decode" in script:
+            # agenda._CACHEAR_LUA: compare-and-set.
+            #
+            # Esto es una RÉPLICA, no el script: lo que corre acá es Python. Un
+            # doble que reimplementa la regla no puede discrepar con el script
+            # sobre la regla —mutar el Lua no rompía ni un test—, así que la
+            # garantía de atomicidad y el desempate los prueba
+            # `test_agenda_redis.py` contra un Redis de verdad. Esta réplica
+            # existe sólo para que los otros tests tengan un caché que se
+            # comporte, y todo lo que decide sale de lo que se le PASA.
+            guardada = self.values.get(keys[0])
+            if guardada:
+                try:
+                    foto = json.loads(guardada)
+                    vieja, nueva = float(foto["sello"]), float(argv[0])
+                    if vieja > nueva:
+                        return 0  # lo guardado es más nuevo: no se pisa
+                    if vieja == nueva and foto["estado"] != argv[6] and argv[2] == "1":
+                        return 0  # empate: lo terminal le gana a lo pendiente
+                except (TypeError, ValueError, KeyError):
+                    pass  # basura guardada no le gana a un evento real
+            if argv[2] == "1":
+                self.zadd(keys[1], {argv[4]: float(argv[3])})
+            else:
+                self.zrem(keys[1], argv[4])
+            self.values[keys[0]] = argv[1]
+            self.ttls[keys[0]] = int(argv[5])
+            return 1
 
         if "ZRANGEBYSCORE" in script:
             # avisos._RECLAMAR_LUA: take the earliest due entry and lease it.

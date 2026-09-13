@@ -1383,3 +1383,391 @@ def test_la_baja_suelta_la_reserva_bajo_EL_MISMO_lock_que_usan_las_decisiones(
     # Y en el orden que no se traba: primero el de la fila, después el de la
     # decisión.
     assert tomados.index(f"pendiente:{PEDIDO}") < tomados.index(f"solicitud:{PEDIDO}")
+
+
+def test_el_aviso_al_dueno_sale_a_su_hora_y_no_cuando_el_plazo_ya_se_venció(
+    mundo, marcas_sin_redis, entrega_a_las_17, monkeypatch
+) -> None:
+    """El caso NORMAL, que era el que no estaba probado.
+
+    La fila se agenda a `plazo - RE_PING_DUENO_HORAS`, así que cuando suena, al
+    plazo todavía le falta una hora entera. Comparar el PLAZO con `ahora` daba
+    verdadero justo entonces y la fila se reprogramaba a la hora a la que YA
+    estaba, una y otra vez: el dueño no se enteraba hasta que faltaba menos de
+    un minuto, que es exactamente la hora que este aviso existe para darle.
+
+    Los dos tests de al lado prueban el plazo MOVIDO y las horas de silencio.
+    Ninguno pasa por acá: el plazo no se mueve y son las 13:00.
+    """
+    monkeypatch.setattr(agenda, "horas_de_aviso", lambda: 3.0)
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "delivery_date": "2026-09-08"}
+    # Entrega 17:00 menos 3 h de aviso = plazo 14:00; el re-ping, una hora
+    # antes: 13:00. Y a las 13:00 es cuando tiene que sonar.
+    agenda.crear(
+        PEDIDO,
+        agenda.RECORDATORIO_PLAZO_DUENO,
+        epoch(13),
+        params={"hora": "14:00"},
+        ahora=epoch(9),
+    )
+
+    agenda.tick(ahora=epoch(13))
+
+    assert len(mundo["al_dueno"]) == 1
+    _, cuerpo = mundo["al_dueno"][0]
+    assert "14:00" in cuerpo
+    # Y la fila se terminó: no quedó viva reprogramándose contra sí misma.
+    assert agenda.vivas(PEDIDO, agenda.RECORDATORIO_PLAZO_DUENO) == []
+
+
+def test_un_seguimiento_sin_equipo_al_que_avisar_no_se_da_por_hecho(
+    mundo, marcas_sin_redis, monkeypatch
+) -> None:
+    """`encolar_equipo` no LEVANTA cuando no hay a quién avisar: devuelve False.
+
+    Sin mirar ese booleano, la fila se cerraba como hecha habiéndole hablado a
+    nadie, y sin reintento. Las dos mitades: que no se haya mandado nada es la
+    fácil —no había destinatario—; la que importa es que la fila SIGA VIVA,
+    porque es la diferencia entre «se reintenta cuando haya equipo» y «se
+    perdió».
+    """
+    from app import router
+
+    # `TELEFONOS_EQUIPO` vacío es lo que hay en un checkout limpio, y es
+    # exactamente el caso que `encolar_equipo` reporta con False.
+    monkeypatch.setattr(router, "STAFF", [])
+    agenda.crear(
+        PEDIDO, agenda.SEGUIMIENTO, epoch(15), params={"por_que": "el motivo"},
+        ahora=epoch(9),
+    )
+
+    agenda.tick(ahora=epoch(16))
+
+    assert _en_cola(marcas_sin_redis) == []
+    assert len(agenda.vivas(PEDIDO, agenda.SEGUIMIENTO)) == 1
+
+
+def test_una_cancelacion_trabada_le_cuesta_el_reemplazo_a_SU_tipo_y_a_ningun_otro(
+    mundo, marcas_sin_redis, entrega_a_las_17, monkeypatch
+) -> None:
+    """El castigo por una cancelación trabada es de ese tipo, no de la ronda.
+
+    Dos filas vivas del MISMO tipo sobre el mismo pedido son DOS avisos al
+    mismo cliente: `avisos.encolar` deduplica por `(evento, pedido)` y el id de
+    la fila va adentro del evento —hace falta, para que dos filas legítimas no
+    se tapen—, así que la vieja que no se pudo cancelar y su reemplazo hablan
+    las dos. Por eso el tipo trabado no se repone.
+
+    Pero cortar la reconciliación entera ahí le sacaba el reemplazo al OTRO
+    tipo, que sí se había cancelado bien: eso no es un aviso de más, es un
+    aviso de MENOS, y no lo repone ningún reintento mientras el trabado siga
+    trabado. Las tres mitades que importan: la vieja sigue viva, su tipo no
+    tiene gemela, y el otro tipo SÍ quedó repuesto.
+    """
+    monkeypatch.setattr(agenda, "horas_de_aviso", lambda: 3.0)
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "delivery_date": "2026-09-08"}
+    vieja = agenda.crear(
+        PEDIDO,
+        agenda.AVISO_ANTES_DE_ENTREGA,
+        epoch(14),
+        params={"horas": 3.0, "hora": "17"},
+        ahora=epoch(9),
+    )
+    assert vieja is not None
+    # Y la del dueño, que es la que SÍ se va a poder cancelar. Sin ella el test
+    # no puede distinguir «repongo lo que corresponde» de «no repongo nada».
+    del_dueno = agenda.crear(
+        PEDIDO,
+        agenda.RECORDATORIO_PLAZO_DUENO,
+        epoch(13),
+        params={"hora": "14:00"},
+        ahora=epoch(9),
+    )
+    assert del_dueno is not None
+
+    # La entrega se corre al día 9: la reconciliación querría cancelar las dos y
+    # reprogramarlas. Y ERPNext rechaza la escritura de la cancelación — las dos
+    # la escriben con el mismo motivo, así que la caída se afina por tipo abajo.
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "delivery_date": "2026-09-09"}
+    # La caída tiene que ser SELECTIVA por tipo: `mundo["caidas"]` afina por
+    # texto, pero las dos cancelaciones traen el mismo motivo y el tipo está en
+    # otra parte del blob. Este envoltorio mira las dos cosas —y las saca del
+    # cuerpo que le PASAN, no de lo que el test supone que dice—, así que
+    # cancelar el tipo equivocado tampoco pasaría por acá.
+    escribir = erpnext.registrar_comentario
+
+    def trabar_solo_la_del_aviso(doctype, name, texto):
+        cuerpo = str(texto)
+        if '"evento":"cancelada"' in cuerpo and agenda.AVISO_ANTES_DE_ENTREGA in cuerpo:
+            raise erpnext.ERPNextError("ERPNext no la tomó")
+        return escribir(doctype, name, cuerpo)
+
+    monkeypatch.setattr(erpnext, "registrar_comentario", trabar_solo_la_del_aviso)
+
+    repuestas = agenda.reconciliar_entrega(PEDIDO, ahora=epoch(10))
+
+    # El tipo trabado: la vieja sigue viva y no tiene gemela.
+    vivas = agenda.vivas(PEDIDO, agenda.AVISO_ANTES_DE_ENTREGA)
+    assert [f.id for f in vivas] == [vieja.id]
+    assert agenda.AVISO_ANTES_DE_ENTREGA not in {f.tipo for f in repuestas}
+    # El otro: se canceló, y su reemplazo está — con el plazo NUEVO, que es lo
+    # que hace que reponerlo sirva de algo.
+    del_dueno_vivas = agenda.vivas(PEDIDO, agenda.RECORDATORIO_PLAZO_DUENO)
+    assert [f.id for f in del_dueno_vivas] != [del_dueno.id]
+    assert len(del_dueno_vivas) == 1
+    assert agenda.RECORDATORIO_PLAZO_DUENO in {f.tipo for f in repuestas}
+
+
+def test_una_escritura_de_cache_atrasada_no_revive_una_fila_terminada(
+    mundo, marcas_sin_redis
+) -> None:
+    """Lo durable y el caché son DOS escrituras, y pueden llegar en desorden.
+
+    Los ids son determinísticos a propósito, así que dos workers trabajan sobre
+    la MISMA fila. El que escribió `pendiente` primero puede cachear último, y
+    con eso `leer` servía la foto vieja, la fila volvía al índice y se
+    despachaba algo que ya estaba hecho.
+
+    Las dos mitades, porque son dos daños distintos: que `leer` siga diciendo
+    HECHO, y que la fila NO vuelva al índice — una fila fuera del índice no se
+    despacha aunque su blob mienta, y un blob correcto con la fila adentro del
+    índice se despacharía igual.
+    """
+    fila = agenda.crear(
+        PEDIDO, agenda.SEGUIMIENTO, epoch(15), params={"por_que": "x"},
+        ahora=epoch(9),
+    )
+    assert fila is not None
+    agenda.registrar(fila, "hecha", ahora=epoch(10), estado=agenda.HECHO)
+
+    # El worker lento vuelve con la foto PENDIENTE de las 09:00 y la cachea
+    # tarde. Es la misma fila: mismo `sobre`, mismo id.
+    agenda._cachear(fila)
+
+    assert agenda.leer(PEDIDO, fila.id).estado == agenda.HECHO
+    assert agenda.vivas(PEDIDO, agenda.SEGUIMIENTO) == []
+
+
+# ===========================================================================
+# 6. Lo que encontró la SEGUNDA revisión, sobre los arreglos de la primera.
+#    Un arreglo que no se prueba es el mismo defecto mudado de lugar, y esto
+#    vale igual para el arreglo de un arreglo.
+# ===========================================================================
+
+
+def test_un_aviso_al_equipo_ya_encolado_deja_terminar_la_fila_en_el_reintento(
+    mundo, marcas_sin_redis, monkeypatch
+) -> None:
+    """«Ya estaba encolado» es HECHO, no fracaso, y la diferencia es un bucle.
+
+    `avisos.encolar` contesta False cuando la clave de idempotencia ya está —o
+    sea, cuando el aviso salió en una ronda anterior—. Contando sólo las
+    llamadas que ESCRIBIERON, `encolar_equipo` reportaba fracaso en todo
+    reintento, y una fila que necesitara una segunda ronda por cualquier otro
+    motivo no podía terminar nunca: el mensaje ya había salido y el barrido
+    seguía tratándola como pendiente para siempre.
+
+    Las dos mitades: que la fila TERMINE, y que el cliente no reciba el aviso
+    dos veces —terminar reenviando sería el otro final malo—.
+    """
+    from app import router
+
+    monkeypatch.setattr(router, "STAFF", ["5493510000001"])
+    agenda.crear(
+        PEDIDO, agenda.SEGUIMIENTO, epoch(15), params={"por_que": "el motivo"},
+        ahora=epoch(9),
+    )
+
+    # Primera ronda: el aviso se encola bien, pero la marca de HECHA no entra.
+    # La fila queda viva — que es justo el estado desde el que hay que poder
+    # salir.
+    mundo["caidas"].add("escribir:\"hecha\"")
+    assert agenda.tick(ahora=epoch(16)) == 0
+    assert len(agenda.vivas(PEDIDO, agenda.SEGUIMIENTO)) == 1
+    encolados = len(_en_cola(marcas_sin_redis))
+    assert encolados == 1
+
+    # Segunda ronda, con ERPNext sano: `encolar_equipo` ve la clave puesta y no
+    # vuelve a escribir. Eso NO puede leerse como «no avisé a nadie».
+    mundo["caidas"].clear()
+    assert agenda.tick(ahora=epoch(16, 1)) == 1
+    assert agenda.vivas(PEDIDO, agenda.SEGUIMIENTO) == []
+    assert len(_en_cola(marcas_sin_redis)) == encolados
+
+
+def test_ejecutar_ahora_despacha_su_hija_y_no_el_resto_del_pedido(
+    mundo, marcas_sin_redis, monkeypatch
+) -> None:
+    """`ejecutar_ahora` no es un barrido escondido adentro de una llamada.
+
+    Despachar la hija en el acto es el arreglo que mantiene el cierre
+    sincrónico. Buscarla con `vivas(sobre)` a secas arrastraba TODA fila
+    vencida del pedido —de cualquier tipo, fuera de su turno y fuera del tope
+    de `POR_RONDA`, que existe para que una ronda no se coma el proceso—.
+
+    Las dos mitades, porque cada una sola se cumple trivialmente: la hija SÍ
+    sale en el acto (si no, el cierre dejó de ser sincrónico) y el seguimiento
+    vencido del mismo pedido NO — y sigue vivo, esperando su barrido.
+    """
+    from app import pendientes, router, solicitudes
+
+    monkeypatch.setattr(router, "STAFF", ["5493510000001"])
+    monkeypatch.setattr(pendientes, "_tiene_marca", lambda so, m: False)
+    monkeypatch.setattr(pendientes, "_sigue_esperando", lambda so: {"name": so})
+    monkeypatch.setattr(solicitudes, "soltar_reserva", lambda so: (True, "soltado"))
+
+    # Un seguimiento del MISMO pedido, vencido hace rato. No tiene nada que ver
+    # con el cierre y no es asunto de esta llamada.
+    seguimiento = agenda.crear(
+        PEDIDO, agenda.SEGUIMIENTO, epoch(12), params={"por_que": "otra cosa"},
+        ahora=epoch(9),
+    )
+    assert seguimiento is not None
+
+    assert agenda.ejecutar_ahora(
+        agenda.CIERRE_BORRADOR, PEDIDO, epoch(15), params={"horas": 4.0}
+    ) is True
+
+    eventos = {e["evento"].split(":")[0] for e in _en_cola(marcas_sin_redis)}
+    assert "pendiente_cerrado_equipo" in eventos, eventos
+    assert "seguimiento_equipo" not in eventos, eventos
+    assert [f.id for f in agenda.vivas(PEDIDO, agenda.SEGUIMIENTO)] == [seguimiento.id]
+
+
+def test_el_aviso_de_cierre_no_se_da_por_hecho_si_la_cola_no_lo_tomo(
+    mundo, marcas_sin_redis, monkeypatch
+) -> None:
+    """El handler del aviso no hace nada irreversible: no puede usar `ya_paso`.
+
+    El cierre lo hizo la fila madre, y probado. Lo único que aporta éste es el
+    mensaje, así que darlo por hecho con la cola caída pierde exactamente la
+    única cosa que la fila existía para hacer.
+
+    Las dos mitades: que la fila siga VIVA con la cola caída, y que con la cola
+    sana el aviso salga —seguir viva y no salir nunca sería el otro final malo—.
+    """
+    from app import avisos as cola
+    from app import pendientes, router, solicitudes
+
+    monkeypatch.setattr(router, "STAFF", ["5493510000001"])
+    monkeypatch.setattr(pendientes, "_tiene_marca", lambda so, m: False)
+    monkeypatch.setattr(pendientes, "_sigue_esperando", lambda so: {"name": so})
+    monkeypatch.setattr(solicitudes, "soltar_reserva", lambda so: (True, "soltado"))
+
+    real = cola.encolar
+    monkeypatch.setattr(
+        cola, "encolar", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("redis"))
+    )
+    agenda.ejecutar_ahora(
+        agenda.CIERRE_BORRADOR, PEDIDO, epoch(15), params={"horas": 4.0}
+    )
+
+    assert _en_cola(marcas_sin_redis) == []
+    vivas = agenda.vivas(PEDIDO, agenda.AVISO_CIERRE)
+    assert len(vivas) == 1
+
+    monkeypatch.setattr(cola, "encolar", real)
+    assert agenda.tick(ahora=epoch(15, 1)) == 1
+    eventos = {e["evento"].split(":")[0] for e in _en_cola(marcas_sin_redis)}
+    assert "pendiente_cerrado" in eventos, eventos
+    assert agenda.vivas(PEDIDO, agenda.AVISO_CIERRE) == []
+
+
+def test_un_aviso_de_cierre_que_no_quedo_agendado_se_reintenta_y_sale_una_vez(
+    mundo, marcas_sin_redis, monkeypatch
+) -> None:
+    """El cierre YA pasó; el aviso que no quedó tiene que poder volver.
+
+    La fila del cierre se terminaba igual, así que un `crear` que no entraba
+    dejaba el borrador cerrado y al cliente sin enterarse — para siempre, porque
+    nadie volvía a mirar. Ahora la fila del cierre NO se termina, y la ronda
+    siguiente entra por la rama de la marca y reintenta el `crear`.
+
+    Las dos mitades que no se cumplen solas: que el aviso salga en el reintento,
+    y que salga UNA vez —el reintento pasa por `crear` otra vez, y un id sacado
+    del reloj habría dejado dos filas, o sea dos mensajes al mismo cliente—.
+    """
+    from app import pendientes, router, solicitudes
+
+    monkeypatch.setattr(router, "STAFF", ["5493510000001"])
+    marca = {"puesta": False}
+    monkeypatch.setattr(pendientes, "_tiene_marca", lambda so, m: marca["puesta"])
+    monkeypatch.setattr(pendientes, "_sigue_esperando", lambda so: {"name": so})
+    sueltas = []
+    monkeypatch.setattr(
+        solicitudes, "soltar_reserva",
+        lambda so: (marca.__setitem__("puesta", True), sueltas.append(so),
+                    (True, "soltado"))[2],
+    )
+
+    # La escritura de la fila del aviso es la que no entra.
+    mundo["caidas"].add('escribir:"tipo":"aviso_cierre"')
+    agenda.ejecutar_ahora(
+        agenda.CIERRE_BORRADOR, PEDIDO, epoch(15), params={"horas": 4.0}
+    )
+    assert agenda.vivas(PEDIDO, agenda.AVISO_CIERRE) == []
+    assert len(agenda.vivas(PEDIDO, agenda.CIERRE_BORRADOR)) == 1
+
+    # Ronda siguiente, con ERPNext sano. La marca ya está, así que el stock no
+    # se suelta dos veces — y el aviso sí se repone. Sale en la ronda de después
+    # y no en ésta, porque `tick` trabaja sobre la foto del índice que tomó al
+    # empezar: acá el cierre dejó de ser sincrónico, y es el precio correcto de
+    # no perder el aviso.
+    mundo["caidas"].clear()
+    agenda.tick(ahora=epoch(15, 1))
+    assert len(agenda.vivas(PEDIDO, agenda.AVISO_CIERRE)) == 1
+    agenda.tick(ahora=epoch(15, 2))
+
+    assert sueltas == [PEDIDO]
+    assert agenda.vivas(PEDIDO, agenda.CIERRE_BORRADOR) == []
+    eventos = [e["evento"].split(":")[0] for e in _en_cola(marcas_sin_redis)]
+    assert eventos.count("pendiente_cerrado") == 1, eventos
+
+
+def test_el_reintento_del_cierre_no_resucita_un_aviso_que_ya_salio(
+    mundo, marcas_sin_redis, monkeypatch
+) -> None:
+    """La rama de la marca corre más de una vez, y el aviso sale UNA.
+
+    Es el reintento visto desde el otro lado: el cierre sale bien y el aviso
+    también, pero la marca de HECHA de la fila del cierre no entra, así que la
+    ronda siguiente vuelve a entrar por la rama de la marca. Ahí
+    `_asegurar_aviso_de_cierre` mira si la fila del aviso EXISTE antes de
+    crearla, en el estado que sea: sin esa lectura, `crear` le anexa un evento
+    `creada` a una fila ya despachada y la revive —`vivas` se queda con el
+    evento más nuevo—, o con un id sacado del reloj le deja una gemela. Los dos
+    caminos terminan igual: el cliente recibe el mismo aviso dos veces.
+    """
+    from app import pendientes, router, solicitudes
+
+    monkeypatch.setattr(router, "STAFF", ["5493510000001"])
+    marca = {"puesta": False}
+    monkeypatch.setattr(pendientes, "_tiene_marca", lambda so, m: marca["puesta"])
+    monkeypatch.setattr(pendientes, "_sigue_esperando", lambda so: {"name": so})
+    monkeypatch.setattr(
+        solicitudes, "soltar_reserva",
+        lambda so: (marca.__setitem__("puesta", True), (True, "soltado"))[1],
+    )
+
+    # El cierre y su aviso salen bien; lo que NO entra es la marca de hecha de
+    # la fila del cierre, así que esa fila queda viva y se vuelve a despachar.
+    mundo["caidas"].add('escribir:"evento":"hecha"')
+    agenda.ejecutar_ahora(
+        agenda.CIERRE_BORRADOR, PEDIDO, epoch(15), params={"horas": 4.0}
+    )
+    salieron = [e["evento"].split(":")[0] for e in _en_cola(marcas_sin_redis)]
+    assert salieron.count("pendiente_cerrado") == 1, salieron
+    assert len(agenda.vivas(PEDIDO, agenda.CIERRE_BORRADOR)) == 1
+
+    # Segunda ronda, con ERPNext sano. El índice va por vencimiento, así que la
+    # fila del aviso —que vence en 0— sale primero y TERMINA; recién después
+    # entra la del cierre, y su rama de la marca se encuentra con un aviso ya
+    # despachado, que es el caso que importa. La tercera ronda es la que haría
+    # hablar a una gemela o a una fila resucitada, si las hubiera.
+    mundo["caidas"].clear()
+    agenda.tick(ahora=epoch(15, 1))
+    agenda.tick(ahora=epoch(15, 2))
+
+    de_nuevo = [e["evento"].split(":")[0] for e in _en_cola(marcas_sin_redis)]
+    assert de_nuevo.count("pendiente_cerrado") == 1, de_nuevo
+    assert agenda.vivas(PEDIDO, agenda.AVISO_CIERRE) == []

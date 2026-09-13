@@ -683,3 +683,122 @@ def test_sin_saber_la_moneda_no_se_inventa_ninguna() -> None:
 
     assert plan.precios_cambiados == []
     assert [f.codigo for f in plan.precios_iguales] == [fila.codigo]
+
+
+def test_verificar_no_aprueba_nada_si_no_sabe_en_qué_moneda_está_la_lista(
+    sin_red: dict[str, Mock], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`verificar` sola, sin `main`: la moneda vacía se COMPARA igual.
+
+    `main` corta antes, así que sin este test la guarda de adentro no la
+    protege nadie: se podía volver a poner el `if moneda and ...` y la suite
+    seguía verde. Una función pública que cualquiera puede llamar tiene que
+    sostener su regla sin depender de quién la llame.
+    """
+    fila = _filas()[0]
+    sin_red["get_list"].side_effect = None
+    sin_red["get_list"].return_value = [{"item_code": fila.codigo}]
+    actual = _erp(
+        items={fila.codigo: {"item_code": fila.codigo, "item_name": fila.nombre, "stock_uom": fila.unidad, "item_group": fila.grupo}},
+        precios={fila.codigo: _precio(fila)},
+    )
+
+    assert cargar.verificar([fila], actual, "Standard Selling", "") == 1
+
+    salida = capsys.readouterr().out
+    assert "Precios distintos (1)" in salida
+    assert "no la pude leer" in salida
+    assert "Coinciden." not in salida
+
+
+@pytest.mark.parametrize("verificar", [True, False])
+def test_una_moneda_que_no_se_pudo_leer_corta_las_dos_ramas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sin_red: dict[str, Mock],
+    capsys: pytest.CaptureFixture[str],
+    verificar: bool,
+) -> None:
+    """Moneda vacía es «no la pude leer», y seguir rompe las dos ramas igual.
+
+    `currency` es obligatoria en un Price List, así que vacía sólo puede querer
+    decir que la lectura falló. Con `if moneda and ...`, `--verificar` se
+    salteaba la comparación y contestaba «coinciden» sobre el único campo que
+    no había mirado; y la carga escribía Item Prices SIN `currency`, que es el
+    catálogo que `policy._precio_autorizado` descarta entero — sin un error en
+    ninguna parte: el bot simplemente no cotiza.
+
+    Las DOS ramas, por separado, porque son dos consumidores del mismo valor y
+    arreglar uno no arregla el otro: así estaba el defecto. Y se afirma el
+    código de salida **y** que nada se escribió — sólo lo primero lo cumpliría
+    también un `return 1` después de haber cargado el catálogo inservible.
+    """
+    _preparar_main(
+        monkeypatch,
+        sin_red,
+        _erp(
+            items={"LEC-ENT-1L": {"item_code": "LEC-ENT-1L", "item_name": "Leche entera sachet 1 L", "stock_uom": "Unidad", "item_group": "Lacteos"}},
+            precios={"LEC-ENT-1L": _precio(_filas()[0])},
+        ),
+    )
+    monkeypatch.setattr(cargar, "moneda_de", Mock(return_value=""))
+    argumentos = [str(_csv(tmp_path, *BIEN))] + (
+        ["--verificar"] if verificar else ["--aplicar"]
+    )
+
+    assert cargar.main(argumentos) == 1
+
+    salida = capsys.readouterr().out
+    assert "no pude leer la moneda" in salida.lower(), salida
+    assert "Standard Selling" in salida
+    assert "Coinciden." not in salida
+    sin_red["create_doc"].assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("campo", "valor", "esperado"),
+    [
+        ("uom", "Kg", "unidad Kg, el archivo dice Unidad"),
+        ("currency", "USD", "moneda USD, la lista está en ARS"),
+    ],
+)
+def test_verificar_no_aprueba_un_precio_que_el_bot_no_puede_usar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sin_red: dict[str, Mock],
+    capsys: pytest.CaptureFixture[str],
+    campo: str,
+    valor: str,
+    esperado: str,
+) -> None:
+    """El NÚMERO coincide; la unidad o la moneda no.
+
+    `planificar` trata los tres campos como un cambio pendiente y `verificar`
+    miraba sólo el número, así que decía «coinciden» sobre un precio que el
+    runtime descarta: `policy._precio_autorizado` filtra por `uom`, y una
+    moneda distinta no da error — da montos en otra escala.
+
+    Se afirman las dos cosas que hacen útil un verificador: que el código de
+    salida es 1 y que la salida NOMBRA el campo. Sólo el código de salida lo
+    cumpliría también un mensaje que dijera «precio distinto» sobre un precio
+    idéntico, y eso manda a buscar al lugar equivocado.
+    """
+    fila = _filas()[0]
+    precio = {**_precio(fila), campo: valor}
+    _preparar_main(
+        monkeypatch,
+        sin_red,
+        _erp(
+            items={"LEC-ENT-1L": {"item_code": "LEC-ENT-1L", "item_name": "Leche entera sachet 1 L", "stock_uom": "Unidad", "item_group": "Lacteos"}},
+            precios={"LEC-ENT-1L": precio},
+        ),
+    )
+    lista = sin_red["get_list"]
+    lista.side_effect = None
+    lista.return_value = [{"item_code": "LEC-ENT-1L"}]
+
+    assert cargar.main([str(_csv(tmp_path, *BIEN)), "--verificar"]) == 1
+
+    salida = capsys.readouterr().out
+    assert "Precios distintos (1)" in salida
+    assert esperado in salida
