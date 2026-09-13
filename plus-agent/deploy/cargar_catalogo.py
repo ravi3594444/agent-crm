@@ -701,20 +701,55 @@ def configuracion_incompatible(lista: str, moneda: str) -> str:
     return ""
 
 
-def verificar(filas: list[Fila], actual: EnErpnext, lista: str) -> int:
+def verificar(
+    filas: list[Fila], actual: EnErpnext, lista: str, moneda: str
+) -> int:
     """¿ERPNext dice lo mismo que el archivo? En las dos direcciones.
 
     El stock NO se compara y no es un olvido: el stock se mueve solo cada vez
     que se vende algo, así que una diferencia ahí es el negocio funcionando, no
     una deriva. Lo que no tiene por qué moverse solo es el precio.
+
+    «El precio» son TRES campos, los mismos tres que `planificar` trata como un
+    cambio pendiente: el número, la UNIDAD y la MONEDA. Acá se comparaba sólo el
+    número, y con eso `--verificar` decía «coinciden» sobre un precio que el bot
+    no puede usar: `policy._precio_autorizado` descarta todo Item Price cuya
+    `uom` no sea la de la línea del pedido, y una moneda distinta no da error
+    —da montos en otra escala—. Un verificador que aprueba lo que el runtime
+    rechaza es peor que no tenerlo, porque se le cree.
+
+    Por eso `moneda` es obligatoria y se compara siempre: una moneda vacía es
+    «no la pude leer», y saltearse la comparación ahí es otra forma de aprobar
+    lo que el runtime rechaza. `main` corta antes de llegar acá.
     """
     faltan = [f for f in filas if f.codigo not in actual.items]
-    distintos = [
-        (f, Decimal(str(actual.precios[f.codigo].get("price_list_rate") or 0)))
-        for f in filas
-        if f.codigo in actual.precios
-        and Decimal(str(actual.precios[f.codigo].get("price_list_rate") or 0)) != f.precio
-    ]
+    distintos: list[tuple[Fila, str]] = []
+    for f in filas:
+        precio = actual.precios.get(f.codigo)
+        if precio is None:
+            continue
+        difs: list[str] = []
+        vigente = Decimal(str(precio.get("price_list_rate") or 0))
+        if vigente != f.precio:
+            difs.append(f"ERPNext dice {vigente}, el archivo dice {f.precio}")
+        unidad = str(precio.get("uom") or "").strip()
+        if unidad != f.unidad:
+            difs.append(
+                f"unidad {unidad or '(vacía)'}, el archivo dice {f.unidad}"
+            )
+        divisa = str(precio.get("currency") or "").strip()
+        # SIN GUARDA sobre `moneda`. Con `if moneda and ...`, una moneda que no
+        # se pudo leer salteaba la comparación y este verificador contestaba
+        # «coinciden» sobre el único campo que no había mirado. `main` ya no
+        # llega hasta acá con la moneda vacía, y comparar igual es lo que hace
+        # que eso valga para cualquier llamador y no sólo para ése.
+        if divisa != moneda:
+            difs.append(
+                f"moneda {divisa or '(vacía)'}, la lista está en "
+                f"{moneda or '(no la pude leer)'}"
+            )
+        if difs:
+            distintos.append((f, "; ".join(difs)))
     sin_precio = [f for f in filas if f.codigo in actual.items and f.codigo not in actual.precios]
 
     grupos = sorted({f.grupo for f in filas})
@@ -741,8 +776,8 @@ def verificar(filas: list[Fila], actual: EnErpnext, lista: str) -> int:
     for codigo in sobran:
         print(f"  - {codigo}")
     print(f"\nPrecios distintos ({len(distintos)})")
-    for fila, en_erp in distintos:
-        print(f"  - {fila.codigo}  ERPNext dice {en_erp}, el archivo dice {fila.precio} (línea {fila.linea})")
+    for fila, detalle in distintos:
+        print(f"  - {fila.codigo}  {detalle} (línea {fila.linea})")
 
     total = len(faltan) + len(sin_precio) + len(sobran) + len(distintos)
     print(f"\n{'Coinciden.' if not total else f'{total} diferencia(s).'}")
@@ -783,10 +818,29 @@ def main(argv: list[str] | None = None) -> int:
         return _rechazar(ruta, problemas)
 
     print(f"{ruta}: {len(filas)} producto(s). Empresa: {empresa} · depósito: {deposito}")
-    if opciones.verificar:
-        return verificar(filas, actual, lista)
-
+    # La moneda se resuelve ANTES de la bifurcación: `--verificar` la compara
+    # igual que la carga, y con la misma fuente.
     moneda = moneda_de(lista)
+    if not moneda:
+        # VACÍA NO ES «no tiene»: `currency` es obligatoria en un Price List de
+        # ERPNext, así que vacía sólo puede querer decir «no la pude leer». Y
+        # seguir con eso rompe las DOS ramas, en silencio y de la misma forma:
+        # `--verificar` se salteaba la comparación de moneda y decía «coinciden»
+        # sobre precios que nadie había mirado, y la carga escribía Item Prices
+        # SIN `currency`, que es exactamente el catálogo que el bot no puede
+        # usar —`policy._precio_autorizado` filtra por lista, moneda Y unidad, y
+        # descarta el precio al que le falte cualquiera de las tres—. Un
+        # catálogo así no da error en ninguna parte: simplemente no cotiza.
+        print(
+            f"\nNO SEGUÍ. No pude leer la moneda de la lista de precios «{lista}». "
+            f"Sin ella no puedo ni comparar un precio ni escribir uno que el bot "
+            f"pueda usar. Revisá que la lista exista y que estas credenciales la "
+            f"puedan leer."
+        )
+        return 1
+    if opciones.verificar:
+        return verificar(filas, actual, lista, moneda)
+
     desacuerdo = configuracion_incompatible(lista, moneda)
     if desacuerdo:
         print(f"\nNO CARGUÉ NADA. {desacuerdo}")
