@@ -237,24 +237,33 @@ def _marcar_sin_reserva(nombre: str) -> bool:
     stamping "Closed" on a submitted order would release the stock ERPNext had
     reserved for it and drop it out of the delivery queue.
 
-    Best effort, and audited either way: an older ERPNext build may refuse to
-    close a document that was never submitted. The rejection does not depend on
-    it, so a failure here never changes what the manager or the customer is
-    told.
+    DELEGATES to solicitudes.soltar_reserva, and that is the whole fix. This
+    used to re-read BEFORE writing (to refuse a non-draft) but never AFTER, so
+    "the write did not raise" was reported as "the stock is free" — and the
+    manager's audit trail then said `Marcado como Closed: ya no compromete
+    stock` about an order ERPNext may not have closed at all. soltar_reserva
+    re-reads afterwards and only claims the release when the re-read agrees,
+    which is the same rule app/confirmacion.py applies to every other promise
+    this system makes.
+
+    The returned value now means "proven released", not "the call went
+    through". Everything the manager reads is unchanged, deliberately: the
+    sentence is durable audit vocabulary that already lives in ERPNext
+    comments, so this commit changes what makes it TRUE, not how it is worded.
     """
+    from app import solicitudes
+
     try:
-        actual = _leer_doc("Sales Order", nombre)
-        if int(actual.get("docstatus") or 0) != 0:
-            print(f"[decisiones] {nombre}: no lo cierro, ya no es un borrador")
-            return False
-        erpnext.policy_update_status("Sales Order", nombre, _ESTADO_SIN_RESERVA)
-        return True
+        liberado, detalle = solicitudes.soltar_reserva(nombre)
     except Exception as exc:
         print(
             f"[decisiones] {nombre}: no pude marcarlo como "
             f"{_ESTADO_SIN_RESERVA} ({type(exc).__name__})"
         )
         return False
+    if not liberado:
+        print(f"[decisiones] {nombre}: no quedó sin reserva ({detalle})")
+    return liberado
 
 
 def _comentar(nombre: str, texto: str) -> None:
