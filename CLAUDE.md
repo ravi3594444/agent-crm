@@ -149,7 +149,7 @@ pytest -q -rs             # needs Redis Stack
 
 ## Status
 
-**Working:** ERPNext + agent live on HTTPS. Three identities with real permission separation. WhatsApp webhook verified, token permanent (SYSTEM_USER). Gemini configured. 13 demo products, 7 demo customers seeded. Customer and management agents both answering. Two staff numbers, two customer numbers registered in Meta.
+**Working:** ERPNext + agent live on HTTPS. **Canal de voz** (`plus-agent/app/voz/`, `docs/VOZ.md`): el mismo agente de clientes atendiendo el teléfono, con las mismas herramientas y las mismas reglas — navegador hoy, telefonía cuando se conecte un transporte. Three identities with real permission separation. WhatsApp webhook verified, token permanent (SYSTEM_USER). Gemini configured. 13 demo products, 7 demo customers seeded. Customer and management agents both answering. Two staff numbers, two customer numbers registered in Meta.
 
 **Open:**
 1. **Gemini key on free tier** — the cause of rate limits and slowness. Highest priority.
@@ -160,6 +160,7 @@ pytest -q -rs             # needs Redis Stack
 6. **Administrator password and the six API keys were exposed in a chat** — rotate before handover.
 7. **CI/CD not wired** — `deploy.yml` exists but isn't installed.
 8. **No email configured** — no password resets, no notifications.
+9. **Voz: sólo navegador** — falta el transporte de telefonía (Telnyx/Twilio). `agente.desde_telefono` ya decide qué significa el `caller_id`; falta quien lo llame. Y `VOZ_CONFIA_EN_CALLER_ID` va apagado hasta que el dueño decida que el número de su operador alcanza: un `caller_id` se falsifica, y entregar el número entrega la cuenta.
 
 ---
 
