@@ -22,106 +22,21 @@ from app.conversacion import (
     recortar_historial,
     texto_plano,
 )
-from app.tools.captura import (
-    confirmar_entrega,
-    contar_stock,
-    redactar_mensaje_cliente,
-    registrar_venta_offline,
+# QUIÉN puede llamar a QUÉ vive en app/tools/registro.py, con los comentarios
+# que explican cada permiso. Se movió cuando apareció el segundo canal
+# (app/voz/): dos canales que arman su propia lista se desincronizan, y este
+# módulo no se puede importar sin Redis. Se re-exportan porque media suite las
+# importa de acá.
+from app.tools.registro import (
+    ERROR_DE_HERRAMIENTA as _ERROR_MSG,
 )
-from app.tools.catalogo import (
-    buscar_producto,
-    consultar_stock,
-    estado_pedido,
-    pedido_habitual,
+from app.tools.registro import (
+    HERRAMIENTA_INEXISTENTE as _HERRAMIENTA_INEXISTENTE,
 )
-from app.tools.configuracion import (
-    historial_limites,
-    proponer_limite,
-    ver_limites,
-    ver_reglas_de_entrega,
+from app.tools.registro import (
+    TOOLS_CLIENTES,
+    TOOLS_GERENCIA,
 )
-from app.tools.gerencia import (
-    cobranzas_vencidas,
-    ejecutar_reporte,
-    ficha_cliente,
-    pedidos_pendientes,
-    resumen_autonomia,
-    stock_bajo,
-    ventas_del_periodo,
-)
-from app.tools.gestion import (
-    detalle_de_pedido,
-    proponer_accion,
-)
-from app.tools.operaciones import (
-    estado_del_sistema,
-    ver_avisos_fallidos,
-)
-from app.tools.pedidos import (
-    crear_cliente,
-    crear_lead,
-    crear_pedido,
-    dar_de_baja_pedido,
-    escalar_a_humano,
-    pedir_excepcion_de_entrega,
-    recordar,
-)
-
-TOOLS_CLIENTES = [
-    buscar_producto, consultar_stock, estado_pedido, pedido_habitual,
-    # crear_cliente da de alta al REMITENTE con el teléfono del webhook: no
-    # acepta un teléfono como argumento, así que ningún mensaje puede pedir
-    # el alta de otra persona.
-    crear_cliente, crear_lead, crear_pedido, escalar_a_humano,
-    # Pide una excepción de entrega. NO decide: o el dueño la dejó autorizada
-    # de antemano, o abre una solicitud para una persona (app/solicitudes.py).
-    pedir_excepcion_de_entrega,
-    # Anota una fila en app/agenda.py para volver sobre un pedido más tarde.
-    # PROPONE: el tipo lo fuerza Python a `seguimiento`, la fecha va acotada al
-    # horizonte y el motivo se guarda como DATO que lee una persona del equipo.
-    # Lo peor que puede causar es un mensaje al equipo que no hacía falta —
-    # nunca una confirmación, un submit, una cancelación ni plata.
-    recordar,
-    # El cliente se da de baja su propio BORRADOR. No escribe nada privilegiado:
-    # comprueba que el pedido es suyo, que es un borrador y que no hay una
-    # decisión en curso, y anota una fila de app/agenda.py con la credencial de
-    # CLIENTE. Quien cierra el borrador es el barrido, con la de política —
-    # ninguna herramienta la alcanza. NUNCA en TOOLS_GERENCIA: el equipo cancela
-    # por el router determinista, con código, y sobre pedidos confirmados.
-    dar_de_baja_pedido,
-]
-
-TOOLS_GERENCIA = [
-    pedidos_pendientes, ventas_del_periodo, stock_bajo,
-    cobranzas_vencidas, ficha_cliente, ejecutar_reporte,
-    buscar_producto, consultar_stock, estado_pedido,
-    escalar_a_humano,
-    # offline capture — how reality gets back into the system
-    registrar_venta_offline, contar_stock, confirmar_entrega,
-    redactar_mensaje_cliente,
-    # the owner's own limits: read them out and PROPOSE a change. There is no
-    # tool that confirms one, deliberately — the four-digit code never enters
-    # this agent's context and the deterministic router in app/main.py is what
-    # applies the change. An agent that could call both steps is one step.
-    # NEVER in TOOLS_CLIENTES — a customer cannot be allowed near these.
-    ver_limites, proponer_limite, historial_limites,
-    # ...and his delivery rules, through the SAME propose/confirm pair. Reading
-    # them is its own tool; changing one is proponer_limite like everything else.
-    ver_reglas_de_entrega,
-    # read-only operational status. No writes, no retries, no secrets, and
-    # NEVER in TOOLS_CLIENTES: these count queues and name the provider.
-    estado_del_sistema, ver_avisos_fallidos,
-    # ...and the owner's prose about ONE order, turned into ONE action that
-    # already exists (app/acciones.py). Reading is done on the spot; anything
-    # that writes is only PREPARED here and confirmed by him with a six-digit
-    # code this agent never sees — the same shape as proponer_limite, and for
-    # the same reason. NEVER in TOOLS_CLIENTES: a customer near these is a
-    # customer deciding his own order.
-    detalle_de_pedido, proponer_accion,
-    # ...and the numbers he needs to decide whether to loosen anything
-    # (app/autonomia.py). Read-only, and it reports rather than advises.
-    resumen_autonomia,
-]
 
 # from_conn_string() is a CONTEXT MANAGER, not a constructor — using it
 # directly hands you a generator, not a saver. Construct directly instead,
@@ -162,12 +77,7 @@ _modelo_gerencia = modelos.construir("gerencia")
 # nada. tests/test_frontera_decisiones.py exige que este override siga
 # enganchado: si una versión de LangGraph le cambia el nombre al hook, falla el
 # test y no la conversación de un cliente.
-_HERRAMIENTA_INEXISTENTE = (
-    "Esa herramienta no existe para esta conversación y no la vas a conseguir "
-    "pidiéndola de nuevo. NO le muestres al cliente este mensaje, ni nombres "
-    "herramientas, sistemas ni errores. Si lo que pide lo tiene que ver una "
-    "persona, usá escalar_a_humano; si no, seguí con lo que sí podés hacer."
-)
+# El texto está en app/tools/registro.py: lo comparten los dos canales.
 
 
 class ToolNodeSinInventario(ToolNode):
@@ -188,12 +98,7 @@ class ToolNodeSinInventario(ToolNode):
 # permanently breaks that conversation thread — on WhatsApp that means one
 # customer can never be replied to again until someone clears Redis by hand.
 # Always turn a tool failure into a normal tool result instead.
-_ERROR_MSG = (
-    "Esa herramienta falló y no devolvió nada. No inventes un resultado. Llamá a "
-    "escalar_a_humano y decile al cliente, en UNA línea y con UNA sola disculpa, "
-    "que eso lo va a ver el encargado. No le hables de herramientas, de sistemas "
-    "ni de errores técnicos."
-)
+# El texto está en app/tools/registro.py: lo comparten los dos canales.
 
 # The system prompt is built per call (prompt=) and never stored in the
 # checkpoint; the model only sees a bounded tail of the thread
