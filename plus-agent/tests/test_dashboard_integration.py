@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs
-from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+from conftest import RelojDePrueba
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -20,6 +20,11 @@ from demo.falso_erpnext import DEPOSITO, EMPRESA, Almacen, manejar
 
 TOKEN = "integration-dashboard-token-with-enough-entropy"
 TODAY = date(2026, 9, 10)
+# El día que este archivo NOMBRA, con sus horas de pared en la zona que el
+# negocio tenga configurada. Escribir la zona a mano acá es lo que hacía que
+# la celda `BUSINESS_TIMEZONE=Asia/Kolkata` de CI probara otra cosa que el
+# código: ver `RelojDePrueba` en tests/conftest.py.
+RELOJ = RelojDePrueba(TODAY.isoformat())
 
 
 @pytest.fixture
@@ -28,7 +33,7 @@ def connected(monkeypatch):
     monkeypatch.setenv("ERPNEXT_WAREHOUSE", DEPOSITO)
     monkeypatch.setenv("DASHBOARD_API_TOKEN", TOKEN)
     monkeypatch.setenv("ERPNEXT_PUBLIC_URL", "https://crm.example")
-    monkeypatch.setattr(reloj, "ahora", lambda: datetime(2026, 9, 10, 12, tzinfo=ZoneInfo("America/Argentina/Buenos_Aires")))
+    monkeypatch.setattr(reloj, "ahora", lambda: RELOJ.a_las(12))
     almacen = Almacen()
     datos.sembrar(almacen, hoy=TODAY)
     calls = []
@@ -475,23 +480,73 @@ def test_una_charla_de_la_noche_sigue_siendo_de_hoy(
     A las 21:00 de Buenos Aires ya son las 00:00 del día siguiente en UTC, así
     que comparar los textos borraba de «Hoy» toda la franja en que un almacén
     cierra la caja y encarga para mañana. Se compara el día LOCAL.
+
+    LA FRANJA SALE DE LA ZONA, NO ESTÁ ESCRITA A MANO, y ésa es la mitad que
+    importa. Al oeste de Greenwich la charla que discrepa es la de la noche
+    —23:30 locales ya son de mañana en UTC— y al este es la de la madrugada
+    —00:30 locales todavía son de ayer—. Con Buenos Aires escrito acá el test
+    fijaba el sentido occidental, y la celda `BUSINESS_TIMEZONE=Asia/Kolkata`
+    de CI lo hacía caer con el código correcto: el sello caía en el día
+    siguiente en las dos zonas, pero en Kolkata ese día siguiente también es el
+    local. El momento se arma con `RELOJ`, que resuelve la zona por
+    `reloj.zona()` —el mismo reloj que usa el panel—, así que lo que se afirma
+    es la regla y no una zona.
     """
     from langchain_core.messages import HumanMessage
 
     client, registrar = almacen_con_cliente
-    # 2026-09-10 21:30 en Buenos Aires = 2026-09-11 00:30 UTC.
+    # El instante DEL NEGOCIO cuyo sello UTC cae en el otro día del calendario.
+    charla = RELOJ.a_las(0, 30) if RELOJ.a_las(12).utcoffset() > timedelta(0) else RELOJ.a_las(23, 30)
+    if charla.astimezone(UTC).date() == charla.date():
+        pytest.skip("con el negocio en UTC no hay día local del que discrepar")
     reg = _hilo(monkeypatch, [HumanMessage(content="mandame 10 sachets")],
-                sellos=["2026-09-11T00:30:00+00:00"])
+                sellos=[charla.astimezone(UTC).isoformat()])
     reg(registrar["telefono"])
-    monkeypatch.setattr(
-        reloj, "ahora",
-        lambda: datetime(2026, 9, 10, 21, 45, tzinfo=ZoneInfo("America/Argentina/Buenos_Aires")),
-    )
+    monkeypatch.setattr(reloj, "ahora", lambda: charla + timedelta(minutes=15))
 
     cuerpo = client.get("/api/dashboard/today").json()
 
     assert cuerpo["date"] == "2026-09-10"
     assert [c["customerId"] for c in cuerpo["conversations"]] == [registrar["cliente"]]
+
+
+def test_una_charla_de_ayer_no_entra_en_hoy(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """La otra mitad de «Hoy»: el hilo existe y NO se movió hoy, así que no sale.
+
+    La mitad que faltaba, y se midió: con el filtro del día borrado entero
+    —`if _dia_local(sello) != hoy` cambiado por `if False`— la suite entera
+    pasaba en las dos celdas de zona. O sea que nada impedía que «Hoy» listara
+    a un cliente cuya última charla fue hace tres semanas, que es la pantalla
+    que el dueño abre a la mañana para saber con quién habló el agente HOY.
+
+    Y las dos fases son una sola cosa: afirmar nada más que la lista viene
+    vacía lo cumple igual un hilo que no se encontró —teléfono mal normalizado,
+    sha distinto, doble sin registrar—, que es la otra forma de estar roto y la
+    que deja el vacío pareciendo correcto. Primero se ve al MISMO cliente con
+    el MISMO doble apareciendo con el sello de hoy; recién entonces el vacío
+    con el sello de ayer dice lo que el test dice.
+    """
+    from langchain_core.messages import HumanMessage
+
+    client, registrar = almacen_con_cliente
+    mensaje = [HumanMessage(content="ayer te pedí dos cajones")]
+
+    reg = _hilo(monkeypatch, mensaje,
+                sellos=[RELOJ.a_las(12).astimezone(UTC).isoformat()])
+    reg(registrar["telefono"])
+    de_hoy = client.get("/api/dashboard/today").json()
+    assert [c["customerId"] for c in de_hoy["conversations"]] == [registrar["cliente"]]
+
+    reg = _hilo(monkeypatch, mensaje,
+                sellos=[RELOJ.a_las(12, dia=TODAY.day - 1).astimezone(UTC).isoformat()])
+    reg(registrar["telefono"])
+
+    cuerpo = client.get("/api/dashboard/today").json()
+
+    assert cuerpo["date"] == "2026-09-10"
+    assert cuerpo["conversations"] == []
 
 
 def test_si_los_pedidos_no_se_pueden_leer_no_se_inventan_ventas_perdidas(
