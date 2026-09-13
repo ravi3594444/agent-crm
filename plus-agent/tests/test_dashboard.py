@@ -105,3 +105,83 @@ class DashboardBoundaryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+PERSONAL = "per-person-dashboard-token-with-32-or-more-chars"
+STAFF_PHONE = "+54 9 351 000 0001"
+STAFF_CANONICAL = "5493510000001"
+
+
+class DashboardIdentityTest(unittest.TestCase):
+    """Un token del dashboard prueba «soy este teléfono» sin WhatsApp.
+
+    Las tres respuestas de `quien` son tres cosas distintas y se afirman por
+    separado: `None` no pasa, `ANONIMO` pasa pero no es nadie, y un teléfono
+    dice de quién es. `ANONIMO` es `""`, que es falsy y es VÁLIDO — un test
+    que comparara por verdad no podría distinguirlo del rechazo.
+    """
+
+    def test_the_three_answers_are_three_different_things(self):
+        # El teléfono va YA canónico: este test es sobre las tres respuestas y
+        # nada más. Escrito raro, también fallaba cuando se rompía la
+        # normalización, y entonces esa mutación mataba dos tests en vez del
+        # suyo — que es medir acoplamiento, no protección.
+        env = {"DASHBOARD_API_TOKEN": TOKEN,
+               "DASHBOARD_TOKENS": f"{PERSONAL}:{STAFF_CANONICAL}"}
+        with patch.dict(os.environ, env):
+            self.assertIsNone(dashboard.quien("Bearer wrong"))
+            self.assertIsNone(dashboard.quien(TOKEN))  # sin el esquema Bearer
+            self.assertEqual(dashboard.quien("Bearer " + TOKEN), dashboard.ANONIMO)
+            self.assertEqual(dashboard.quien("Bearer " + PERSONAL), STAFF_CANONICAL)
+
+    def test_a_personal_token_alone_is_a_configured_install(self):
+        """La regresión concreta: mirar sólo el token compartido daba 503 a
+        una instalación configurada entera con tokens por persona."""
+        with patch.dict(os.environ, {"DASHBOARD_TOKENS": f"{PERSONAL}:{STAFF_PHONE}"}, clear=False):
+            os.environ.pop("DASHBOARD_API_TOKEN", None)
+            self.assertTrue(dashboard.hay_acceso_configurado())
+            with patch.object(dashboard, "snapshot", return_value={"mode": "live"}):
+                self.assertEqual(request(token=PERSONAL)[0], 200)
+            self.assertEqual(request(token="wrong")[0], 401)
+
+    def test_a_guessable_personal_token_is_not_authentication(self):
+        with patch.dict(os.environ, {"DASHBOARD_TOKENS": f"short:{STAFF_PHONE}"}, clear=False):
+            os.environ.pop("DASHBOARD_API_TOKEN", None)
+            self.assertEqual(dashboard._tokens_por_persona(), {})
+            self.assertFalse(dashboard.hay_acceso_configurado())
+            self.assertIsNone(dashboard.quien("Bearer short"))
+
+    def test_only_a_named_staff_phone_may_decide_anything(self):
+        """`decisiones.*` no verifica quién llama: confía en el llamador.
+
+        Por eso las tres respuestas importan acá y no sólo «entró o no
+        entró». El token compartido nunca alcanza: una decisión sin nombre
+        no se puede auditar.
+        """
+        from app import router
+
+        with patch.object(router, "STAFF", [STAFF_CANONICAL]):
+            self.assertTrue(dashboard.puede_decidir(STAFF_CANONICAL))
+            self.assertFalse(dashboard.puede_decidir(dashboard.ANONIMO))
+            self.assertFalse(dashboard.puede_decidir(None))
+            self.assertFalse(dashboard.puede_decidir("5493510009999"))
+
+    def test_two_tokens_for_one_person_are_ONE_identity(self):
+        """La identidad que devuelve `quien` tiene que ser canónica.
+
+        La versión anterior de este test afirmaba
+        `puede_decidir(quien(...))` con el teléfono escrito raro, y NO PODÍA
+        FALLAR: `router.es_equipo` vuelve a normalizar lo que le pasen
+        (`app/router.py:52`), así que tragaba el bug entero. Lo que la
+        normalización compra de verdad está un paso más allá de `es_equipo`:
+        el string que sale de acá es la identidad con la que se audita una
+        decisión, y dos tokens de la MISMA persona escritos distinto tienen
+        que dar la MISMA identidad, o el registro dice que fueron dos.
+        """
+        otro = "second-token-for-the-same-person-32-plus"
+        env = {"DASHBOARD_TOKENS": f"{PERSONAL}:+54 9 351 000 0001,{otro}:005493510000001"}
+        with patch.dict(os.environ, env):
+            uno = dashboard.quien("Bearer " + PERSONAL)
+            dos = dashboard.quien("Bearer " + otro)
+            self.assertEqual(uno, dos)
+            self.assertEqual(uno, STAFF_CANONICAL)
