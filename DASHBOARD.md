@@ -1,7 +1,7 @@
 # Plus CRM dashboard
 
-A responsive dashboard for the existing Plus Agent: overview, orders, inventory,
-customers, AI agents, and connection settings. It starts signed out. Real data
+A responsive dashboard for the existing Plus Agent: Today, Overview, Coming up,
+orders, inventory, customers, AI agents, and connection settings. It starts signed out. Real data
 appears only after a successful connection; sample records require choosing
 **Explore sample data** or adding `?demo=1` to the dashboard URL.
 
@@ -54,19 +54,52 @@ and permissions when that link opens.
 
 | Screen | Connected behavior |
 | --- | --- |
-| Overview | Booked sales, order totals, daily chart inspection, order status breakdown, pending review and low-stock alerts |
+| Today | Customer activity, conversations without an order highlighted first, first orders today, and links to the customer and order; requires the new Today endpoint |
+| Overview | Booked sales, order totals, daily chart inspection, order status breakdown, pending review, low-stock alerts, failed delivery counts, and a Coming up card |
+| Coming up | Scheduled actions in due-time order, a count and list of orders waiting on a person, and undelivered replies/notices; requires the new queue endpoint |
 | Orders | Seven- or thirty-day history, all-date pending drafts, status filters, search, ten-row pagination and filtered CSV export |
 | Order details | Fresh ERPNext line items, quantities, prices, total, status and delivery address; copy order ID; optional ERPNext link |
 | Inventory | Configured warehouse stock, submitted reservations, available quantities, product search, low-stock filter and item details |
-| Customers | Active customer search, group and territory, loaded order totals and recent orders that open full details |
+| Customers | Company-scoped customer search, group and territory, loaded order totals and orders that open full details; the retained conversation appears below the orders when its endpoint is available |
 | AI agents | Actual configured model names, current guarded owner settings, Redis availability, worker lease and queue/failure counts |
 | Settings | Connect or switch agent, display connection status, and disconnect |
 
-Visible signed-in dashboards refresh every minute, except while a dialog or
-input is active. Manual refresh is always available. Failed refreshes retain
-the last snapshot with a visible interruption notice. Missing datasets stay
-unavailable; failed settings or queue reads never reuse sample values. Requests
-from a closed sign-in or an old session cannot restore signed-out records.
+Visible signed-in dashboards refresh the snapshot every minute, except while a
+dialog or input is active. Today, Coming up, delivery status, and controls load
+explicitly on their relevant views; opening a customer loads only that customer's
+conversation. Recent view reads can be reused for a minute and show their own
+read time. The timer never fetches those extra endpoints. Manual refresh updates
+the snapshot and the current view; each new list also has a refresh button.
+Transient snapshot failures retain the last snapshot with an interruption notice.
+Missing lists stay unavailable and offer retry; live mode never substitutes demo
+records. A 401 on any authenticated read clears the session, its cached lists,
+and open details. Late responses cannot restore signed-out records or overwrite
+another customer's dialog.
+
+### New read contracts: UI implemented, endpoints pending
+
+This change implements the UI only. The following endpoints are **not yet
+implemented by `app/dashboard.py`**. Their exact shapes are in
+[the panel brief](plus-agent/docs/prompt-panel.md); the endpoint implementation
+must preserve the existing authentication and company scope.
+
+| Endpoint | UI consumer |
+| --- | --- |
+| `GET /api/dashboard/today` | Today, including links to customers outside the capped snapshot |
+| `GET /api/dashboard/queue` | Coming up and its Overview card |
+| `GET /api/dashboard/customers/{customerId}/conversation` | The customer's detail dialog, below their loaded orders |
+
+The UI validates each response independently, renders only the specified display
+fields, and escapes text. Tool calls appear only as server-written `note` text;
+there is no tool-name, argument, system-prompt, or phone field in the view.
+Conversations are reached through a customer, never through an enumerable inbox.
+Missing WhatsApp numbers and empty retained histories have separate empty states.
+The server's `retentionDays` and `truncated` fields explain expiring or omitted
+messages. All new screens and conversation states have explicit demo fixtures at
+`?demo=1`; `#today` and `#queue` open the corresponding views.
+
+Order confirmation and shop-closure controls are outside this change. The order
+detail continues to direct decisions to the authorized manager's WhatsApp thread.
 
 ## Display currency
 
@@ -115,7 +148,7 @@ Record and metric definitions:
 
 - Recent orders cover the last 30 business-calendar days. Pending review is a
   separate all-date query so older drafts remain visible.
-- Each list is capped at 250 records, with a truncation notice. Totals and CSV
+- Each snapshot list is capped at 250 records, with a notice beside the affected list. Totals and CSV
   exports cover the loaded records. Customer totals cover recent loaded orders.
 - Booked sales include submitted/completed orders in the company currency.
   This is order value, not collected payments or invoiced revenue.
