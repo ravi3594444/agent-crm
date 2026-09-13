@@ -94,6 +94,13 @@ VERSION = 1
 # comportamiento es agregar una constante acá, un handler en `_HANDLERS` y dos
 # tests — no un módulo.
 CIERRE_BORRADOR = "cierre_borrador"
+# El cierre son DOS filas, y la razón es que soltar el stock y avisarle a una
+# persona tienen reglas de horario distintas. `cierre_borrador` suelta la
+# reserva y escribe la marca; `aviso_cierre` es el que habla, y es el único de
+# los dos que espera a la mañana. Con una sola fila, las horas de silencio
+# postergaban el cierre ENTERO y el borrador se quedaba con el stock tomado de
+# las 22:00 a las 07:00, sin que nadie pudiera explicar por qué.
+AVISO_CIERRE = "aviso_cierre"
 AVISO_ANTES_DE_ENTREGA = "aviso_antes_de_entrega"
 RECORDATORIO_PLAZO_DUENO = "recordatorio_plazo_dueno"
 SEGUIMIENTO = "seguimiento"
@@ -115,6 +122,7 @@ AVISO_BAJA_AL_DUENO = "aviso_baja_al_dueno"
 
 TIPOS = (
     CIERRE_BORRADOR,
+    AVISO_CIERRE,
     AVISO_ANTES_DE_ENTREGA,
     RECORDATORIO_PLAZO_DUENO,
     SEGUIMIENTO,
@@ -139,6 +147,9 @@ CON_PLAZO = frozenset({PENDIENTE})
 # veces si alguna vez conviven, y además es lo que sus tests afirman.
 _LOCKS = {
     CIERRE_BORRADOR: "pendiente:{sobre}",
+    # El mismo lock que su fila madre: son dos mitades de un cierre y no dos
+    # cosas que puedan pasar a la vez sobre el mismo pedido.
+    AVISO_CIERRE: "pendiente:{sobre}",
     AVISO_ANTES_DE_ENTREGA: "agenda:{sobre}",
     RECORDATORIO_PLAZO_DUENO: "agenda:{sobre}",
     SEGUIMIENTO: "agenda:{sobre}",
@@ -149,9 +160,39 @@ _LOCKS = {
     AVISO_BAJA_AL_DUENO: "agenda:{sobre}",
 }
 
+# El plazo de la fila `aviso_cierre` es CERO, y no es un descuido.
+#
+# `_nuevo_id` sale de `(sobre, tipo, vence)`, así que un `vence` sacado del
+# reloj daría un id distinto en cada reintento: el segundo intento no
+# reescribiría la fila del primero, crearía una gemela. Y dos filas de aviso
+# sobre el mismo pedido son DOS mensajes al mismo cliente, porque el id va
+# adentro de la clave con que `avisos.encolar` deduplica. Con cero, el id es el
+# mismo para el mismo pedido: reintentar es gratis, y `ejecutar_ahora` puede
+# NOMBRAR la fila hija en vez de salir a buscarla.
+#
+# Que venza "en 1970" no la hace disparar antes: vencida es vencida, y cuándo
+# SALE lo decide la ventana de silencio de `_despachar`, no este número.
+AVISO_CIERRE_VENCE = 0.0
+
+# Qué fila deja atrás cada tipo cuando su handler crea otra, y con qué plazo
+# —o sea, con qué id, porque el id sale del plazo—.
+#
+# Es lo único que `ejecutar_ahora` despacha en el acto además de la fila que
+# creó, y va por id y no por listado: `vivas(sobre)` traía TODA fila vencida
+# del pedido, de cualquier tipo, fuera de su turno y fuera del tope de
+# `POR_RONDA` — un barrido entero escondido adentro de una llamada que dice
+# cerrar un borrador.
+_HIJAS = {CIERRE_BORRADOR: (AVISO_CIERRE, AVISO_CIERRE_VENCE)}
+
 # Los tipos que le hablan a una PERSONA y por lo tanto esperan a la mañana.
-# `cierre_borrador` está adentro porque le dice al cliente que su pedido no se
-# confirmó, y eso no son las 3 de la mañana.
+#
+# `cierre_borrador` NO está adentro, y ésa es la corrección que separó las dos
+# filas. Estuvo adentro por un motivo cierto —le dice al cliente que su pedido
+# no se confirmó, y eso no son las 3 de la mañana— pero el mismo handler era el
+# que llamaba a `solicitudes.soltar_reserva`, así que postergarlo postergaba el
+# cierre entero: el borrador vencido se quedaba con el stock reservado hasta las
+# 07:00 y cada barrido volvía a anotar un intento. Soltar una reserva no le
+# habla a nadie; el que habla es `aviso_cierre`, y es el que espera.
 #
 # `recordatorio_plazo_dueno` también, y la decisión no es obvia: el aviso existe
 # para que el dueño llegue a contestar ANTES del plazo, así que postergarlo
@@ -168,7 +209,7 @@ _LOCKS = {
 # mañana es `aviso_baja_al_dueno`, que sí le escribe a una persona.
 _HABLAN_CON_ALGUIEN = frozenset(
     {
-        CIERRE_BORRADOR,
+        AVISO_CIERRE,
         AVISO_ANTES_DE_ENTREGA,
         RECORDATORIO_PLAZO_DUENO,
         SEGUIMIENTO,
@@ -191,6 +232,41 @@ REINTENTO_RECONSTRUCCION_SEGUNDOS = 600.0
 
 CLAVE_INDICE = "wa:{inbound}:agenda"
 CACHE_TTL_SEGUNDOS = 30 * 24 * 60 * 60
+
+# Cachear una foto es un compare-and-set: pertenencia al índice y blob, o nada,
+# y sólo si lo que hay guardado no es MÁS NUEVO. Ver `_cachear` para el porqué.
+#
+# Una foto guardada que no parsea no bloquea la escritura —es basura, y basura
+# no puede ganarle a un evento real—, así que el `pcall` que falla cae en el
+# camino de escribir.
+_CACHEAR_LUA = """
+local guardada = redis.call('GET', KEYS[1])
+if guardada then
+    local ok, foto = pcall(cjson.decode, guardada)
+    if ok and type(foto) == 'table' and tonumber(foto['sello']) ~= nil then
+        local vieja = tonumber(foto['sello'])
+        local nueva = tonumber(ARGV[1])
+        if vieja > nueva then
+            return 0
+        end
+        -- EMPATE: lo terminal le gana a lo pendiente. Una fila creada y
+        -- despachada en el mismo acto —`ejecutar_ahora`— tiene sus dos eventos
+        -- con el MISMO sello, porque los dos salen del mismo `ahora`. Sin este
+        -- desempate un `creada` que llega tarde revive una `hecha` y la fila
+        -- vuelve al índice: el sello solo no alcanza para ordenar ese par.
+        if vieja == nueva and foto['estado'] ~= ARGV[7] and ARGV[3] == '1' then
+            return 0
+        end
+    end
+end
+if ARGV[3] == '1' then
+    redis.call('ZADD', KEYS[2], ARGV[4], ARGV[5])
+else
+    redis.call('ZREM', KEYS[2], ARGV[5])
+end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[6]))
+return 1
+"""
 
 
 # ----------------------------------------------------------------- el reloj
@@ -352,8 +428,9 @@ def _cachear(fila: Fila) -> None:
 
     La pertenencia al índice va PRIMERO y el blob después, y no al revés: el
     índice es lo único que hace que la fila se despache, y el blob es sólo un
-    atajo que `leer` sabe suplir yendo a ERPNext. Si sólo una de las dos
-    escrituras entra, que sea la que no se puede reconstruir barato.
+    atajo que `leer` sabe suplir yendo a ERPNext. Desde que las dos van en el
+    mismo script el orden ya no decide quién sobrevive a una caída —entran las
+    dos o ninguna—, pero sigue siendo el correcto para leerlo.
 
     Y si algo falla se anota la DEUDA: el evento durable ya quedó escrito, así
     que una fila puede existir sin estar en el índice. `_toca_reconstruir` sólo
@@ -362,14 +439,34 @@ def _cachear(fila: Fila) -> None:
     """
     global _cache_incompleta
 
+    # NO PISAR UNA FOTO MÁS NUEVA. Lo durable y el caché son dos escrituras
+    # separadas, así que dos workers sobre la MISMA fila —los ids son
+    # determinísticos, eso es a propósito— pueden llegar acá en desorden: el que
+    # escribió `pendiente` primero puede cachear último, y entonces `leer` sirve
+    # la foto vieja, la fila vuelve al índice y se despacha una fila que ya
+    # estaba hecha. El `sello` de cada evento es lo que los ordena, y ya se usa
+    # así en `_seguimiento`.
+    #
+    # La comparación y las dos escrituras van en UN script, del lado de Redis.
+    # Leerlo acá y decidir en Python dejaba una ventana entre las dos —angosta,
+    # pero es exactamente la carrera que esto existe para no tener, y el
+    # desorden entre workers no es más improbable ahí que en cualquier otro
+    # punto—. En Lua no hay ventana: nadie corre entre el GET y el SET.
     cuerpo = json.dumps(fila.como_dict(), ensure_ascii=False, separators=(",", ":"))
     try:
-        cliente = _redis()
-        if fila.con_plazo:
-            cliente.zadd(CLAVE_INDICE, {_miembro(fila): fila.vence})
-        else:
-            cliente.zrem(CLAVE_INDICE, _miembro(fila))
-        cliente.set(_clave_cache(fila.sobre, fila.id), cuerpo, ex=CACHE_TTL_SEGUNDOS)
+        _redis().eval(
+            _CACHEAR_LUA,
+            2,
+            _clave_cache(fila.sobre, fila.id),
+            CLAVE_INDICE,
+            f"{fila.sello:.6f}",
+            cuerpo,
+            "1" if fila.con_plazo else "0",
+            f"{fila.vence:.3f}",
+            _miembro(fila),
+            str(CACHE_TTL_SEGUNDOS),
+            PENDIENTE,
+        )
     except Exception as exc:
         print(f"[agenda] {fila.sobre}: caché no guardada ({type(exc).__name__})")
         _cache_incompleta = True
@@ -812,7 +909,24 @@ def _encolar(fila: Fila, salientes: tuple) -> bool:
         evento = f"{saliente.evento}:{fila.id}"
         try:
             if saliente.equipo:
-                cola.encolar_equipo(evento, fila.sobre, saliente.texto)
+                # EL BOOLEANO SE MIRA. `encolar_equipo` no levanta cuando no
+                # hay a quién avisar: devuelve False —`TELEFONOS_EQUIPO` vacío,
+                # o ningún destinatario se pudo encolar— y sigue. Tirarlo hacía
+                # que la fila se cerrara como hecha habiéndole hablado a nadie,
+                # y sin reintento: el seguimiento desaparecía en silencio, que
+                # es el final que este módulo entero existe para no tener.
+                #
+                # Y su False ya NO incluye «ya estaba encolado»: eso cuenta como
+                # cubierto, igual que acá abajo con `cola.encolar`. Sin eso, la
+                # primera ronda encolaba y todas las siguientes reportaban
+                # fracaso, así que una fila que necesitara un segundo intento
+                # por CUALQUIER otro motivo no podía terminar nunca.
+                if not cola.encolar_equipo(evento, fila.sobre, saliente.texto):
+                    print(
+                        f"[agenda] {fila.sobre}: aviso {saliente.evento} sin "
+                        f"destinatario de equipo"
+                    )
+                    todo_bien = False
             else:
                 cola.encolar(
                     evento,
@@ -985,6 +1099,28 @@ def seguimiento_equipo(pedido: str, motivo: str, lengua: str | None = None) -> s
 # ---------------------------------------------------- cierre_borrador (port)
 
 
+
+def _asegurar_aviso_de_cierre(sobre: str, horas: float, ahora: float) -> bool:
+    """La fila que habla del cierre, exactamente una. False = no quedó.
+
+    Se lee antes de escribir porque `crear` anexa un evento `creada`, y sobre
+    una fila YA DESPACHADA eso la resucitaría: `vivas` se queda con el evento
+    más nuevo, que volvería a decir `pendiente`. Existe en cualquier estado =
+    el aviso ya está a cargo de alguien y acá no hay nada que hacer.
+
+    Un ERPNext ilegible no puede colarse por ese hueco: `leer` devuelve None,
+    pero `crear` escribe por el mismo camino durable y falla también, así que
+    la respuesta sigue siendo False y el llamador reintenta.
+    """
+    identificador = _nuevo_id(sobre, AVISO_CIERRE, AVISO_CIERRE_VENCE)
+    if leer(sobre, identificador) is not None:
+        return True
+    return crear(
+        sobre, AVISO_CIERRE, AVISO_CIERRE_VENCE,
+        params={"horas": horas}, ahora=ahora,
+    ) is not None
+
+
 def _cerrar_borrador(fila: Fila, ahora: float) -> Resultado | None:
     """El cierre que vivía en `pendientes._cerrar`, ahora como fila.
 
@@ -998,7 +1134,7 @@ def _cerrar_borrador(fila: Fila, ahora: float) -> Resultado | None:
     lock y la marca de idempotencia SON el comportamiento del cierre, no del
     mecanismo, así que se quedan donde estaban.
     """
-    from app import decisiones, idioma, pendientes, solicitudes
+    from app import pendientes, solicitudes
 
     sobre = fila.sobre
     horas = float(fila.params.get("horas") or 0.0)
@@ -1011,8 +1147,15 @@ def _cerrar_borrador(fila: Fila, ahora: float) -> Resultado | None:
     if marca is None:
         return None  # no pude saber: la próxima ronda vuelve a preguntar
     if marca:
-        # Ya estaba cerrado. No hay nada que hacer y no se le habla a nadie,
-        # pero la fila SÍ se cierra: es la que converge.
+        # Ya estaba cerrado —por una ronda anterior de esta misma fila, o por
+        # `pendientes` cuando el cierre todavía no era una fila—. El cierre no
+        # se repite; lo único que puede faltar es el AVISO, así que se lo
+        # asegura acá en lugar de dar la fila por terminada. Ésta es la rama
+        # que hace recuperable el `crear` de más abajo: sin ella, un aviso que
+        # no quedaba agendado se perdía para siempre, porque la fila del cierre
+        # se cerraba y nadie volvía a mirar.
+        if not _asegurar_aviso_de_cierre(sobre, horas, ahora):
+            return None
         return Resultado(detalle="el borrador ya estaba cerrado")
     if pendientes._sigue_esperando(sobre) is None:
         # Una persona lo decidió entre el listado y acá. No se le dice nada al
@@ -1039,6 +1182,36 @@ def _cerrar_borrador(fila: Fila, ahora: float) -> Resultado | None:
         # nunca de que el borrador se cerró.
         print(f"[agenda] {sobre}: cerrado, pero la marca no quedó ({type(exc).__name__})")
 
+    # EL CIERRE TERMINA ACÁ Y NO DICE NADA. Lo que hay que decir lo dice
+    # `aviso_cierre`, que es otra fila: es la única forma de darle a la reserva
+    # y al mensaje dos horarios distintos, que es justo lo que necesitan. La
+    # fila se crea SÓLO con el cierre ya probado, igual que el re-ping al dueño
+    # se crea sólo con el plazo en la mano.
+    if not _asegurar_aviso_de_cierre(sobre, horas, ahora):
+        # No quedó durable = nadie va a avisar. El cierre YA pasó y no se
+        # deshace, pero esta fila NO se termina: la próxima ronda entra por la
+        # rama de la marca —que ya está puesta, así que no suelta el stock dos
+        # veces— y vuelve a intentar el `crear`. Terminarla acá era perder el
+        # aviso en silencio: el borrador cerrado y el cliente sin enterarse.
+        print(f"[agenda] {sobre}: cerrado, pero el aviso no quedó agendado; reintento")
+        return None
+    return Resultado(detalle=detalle, ya_paso=True)
+
+
+# ----------------------------------------------- aviso_cierre (el que habla)
+
+
+def _aviso_cierre(fila: Fila, ahora: float) -> Resultado | None:
+    """Le dice al cliente y al equipo que el borrador se cerró. Diez líneas.
+
+    No toca ERPNext ni Redis ni decide nada: para cuando esto corre, el cierre
+    ya está hecho y probado. Lo único que aporta es el horario — es el que
+    espera a las 07:00— y por eso es el que está en `_HABLAN_CON_ALGUIEN`.
+    """
+    from app import decisiones, idioma, pendientes
+
+    sobre = fila.sobre
+    horas = float(fila.params.get("horas") or 0.0)
     salientes: list[Aviso] = []
     try:
         telefono = str(decisiones.telefono_del_cliente(sobre) or "")
@@ -1064,7 +1237,12 @@ def _cerrar_borrador(fila: Fila, ahora: float) -> Resultado | None:
             equipo=True,
         )
     )
-    return Resultado(detalle=detalle, avisos=tuple(salientes), ya_paso=True)
+    # SIN `ya_paso`. Este handler no hizo nada irreversible —el cierre lo hizo
+    # otra fila, y probado—, así que si la cola no toma los avisos lo correcto
+    # es que la fila siga viva y la próxima ronda reintente. `ya_paso=True` acá
+    # la daba por hecha con Redis caído y el aviso no salía nunca: la única
+    # salida de la fila era el mensaje, y era justo el que se había perdido.
+    return Resultado(detalle="cierre avisado", avisos=tuple(salientes))
 
 
 # ------------------------------------------- aviso_antes_de_entrega (plazos)
@@ -1164,12 +1342,20 @@ def _recordar_al_dueno(fila: Fila, ahora: float) -> Resultado | None:
     plazo = vence_antes_de_entrega(doc)
     if plazo is None:
         return Resultado(detalle="el pedido ya no tiene un plazo legible")
-    if plazo > ahora + 60:
-        # El plazo se corrió: este aviso se corre con él, una hora antes.
-        nuevo = plazo - RE_PING_DUENO_HORAS * 3600.0
+    # LO QUE SE COMPARA ES ESTE AVISO, NO EL PLAZO. La fila se agenda a
+    # `plazo - RE_PING_DUENO_HORAS`, así que a la hora en que debe sonar el
+    # plazo todavía falta una hora entera — y comparar el PLAZO con `ahora`
+    # daba verdadero justo entonces: la fila se reprogramaba a la misma hora a
+    # la que ya estaba, una y otra vez, y el dueño no se enteraba hasta que
+    # faltaba menos de un minuto. Le comía la hora entera que este aviso existe
+    # para darle.
+    recordatorio = plazo - RE_PING_DUENO_HORAS * 3600.0
+    if recordatorio > ahora + 60:
+        # El plazo se corrió hacia ADELANTE: este aviso se corre con él, y
+        # sigue saliendo una hora antes del plazo nuevo.
         return Resultado(
             detalle="el plazo se movió",
-            reprogramar=nuevo,
+            reprogramar=recordatorio,
             params={**dict(fila.params or {}), "hora": texto_del_plazo(plazo)},
         )
 
@@ -1526,6 +1712,7 @@ def _aviso_baja_al_dueno(fila: Fila, ahora: float) -> Resultado | None:
 _HANDLERS.update(
     {
         CIERRE_BORRADOR: _cerrar_borrador,
+        AVISO_CIERRE: _aviso_cierre,
         AVISO_ANTES_DE_ENTREGA: _avisar_antes_de_entrega,
         RECORDATORIO_PLAZO_DUENO: _recordar_al_dueno,
         SEGUIMIENTO: _seguimiento,
@@ -1660,7 +1847,9 @@ def plazo_del_pedido(doc: dict) -> str:
     return "" if vence is None else texto_del_plazo(vence)
 
 
-def programar_para_entrega(doc: dict, ahora: float | None = None) -> list[Fila]:
+def programar_para_entrega(
+    doc: dict, ahora: float | None = None, omitir: frozenset[str] = frozenset()
+) -> list[Fila]:
     """Las filas de un pedido recién creado que tiene fecha de entrega.
 
     Dos: el aviso al cliente antes de la entrega, y UN re-ping al dueño cuando
@@ -1673,6 +1862,10 @@ def programar_para_entrega(doc: dict, ahora: float | None = None) -> list[Fila]:
     crear una gemela. Hace falta que lo sea: `crear_pedido` tiene cuatro salidas
     tempranas que no llegan a este punto, y la de recuperación después de una
     caída vuelve a pasar por acá con el pedido ya existente.
+
+    `omitir` son los tipos que el llamador NO pudo dejar limpios. Sólo lo usa
+    `reconciliar_entrega`, y es lo que le permite reponer un tipo aunque el otro
+    se le haya trabado: ver el comentario allá.
     """
     sobre = str(doc.get("name") or "").strip()
     if not sobre:
@@ -1699,15 +1892,16 @@ def programar_para_entrega(doc: dict, ahora: float | None = None) -> list[Fila]:
 
     hora = texto_de_la_hora(doc)
     creadas: list[Fila] = []
-    fila = crear(
-        sobre,
-        AVISO_ANTES_DE_ENTREGA,
-        vence,
-        params={"horas": horas, "hora": hora},
-        ahora=momento,
-    )
-    if fila is not None:
-        creadas.append(fila)
+    if AVISO_ANTES_DE_ENTREGA not in omitir:
+        fila = crear(
+            sobre,
+            AVISO_ANTES_DE_ENTREGA,
+            vence,
+            params={"horas": horas, "hora": hora},
+            ahora=momento,
+        )
+        if fila is not None:
+            creadas.append(fila)
 
     # El re-ping al dueño: una sola vez, antes del aviso al cliente, para que
     # todavía pueda decidirlo él en vez de enterarse por el aviso.
@@ -1716,7 +1910,7 @@ def programar_para_entrega(doc: dict, ahora: float | None = None) -> list[Fila]:
     # se le dice hasta cuándo puede contestar, al cliente para cuándo era. Mismo
     # `vence`, dos lecturas, y por eso son dos funciones y no una.
     aviso_dueno = vence - RE_PING_DUENO_HORAS * 3600.0
-    if aviso_dueno > momento:
+    if aviso_dueno > momento and RECORDATORIO_PLAZO_DUENO not in omitir:
         fila_dueno = crear(
             sobre,
             RECORDATORIO_PLAZO_DUENO,
@@ -1756,14 +1950,28 @@ def reconciliar_entrega(sobre: str, ahora: float | None = None) -> list[Fila]:
     abiertas = vivas(sobre)
     if abiertas is None:
         return []  # no pude leer: no se toca nada
+    trabados: set[str] = set()
     for fila in abiertas:
         if fila.tipo not in (AVISO_ANTES_DE_ENTREGA, RECORDATORIO_PLAZO_DUENO):
             continue
         if nuevo is not None and fila.vence == nuevo:
             continue  # ya apunta al plazo vigente
-        cancelar(fila, "la fecha de entrega cambió", ahora=momento)
+        if cancelar(fila, "la fecha de entrega cambió", ahora=momento) is None:
+            # NO QUEDÓ CANCELADA = SIGUE VIVA. Crear igual su reemplazo deja DOS
+            # filas apuntando al mismo pedido con ids distintos, y `avisos.encolar`
+            # deduplica por `(evento, pedido)` con el id adentro, así que las dos
+            # hablan: el cliente recibiría el mismo aviso de entrega dos veces.
+            #
+            # Pero el castigo es de ESE tipo y de ningún otro. Cortar la función
+            # entera acá dejaba al otro tipo —que sí se había cancelado bien—
+            # sin reemplazo: no un aviso de más, un aviso de MENOS, y ése no lo
+            # repone ningún reintento mientras el trabado siga trabado. Se anota
+            # el tipo y se sigue; la reconciliación es idempotente y el próximo
+            # intento lo vuelve a cancelar y repone también el suyo.
+            print(f"[agenda] {sobre}: no pude cancelar {fila.id}; no repongo {fila.tipo}")
+            trabados.add(fila.tipo)
 
-    return programar_para_entrega(doc, ahora=momento)
+    return programar_para_entrega(doc, ahora=momento, omitir=frozenset(trabados))
 
 
 def ejecutar_ahora(
@@ -1780,7 +1988,32 @@ def ejecutar_ahora(
     if fila is None:
         # No quedó durable = no pasó. Nada se cerró y nadie fue avisado.
         return False
-    return _despachar(sobre, fila.id, ahora)
+    hecho = _despachar(sobre, fila.id, ahora)
+
+    # LAS FILAS QUE ESTO DEJÓ ATRÁS SALEN EN EL MISMO ACTO. `_cerrar_borrador`
+    # crea `aviso_cierre` en vez de hablar él, y sin esto el aviso esperaría al
+    # próximo tick del barrido: el cierre dejaría de ser sincrónico, que es
+    # justamente lo que `pendientes` y sus tests afirman.
+    #
+    # Y pasa por `_despachar`, no por el handler: así el aviso sigue sujeto a
+    # las horas de silencio —a las 3 de la mañana se queda vivo y sale a las
+    # 07:00— mientras el cierre, que ya corrió, no espera a nadie. Ése es el
+    # arreglo entero, en una llamada.
+    # Y SÓLO ESA, por id. `vivas(sobre)` a secas devuelve las filas de todos
+    # los tipos, así que un `aviso_antes_de_entrega` o un `seguimiento` vencidos
+    # del mismo pedido se despachaban también acá: fuera del barrido, fuera de
+    # su turno y fuera del tope de `POR_RONDA`, que existe para que una ronda no
+    # se coma el proceso. El id de la hija es determinístico —para eso su plazo
+    # es una constante—, así que se la nombra y no se lista nada.
+    #
+    # `_despachar` ya sabe no hacer nada con una fila que no existe, que no
+    # tiene plazo o que no venció, así que nombrarla alcanza: no hace falta
+    # preguntar antes si el handler llegó a crearla.
+    hija = _HIJAS.get(tipo)
+    if hija is None:
+        return hecho  # este tipo no deja filas atrás: no hay nada que despachar
+    _despachar(sobre, _nuevo_id(sobre, hija[0], hija[1]), ahora)
+    return hecho
 
 
 # =========================================================================

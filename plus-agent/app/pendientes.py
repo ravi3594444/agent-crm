@@ -595,17 +595,28 @@ def tick(ahora: float | None = None) -> int:
     except Exception as exc:
         print(f"[pendientes] la ronda de sombra falló: {type(exc).__name__}: {exc}")
 
-    # Lo que le habla a una persona respeta las horas de silencio. El cierre
-    # también: suelta stock, pero le dice al cliente que su pedido no se
-    # confirmó, y eso no son las 3 de la mañana. De noche no entran pedidos,
-    # así que el stock retenido nueve horas más no le cuesta una venta a nadie.
-    if en_silencio(momento):
-        return hechos
-
+    # EL CIERRE CORRE DE NOCHE; EL AVISO NO. Acá había UNA sola guarda para los
+    # dos, con este argumento escrito al lado:
+    #
+    #   «El cierre también: suelta stock, pero le dice al cliente que su pedido
+    #    no se confirmó, y eso no son las 3 de la mañana. De noche no entran
+    #    pedidos, así que el stock retenido nueve horas más no le cuesta una
+    #    venta a nadie.»
+    #
+    # Era cierto MIENTRAS soltar la reserva y hablar fueran el mismo acto: había
+    # que elegir, y se eligió no despertar a nadie. Ya no hay que elegir.
+    # `agenda` parte el cierre en dos filas —`cierre_borrador` suelta,
+    # `aviso_cierre` habla— y sólo la segunda está en `_HABLAN_CON_ALGUIEN`. El
+    # canje se disolvió en vez de resolverse a favor de uno de los dos.
+    #
+    # Lo que queda de la guarda es lo que siempre fue verdad: `_avisar` manda la
+    # sombra y el recordatorio al cliente, y eso sí espera a la mañana.
     try:
         hechos += _cerrar(candidatos, momento)
     except Exception as exc:
         print(f"[pendientes] la ronda de cierre falló: {type(exc).__name__}: {exc}")
+    if en_silencio(momento):
+        return hechos
     try:
         hechos += _avisar(candidatos, momento)
     except Exception as exc:

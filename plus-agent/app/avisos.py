@@ -170,13 +170,26 @@ def encolar(
 
 
 def encolar_equipo(evento: str, pedido: str, texto: str) -> bool:
-    """Queue one notice per staff phone. True when at least one was queued.
+    """Queue one notice per staff phone. True when at least one is COVERED.
 
     A decision request must never be delivered inline: the sales turn that
     opened it has to answer the customer now, and a manager notice that Meta
     happens to reject must not take the request down with it. The idempotency
     key carries the recipient tag, so each phone is told exactly once and a
     second staff member is not skipped as a duplicate.
+
+    COVERED, not "queued by this call". ``encolar`` answers False for "already
+    queued or already delivered", and on a retry that is every recipient — the
+    notice went out the first time round. Counting only the calls that
+    committed made the second attempt report failure, so a caller that keeps
+    its work alive until the notice lands (``agenda._encolar``) could never
+    finish: the first round queued the notice, every round after that was told
+    it had failed. The one thing that is NOT covered is an enqueue that raised,
+    because then nobody holds the notice.
+
+    So False means exactly one thing: *nobody was told and nobody is going to
+    be* — no staff configured, or Redis refused every recipient. Both are worth
+    retrying, and that is what the callers do with it.
     """
     from app.router import STAFF
 
@@ -186,22 +199,22 @@ def encolar_equipo(evento: str, pedido: str, texto: str) -> bool:
     telefonos = sorted(STAFF)
     if os.getenv("NOTIFICAR_SOLO_PRIMERO", "true").strip().lower() == "true":
         telefonos = telefonos[:1]
-    encolados = 0
+    cubiertos = 0
     for telefono in telefonos:
         etiqueta = digest_recipiente(telefono)[:12]
         try:
-            if encolar(
+            encolar(
                 f"{evento}:{etiqueta}",
                 pedido,
                 telefono,
                 texto,
                 plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE",
                 parametros=[pedido, texto[:512]],
-            ):
-                encolados += 1
+            )
+            cubiertos += 1
         except Exception as exc:
             print(f"[avisos] {pedido}: aviso al equipo no encolado ({type(exc).__name__})")
-    return bool(encolados)
+    return bool(cubiertos)
 
 
 def pendientes() -> int:

@@ -15,3 +15,10 @@ __pycache__/
 /dist/
 /node_modules/
 /.openai/*.local.json
+
+# El volcado de Redis. `pytest` necesita un Redis Stack de verdad —app/graph.py
+# arma el checkpointer al importar— y ese servidor deja su `dump.rdb` en el
+# directorio desde el que se lo levantó. Es estado local de una corrida, no del
+# proyecto: sin esto, todo el que siga las instrucciones de CLAUDE.md se
+# encuentra un binario sin trackear en `git status`.
+dump.rdb

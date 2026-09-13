@@ -19,7 +19,7 @@ from datetime import UTC, date, datetime
 import pytest
 from conftest import RelojDePrueba
 
-from app import avisos, erpnext, outbound_status, pendientes, policy, reloj, router, sombra
+from app import agenda, avisos, erpnext, outbound_status, pendientes, policy, reloj, router, sombra
 from tests.fakes import entrada_de_cola
 
 PEDIDO = "SAL-ORD-2026-00042"
@@ -1107,3 +1107,64 @@ def test_the_closure_notice_carries_its_template_too(mundo, monkeypatch) -> None
     assert len(cerrados) == 1
     assert cerrados[0]["plantilla_env"] == pendientes.PLANTILLA_CERRADO
     assert cerrados[0]["parametros"] == [PEDIDO]
+
+
+# ---------- soltar el stock no le habla a nadie, así que no espera a nadie
+#
+# El cierre son DOS filas de `agenda` porque tiene dos mitades con horarios
+# distintos: soltar la reserva —ahora, siempre— y decírselo a una persona —a la
+# mañana—. Con una sola fila, las horas de silencio postergaban el cierre
+# ENTERO: el handler que hablaba era el mismo que llamaba a `soltar_reserva`,
+# así que el borrador vencido se quedaba con el stock tomado de 22 a 7 y cada
+# barrido volvía a anotar un intento.
+
+
+def test_de_madrugada_el_stock_se_suelta_igual_y_el_aviso_espera_a_la_manana(
+    mundo, monkeypatch
+) -> None:
+    """Las DOS mitades, que es donde estaba el bug.
+
+    Afirmar sólo «a las 3 no se le escribió a nadie» lo cumple también la
+    versión rota, que tampoco escribía — porque no hacía NADA. Lo que separa el
+    arreglo del bug es que el pedido quedó cerrado igual.
+    """
+    monkeypatch.setenv("PENDIENTE_CIERRE_HORAS", "4")
+    monkeypatch.setattr(router, "STAFF", ["5493510000001"])
+    _listo(mundo)
+
+    pendientes.tick(ahora=epoch(3, dia=9))
+
+    # La mitad que NO espera.
+    assert mundo["estados"] == [(PEDIDO, "Closed")]
+    assert any(t.startswith(pendientes.MARCA_CIERRE) for _, _, t in mundo["escritos"])
+    # La mitad que SÍ espera: a esa hora no se le escribe a nadie.
+    assert _en_cola() == []
+    assert _al_cliente(mundo) == []
+
+    # Y a la mañana sale, que es lo que convierte «postergar» en algo distinto
+    # de «descartar».
+    agenda.tick(ahora=epoch(7, 30, dia=9))
+    eventos = {e["evento"].split(":")[0] for e in _en_cola()}
+    assert "pendiente_cerrado_equipo" in eventos, eventos
+    assert "pendiente_cerrado" in eventos, eventos
+
+
+def test_en_horario_el_cierre_y_su_aviso_siguen_siendo_un_solo_acto(
+    mundo, monkeypatch
+) -> None:
+    """Partirlo en dos filas no puede volverlo asincrónico a las 15:00.
+
+    Es la otra mitad de la regla: lo único que cambia con la hora es si el
+    aviso habla o se posterga; el cierre no espera nunca, y a las 15:00 el
+    aviso tampoco.
+    """
+    monkeypatch.setenv("PENDIENTE_CIERRE_HORAS", "4")
+    monkeypatch.setattr(router, "STAFF", ["5493510000001"])
+    _listo(mundo)
+
+    pendientes.tick(ahora=epoch(15))
+
+    assert mundo["estados"] == [(PEDIDO, "Closed")]
+    eventos = {e["evento"].split(":")[0] for e in _en_cola()}
+    assert "pendiente_cerrado_equipo" in eventos, eventos
+    assert _al_cliente(mundo) != []
