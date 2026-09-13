@@ -622,6 +622,41 @@ def _documento(sobre: str) -> dict | None:
     return doc if isinstance(doc, dict) else None
 
 
+def por_que_ya_no_vive(doc: dict) -> str:
+    """`''` si el pedido sigue vivo; si no, por qué no. DOS maneras, no una.
+
+    Un pedido deja de estar vivo de dos formas distintas y los handlers miraban
+    una sola:
+
+    - `docstatus` 1 o 2 — lo confirmaron o lo cancelaron;
+    - **borrador cerrado**: `docstatus=0` con `status` en `ESTADOS_SIN_RESERVA`.
+      Así terminan un rechazo del equipo (`decisiones.rechazar`), un
+      vencimiento (`solicitudes._liberar`) y la baja que pide un cliente.
+
+    `policy.sin_reserva` es la ÚNICA definición de la segunda, y es la misma que
+    `pendientes._sigue_esperando` aplica — que es exactamente por qué
+    `_cerrar_borrador`, que pasa por ahí, nunca tuvo este bug y los otros tres
+    sí. Está acá y no en cada handler para que siga siendo una definición.
+
+    «On Hold» entra también, y es deliberado: ERPNext no lo cuenta contra el
+    stock, así que no es un pedido en movimiento. Un pedido en pausa no recibe
+    un aviso de entrega ni despierta al dueño por un plazo; cuando vuelve, el
+    equipo vuelve a pedir lo que necesite.
+    """
+    from app import policy
+
+    try:
+        if int(doc.get("docstatus") or 0) != 0:
+            return "el pedido ya no es un borrador"
+    except (TypeError, ValueError):
+        # Un `docstatus` ilegible NO es un borrador vivo. Fallar cerrado: lo
+        # caro es hablarle a un cliente de un pedido que ya no existe.
+        return "el pedido tiene un docstatus ilegible"
+    if policy.sin_reserva(doc.get("status")):
+        return "el borrador está cerrado y ya no compromete stock"
+    return ""
+
+
 def en_silencio(momento: datetime) -> bool:
     """¿Son las horas en que no se le escribe a una persona?
 
@@ -976,10 +1011,13 @@ def _avisar_antes_de_entrega(fila: Fila, ahora: float) -> Resultado | None:
     if doc is None:
         return None  # ilegible: no adivinar, la próxima ronda pregunta
 
-    if int(doc.get("docstatus") or 0) != 0:
-        # Se confirmó (o se canceló) entre que venció y ahora. No hay nada que
-        # avisar, y la fila se cierra en vez de quedar viva para siempre.
-        return Resultado(detalle="el pedido ya no es un borrador")
+    muerto = por_que_ya_no_vive(doc)
+    if muerto:
+        # Se confirmó, se canceló, o cerraron el borrador entre que venció y
+        # ahora. No hay nada que avisar —y menos a un CLIENTE, que leería una
+        # hora de entrega de un pedido que ya no va a salir—, así que la fila se
+        # cierra en vez de quedar viva para siempre.
+        return Resultado(detalle=muerto)
 
     nuevo = vence_antes_de_entrega(doc, fila.params.get("horas"))
     if nuevo is None:
@@ -1039,8 +1077,11 @@ def _recordar_al_dueno(fila: Fila, ahora: float) -> Resultado | None:
     doc = _documento(fila.sobre)
     if doc is None:
         return None
-    if int(doc.get("docstatus") or 0) != 0:
-        return Resultado(detalle="ya lo decidieron")
+    muerto = por_que_ya_no_vive(doc)
+    if muerto:
+        # Ya lo decidieron, o cerraron el borrador. Despertar al dueño por el
+        # plazo de un pedido muerto gasta lo único que este aviso cuida.
+        return Resultado(detalle=muerto)
 
     # El plazo se RECALCULA, no se lee de la fila: una excepción de entrega
     # aceptada reescribe `delivery_date` después de que la fila se creó, y
@@ -1089,6 +1130,14 @@ def _seguimiento(fila: Fila, ahora: float) -> Resultado | None:
     doc = _documento(fila.sobre)
     if doc is None:
         return None
+
+    # Este handler no tenía NINGUNA guarda de documento: avisaba al equipo sobre
+    # un pedido rechazado, vencido o dado de baja igual que sobre uno vivo. Un
+    # seguimiento existe para empujar un pedido hacia adelante, y un pedido que
+    # ERPNext ya no cuenta no se empuja a ningún lado.
+    muerto = por_que_ya_no_vive(doc)
+    if muerto:
+        return Resultado(detalle=muerto)
 
     # UN seguimiento por pedido, hecho valer acá y no sólo al crearlo. `recordar`
     # crea el nuevo antes de cancelar el viejo —para que un fallo de escritura
@@ -1268,14 +1317,12 @@ def programar_para_entrega(doc: dict, ahora: float | None = None) -> list[Fila]:
     sobre = str(doc.get("name") or "").strip()
     if not sobre:
         return []
-    # Sólo un BORRADOR. Un pedido ya confirmado no necesita que le avisen que no
-    # está confirmado, y un cancelado menos. Va acá y no en cada llamador para
-    # que llamarla de más sea inofensivo: es lo que la vuelve segura de reponer
-    # en los caminos de reintento, donde el pedido ya existe.
-    try:
-        if int(doc.get("docstatus") or 0) != 0:
-            return []
-    except (TypeError, ValueError):
+    # Sólo un borrador VIVO. Un pedido ya confirmado no necesita que le avisen
+    # que no está confirmado, un cancelado menos, y un borrador ya cerrado
+    # tampoco: programarle filas sería crearlas muertas. Va acá y no en cada
+    # llamador para que llamarla de más sea inofensivo: es lo que la vuelve
+    # segura de reponer en los caminos de reintento, donde el pedido ya existe.
+    if por_que_ya_no_vive(doc):
         return []
     horas = horas_de_aviso()
     if horas is None:
