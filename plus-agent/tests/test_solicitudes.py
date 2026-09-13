@@ -385,16 +385,29 @@ def test_the_request_is_durable_in_erpnext_not_in_redis(mundo) -> None:
 
 
 def test_the_customer_is_told_at_once_and_promised_nothing(mundo) -> None:
+    """Qué protegía comportamiento acá y qué sólo fijaba la redacción.
+
+    Se van DOS afirmaciones, y las dos eran de redacción: «encargado» nombraba
+    a quién se le pregunta y «vuelvo a chequear el stock» contaba la mecánica
+    de adentro. La segunda además fijaba exactamente la frase que
+    `app/prompts.py` prohíbe —«Nunca cuentes lo que hacés por dentro»—, así que
+    el test estaba sosteniendo el defecto en vez de atraparlo: la regla ata al
+    modelo y no a las cadenas fijas de `app/idioma.py`, y nadie miraba.
+
+    Se quedan las tres que sí son comportamiento —el número del pedido, que NO
+    diga confirmado, y que no prometa ninguna reserva— y se agrega la que la
+    regla pide de verdad: que no se cuente nada de adentro.
+    """
     solicitud = _abrir(mundo)
 
     texto = solicitudes.texto_pendiente_cliente(solicitud)
 
     assert SO in texto
-    assert "encargado" in texto
     assert "no está confirmado" in texto
-    assert "vuelvo a chequear el stock" in texto
     # No hold is promised, because none can be guaranteed.
     assert "reserv" not in texto.lower() and "guard" not in texto.lower()
+    for adentro in ("chequear", "stock", "encargado", "pregunt"):
+        assert adentro not in texto.lower(), adentro
 
 
 def test_opening_a_request_holds_no_lock_and_blocks_no_worker(mundo) -> None:

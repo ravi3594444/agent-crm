@@ -61,6 +61,7 @@ from app.tools.pedidos import (
     crear_cliente,
     crear_lead,
     crear_pedido,
+    dar_de_baja_pedido,
     escalar_a_humano,
     pedir_excepcion_de_entrega,
     recordar,
@@ -81,6 +82,13 @@ TOOLS_CLIENTES = [
     # Lo peor que puede causar es un mensaje al equipo que no hacía falta —
     # nunca una confirmación, un submit, una cancelación ni plata.
     recordar,
+    # El cliente se da de baja su propio BORRADOR. No escribe nada privilegiado:
+    # comprueba que el pedido es suyo, que es un borrador y que no hay una
+    # decisión en curso, y anota una fila de app/agenda.py con la credencial de
+    # CLIENTE. Quien cierra el borrador es el barrido, con la de política —
+    # ninguna herramienta la alcanza. NUNCA en TOOLS_GERENCIA: el equipo cancela
+    # por el router determinista, con código, y sobre pedidos confirmados.
+    dar_de_baja_pedido,
 ]
 
 TOOLS_GERENCIA = [

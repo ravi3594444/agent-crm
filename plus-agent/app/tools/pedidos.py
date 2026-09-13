@@ -1086,3 +1086,118 @@ def recordar(
         f"Anotado: vuelvo sobre {fila.sobre} el "
         f"{_texto_de_momento(fila.vence)}. No le prometí nada al cliente."
     )
+
+
+# Una sola frase para «no existe» y «no es tuyo», construida en UN lugar. Dos
+# textos distintos le dicen al modelo —en castellano, que es lo que lee— cuál de
+# las dos cosas pasó, y el modelo se lo escribe al cliente: con eso, probar
+# números ajenos y mirar la respuesta enumera los pedidos de otro. Misma
+# negativa que `recordar` y que `catalogo.estado_pedido`.
+def _no_encontrado(pedido: str) -> str:
+    return f"No encontré el pedido {pedido}."
+
+
+@tool
+def dar_de_baja_pedido(
+    pedido: Annotated[
+        str,
+        Field(description="El número de pedido real, como SO-2026-00042."),
+    ],
+    config: RunnableConfig,
+) -> str:
+    """Dar de baja un BORRADOR que el cliente pide cancelar o deshacer.
+
+    Llamala cuando el cliente pide explícitamente cancelar, anular o deshacer
+    ESTE pedido suyo («cancelá el pedido», «me equivoqué, dalo de baja»).
+
+    NO la llames si el cliente sólo lamenta algo o duda («uf, me salió caro»,
+    «no sé si me sirve»): eso lo ve una persona. Y NO la llames para cambiar
+    una cantidad o un producto — eso es una baja y DESPUÉS un pedido nuevo, no
+    una edición.
+
+    Sólo sobre un borrador. Si el pedido ya está confirmado no lo toca y te lo
+    dice: un pedido confirmado lo cancela una persona del equipo, no vos.
+    """
+    try:
+        actor, cuenta = _cuenta_del_remitente(config)
+    except RuntimeContextError:
+        return "No pude autenticar la conversación para dar de baja nada."
+
+    # EL PEDIDO TIENE QUE SER DE QUIEN ESCRIBE, por lo mismo que en `recordar`:
+    # el número lo dice el MODELO y el modelo lee lo que escribió un cliente.
+    # Sin esto, un mensaje que nombra el pedido de otro se lo da de baja.
+    #
+    # `gerencia_verificada` y no `is_management`: el alcance lo pone el webhook,
+    # pero tocar el pedido de cualquiera lo habilita únicamente un teléfono que
+    # sigue en la lista del equipo.
+    try:
+        doc = erpnext.policy_get_doc("Sales Order", pedido)
+    except Exception:
+        return _no_encontrado(pedido)
+    if not actor.gerencia_verificada and str(doc.get("customer") or "") != cuenta:
+        return _no_encontrado(pedido)
+
+    # UN pedido confirmado es un compromiso, y darlo de baja no es lo mismo que
+    # retirar algo que nunca se otorgó. Se refuta ACÁ y explícito, no apoyándose
+    # en que `soltar_reserva` también lo refuse: eso pasa en el barrido, una
+    # hora después y fuera de la vista del cliente, y un test que sólo mirara
+    # «el documento quedó intacto» seguiría verde con esta guarda borrada.
+    try:
+        borrador = int(doc.get("docstatus") or 0) == 0
+    except (TypeError, ValueError):
+        # Un `docstatus` ilegible NO es un borrador. Falla cerrado, igual que
+        # `agenda.por_que_ya_no_vive`: lo caro es dar de baja algo que no se
+        # entendió, no negarse una vez de más.
+        borrador = False
+    if not borrador:
+        return (
+            f"El pedido {pedido} ya está confirmado: darlo de baja lo decide "
+            "una persona del equipo. Derivá."
+        )
+
+    # Y NO mientras haya una decisión en curso. La condición es «no terminal»,
+    # una sola, sobre TERMINALES: `ABIERTOS` deja afuera `revision_humana` a
+    # propósito, así que filtrar por ahí rechazaría los dos estados en los que
+    # el cliente NO aceptó y dejaría pasar el único en el que sí — al revés.
+    # Cualquier estado no terminal lleva un plazo vivo que el barrido tiene que
+    # honrar, y dejar que una baja le corra la carrera es cómo un pedido dado de
+    # baja recibe una contraoferta, un «acepto» y un Submit.
+    try:
+        solicitud = solicitudes.leer(pedido)
+    except Exception as exc:
+        print(f"[orders] baja: no pude leer la solicitud ({type(exc).__name__})")
+        return "No pude comprobar si hay una decisión en curso sobre ese pedido."
+    if solicitud is not None and solicitud.estado not in solicitudes.TERMINALES:
+        return (
+            f"El pedido {pedido} tiene una decisión en curso: la baja la ve "
+            "una persona del equipo. Derivá."
+        )
+
+    from app import agenda
+
+    momento = _ahora_del_negocio().timestamp()
+    try:
+        fila = agenda.crear(
+            pedido, agenda.BAJA_DE_PEDIDO, momento, params={}, ahora=momento
+        )
+    except Exception as exc:
+        print(f"[orders] baja no agendada ({type(exc).__name__})")
+        return "No pude dar de baja el pedido."
+    if fila is None:
+        # No quedó durable = no pasó. Se dice, nunca se finge.
+        return "No pude dar de baja el pedido de forma durable."
+
+    # Lo que es verdad AHORA, para el MODELO, que es quien lee esto.
+    #
+    # Lo durable en este punto es la BAJA, no el cierre: el borrador lo cierra
+    # el barrido después, y puede tardar o fallar (ahí lo ve una persona). Así
+    # que acá no se afirma que el pedido ya esté cerrado ni que el stock esté
+    # libre — se afirma lo único probado, que la baja quedó tomada y que el
+    # pedido no se va a preparar, que es el compromiso del negocio y no un
+    # estado de ERPNext.
+    #
+    # Sin cuándo, sin qué pasa después y sin «listo».
+    return (
+        f"Baja tomada para el pedido {pedido}: no se va a preparar. "
+        "Decíselo en una línea, sin prometer nada más y sin hablar de tiempos."
+    )

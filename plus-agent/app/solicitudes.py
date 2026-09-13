@@ -731,11 +731,22 @@ def vencimientos(pedidos: list[str]) -> dict[str, float]:
     return pendientes
 
 
+# Los DOS éxitos de `soltar_reserva`, que no son el mismo hecho. El texto es
+# exactamente el que se devolvía escrito a mano: lo que cambia es que ahora se
+# pueden comparar sin mirar prosa. Ver el docstring de la función.
+YA_ESTABA_CERRADO = "el borrador ya estaba cerrado y no compromete stock"
+LO_CERRO_ESTA_LLAMADA = "el borrador quedó cerrado y ya no compromete stock"
+
+
 def soltar_reserva(pedido: str) -> tuple[bool, str]:
     """Make ERPNext itself stop reserving a draft nobody will fulfil.
 
     Returns (proven released, what to say). "Proven" means the document was
-    re-read afterwards and really is in a state ERPNext does not count. The
+    re-read afterwards and really is in a state ERPNext does not count.
+
+    TWO successes, not one, and a caller that attributes the close to somebody
+    must tell them apart: `LO_CERRO_ESTA_LLAMADA` is a transition this call
+    made, `YA_ESTABA_CERRADO` is a draft somebody else had already closed. The
     "Closed draft" behaviour is not verified against a live ERPNext build, so
     the claim is only made when the re-read agrees; otherwise the caller says
     the stock will be re-checked instead of saying it was freed.
@@ -752,7 +763,14 @@ def soltar_reserva(pedido: str) -> tuple[bool, str]:
     if policy.sin_reserva(actual.get("status")):
         # Already out of the way — a fallback offer lives on a draft its
         # predecessor closed, and re-closing it would be a write for nothing.
-        return True, "el borrador ya estaba cerrado y no compromete stock"
+        #
+        # The phrase is a CONSTANT because one caller has to tell these two
+        # successes apart. "Already closed" means closed by ANYBODY — a staff
+        # rejection, an expiry, another withdrawal — so a caller that attributes
+        # the transition to whoever asked for it (app/agenda._baja_de_pedido
+        # writes "[baja-por-cliente]") must not treat this branch as its own
+        # doing. Both are still True: the stock is free either way.
+        return True, YA_ESTABA_CERRADO
     try:
         erpnext.policy_update_status("Sales Order", pedido, _ESTADO_SIN_RESERVA)
     except Exception as exc:
@@ -764,7 +782,7 @@ def soltar_reserva(pedido: str) -> tuple[bool, str]:
         print(f"[solicitudes] {pedido}: relectura falló ({type(exc).__name__})")
         return False, "cerré el borrador pero no pude comprobarlo"
     if policy.sin_reserva(confirmado.get("status")):
-        return True, "el borrador quedó cerrado y ya no compromete stock"
+        return True, LO_CERRO_ESTA_LLAMADA
     return False, "ERPNext no dejó el borrador cerrado; sigue comprometiendo stock"
 
 

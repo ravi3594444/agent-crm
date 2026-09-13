@@ -238,8 +238,22 @@ def test_reject_tells_the_customer_and_leaves_the_draft_unconfirmed(
     monkeypatch.setattr(
         decisiones, "_leer_doc", Mock(return_value={"docstatus": 0, "status": "Draft"})
     )
-    estado = Mock(return_value={"name": "SAL-ORD-0001", "status": "Closed"})
+    # El cierre ahora pasa por `solicitudes.soltar_reserva`, que RE-LEE el
+    # documento después de escribirlo y sólo entonces afirma que soltó el
+    # stock. El doble tiene que contestar lo que ERPNext contestaría —«Draft»
+    # antes, «Closed» después— o el test estaría afirmando la frase sin que
+    # nada la sostenga, que es justo el defecto que este arreglo saca.
+    doc = {"name": "SAL-ORD-0001", "docstatus": 0, "status": "Draft"}
+
+    def cerrar(doctype, name, status):
+        doc["status"] = status
+        return dict(doc)
+
+    estado = Mock(side_effect=cerrar)
     monkeypatch.setattr(decisiones.erpnext, "policy_update_status", estado)
+    monkeypatch.setattr(
+        decisiones.erpnext, "policy_get_doc", lambda doctype, name: dict(doc)
+    )
     submit = Mock()
     monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
 
@@ -275,11 +289,15 @@ def test_a_rejection_that_cannot_be_closed_says_so_instead_of_pretending(
     monkeypatch.setattr(
         decisiones, "_leer_doc", Mock(return_value={"docstatus": 0, "status": "Draft"})
     )
+    # El borrador SÍ se puede leer: sin esto la lectura falla primero y el test
+    # pasa sin llegar nunca a la escritura que dice estar probando.
     monkeypatch.setattr(
         decisiones.erpnext,
-        "policy_update_status",
-        Mock(side_effect=decisiones.erpnext.ERPNextError("ERPNext rechazó")),
+        "policy_get_doc",
+        lambda doctype, name: {"name": name, "docstatus": 0, "status": "Draft"},
     )
+    escritura = Mock(side_effect=decisiones.erpnext.ERPNextError("ERPNext rechazó"))
+    monkeypatch.setattr(decisiones.erpnext, "policy_update_status", escritura)
     submit = Mock()
     monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
 
@@ -287,7 +305,58 @@ def test_a_rejection_that_cannot_be_closed_says_so_instead_of_pretending(
 
     assert "rechazado" in result.lower()
     submit.assert_not_called()
+    escritura.assert_called_once()
     audit = " ".join(str(c) for c in comment.call_args_list)
+    assert "sigue comprometiendo stock" in audit
+
+
+def test_un_cierre_que_erpnext_contesta_200_pero_no_guarda_no_se_afirma(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La mitad que faltaba: la escritura NO falla y el estado igual no queda.
+
+    Es el caso que el docstring de arriba nombra —«a Frappe PUT can even answer
+    200 having quietly recomputed the field back»— y que nada probaba, porque
+    `_marcar_sin_reserva` re-leía ANTES de escribir y nunca DESPUÉS: con la
+    escritura sin excepción devolvía True, y el rastro durable del pedido
+    quedaba diciendo «ya no compromete stock» sobre un borrador que seguía
+    tomándolo. Ahora delega en `solicitudes.soltar_reserva`, que re-lee y sólo
+    afirma lo que la relectura sostiene.
+
+    El rechazo sigue en pie: lo que cambia es lo que se AFIRMA de él.
+    """
+    from app import decisiones
+
+    monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
+    monkeypatch.setattr(
+        decisiones, "telefono_del_cliente", lambda nombre: "5493511234567"
+    )
+    monkeypatch.setattr(decisiones, "_avisar_cliente_rechazo", lambda *a: True)
+    comment = Mock()
+    monkeypatch.setattr(decisiones.erpnext, "add_comment", comment)
+    monkeypatch.setattr(
+        decisiones, "_leer_doc", Mock(return_value={"docstatus": 0, "status": "Draft"})
+    )
+    # ERPNext acepta el PUT sin chistar y deja el documento como estaba.
+    escritura = Mock(return_value={"name": "SAL-ORD-0009", "status": "Closed"})
+    monkeypatch.setattr(decisiones.erpnext, "policy_update_status", escritura)
+    monkeypatch.setattr(
+        decisiones.erpnext,
+        "policy_get_doc",
+        lambda doctype, name: {"name": name, "docstatus": 0, "status": "Draft"},
+    )
+    submit = Mock()
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
+
+    result = aprobacion.manejar_boton("no:SAL-ORD-0009", "5491100000000")
+
+    assert "rechazado" in result.lower()
+    submit.assert_not_called()
+    # La escritura se intentó de verdad: el test no pasa por no haber llegado.
+    escritura.assert_called_once()
+    audit = " ".join(str(c) for c in comment.call_args_list)
+    # Y lo que importa: NO se afirma la liberación, y se dice lo contrario.
+    assert "ya no compromete stock" not in audit
     assert "sigue comprometiendo stock" in audit
 
 

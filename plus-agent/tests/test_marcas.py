@@ -75,6 +75,7 @@ TEXTOS_DURABLES = {
     "remito_agente": "[remito-preparado-por-agente]",
     "pendiente_aviso": "[pendiente-aviso]",
     "pendiente_cierre": "[pendiente-cerrado]",
+    "baja_cliente": "[baja-por-cliente]",
     "agenda": "[agenda]",
     "revision_humana": "Requiere revisión humana:",
     "rechazo_manual": "Rechazado manualmente por",
@@ -99,7 +100,8 @@ def test_el_registro_no_tiene_filas_de_mas_ni_de_menos():
     """
     entre_corchetes = [m for m in marcas.MARCAS.values() if not m.prosa]
     en_prosa = [m for m in marcas.MARCAS.values() if m.prosa]
-    assert len(entre_corchetes) == 11
+    # Doce con #W4: `[baja-por-cliente]`, la baja que pide el propio cliente.
+    assert len(entre_corchetes) == 12
     assert len(en_prosa) == 2
     assert all(m.texto.startswith("[") and "]" in m.texto for m in entre_corchetes)
 
