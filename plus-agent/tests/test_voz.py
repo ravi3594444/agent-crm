@@ -720,3 +720,58 @@ def test_el_log_de_un_fallo_no_lleva_lo_que_dijo_el_cliente(monkeypatch, capsys)
         configurable={"actor_scope": "customer", "thread_id": "voz:abc"},
     )
     assert "cumpleaños" not in capsys.readouterr().out
+
+
+# --- Un reconecte es la misma llamada ---------------------------------------
+
+
+def test_un_reconecte_conserva_la_identidad_de_la_llamada(monkeypatch):
+    """El relay llama al factory de nuevo en CADA conexión, reconectes
+    incluidos. Con un id nuevo, el socket que se cae y vuelve convierte un
+    reintento del mismo pedido en un pedido NUEVO: el cliente pide una vez y le
+    entran dos. `resume` es el id de la sesión que se reanuda, o sea «la misma
+    llamada»."""
+    pytest.importorskip("calling_agent")
+    recibidos = []
+    monkeypatch.setattr(
+        herramientas,
+        "ejecutar",
+        lambda nombre, args, *, configurable: (
+            recibidos.append(configurable),
+            ("ok", False),
+        )[1],
+    )
+    primera = agente.desde_navegador({})
+    primera.run_tool("buscar_producto", {}, "tc-1")
+    sesion = recibidos[0]["thread_id"].removeprefix("voz:")
+
+    # El navegador reconecta con ?resume=<id de sesión upstream>.
+    reconectada = agente.desde_navegador({"resume": sesion})
+    reconectada.run_tool("buscar_producto", {}, "tc-1")
+
+    assert recibidos[0]["inbound_message_id"] == recibidos[1]["inbound_message_id"]
+
+
+def test_dos_llamadas_distintas_siguen_siendo_distintas(monkeypatch):
+    """La otra mitad: sin `resume`, cada conexión es una llamada nueva."""
+    pytest.importorskip("calling_agent")
+    recibidos = []
+    monkeypatch.setattr(
+        herramientas,
+        "ejecutar",
+        lambda nombre, args, *, configurable: (
+            recibidos.append(configurable),
+            ("ok", False),
+        )[1],
+    )
+    agente.desde_navegador({}).run_tool("buscar_producto", {}, "tc-1")
+    agente.desde_navegador({}).run_tool("buscar_producto", {}, "tc-1")
+    assert recibidos[0]["inbound_message_id"] != recibidos[1]["inbound_message_id"]
+
+
+def test_el_agente_le_dice_a_la_pagina_el_nombre_del_negocio(monkeypatch):
+    """Sin esto el relay contesta el suyo —el del restaurante— sobre el
+    producto de otro."""
+    pytest.importorskip("calling_agent")
+    monkeypatch.setenv("NOMBRE_NEGOCIO", "Lácteos Plus")
+    assert agente.desde_navegador({}).display_name == "Lácteos Plus"

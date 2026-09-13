@@ -78,6 +78,9 @@ def para_llamada(configurable: dict[str, str]):
         # inglés contestaría en inglés con acento y rompería esa regla desde
         # afuera del prompt, que es donde no se puede arreglar.
         voice=os.getenv("VOZ_AGENTE", "diego").strip() or "diego",
+        # Lo que la página muestra como nombre del negocio. Sin esto el relay
+        # contesta el suyo —el del restaurante— sobre el producto de otro.
+        display_name=os.getenv("NOMBRE_NEGOCIO", "").strip() or None,
     )
 
 
@@ -103,8 +106,18 @@ def desde_navegador(parametros: dict[str, str] | None = None):
     La degradación correcta es atender SIN cuenta: el que llama pregunta
     precios y lo suyo lo ve una persona.
     """
-    id_llamada = uuid.uuid4().hex
-    declarado = str((parametros or {}).get("telefono") or "").strip()
+    parametros = parametros or {}
+    # UN RECONECTE TIENE QUE SER LA MISMA LLAMADA. El relay llama al factory de
+    # nuevo en cada conexión, reconectes incluidos, y el `id_llamada` es de
+    # donde sale la clave de idempotencia de `crear_pedido`. Con un uuid nuevo,
+    # el socket que se cae y vuelve convierte un reintento del mismo pedido en
+    # un pedido NUEVO — el cliente pide una vez y le entran dos.
+    #
+    # `resume` es el id de la sesión upstream que el navegador reanuda, así que
+    # es exactamente «la misma llamada»: derivar de ahí hace que la identidad
+    # sobreviva al corte. Lo pidió una review sobre el repo del relay.
+    id_llamada = str(parametros.get("resume") or "").strip() or uuid.uuid4().hex
+    declarado = str(parametros.get("telefono") or "").strip()
     if declarado:
         try:
             return para_llamada(identidad.de_parametro(declarado, id_llamada=id_llamada))

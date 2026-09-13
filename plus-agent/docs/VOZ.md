@@ -206,6 +206,15 @@ herramientas sean el registro de clientes y que la demo del número por parámet
 no se haya quedado encendida. No llama a AssemblyAI ni gasta una llamada. Lo
 corre también el job `imagen-voz` de CI, contra la imagen recién construida.
 
+## Un reconecte es la misma llamada
+
+El relay llama al factory en CADA conexión, reconectes incluidos, y de su
+`id_llamada` sale la clave de idempotencia de `crear_pedido`. Con un id nuevo,
+el socket que se cae y vuelve convierte un reintento del mismo pedido en un
+pedido nuevo: el cliente pide una vez y le entran dos. Por eso el id sale de
+`?resume=` cuando viene —el id de la sesión upstream que el navegador
+reanuda—, que es exactamente «la misma llamada».
+
 ## Una caída de ERPNext no cambia de agente
 
 Lo encontró un arranque de verdad del servidor, no un test: con ERPNext apagado
