@@ -737,3 +737,116 @@ def test_si_quedaron_dos_seguimientos_vivos_sale_UN_solo_mensaje(
     ]
     assert len(salientes) == 1
     assert "el nuevo" in salientes[0]["texto"]
+
+
+# --------------------------------------- un borrador CERRADO ya no está vivo
+#
+# Un pedido deja de estar vivo de dos maneras y tres handlers miraban una sola.
+# `docstatus` 1/2 lo cubre el test de arriba; ésta es la otra: `docstatus=0` con
+# `status="Closed"`, que es como terminan un rechazo del equipo, un vencimiento
+# y la baja que pide un cliente.
+#
+# Los tres tests afirman LAS DOS MITADES. «No se mandó nada» solo lo cumple
+# también una fila que quedó trabada reintentando para siempre contra un
+# documento que no va a volver a cambiar, que es el otro final malo. Que la fila
+# TERMINE es lo que distingue «se cerró» de «se colgó».
+
+
+def _cerrado(mundo) -> None:
+    """El borrador que el equipo rechazó, o que venció, o que el cliente bajó."""
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "status": "Closed"}
+
+
+def test_un_borrador_cerrado_no_recibe_el_aviso_de_entrega_y_la_fila_se_termina(
+    mundo, marcas_sin_redis, entrega_a_las_17, monkeypatch
+) -> None:
+    """El peor de los tres: el mensaje va al CLIENTE.
+
+    Sin esto el cliente lee «tu pedido llega a las 17» sobre un pedido que ya
+    nadie va a preparar. La fila se creó cuando el borrador estaba vivo, que es
+    justamente cuando `crear_pedido` la programa.
+    """
+    monkeypatch.setattr(agenda, "horas_de_aviso", lambda: 3.0)
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "delivery_date": "2026-09-08"}
+    agenda.crear(
+        PEDIDO,
+        agenda.AVISO_ANTES_DE_ENTREGA,
+        epoch(14),
+        params={"horas": 3.0, "hora": "17"},
+        ahora=epoch(9),
+    )
+    _cerrado(mundo)
+
+    agenda.tick(ahora=epoch(15))
+
+    assert _en_cola(marcas_sin_redis) == []
+    assert agenda.vivas(PEDIDO, agenda.AVISO_ANTES_DE_ENTREGA) == []
+
+
+def test_un_borrador_cerrado_no_despierta_al_dueno_y_la_fila_se_termina(
+    mundo, marcas_sin_redis, entrega_a_las_17, monkeypatch
+) -> None:
+    """El re-ping existe para comprar un plazo que un pedido cerrado ya no tiene."""
+    monkeypatch.setattr(agenda, "horas_de_aviso", lambda: 3.0)
+    mundo["docs"][PEDIDO] = {**mundo["docs"][PEDIDO], "delivery_date": "2026-09-08"}
+    agenda.crear(
+        PEDIDO,
+        agenda.RECORDATORIO_PLAZO_DUENO,
+        epoch(13),
+        params={"hora": "14:00"},
+        ahora=epoch(9),
+    )
+    _cerrado(mundo)
+
+    agenda.tick(ahora=epoch(14))
+
+    assert mundo["al_dueno"] == []
+    assert agenda.vivas(PEDIDO, agenda.RECORDATORIO_PLAZO_DUENO) == []
+
+
+def test_un_borrador_cerrado_no_genera_seguimiento_al_equipo_y_la_fila_se_termina(
+    mundo, marcas_sin_redis, monkeypatch
+) -> None:
+    """Este handler no tenía NINGUNA guarda de documento, ni siquiera `docstatus`.
+
+    `router.STAFF` se arma al importar y conftest deja `TELEFONOS_EQUIPO` vacío,
+    así que sin fijarlo el test contaría cero mensajes por el motivo equivocado.
+    """
+    from app import router
+
+    monkeypatch.setattr(router, "STAFF", ["5493510000001"])
+    agenda.crear(
+        PEDIDO,
+        agenda.SEGUIMIENTO,
+        epoch(15),
+        params={"por_que": "el cliente dijo que confirmaba hoy"},
+        ahora=epoch(9),
+    )
+    _cerrado(mundo)
+
+    agenda.tick(ahora=epoch(16))
+
+    assert [
+        e for e in _en_cola(marcas_sin_redis)
+        if e["evento"].startswith("agenda_seguimiento")
+    ] == []
+    assert agenda.vivas(PEDIDO, agenda.SEGUIMIENTO) == []
+
+
+def test_no_se_programan_filas_sobre_un_borrador_ya_cerrado(
+    mundo, marcas_sin_redis, entrega_a_las_17, monkeypatch
+) -> None:
+    """Programarlas sería crearlas muertas.
+
+    `programar_para_entrega` es idempotente y los caminos de recuperación de
+    `crear_pedido` vuelven a pasar por ella con el pedido ya existente: si para
+    entonces el borrador se cerró, no hay nada que programar.
+    """
+    monkeypatch.setattr(agenda, "horas_de_aviso", lambda: 3.0)
+    doc = {
+        **mundo["docs"][PEDIDO],
+        "delivery_date": "2026-09-08",
+        "status": "Closed",
+    }
+
+    assert agenda.programar_para_entrega(doc, ahora=epoch(9)) == []
