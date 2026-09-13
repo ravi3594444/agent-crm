@@ -225,3 +225,57 @@ jobs:
           echo "el contenedor no respondió /health"
           docker logs agente-ci
           exit 1
+
+  imagen-voz:
+    name: imagen de voz
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: La imagen de voz buildea
+        # Es otra imagen que la del agente: clona el relay al sha pinneado y le
+        # apunta STATIC_DIR a la interfaz del navegador, que no viaja en el
+        # wheel. Sin este job, romperla no se nota hasta que alguien llama.
+        run: docker build -f Dockerfile.voz -t plus-voz:ci .
+
+      - name: El contenedor sirve /healthz y resuelve el agente del CRM
+        # Las dos cosas, y la segunda es la que importa. El relay trata un
+        # AGENT_FACTORY que falla como «servime el agente de fábrica», y el de
+        # fábrica es el de RESTAURANTE: la llamada se atiende igual, /healthz
+        # contesta 200, y el que llama a la distribuidora escucha a una
+        # recepcionista ofreciéndole mesa. Ningún healthcheck puede verlo, así
+        # que lo mira `app/voz/verificar.py`.
+        #
+        # ERPNEXT_URL apunta a un host que no existe a propósito: esto corre el
+        # camino degradado, donde el agente se arma igual pero sin cuenta.
+        run: |
+          docker network create ci-voz
+          docker run -d --name redis-voz --network ci-voz redis/redis-stack-server:7.4.0-v1
+          for i in $(seq 1 30); do
+            docker exec redis-voz redis-cli ping 2>/dev/null | grep -q PONG && break
+            sleep 1
+          done
+          docker run -d --name voz-ci --network ci-voz -p 8082:8082 \
+            -e ERPNEXT_URL=http://erpnext.invalid \
+            -e ERPNEXT_API_KEY=k -e ERPNEXT_API_SECRET=s \
+            -e ERPNEXT_MANAGER_API_KEY=mk -e ERPNEXT_MANAGER_API_SECRET=ms \
+            -e ERPNEXT_POLICY_API_KEY=pk -e ERPNEXT_POLICY_API_SECRET=ps \
+            -e META_APP_SECRET=x -e META_VERIFY_TOKEN=y \
+            -e REDIS_URL=redis://redis-voz:6379/0 \
+            -e WHATSAPP_PHONE_NUMBER_ID=1 -e WHATSAPP_TOKEN=t \
+            -e DASHSCOPE_API_KEY=noop \
+            -e ASSEMBLYAI_API_KEY=noop \
+            plus-voz:ci
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS localhost:8082/healthz >/dev/null; then ok=1; break; fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "el contenedor de voz no respondió /healthz"
+            docker logs voz-ci
+            exit 1
+          fi
+          docker exec voz-ci python -m app.voz.verificar || { docker logs voz-ci; exit 1; }

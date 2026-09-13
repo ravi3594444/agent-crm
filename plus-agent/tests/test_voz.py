@@ -504,3 +504,90 @@ def test_el_factory_aguanta_cualquier_fallo_al_resolver_el_numero(monkeypatch):
     definicion = agente.desde_navegador({"telefono": CLIENTE})
     assert definicion.name == "plus-clientes"
     assert "REGLAS QUE NO PODÉS ROMPER" in definicion.build_prompt()
+
+
+# --- El verificador de arranque --------------------------------------------
+
+
+def _entorno_de_voz(monkeypatch):
+    monkeypatch.setenv("ASSEMBLYAI_API_KEY", "noop")
+    monkeypatch.setenv("AGENT_FACTORY", "app.voz.agente:desde_navegador")
+    monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "")
+
+
+def test_el_verificador_pasa_con_todo_en_su_lugar(monkeypatch):
+    pytest.importorskip("calling_agent")
+    from app.voz import verificar as verificador
+
+    _entorno_de_voz(monkeypatch)
+    monkeypatch.setattr(clientes, "buscar_por_telefono", lambda n, get_list=None: None)
+    assert verificador.verificar() == []
+
+
+def test_el_verificador_ve_lo_que_healthz_no_puede_ver(monkeypatch):
+    """`/healthz` contesta 200 con el agente de restaurante servido. Eso es lo
+    que este módulo existe para atrapar, así que es lo que se prueba."""
+    pytest.importorskip("calling_agent")
+    from app.voz import verificar as verificador
+
+    _entorno_de_voz(monkeypatch)
+    monkeypatch.setenv("AGENT_FACTORY", "app.voz.agente:no_existe")
+    problemas = verificador.verificar()
+    assert any("restaurante" in problema for problema in problemas)
+
+
+def test_el_verificador_avisa_si_la_demo_quedo_encendida(monkeypatch):
+    """Encendido no es un error, pero que no lo descubra un cliente."""
+    pytest.importorskip("calling_agent")
+    from app.voz import verificar as verificador
+
+    _entorno_de_voz(monkeypatch)
+    monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "1")
+    monkeypatch.setattr(clientes, "buscar_por_telefono", lambda n, get_list=None: None)
+    problemas = verificador.verificar()
+    assert any("VOZ_NUMERO_POR_PARAMETRO" in problema for problema in problemas)
+
+
+def test_el_verificador_avisa_si_falta_la_clave(monkeypatch):
+    pytest.importorskip("calling_agent")
+    from app.voz import verificar as verificador
+
+    _entorno_de_voz(monkeypatch)
+    monkeypatch.setenv("ASSEMBLYAI_API_KEY", "")
+    monkeypatch.setattr(clientes, "buscar_por_telefono", lambda n, get_list=None: None)
+    assert any("ASSEMBLYAI_API_KEY" in p for p in verificador.verificar())
+
+
+def test_el_verificador_mira_los_bloques_del_prompt(monkeypatch):
+    """Si el bloque de voz desaparece del prompt, el agente sigue atendiendo
+    y contesta con formato de chat. Nada más lo nota."""
+    pytest.importorskip("calling_agent")
+    from app.voz import prompt as prompt_modulo
+    from app.voz import verificar as verificador
+
+    _entorno_de_voz(monkeypatch)
+    monkeypatch.setattr(clientes, "buscar_por_telefono", lambda n, get_list=None: None)
+    monkeypatch.setattr(prompt_modulo, "BLOQUE_VOZ", "")
+    problemas = verificador.verificar()
+    assert any("POR TELÉFONO" in problema for problema in problemas)
+
+
+def test_el_verificador_atrapa_un_factory_que_falla_con_el_nombre_bien(monkeypatch):
+    """El caso que de verdad pasa en producción, y que faltaba.
+
+    El test de arriba pone un AGENT_FACTORY que no existe, y eso lo atrapa el
+    chequeo del NOMBRE — así que la rama «el factory devolvió None» no se
+    probaba: borrarla dejaba los 40 en verde. En el server el nombre va a estar
+    bien y lo que va a fallar es el factory, por un import roto o un módulo que
+    no levanta. Ahí, el relay sirve el de restaurante y `/healthz` dice 200.
+    """
+    pytest.importorskip("calling_agent")
+    import calling_agent.main as relay
+
+    from app.voz import verificar as verificador
+
+    _entorno_de_voz(monkeypatch)  # AGENT_FACTORY correcto
+    monkeypatch.setattr(relay, "_build_agent", lambda *args, **kwargs: None)
+    problemas = verificador.verificar()
+    assert len(problemas) == 1
+    assert "restaurante" in problemas[0]

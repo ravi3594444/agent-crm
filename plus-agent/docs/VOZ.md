@@ -148,6 +148,20 @@ por eso la repetición es obligatoria, no un lujo de prolijidad.
 
 ---
 
+## Después de un deploy
+
+```bash
+docker compose --profile voz exec voz python -m app.voz.verificar
+```
+
+`/healthz` contesta 200 aunque `AGENT_FACTORY` no resuelva, porque el relay
+atiende igual —con SU agente de fábrica, el de restaurante—. O sea que el modo
+de falla que importa es invisible para un healthcheck. Esto lo mira: que el
+agente sea el del CRM, que el prompt tenga sus cuatro bloques, que las
+herramientas sean el registro de clientes y que la demo del número por parámetro
+no se haya quedado encendida. No llama a AssemblyAI ni gasta una llamada. Lo
+corre también el job `imagen-voz` de CI, contra la imagen recién construida.
+
 ## Una caída de ERPNext no cambia de agente
 
 Lo encontró un arranque de verdad del servidor, no un test: con ERPNext apagado
