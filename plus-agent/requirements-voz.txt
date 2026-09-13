@@ -19,4 +19,4 @@
 # Pinneado a un commit y no a una rama, por lo mismo que todo lo de arriba: dos
 # builds del mismo mes tienen que dar la misma app. Para actualizarlo, cambiá el
 # sha, corré `make test` y recién entonces commiteá.
-calling-agent @ git+https://github.com/ravi3594444/the-calling-agent@edc2ecdf23b13a9356958acb12dac4f92c007a70
+calling-agent @ git+https://github.com/ravi3594444/the-calling-agent@ed582b10e8df8f357753c2f9a57c30866472d22e

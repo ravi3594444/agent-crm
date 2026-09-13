@@ -15,7 +15,7 @@ WORKDIR /srv
 # adentro del paquete. `calling_agent.main` la busca en STATIC_DIR, así que el
 # clon queda y se le apunta. `git` se saca en la misma capa: lo necesita pip,
 # no el proceso.
-ARG CALLING_AGENT_SHA=edc2ecdf23b13a9356958acb12dac4f92c007a70
+ARG CALLING_AGENT_SHA=ed582b10e8df8f357753c2f9a57c30866472d22e
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
  && git clone https://github.com/ravi3594444/the-calling-agent /opt/calling-agent \
