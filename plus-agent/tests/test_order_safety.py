@@ -21,7 +21,7 @@ os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "test-phone-id")
 os.environ.setdefault("WHATSAPP_TOKEN", "test-token")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from conftest import entrega_autorizada, inventario_confiable
+from conftest import RelojDePrueba, entrega_autorizada, inventario_confiable
 
 from app import erpnext, inventario, policy, router
 from app.tools import catalogo, pedidos
@@ -29,6 +29,12 @@ from app.tools import catalogo, pedidos
 # Captured before any fixture stubs it: these two tests are about the real
 # earned-trust logic, not about a stub of it.
 _CONFIABLE_REAL = inventario.confiable
+
+# El día que este archivo nombra, el mismo que ya estaba escrito trece veces como
+# `date(2026, 8, 29)`. Acá sólo lo usa el test del conteo vencido, que necesita
+# un momento con zona; los trece `_hoy_del_negocio` siguen pasando un `date`,
+# que no tiene zona y no hace falta tocar.
+RELOJ = RelojDePrueba("2026-08-29")
 
 
 def _limites_del_dueno(monkeypatch: pytest.MonkeyPatch, **cambios: object) -> None:
@@ -113,7 +119,10 @@ def _order(**overrides) -> dict:
 def _safe_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ERPNEXT_COMPANY", "Lácteos Plus SA")
     monkeypatch.setenv("ERPNEXT_WAREHOUSE", "Depósito A - LP")
-    monkeypatch.setenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires")
+    # La zona NO se fija acá. Era decorado: repetía el pin que el conftest tenía
+    # en `_FIJAS`, y ningún test de este archivo afirma el nombre de una zona
+    # salvo el de «mañana» (abajo), que la nombra él y dos veces. Fijarla acá
+    # volvería a tapar la celda de zona de CI para todo el archivo.
 
 
 def test_context_requires_both_explicit_values_without_warehouse_fallback(
@@ -793,15 +802,15 @@ def test_a_stale_count_leaves_the_order_pending_with_a_reason_he_can_act_on(
 ) -> None:
     """Nobody counted this product today, so the stock figure is a guess. The
     order waits and the reason tells the team exactly what to do about it."""
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
+    from datetime import timedelta
 
     mocks = _politica_verde(monkeypatch, fisico=1_000)
     monkeypatch.setattr(inventario, "confiable", _CONFIABLE_REAL)
     monkeypatch.setenv("STOCK_CONFIABLE", "true")
     monkeypatch.setenv("STOCK_CONFIABLE_HORAS", "24")
-    zona = ZoneInfo("America/Argentina/Buenos_Aires")
-    ahora = datetime(2026, 8, 29, 9, 0, tzinfo=zona)
+    # Lo que este test afirma es «hace 40 h», que sale de la resta: el momento y
+    # la zona pueden venir del reloj declarado y la cuenta no se mueve.
+    ahora = RELOJ.a_las(9)
     viejo = ahora - timedelta(hours=40)
     monkeypatch.setattr(inventario, "_ahora", lambda: ahora)
     monkeypatch.setattr(

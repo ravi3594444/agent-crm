@@ -65,7 +65,20 @@ _FUNCIONALES_ES = frozenset(["de", "sin"])
 # y el texto se pasa a minúsculas y se le quitan los acentos antes de cruzar.
 _CENTINELAS_ES = frozenset(["desconocido", "disponible"])
 
-_PALABRAS_ES = _RESTOS_DE_PLANTILLA | _FUNCIONALES_ES | _CENTINELAS_ES
+# La palabra que el informe de avisos caídos pegaba a mano en CADA entrada con
+# tag: «— destinatario a1b2c3d4…». El audit no la veía —no estaba en la lista—
+# así que filtraba en silencio en todas, no sólo en las de fallback.
+#
+# Se agrega ACÁ Y AHORA, junto con el arreglo de app/tools/operaciones.py, que
+# es la condición que pedía el handoff del issue: ensanchar el detector sobre un
+# archivo que nadie está tocando deja el audit en rojo sin dueño. Es segura por
+# lo mismo que las otras: doce letras, comparación por ficha entera y ninguna
+# palabra inglesa que la contenga.
+_DEL_INFORME_ES = frozenset(["destinatario"])
+
+_PALABRAS_ES = (
+    _RESTOS_DE_PLANTILLA | _FUNCIONALES_ES | _CENTINELAS_ES | _DEL_INFORME_ES
+)
 
 # Lo que SÍ puede aparecer en español aunque el idioma sea inglés, porque no es
 # prosa: nombres propios de ERPNext, estados canónicos, marcas de auditoría.

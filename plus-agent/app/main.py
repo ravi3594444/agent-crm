@@ -529,8 +529,9 @@ def _codigo_de_ajuste(text: str, telefono: str) -> str | None:
     try:
         cambio = limites.aplicar(match.group(1), telefono)
     except limites.LimiteError as exc:
-        motivo = idioma.t(exc.clave, lengua) if getattr(exc, "clave", "") else str(exc)
-        return idioma.t("codigo.ajuste_no_aplicado", lengua, motivo=motivo)
+        return idioma.t(
+            "codigo.ajuste_no_aplicado", lengua, motivo=limites.motivo(exc, lengua)
+        )
     except Exception as error:
         print(f"[limites] confirmación falló type={_error_name(error)}")
         return idioma.t("codigo.ajuste_error", lengua)
@@ -684,10 +685,11 @@ def _resumen_de_solicitud(text: str) -> str | None:
             continue
         if solicitud is None or not solicitud.abierta:
             continue
+        lengua = idioma.gerencia()
         return (
-            "No ejecuto una instrucción que no sea exacta: esto cambia una fecha "
-            "y un precio que después hay que cumplir.\n\n"
-            f"{solicitudes.texto_para_equipo(solicitud)}"
+            idioma.t("equipo.instruccion_no_exacta", lengua)
+            + "\n\n"
+            + solicitudes.texto_para_equipo(solicitud, lengua)
         )
     return None
 
@@ -1569,7 +1571,7 @@ def _solicitudes_scheduler(stop: threading.Event) -> None:
     writing in, and the sweep must not sit in front of the inbound FIFO. A
     failure only skips one round.
     """
-    from app import pendientes, solicitudes
+    from app import agenda, pendientes, solicitudes
 
     while not stop.wait(_SOLICITUDES_TICK_SECONDS):
         try:
@@ -1583,6 +1585,15 @@ def _solicitudes_scheduler(stop: threading.Event) -> None:
             pendientes.tick()
         except Exception as error:
             print(f"[pendientes] tick type={_error_name(error)}")
+        # Y la agenda, en ESTE hilo y no en uno nuevo: es el mismo minuto y el
+        # mismo tipo de trabajo. Su propio try/except por la misma razón que los
+        # dos de arriba. No-op mientras no haya filas, que es lo que pasa hasta
+        # que el dueño encienda AVISO_ANTES_DE_ENTREGA_HORAS o el modelo use
+        # `recordar`.
+        try:
+            agenda.tick()
+        except Exception as error:
+            print(f"[agenda] tick type={_error_name(error)}")
 
 
 def _digest_scheduler(stop: threading.Event) -> None:

@@ -19,23 +19,33 @@ filtro, que es el que decide el número tanto acá como en producción.
 """
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 import pytest
+from conftest import RelojDePrueba
 
 from app import autonomia, confirmacion, erpnext, inventario, policy, sombra
 from tests.fakes import listar
 
-# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
-# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
-pytestmark = pytest.mark.idioma("es")
+# Este archivo afirma texto en español y montos con forma argentina, así que
+# declara los dos en vez de heredarlos del entorno. Ver `_idioma_declarado` y
+# `_locale_declarado` en tests/conftest.py.
+pytestmark = [pytest.mark.idioma("es"), pytest.mark.locale("es_AR")]
 
-AHORA = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
+# El día que este archivo nombra. Era `AHORA = datetime(2026, 9, 8, 12, 0,
+# tzinfo=UTC)`: con la zona escrita a mano —y en UTC, que NO es el reloj del
+# negocio— mientras `_sello` escribía ese momento como naive y `autonomia._creacion`
+# lo volvía a leer en BUSINESS_TIMEZONE. La asimetría estaba metida adentro del
+# fixture y sin declarar; por `RELOJ` las dos puntas son la misma zona salvo
+# donde un test diga lo contrario.
+RELOJ = RelojDePrueba("2026-09-08")
+AHORA = RELOJ.a_las(12)
 PO_AGENTE = "WA-" + "0123456789abcdef" * 2 + "01234567"
 
 
 def _sello(dias_atras: float = 0) -> str:
-    return (AHORA - timedelta(days=dias_atras)).strftime("%Y-%m-%d %H:%M:%S")
+    """El `creation` SIN zona que guarda ERPNext, como lo lee `_creacion`."""
+    return RELOJ.sello(RELOJ.a_las(12) - timedelta(days=dias_atras))
 
 
 def _comentario(pedido: str, contenido: str, dias_atras: float = 0) -> dict:
@@ -1078,3 +1088,45 @@ def test_una_zona_invalida_no_le_saca_comentarios_al_conteo(monkeypatch) -> None
 
     assert momento is not None
     assert momento.tzinfo is not None
+
+
+def test_cada_cubeta_del_desglose_tiene_nombre_en_los_dos_idiomas() -> None:
+    """La tabla `_GRUPOS` guarda el nombre CANÓNICO —se cuenta, se suma entre
+    fuentes y se ordena, o sea que es una clave— y el catálogo dice cómo se
+    muestra. Una cubeta nueva sin fila en el catálogo saldría en español adentro
+    de un resumen en inglés, que es el bug que abrió el issue #9.
+
+    Entran también las dos puertas de postura de `app/policy.py`: las cuenta
+    `_por_sombras` y las muestra la misma línea.
+    """
+    from app import idioma, policy
+
+    canonicos = (
+        [nombre for nombre, _ in autonomia._GRUPOS]
+        + [autonomia.OTROS, policy.POSTURA_TOPE, policy.POSTURA_STOCK]
+    )
+    for nombre in canonicos:
+        clave = autonomia._NOMBRE_DE_CUBETA.get(nombre)
+        assert clave, f"la cubeta «{nombre}» no tiene cómo decirse"
+        assert clave in idioma.CATALOGO, f"{clave} no está en el catálogo"
+        for lengua in idioma.IDIOMAS:
+            assert idioma.t(clave, lengua).strip()
+        # En español dice exactamente lo que dice la tabla: lo que se muestra y
+        # lo que se guarda coinciden en el idioma de origen, como con los días.
+        assert autonomia.nombre_de_cubeta(nombre, "es") == nombre
+        assert autonomia.nombre_de_cubeta(nombre, "en") != nombre
+
+
+def test_una_cubeta_que_nadie_nombro_se_muestra_igual() -> None:
+    """Mostrar no valida: un nombre que no está en el mapa sale tal cual, que es
+    además cómo se nota que falta una fila."""
+    assert autonomia.nombre_de_cubeta("una cubeta nueva", "en") == "una cubeta nueva"
+
+
+def test_el_conteo_de_frescura_no_lleva_el_separador_en_espanol() -> None:
+    """El `de` de «5 de 6»: el resto que motivó el issue #9, y el que el
+    detector no veía porque `de` no estaba en `_PALABRAS_ES`."""
+    from app import idioma
+
+    assert idioma.t("gerencia.autonomia_conteos", "en", frescos=5, mirados=6) == "5 of 6"
+    assert idioma.t("gerencia.autonomia_conteos", "es", frescos=5, mirados=6) == "5 de 6"

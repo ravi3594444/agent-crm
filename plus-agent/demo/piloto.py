@@ -273,6 +273,19 @@ def _idioma_demo() -> str:
     return crudo if crudo in ("es", "en") else "es"
 
 
+def _locale_demo() -> str:
+    """La forma de los montos del banco: LOCALE del entorno, o es_AR.
+
+    Separada de `_idioma_demo` porque son dos ejes: la demo del cliente que
+    habla inglés se corre con `IDIOMA_DEMO=en LOCALE=en_US`, y un almacén
+    argentino con dueño que lee en inglés es `IDIOMA_DEMO=en` a secas.
+    """
+    from app import formato
+
+    crudo = str(os.environ.get("LOCALE", "") or "").strip()
+    return formato.locale_configurado() if crudo else formato.LOCALE_POR_DEFECTO
+
+
 def entorno_del_agente(modo: str = "offline", modelo_llm: str = "") -> dict[str, str]:
     """El .env del banco de pruebas. Ninguna credencial de acá sirve para nada."""
     modelo = RELEVO if modo == "gemini" else SERVICIOS
@@ -318,6 +331,10 @@ def entorno_del_agente(modo: str = "offline", modelo_llm: str = "") -> dict[str,
         "STOCK_CONFIABLE_HORAS": "24",
         "AUTO_CONFIRM_PRICE_LIST": "Standard Selling",
         "AUTO_CONFIRM_CURRENCY": "ARS",
+        # La forma del número, que no es el idioma: el mismo guión en inglés
+        # con LOCALE=es_AR sigue mostrando $12.000, que es lo correcto para un
+        # almacén argentino cuyo dueño lee en inglés.
+        "LOCALE": _locale_demo(),
         "AUTO_CONFIRM_MAX": "0",
         "ENTREGA_DIAS_REPARTO": "lunes,martes,miercoles,jueves,viernes",
         "ENTREGA_HORA_REPARTO": "09:00",

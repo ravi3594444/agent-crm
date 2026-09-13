@@ -38,9 +38,19 @@ from pydantic import Field
 from app import avisos, erpnext, idioma, modelos, outbound_status, solicitudes
 from app.runtime_context import RuntimeContextError, require_management
 
-_SIN_PERMISO = (
-    "Ese número no está autorizado para ver el estado del sistema. No consulté nada."
-)
+
+def _sin_permiso(lengua: str | None = None) -> str:
+    """La rama de «no autorizado» de los dos informes de este módulo.
+
+    ERA UNA CONSTANTE DE MÓDULO, y ése era todo el bug: se evalúa al importar,
+    o sea antes de que exista un idioma que consultar, así que el único string
+    del archivo sin clave de catálogo era justamente el que no podía tenerla.
+    Como función se resuelve cuando se contesta, que es cuando se sabe a quién.
+    """
+    return idioma.t(
+        "sistema.sin_permiso", lengua if lengua is not None else idioma.gerencia()
+    )
+
 
 # Una prueba de vida tiene que contestar en segundos o no sirve como prueba de
 # vida: el dueño está esperando en WhatsApp.
@@ -60,15 +70,25 @@ REGISTROS_MAXIMO = 20
 CLAVE_DEAD_RESPUESTAS = "wa:{inbound}:dead"
 
 
-def _cuenta(valor: object) -> str:
-    """Un contador, o DESCONOCIDO. None y -1 significan «no pude leer»."""
+def _cuenta(valor: object, lengua: str | None = None) -> str:
+    """Un contador, o el centinela de «no pude leer», en el idioma de quien lee.
+
+    `DESCONOCIDO` es la palabra que significa «no leas esto como cero», o sea
+    justo la que hay que entender — y salía en español adentro de un informe en
+    inglés porque esta función no tomaba idioma. El catálogo ya tenía la fila
+    (`sistema.desconocido`, EN «UNKNOWN») y el mismo archivo la usaba bien dos
+    líneas más arriba; lo que faltaba era el parámetro.
+
+    None y -1 significan «no pude leer». El número, cuando hay, se interpola
+    tal cual: un contador no tiene idioma.
+    """
     if valor is None:
-        return DESCONOCIDO
+        return idioma.t("sistema.desconocido", lengua)
     try:
         numero = int(valor)
     except (TypeError, ValueError):
-        return DESCONOCIDO
-    return DESCONOCIDO if numero < 0 else str(numero)
+        return idioma.t("sistema.desconocido", lengua)
+    return idioma.t("sistema.desconocido", lengua) if numero < 0 else str(numero)
 
 
 def _presencia(nombre: str, lengua: str) -> str:
@@ -159,15 +179,15 @@ def _bloque_whatsapp(cuentas: dict, lengua: str) -> str:
         "sistema.whatsapp", lengua,
         numero=_presencia("WHATSAPP_PHONE_NUMBER_ID", lengua),
         token=_presencia("WHATSAPP_TOKEN", lengua),
-        rechazadas=_cuenta(cuentas.get("entregas_fallidas")),
-        sin_entregar=_cuenta(cuentas.get("respuestas_en_dead_letter")),
+        rechazadas=_cuenta(cuentas.get("entregas_fallidas"), lengua),
+        sin_entregar=_cuenta(cuentas.get("respuestas_en_dead_letter"), lengua),
     )
 
 
 def _bloque_colas(cuentas: dict, lengua: str) -> str:
     return idioma.t(
-        "sistema.colas", lengua, espera=_cuenta(avisos.pendientes()),
-        caidos=_cuenta(cuentas.get("avisos_en_dead_letter")),
+        "sistema.colas", lengua, espera=_cuenta(avisos.pendientes(), lengua),
+        caidos=_cuenta(cuentas.get("avisos_en_dead_letter"), lengua),
     )
 
 
@@ -192,7 +212,7 @@ def _bloque_decisiones(lengua: str) -> str:
     )
     return idioma.t(
         "sistema.decisiones", lengua, indice=indice,
-        trabadas=_cuenta(trabadas), extra=reservan,
+        trabadas=_cuenta(trabadas, lengua), extra=reservan,
     )
 
 
@@ -210,7 +230,7 @@ def estado_del_sistema(config: RunnableConfig) -> str:
     try:
         require_management(config)
     except RuntimeContextError:
-        return _SIN_PERMISO
+        return _sin_permiso()
     try:
         cuentas = outbound_status.contar_pendientes()
     except Exception as exc:
@@ -228,7 +248,9 @@ def estado_del_sistema(config: RunnableConfig) -> str:
     return idioma.t("sistema.titulo", lengua) + "\n" + "\n".join(lineas)
 
 
-def _entradas_de_avisos_caidos(maximo: int) -> tuple[list[str], str]:
+def _entradas_de_avisos_caidos(
+    maximo: int, lengua: str | None = None
+) -> tuple[list[str], str]:
     """(líneas seguras, problema). Las más nuevas primero.
 
     Una entrada ilegible se cuenta y se salta: la lista es un registro de algo
@@ -241,8 +263,8 @@ def _entradas_de_avisos_caidos(maximo: int) -> tuple[list[str], str]:
     except Exception as exc:
         return [], idioma.t(
             "sistema.lista_no_disponible",
-            idioma.gerencia(),
-            estado=idioma.t("sistema.no_disponible", idioma.gerencia()),
+            lengua,
+            estado=idioma.t("sistema.no_disponible", lengua),
             error=type(exc).__name__,
         )
 
@@ -257,22 +279,24 @@ def _entradas_de_avisos_caidos(maximo: int) -> tuple[list[str], str]:
         except Exception:
             ilegibles += 1
             continue
-        pedido = str(entrada.get("order_name") or "").strip() or "sin pedido"
-        proposito = str(entrada.get("purpose") or "").strip() or "sin propósito"
+        # Los dos fallbacks NO son decorado: se alcanzan en la forma más
+        # normal de una respuesta fallida a un cliente, que no tiene pedido.
+        pedido = str(entrada.get("order_name") or "").strip() or idioma.t(
+            "sistema.sin_pedido", lengua
+        )
+        proposito = str(entrada.get("purpose") or "").strip() or idioma.t(
+            "sistema.sin_proposito", lengua
+        )
         # El tag ya es un hash; se recorta igual, y el teléfono nunca estuvo acá.
         tag = str(entrada.get("destinatario") or "").strip()[:8]
         resumen = _titular(entrada.get("resumen"))
         linea = f"· {pedido} — {proposito}"
         if tag:
-            linea += f" — destinatario {tag}…"
+            linea += idioma.t("sistema.destinatario", lengua, tag=tag)
         if resumen:
             linea += f"\n    {resumen}"
         lineas.append(linea)
-    problema = (
-        idioma.t("sistema.ilegibles", idioma.gerencia(), n=ilegibles)
-        if ilegibles
-        else ""
-    )
+    problema = idioma.t("sistema.ilegibles", lengua, n=ilegibles) if ilegibles else ""
     return lineas, problema
 
 
@@ -298,7 +322,7 @@ def ver_avisos_fallidos(
     try:
         require_management(config)
     except RuntimeContextError:
-        return _SIN_PERMISO
+        return _sin_permiso()
     maximo = max(1, min(int(cuantos or REGISTROS_DEFAULT), REGISTROS_MAXIMO))
     try:
         cuentas = outbound_status.contar_pendientes()
@@ -311,18 +335,18 @@ def ver_avisos_fallidos(
         idioma.t("sistema.fallidos_titulo", lengua),
         idioma.t(
             "sistema.fallidos_avisos", lengua,
-            n=_cuenta(cuentas.get("avisos_en_dead_letter")),
+            n=_cuenta(cuentas.get("avisos_en_dead_letter"), lengua),
         ),
         idioma.t(
             "sistema.fallidos_respuestas", lengua,
-            n=_cuenta(cuentas.get("respuestas_en_dead_letter")),
+            n=_cuenta(cuentas.get("respuestas_en_dead_letter"), lengua),
         ),
         idioma.t(
             "sistema.fallidos_rechazadas", lengua,
-            n=_cuenta(cuentas.get("entregas_fallidas")),
+            n=_cuenta(cuentas.get("entregas_fallidas"), lengua),
         ),
     ]
-    registros, problema = _entradas_de_avisos_caidos(maximo)
+    registros, problema = _entradas_de_avisos_caidos(maximo, lengua)
     if problema:
         lineas.append(f"⚠️ {problema}")
     if registros:

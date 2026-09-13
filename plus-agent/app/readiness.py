@@ -47,6 +47,10 @@ PLANTILLAS = (
     "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE",
     "WHATSAPP_CUSTOMER_PENDING_TEMPLATE",
     "WHATSAPP_CUSTOMER_PENDING_CLOSED_TEMPLATE",
+    # El aviso antes de la entrega (una fila de app/agenda.py), por lo mismo:
+    # sale horas antes de una entrega prometida, así que la ventana de 24 h ya
+    # está cerrada casi siempre.
+    "WHATSAPP_CUSTOMER_DELIVERY_LEAD_TEMPLATE",
 )
 # Las que NO pueden contar con la ventana de 24 h, porque las dispara un barrido
 # y no una respuesta a un mensaje del cliente. El resto son opcionales en el
@@ -66,12 +70,17 @@ PLANTILLAS_BARRIDO_SIEMPRE = (
     "WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE",
     "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE",
 )
-# Estas dos sólo salen si el dueño encendió el límite que las gatea, y los dos
+# Estas tres sólo salen si el dueño encendió el límite que las gatea, y los tres
 # arrancan en NINGUNO. Apagado el flujo, no se manda nada y no hay nada mal:
 # AVISO. Encendido, es exactamente el mismo problema que arriba: FALTA.
 PLANTILLAS_BARRIDO_OPCIONAL = {
     "WHATSAPP_CUSTOMER_PENDING_TEMPLATE": "PENDIENTE_AVISO_HORAS",
     "WHATSAPP_CUSTOMER_PENDING_CLOSED_TEMPLATE": "PENDIENTE_CIERRE_HORAS",
+    # El aviso antes de la entrega (una fila de app/agenda.py). Sale horas
+    # antes de una entrega prometida, o sea casi siempre fuera de la ventana de
+    # 24 h, así que sin plantilla no falla a veces: falla SIEMPRE. Arranca en
+    # NINGUNO como los otros dos.
+    "WHATSAPP_CUSTOMER_DELIVERY_LEAD_TEMPLATE": "AVISO_ANTES_DE_ENTREGA_HORAS",
 }
 PLANTILLAS_FUERA_DE_VENTANA = PLANTILLAS_BARRIDO_SIEMPRE + tuple(
     PLANTILLAS_BARRIDO_OPCIONAL
@@ -726,6 +735,34 @@ def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_l
         else:
             reporte.aviso(clave, "vacía: el catálogo responde 'precio a confirmar' y nada se auto-confirma")
 
+    # LOCALE se fija en el onboarding al lado de la moneda, y un valor mal
+    # escrito no rompe nada: `formato.pesos` cae al de por defecto para no dejar
+    # un mensaje sin salir. Por eso lo dice acá, una vez y en el arranque, en vez
+    # de que un total con forma argentina aparezca en la pantalla de alguien que
+    # lo lee como otra cifra y nadie se entere. Se valida el valor de `env` —no
+    # `formato.locale_configurado()`— porque este chequeo tiene que poder mirar
+    # un .env que todavía no es el del proceso.
+    from app import formato as _formato
+
+    crudo_locale = _valor(env, "LOCALE")
+    conocidos = {codigo.lower(): codigo for codigo in _formato.LOCALES}
+    normal_locale = conocidos.get(crudo_locale.replace("-", "_").lower())
+    if not crudo_locale:
+        reporte.ok(
+            "LOCALE",
+            f"vacía: los montos se escriben {_formato.LOCALE_POR_DEFECTO} "
+            "($12.000), como siempre",
+        )
+    elif normal_locale is None:
+        reporte.error(
+            "LOCALE",
+            f"{crudo_locale!r} no es ninguno de {', '.join(_formato.LOCALES)}: "
+            f"los montos se van a escribir {_formato.LOCALE_POR_DEFECTO} igual, "
+            "que puede no ser lo que lee este cliente",
+        )
+    else:
+        reporte.ok("LOCALE", f"montos con forma {normal_locale}")
+
     if resumen_limites is None:
         reporte.aviso("Límites", "sin Redis: no se verificaron los límites del dueño")
         return
@@ -971,15 +1008,34 @@ def chequear_entrega(
         and _puesto("RETIRO_LOCAL_DIAS")
         and _puesto("RETIRO_LOCAL_HORA")
     )
+    def _dicho(nombre: str) -> str:
+        """El valor como se MUESTRA, no como está guardado.
+
+        Los días se guardan siempre en español —"lunes,viernes"— y quién decide
+        cómo se escriben para una persona es `limites.mostrar`, en un solo
+        lugar. Interpolar el valor crudo acá era una segunda ortografía del
+        mismo dato: hoy se ve casi igual, y el día que la forma guardada cambie,
+        este informe va a decir otra cosa que el resto del producto.
+
+        El idioma se pide EXPLÍCITO y es el español, como toda la prosa de este
+        informe: lo lee quien opera el sistema en una consola, no un cliente en
+        WhatsApp (ver la sección 1 de tests/idioma_allowlist.py). Dejarlo al
+        default lo ataría a `IDIOMA_DEFAULT`, y un despliegue en inglés
+        imprimiría «reparto Monday,Friday» adentro de una frase en español.
+        """
+        from app import idioma as _idioma
+
+        return limites.mostrar(nombre, _puesto(nombre), _idioma.ES)
+
     if reparto:
         reporte.ok(
             "ENTREGA_DIAS",
-            f"reparto {_puesto('ENTREGA_DIAS')} a las {_puesto('ENTREGA_HORA')}",
+            f"reparto {_dicho('ENTREGA_DIAS')} a las {_dicho('ENTREGA_HORA')}",
         )
     if retiro:
         reporte.ok(
             "RETIRO_LOCAL_DIAS",
-            f"retiro {_puesto('RETIRO_LOCAL_DIAS')} a las {_puesto('RETIRO_LOCAL_HORA')}",
+            f"retiro {_dicho('RETIRO_LOCAL_DIAS')} a las {_dicho('RETIRO_LOCAL_HORA')}",
         )
     if not reparto and not retiro:
         reporte.aviso(

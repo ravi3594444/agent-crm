@@ -202,7 +202,13 @@ def contar_stock(
     )
     if pedido:
         return idioma.t(
-            "stock.conteo_boton_enviado", lengua, resumen=resumen, producto=item_code
+            "stock.conteo_boton_enviado",
+            lengua,
+            resumen=resumen,
+            producto=item_code,
+            # La etiqueta que el dueño tiene en la pantalla, no una copia de
+            # ella: el modelo suele repetir esta frase tal cual.
+            boton=idioma.t("boton.confirmar_conteo", lengua),
         )
     return idioma.t(
         "stock.conteo_sin_boton",

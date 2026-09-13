@@ -33,7 +33,10 @@ pytestmark = pytest.mark.idioma("es")
 def _context(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ERPNEXT_COMPANY", "Lacteos Test SA")
     monkeypatch.setenv("ERPNEXT_WAREHOUSE", "Principal - LT")
-    monkeypatch.setenv("BUSINESS_TIMEZONE", "America/Argentina/Buenos_Aires")
+    # La zona NO se fija acá: era decorado. Lo único de este archivo que depende
+    # del reloj son los `posting_date`, y se comparan contra
+    # `policy._hoy_del_negocio()` —código contra código—, así que el resultado es
+    # el mismo en cualquier zona. Fijarla tapaba la celda de zona de CI.
     monkeypatch.setattr(erpnext, "add_comment", Mock())
 
 

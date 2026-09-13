@@ -39,13 +39,15 @@ from app import (
     limites,
     main,
     outbound_status,
+    reloj,
     solicitudes,
 )
 from tests.fakes import FakeMarcas, entrada_de_cola, listar
 
-# Este archivo afirma texto en español, así que lo declara en vez de heredarlo
-# del entorno. Ver `_idioma_declarado` en tests/conftest.py.
-pytestmark = pytest.mark.idioma("es")
+# Este archivo afirma texto en español y montos con forma argentina, así que
+# declara los dos en vez de heredarlos del entorno. Ver `_idioma_declarado` y
+# `_locale_declarado` en tests/conftest.py.
+pytestmark = [pytest.mark.idioma("es"), pytest.mark.locale("es_AR")]
 
 # Captured before the `mundo` fixture stubs it: the tests about the customer's
 # confirmation surviving a failed re-read need the REAL queue.
@@ -2073,14 +2075,19 @@ def test_an_offer_erpnext_refuses_to_record_is_never_sent(
 
 
 def test_the_fallback_offer_never_outlives_the_day_it_promises(monkeypatch) -> None:
-    """An offer for Tuesday 08:00 must not be acceptable on Tuesday at 09:00."""
-    from zoneinfo import ZoneInfo
+    """An offer for Tuesday 08:00 must not be acceptable on Tuesday at 09:00.
 
+    Las 08:00 son del NEGOCIO, y la zona sale de `reloj.zona()` en vez de estar
+    escrita a mano: `_vence_respaldo` resuelve la suya de `BUSINESS_TIMEZONE`, y
+    con Buenos Aires escrito de este lado el test afirmaba el mismo offset dos
+    veces en vez de la regla. Escrito así el vencimiento son las 08:00 de pared
+    en cualquier zona, que es lo que la oferta promete.
+    """
     monkeypatch.setenv("APROBACION_TIMEOUT_HORAS", "72")
     manana = (date.today() + timedelta(days=1)).isoformat()
-    momento = datetime.fromisoformat(f"{manana}T08:00").replace(
-        tzinfo=ZoneInfo("America/Argentina/Buenos_Aires")
-    ).timestamp()
+    momento = (
+        datetime.fromisoformat(f"{manana}T08:00").replace(tzinfo=reloj.zona()).timestamp()
+    )
     ahora = time.time()
 
     vence = solicitudes._vence_respaldo(ahora, manana, "08:00")
@@ -3882,12 +3889,13 @@ def test_readiness_watches_exactly_the_notices_a_sweep_fires() -> None:
 
     Los otros dos avisos al cliente (`solicitud_oferta`, `solicitud_rechazo`)
     salen en la misma vuelta en que el cliente escribió, así que su ventana
-    está abierta y no necesitan plantilla. Estos cinco los dispara un barrido
-    horas después, y son los únicos así. Este test ya hizo su trabajo una vez:
-    se puso rojo cuando `app/pendientes.py` agregó sus dos, que era justo lo
-    que había que no dejar pasar.
+    está abierta y no necesitan plantilla. Estos SEIS los dispara un barrido
+    horas después, y son los únicos así. Este test ya hizo su trabajo dos
+    veces: se puso rojo cuando `app/pendientes.py` agregó sus dos, y otra vez
+    cuando `app/agenda.py` agregó el aviso previo a la entrega. Las dos veces
+    era justo lo que había que no dejar pasar.
     """
-    from app import pendientes, readiness
+    from app import agenda, pendientes, readiness
 
     assert set(readiness.PLANTILLAS_FUERA_DE_VENTANA) == {
         solicitudes.PLANTILLA_VENCIDA,
@@ -3895,6 +3903,7 @@ def test_readiness_watches_exactly_the_notices_a_sweep_fires() -> None:
         solicitudes.PLANTILLA_REVISION_VENCIDA,
         pendientes.PLANTILLA_RECORDATORIO,
         pendientes.PLANTILLA_CERRADO,
+        agenda.PLANTILLA_AVISO_ENTREGA,
     }
     # Y todas están en la lista que readiness recorre.
     assert set(readiness.PLANTILLAS_FUERA_DE_VENTANA) <= set(readiness.PLANTILLAS)
