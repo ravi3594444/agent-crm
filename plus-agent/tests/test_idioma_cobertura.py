@@ -497,7 +497,10 @@ def test_la_lista_de_intencionalmente_sin_traducir_esta_documentada():
     from app import marcas
 
     assert set(permitido.MARCAS_DURABLES) == {m.texto for m in marcas.MARCAS.values()}
-    assert len(permitido.MARCAS_DURABLES) == 13
+    # Catorce con #W4. La igualdad de arriba SALE del registro y por eso no
+    # se tocó: lo que se cuenta a mano es el censo, que es la mitad que una
+    # fila nueva tiene que hacer decidir a una persona.
+    assert len(permitido.MARCAS_DURABLES) == 14
     assert permitido.ERPNEXT_CANONICO
     assert permitido.COMANDOS_ES
     # Los comandos en inglés se AGREGARON; los de siempre siguen.

@@ -97,8 +97,30 @@ CIERRE_BORRADOR = "cierre_borrador"
 AVISO_ANTES_DE_ENTREGA = "aviso_antes_de_entrega"
 RECORDATORIO_PLAZO_DUENO = "recordatorio_plazo_dueno"
 SEGUIMIENTO = "seguimiento"
+# La baja que pide el propio cliente, en DOS filas y no en una. Es el mismo
+# hecho leído por dos consumidores que quieren respuestas opuestas de las horas
+# de silencio, y por eso son dos tipos:
+#
+#   * soltar la reserva no le habla a nadie y no puede esperar a la mañana —
+#     un cliente que se da de baja a las 23:00 tendría el stock tomado hasta
+#     las 07:00 por nada que se le pueda explicar a nadie;
+#   * avisarle al dueño SÍ le habla a una persona, y a las 03:00 un aviso no se
+#     lee, se resiente.
+#
+# Una sola fila tiene que elegir una de las dos, y las dos son correctas para
+# su mitad. La de la reserva crea la del aviso cuando la reserva está PROBADA,
+# que es el mismo encadenado que el re-ping al dueño.
+BAJA_DE_PEDIDO = "baja_de_pedido"
+AVISO_BAJA_AL_DUENO = "aviso_baja_al_dueno"
 
-TIPOS = (CIERRE_BORRADOR, AVISO_ANTES_DE_ENTREGA, RECORDATORIO_PLAZO_DUENO, SEGUIMIENTO)
+TIPOS = (
+    CIERRE_BORRADOR,
+    AVISO_ANTES_DE_ENTREGA,
+    RECORDATORIO_PLAZO_DUENO,
+    SEGUIMIENTO,
+    BAJA_DE_PEDIDO,
+    AVISO_BAJA_AL_DUENO,
+)
 
 # El único tipo que el modelo puede pedir. Todo lo demás lo decide Python.
 TIPO_DEL_MODELO = SEGUIMIENTO
@@ -120,6 +142,11 @@ _LOCKS = {
     AVISO_ANTES_DE_ENTREGA: "agenda:{sobre}",
     RECORDATORIO_PLAZO_DUENO: "agenda:{sobre}",
     SEGUIMIENTO: "agenda:{sobre}",
+    # El MISMO lock que `cierre_borrador`, y no el de la agenda: los dos cierran
+    # el mismo borrador, así que compartir el lock es lo que impide que la baja
+    # del cliente y el cierre por vencimiento se pisen sobre un pedido.
+    BAJA_DE_PEDIDO: "pendiente:{sobre}",
+    AVISO_BAJA_AL_DUENO: "agenda:{sobre}",
 }
 
 # Los tipos que le hablan a una PERSONA y por lo tanto esperan a la mañana.
@@ -134,8 +161,19 @@ _LOCKS = {
 # está postergado hasta las 07:00, así que un aviso al dueño de madrugada no
 # compra el plazo — sólo lo despierta. El que sale a las 07:00 todavía sirve
 # para una entrega del día.
+#
+# `baja_de_pedido` NO está: no le habla a nadie. Soltar una reserva a las 03:00
+# no despierta a ninguna persona, y postergarlo hasta las 07:00 le dejaría el
+# stock tomado a un cliente que ya dijo que se equivocó. El que espera a la
+# mañana es `aviso_baja_al_dueno`, que sí le escribe a una persona.
 _HABLAN_CON_ALGUIEN = frozenset(
-    {CIERRE_BORRADOR, AVISO_ANTES_DE_ENTREGA, RECORDATORIO_PLAZO_DUENO, SEGUIMIENTO}
+    {
+        CIERRE_BORRADOR,
+        AVISO_ANTES_DE_ENTREGA,
+        RECORDATORIO_PLAZO_DUENO,
+        SEGUIMIENTO,
+        AVISO_BAJA_AL_DUENO,
+    }
 )
 
 # Cuántas filas se despachan por tick. Acotado para que un atraso no trabe el
@@ -897,6 +935,41 @@ def recordatorio_plazo(
     )
 
 
+def baja_al_dueno(
+    pedido: str, cliente: str, lengua: str | None = None
+) -> tuple[str, str]:
+    """(asunto, cuerpo) al dueño: el cliente se dio de baja este borrador.
+
+    Es un HECHO consumado, no una pregunta: cuando esto se compone la reserva
+    ya está suelta y probada. El dueño no tiene que decidir nada — se entera de
+    que un pedido que estaba en la cola dejó de estarlo, que es justo lo que
+    dejaba de saber cuando la baja la hacía una persona a mano.
+    """
+    from app import idioma
+
+    return (
+        idioma.t("gerencia.baja_asunto", lengua, pedido=pedido),
+        idioma.t("gerencia.baja_cuerpo", lengua, pedido=pedido, cliente=cliente),
+    )
+
+
+def baja_trabada(
+    pedido: str, motivo: str, lengua: str | None = None
+) -> tuple[str, str]:
+    """(asunto, cuerpo) al dueño: no pude dar de baja lo que ya dije de baja.
+
+    `motivo` sale de `solicitudes.soltar_reserva`, que devuelve la frase JUNTO
+    con la prueba: es lo que ERPNext contestó, no una interpretación de este
+    módulo.
+    """
+    from app import idioma
+
+    return (
+        idioma.t("gerencia.baja_trabada_asunto", lengua, pedido=pedido),
+        idioma.t("gerencia.baja_trabada_cuerpo", lengua, pedido=pedido, motivo=motivo),
+    )
+
+
 def seguimiento_equipo(pedido: str, motivo: str, lengua: str | None = None) -> str:
     """Al equipo: alguien pidió volver sobre este pedido, y por qué.
 
@@ -1165,12 +1238,153 @@ def _seguimiento(fila: Fila, ahora: float) -> Resultado | None:
     )
 
 
+# ------------------------------------------------------- baja pedida por el cliente
+
+# Cuánto se espera entre intentos de soltar la reserva, y cuántos. La fila NO se
+# reintenta cada 60 s para siempre: cada reintento escribe un evento durable y el
+# techo de `[agenda]` son 80 para TODAS las filas de un pedido, así que un
+# ERPNext caído media hora se comería la historia del pedido entero. Cinco
+# intentos con espera creciente cubren una caída corta —que es la que se arregla
+# sola— y después lo mira una persona, que es lo que arregla la larga.
+BAJA_ESPERA_SEGUNDOS = 300.0
+BAJA_INTENTOS = 5
+
+
+def _baja_de_pedido(fila: Fila, ahora: float) -> Resultado | None:
+    """El cliente se dio de baja su propio borrador: soltar la reserva.
+
+    La herramienta del cliente ya autenticó, comprobó que el pedido es suyo,
+    que es un borrador y que no hay una decisión en curso — y escribió esta
+    fila con la credencial de CLIENTE. Acá es el barrido, que no tiene scope y
+    llama `policy_*` explícito, así que el `update_status` lo hace la identidad
+    de política y ninguna herramienta la toca. Ésa es toda la razón de que esto
+    sea una fila y no las últimas diez líneas de la herramienta.
+    """
+    from app import marcas, solicitudes
+
+    sobre = fila.sobre
+    doc = _documento(sobre)
+    if doc is None:
+        # No pude leer. La próxima ronda vuelve a preguntar: fallar cerrado es
+        # no hacer nada, y acá «nada» todavía es reversible.
+        return None
+
+    muerto = por_que_ya_no_vive(doc)
+    if muerto:
+        # Lo cerró OTRO —el equipo lo rechazó, venció, o esta misma baja ya
+        # corrió—. Final convergente, no falla: la fila se cierra y NO se
+        # escribe la marca. «Cerrado por alguien» no es «lo dio de baja su
+        # cliente», y escribirla acá pondría esa frase en el rastro de un
+        # borrador que rechazó una persona.
+        #
+        # Esta rama ES la idempotencia de la marca: una segunda baja del mismo
+        # pedido llega hasta acá y se va sin escribir nada. Por eso no hace
+        # falta un `marcas.existe` antes de escribir — `escribir` es un
+        # `add_comment` pelado, sin dedup, y lo que lo hace exactamente-una-vez
+        # es que abajo sólo se llega con el borrador todavía abierto.
+        return Resultado(detalle=muerto)
+
+    ok, frase = solicitudes.soltar_reserva(sobre)
+    if not ok:
+        return _baja_sin_prueba(fila, ahora, frase)
+
+    # De acá para abajo la reserva está SUELTA y comprobada (`soltar_reserva`
+    # re-lee después de escribir), así que `ya_paso=True`: pase lo que pase con
+    # la marca o con el aviso, la fila no vuelve a intentar cerrar un borrador
+    # que ya está cerrado.
+    try:
+        marcas.escribir("baja_cliente", sobre, f"{_sello(ahora)} {frase}")
+    except Exception as exc:
+        # Su propio try, igual que en `_cerrar_borrador`: la baja YA ocurrió y
+        # esta ronda es la última que mira esta fila, así que si este fallo se
+        # comiera el aviso de abajo nadie se enteraría nunca.
+        print(f"[agenda] {sobre}: baja hecha, pero la marca no quedó ({type(exc).__name__})")
+
+    cliente = str(doc.get("customer_name") or doc.get("customer") or "")
+    aviso = crear(
+        sobre, AVISO_BAJA_AL_DUENO, ahora, params={"cliente": cliente}, ahora=ahora
+    )
+    if aviso is None:
+        # No quedó durable = no pasó. Se dice, no se finge: el stock está
+        # liberado igual y eso es lo que no podía esperar, pero el dueño se
+        # queda sin el aviso y el log es lo único que lo cuenta.
+        print(f"[agenda] {sobre}: baja hecha, pero el aviso al dueño no quedó agendado")
+
+    return Resultado(detalle=f"baja pedida por el cliente; {frase}", ya_paso=True)
+
+
+def _baja_sin_prueba(fila: Fila, ahora: float, frase: str) -> Resultado | None:
+    """Sin prueba de que soltó el stock: ni marca, ni aviso, ni fila terminada.
+
+    Escribir `[baja-por-cliente]` acá pondría «lo dio de baja su cliente» en el
+    rastro de un pedido que sigue tomando stock, que es exactamente la clase de
+    mentira que `app/confirmacion.py` existe para que el sistema no pueda
+    contar. La fila se corre y vuelve a intentar.
+    """
+    from app import idioma, notificar
+
+    sobre = fila.sobre
+    intentos = int(fila.params.get("intentos") or 0) + 1
+    print(f"[agenda] {sobre}: no pude soltar la reserva ({frase}); intento {intentos}")
+
+    if intentos < BAJA_INTENTOS:
+        # Los params van CON el `vence`, que es lo que este mecanismo pide: el
+        # número de intento y la hora del próximo salen de la misma escritura.
+        return Resultado(
+            detalle=f"reintento {intentos}: {frase}",
+            reprogramar=ahora + BAJA_ESPERA_SEGUNDOS * (2 ** (intentos - 1)),
+            params={**dict(fila.params or {}), "intentos": intentos},
+        )
+
+    # Se acabó el presupuesto. Al cliente ya se le dijo que su pedido estaba
+    # dado de baja, y no lo está: eso lo tiene que saber una persona, hoy.
+    asunto, cuerpo = baja_trabada(sobre, frase, idioma.gerencia())
+    try:
+        avisado = bool(
+            notificar.avisar_dueno(
+                asunto, cuerpo, plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE"
+            )
+        )
+    except Exception as exc:
+        print(f"[agenda] {sobre}: aviso de baja trabada falló ({type(exc).__name__})")
+        return None
+    # Si no se le pudo decir a nadie, la fila NO se cierra: un pedido que quedó
+    # tomando stock sin que nadie lo sepa es el único final peor que reintentar.
+    return Resultado(detalle=f"baja trabada, dueño avisado: {frase}") if avisado else None
+
+
+def _aviso_baja_al_dueno(fila: Fila, ahora: float) -> Resultado | None:
+    """Al dueño: este pedido lo dio de baja su cliente.
+
+    Diez líneas: arma un mensaje con los datos de la fila y vuelve. No toca
+    Redis, ni el reloj, ni la idempotencia, ni el lock — y no re-lee el pedido,
+    porque lo que anuncia ya pasó y no puede dejar de haber pasado.
+    """
+    from app import idioma, notificar
+
+    asunto, cuerpo = baja_al_dueno(
+        fila.sobre, str(fila.params.get("cliente") or ""), idioma.gerencia()
+    )
+    try:
+        avisado = bool(
+            notificar.avisar_dueno(
+                asunto, cuerpo, plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE"
+            )
+        )
+    except Exception as exc:
+        print(f"[agenda] {fila.sobre}: aviso de baja falló ({type(exc).__name__})")
+        return None
+    return Resultado(detalle="dueño avisado de la baja") if avisado else None
+
+
 _HANDLERS.update(
     {
         CIERRE_BORRADOR: _cerrar_borrador,
         AVISO_ANTES_DE_ENTREGA: _avisar_antes_de_entrega,
         RECORDATORIO_PLAZO_DUENO: _recordar_al_dueno,
         SEGUIMIENTO: _seguimiento,
+        BAJA_DE_PEDIDO: _baja_de_pedido,
+        AVISO_BAJA_AL_DUENO: _aviso_baja_al_dueno,
     }
 )
 

@@ -401,6 +401,19 @@ _FILAS = (
             "veces es el error caro de los dos."
         ),
     ),
+    Marca(
+        nombre="baja_cliente",
+        texto="[baja-por-cliente]",
+        doctype="Sales Order",
+        portador=COMENTARIO,
+        lectura=EXISTENCIA,
+        techo=1,
+        porque_el_techo=(
+            "La pregunta es «¿este borrador lo dio de baja su cliente?», y una "
+            "fila la contesta. No se lee el contenido: quién y cuándo están en "
+            "el texto, pero lo que decide algo es que la marca esté."
+        ),
+    ),
     # ----------------------------------------------------------------- agenda
     #
     # La lista durable de cosas que vencen más tarde (`app/agenda.py`). Es la

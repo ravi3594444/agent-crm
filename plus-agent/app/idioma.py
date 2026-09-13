@@ -1609,6 +1609,34 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "⏳ Necesita respuesta antes de {hora} o no llega.",
         EN: "⏳ Needs an answer before {hora} or it won't make it.",
     },
+    # La baja que pide el propio cliente (`app/agenda.py`). Las dos primeras son
+    # un HECHO ya consumado: cuando salen, la reserva está suelta y comprobada,
+    # así que no preguntan nada ni piden que nadie haga nada.
+    "gerencia.baja_asunto": {
+        ES: "Pedido {pedido}: lo dio de baja el cliente",
+        EN: "Order {pedido}: the customer took it back",
+    },
+    "gerencia.baja_cuerpo": {
+        ES: "{cliente} dio de baja el pedido {pedido}. No se prepara y ya no toma stock.",
+        EN: "{cliente} took order {pedido} back. It will not be prepared and no longer holds stock.",
+    },
+    # Y éstas dos son lo contrario: al cliente se le dijo que su pedido quedaba
+    # dado de baja y NO quedó. Es lo único de esta función que necesita a una
+    # persona, y por eso lo dice con el motivo que contestó ERPNext.
+    "gerencia.baja_trabada_asunto": {
+        ES: "Pedido {pedido}: no pude darlo de baja",
+        EN: "Order {pedido}: I could not take it back",
+    },
+    "gerencia.baja_trabada_cuerpo": {
+        ES: (
+            "Al cliente le dije que el pedido {pedido} quedaba dado de baja y no "
+            "quedó: {motivo}. Sigue tomando stock hasta que lo cierres a mano."
+        ),
+        EN: (
+            "I told the customer order {pedido} was taken back and it was not: "
+            "{motivo}. It keeps holding stock until you close it by hand."
+        ),
+    },
 }
 
 

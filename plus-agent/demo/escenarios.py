@@ -84,6 +84,30 @@ def escenarios() -> list[Escenario]:
             ],
         ),
         Escenario(
+            "cliente_da_de_baja",
+            "Un cliente se da de baja su propio borrador",
+            porque="El cliente se equivocó y lo dice. El borrador se CIERRA, "
+                   "nunca se borra: el rastro sobrevive y ERPNext deja de "
+                   "reservar el stock. La herramienta no escribe nada "
+                   "privilegiado — anota una fila de agenda con la credencial "
+                   "de cliente y el barrido cierra el borrador con la de "
+                   "política. Y no se le promete nada: ni cuándo, ni qué pasa "
+                   "después.",
+            pasos=[
+                Paso(CLIENTE, "dame 10 unidades de leche entera para mañana",
+                     espera=["SAL-ORD"], prohibe=["confirmado"],
+                     documentos={"Sales Order/*": {"docstatus": 0}}),
+                Paso(CLIENTE, "cancelá el pedido, me equivoqué",
+                     espera=["baja"],
+                     # Sigue siendo un BORRADOR: dado de baja es `status`
+                     # Closed con `docstatus` 0, nunca un documento borrado ni
+                     # uno cancelado.
+                     documentos={"Sales Order/*": {"docstatus": 0}},
+                     prohibe=["confirmado"],
+                     nota="La baja la pide el cliente y la ejecuta el barrido."),
+            ],
+        ),
+        Escenario(
             "alta_y_pedido",
             "Un cliente nuevo se registra y pide",
             porque="El alta usa el teléfono del webhook firmado, nunca uno que "
@@ -516,6 +540,15 @@ def reglas() -> list[Regla]:
             # Devuelve el resultado TAL CUAL. Un texto propio taparía que la
             # herramienta falló y el escenario pasaría sin probar nada.
             Texto(f"Estado del sistema:\n{ULTIMO_RESULTADO}"),
+        ]),
+
+        # -- la baja que pide el propio cliente. Va antes del catálogo por la
+        # misma razón que la de arriba: el primer match gana. El número sale de
+        # ULTIMO_PEDIDO, que es de donde lo leería un modelo — el cliente no lo
+        # repite, dice "el pedido".
+        (contiene("cancela el pedido"), [
+            Llamada("dar_de_baja_pedido", {"pedido": ULTIMO_PEDIDO}),
+            Texto("Listo, lo di de baja. No se prepara."),
         ]),
 
         # -- catálogo
