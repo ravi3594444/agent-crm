@@ -481,12 +481,20 @@ def _recordar_al_dueno(vencidos: list[tuple[dict, float]], momento: datetime) ->
 def _cerrar(filas: list[dict], momento: datetime) -> int:
     """Cerrar el borrador que nadie miró, para que suelte el stock.
 
-    Es lo único de este módulo que cambia el documento, y por eso es lo único
-    que corre bajo el lock del pedido, relee adentro, y no escribe nada
-    terminal que no haya podido probar.
+    Lo que HACE no cambió: mismo lock del pedido, misma relectura adentro, la
+    misma regla dura de no escribir nada terminal sin prueba de que soltó el
+    stock, la misma marca durable y los mismos dos avisos. Lo que cambió es de
+    quién es el mecanismo: los cinco conceptos compartidos —exactamente-una-vez,
+    horas de silencio, re-leer antes de actuar, fallar cerrado y el lote
+    acotado— los pone ahora `app/agenda.py`, y este módulo se queda con lo suyo,
+    que es ENCONTRAR los candidatos (barrer ERPNext, medir la edad, respetar el
+    límite del dueño y el origen del borrador).
+
+    Ver `docs/prompt-agenda.md` y el hallazgo 5 de `docs/AUDITORIA.md`. Que los
+    tests de este archivo pasen sin tocarse es la prueba de que el mecanismo
+    nuevo es equivalente al que reemplazó.
     """
-    from app import avisos, decisiones, solicitudes
-    from app.locks import CoordinationError, distributed_lock
+    from app import agenda
 
     horas = _horas("PENDIENTE_CIERRE_HORAS", None)
     if horas is None:
@@ -501,64 +509,20 @@ def _cerrar(filas: list[dict], momento: datetime) -> int:
         if edad is None or edad < horas:
             continue
         try:
-            if _tiene_marca(pedido, "pendiente_cierre") is not False:
-                continue
-            with distributed_lock(f"pendiente:{pedido}", lease_seconds=60, wait_seconds=5):
-                if _sigue_esperando(pedido) is None:
-                    # Una persona lo decidió. No se le dice nada al cliente.
-                    continue
-                liberado, detalle = solicitudes.soltar_reserva(pedido)
-                if not liberado:
-                    # Sin prueba de que soltó el stock no se escribe un estado
-                    # terminal: la próxima ronda vuelve a preguntar.
-                    print(f"[pendientes] {pedido}: no pude cerrarlo ({detalle})")
-                    continue
-                try:
-                    erpnext.add_comment(
-                        "Sales Order",
-                        pedido,
-                        f"{MARCA_CIERRE} {_sello(momento)} sin decisión en "
-                        f"{horas:g} h; {detalle}",
-                    )
-                except Exception as exc:
-                    # Su propio try: el cierre YA pasó y la próxima ronda no lo
-                    # vuelve a mirar (`_sigue_esperando` lo ve cerrado), así que
-                    # si este fallo cayera en el except de afuera se saltearían
-                    # los dos avisos y nadie se enteraría nunca del cierre.
-                    print(
-                        f"[pendientes] {pedido}: cerrado, pero la marca no quedó "
-                        f"({type(exc).__name__})"
-                    )
-        except CoordinationError:
-            continue  # ronda salteada, nunca un cambio a medias
+            # Vence YA: el candidato lo eligió este barrido, y la agenda lo
+            # despacha en el acto con los cinco conceptos puestos. La fila queda
+            # durable igual — es el registro de que el cierre se intentó y cómo
+            # terminó.
+            if agenda.ejecutar_ahora(
+                agenda.CIERRE_BORRADOR,
+                pedido,
+                momento.timestamp(),
+                params={"horas": horas},
+            ):
+                cerrados += 1
         except Exception as exc:
             print(f"[pendientes] {pedido}: cierre falló: {type(exc).__name__}: {exc}")
             continue
-
-        cerrados += 1
-        # Los avisos salen FUERA del lock, por la cola durable: el teléfono de
-        # una persona no puede estar en el camino crítico de un cambio de estado.
-        try:
-            telefono = decisiones.telefono_del_cliente(pedido)
-            if telefono:
-                avisos.encolar(
-                    "pendiente_cerrado",
-                    pedido,
-                    telefono,
-                    pendiente_cerrado(pedido, idioma.para_destinatario(telefono)),
-                    plantilla_env=PLANTILLA_CERRADO,
-                    parametros=[pedido],
-                )
-        except Exception as exc:
-            print(f"[pendientes] {pedido}: aviso de cierre no encolado ({type(exc).__name__})")
-        try:
-            avisos.encolar_equipo(
-                "pendiente_cerrado_equipo",
-                pedido,
-                pendiente_cerrado_equipo(pedido, horas, idioma.gerencia()),
-            )
-        except Exception as exc:
-            print(f"[pendientes] {pedido}: aviso de cierre al equipo falló ({type(exc).__name__})")
     return cerrados
 
 

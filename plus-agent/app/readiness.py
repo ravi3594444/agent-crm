@@ -47,6 +47,10 @@ PLANTILLAS = (
     "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE",
     "WHATSAPP_CUSTOMER_PENDING_TEMPLATE",
     "WHATSAPP_CUSTOMER_PENDING_CLOSED_TEMPLATE",
+    # El aviso antes de la entrega (una fila de app/agenda.py), por lo mismo:
+    # sale horas antes de una entrega prometida, así que la ventana de 24 h ya
+    # está cerrada casi siempre.
+    "WHATSAPP_CUSTOMER_DELIVERY_LEAD_TEMPLATE",
 )
 # Las que NO pueden contar con la ventana de 24 h, porque las dispara un barrido
 # y no una respuesta a un mensaje del cliente. El resto son opcionales en el
@@ -66,12 +70,17 @@ PLANTILLAS_BARRIDO_SIEMPRE = (
     "WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE",
     "WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE",
 )
-# Estas dos sólo salen si el dueño encendió el límite que las gatea, y los dos
+# Estas tres sólo salen si el dueño encendió el límite que las gatea, y los tres
 # arrancan en NINGUNO. Apagado el flujo, no se manda nada y no hay nada mal:
 # AVISO. Encendido, es exactamente el mismo problema que arriba: FALTA.
 PLANTILLAS_BARRIDO_OPCIONAL = {
     "WHATSAPP_CUSTOMER_PENDING_TEMPLATE": "PENDIENTE_AVISO_HORAS",
     "WHATSAPP_CUSTOMER_PENDING_CLOSED_TEMPLATE": "PENDIENTE_CIERRE_HORAS",
+    # El aviso antes de la entrega (una fila de app/agenda.py). Sale horas
+    # antes de una entrega prometida, o sea casi siempre fuera de la ventana de
+    # 24 h, así que sin plantilla no falla a veces: falla SIEMPRE. Arranca en
+    # NINGUNO como los otros dos.
+    "WHATSAPP_CUSTOMER_DELIVERY_LEAD_TEMPLATE": "AVISO_ANTES_DE_ENTREGA_HORAS",
 }
 PLANTILLAS_FUERA_DE_VENTANA = PLANTILLAS_BARRIDO_SIEMPRE + tuple(
     PLANTILLAS_BARRIDO_OPCIONAL

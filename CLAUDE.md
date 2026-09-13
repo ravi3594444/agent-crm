@@ -165,6 +165,12 @@ pytest -q -rs             # needs Redis Stack
 
 ## Working agreements
 
+- **Read `plus-agent/docs/MAPA.md` first, and update it in the same commit that changes a module.**
+  It says what each big file does and what its traps are, so a session does not
+  spend half its context re-reading `solicitudes.py` (2731 lines), `idioma.py`
+  (2135), `limites.py` (1798) and `main.py` (1775) to rediscover what the last
+  session already found out. A map nobody updates is worse than no map, because
+  it gets believed — so the module's row moves with the module.
 - Never edit files directly on the server. Edit in the repo, push, pull. A `git pull` will silently revert server-side edits.
 - Never commit `.env` or `docker-compose.override.yml`.
 - Tone work goes in `CÓMO HABLÁS` and in fixed strings — never inside the numbered safety rules.

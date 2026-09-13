@@ -1570,7 +1570,7 @@ def _solicitudes_scheduler(stop: threading.Event) -> None:
     writing in, and the sweep must not sit in front of the inbound FIFO. A
     failure only skips one round.
     """
-    from app import pendientes, solicitudes
+    from app import agenda, pendientes, solicitudes
 
     while not stop.wait(_SOLICITUDES_TICK_SECONDS):
         try:
@@ -1584,6 +1584,15 @@ def _solicitudes_scheduler(stop: threading.Event) -> None:
             pendientes.tick()
         except Exception as error:
             print(f"[pendientes] tick type={_error_name(error)}")
+        # Y la agenda, en ESTE hilo y no en uno nuevo: es el mismo minuto y el
+        # mismo tipo de trabajo. Su propio try/except por la misma razón que los
+        # dos de arriba. No-op mientras no haya filas, que es lo que pasa hasta
+        # que el dueño encienda AVISO_ANTES_DE_ENTREGA_HORAS o el modelo use
+        # `recordar`.
+        try:
+            agenda.tick()
+        except Exception as error:
+            print(f"[agenda] tick type={_error_name(error)}")
 
 
 def _digest_scheduler(stop: threading.Event) -> None:

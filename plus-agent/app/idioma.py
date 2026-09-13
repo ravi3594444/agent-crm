@@ -1575,6 +1575,40 @@ CATALOGO: dict[str, dict[str, str]] = {
     },
     "idioma.nombre.es": {ES: "español", EN: "Spanish"},
     "idioma.nombre.en": {ES: "inglés", EN: "English"},
+    # ------------------------------------------------------------- la agenda
+    #
+    # Las filas de `app/agenda.py`. El aviso al cliente NO promete día, hora ni
+    # precio: `{hora}` es la hora de reparto que el cliente YA conocía, y la
+    # frase dice justamente que a esa hora todavía no está confirmado.
+    "pedido.aviso_antes_de_entrega": {
+        ES: (
+            "Todavía no te lo pude confirmar para las {hora}. "
+            "Apenas lo vea el encargado te aviso. (Pedido {pedido})"
+        ),
+        EN: (
+            "I haven't been able to confirm it for {hora} yet. "
+            "As soon as the manager sees it I'll let you know. (Order {pedido})"
+        ),
+    },
+    "gerencia.plazo_asunto": {
+        ES: "Pedido {pedido}: se vence el plazo",
+        EN: "Order {pedido}: the deadline is close",
+    },
+    "gerencia.plazo_cuerpo": {
+        ES: "Necesita respuesta antes de {hora} o no llega. Pedido {pedido}.",
+        EN: "Needs an answer before {hora} or it won't make it. Order {pedido}.",
+    },
+    "gerencia.seguimiento": {
+        ES: "Recordatorio del pedido {pedido}: {motivo}",
+        EN: "Follow-up on order {pedido}: {motivo}",
+    },
+    # La línea que el aviso de pedido pendiente le agrega al dueño cuando hay
+    # un plazo real. Va aparte y no dentro de `gerencia.cuerpo_pedido` para que
+    # el aviso sin plazo no cambie ni una palabra.
+    "gerencia.responder_antes_de": {
+        ES: "⏳ Necesita respuesta antes de {hora} o no llega.",
+        EN: "⏳ Needs an answer before {hora} or it won't make it.",
+    },
 }
 
 
