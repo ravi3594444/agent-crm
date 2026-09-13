@@ -45,7 +45,12 @@ jobs:
           node-version: "22"
       - name: JavaScript syntax
         run: npm run check
-      - name: Dashboard interactions
+      - name: Dashboard interactions y la página de voz
+        # `npm test` corre los dos: el dashboard y `scripts/test-voz-ui.mjs`,
+        # que ejecuta el script de la página del canal de voz contra un DOM
+        # falso. Lo que prueba es lo que falla EN SILENCIO ahí — el número que
+        # no viaja, la conversación que se ve vacía— y que no levanta ningún
+        # error en el navegador.
         run: npm test
       - name: Static dashboard build
         run: npm run build

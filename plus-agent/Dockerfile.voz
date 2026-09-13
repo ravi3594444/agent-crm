@@ -27,6 +27,11 @@ RUN apt-get update \
 
 ENV STATIC_DIR=/opt/calling-agent/static
 
+# La página del relay es el sitio de un producto de restaurantes. Ésta es la
+# del CRM y usa el mismo `js/`: se pisa el index y nada más, así que el núcleo
+# —websocket, reconecte, audio— sigue siendo el del relay, pinneado con él.
+COPY static_voz/index.html /opt/calling-agent/static/index.html
+
 # Las del CRM. requirements-voz.txt ya trae requirements.txt adentro, pero el
 # pin del relay se saca con --no-deps porque acá se instaló desde el clon.
 COPY requirements.txt .

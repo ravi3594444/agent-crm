@@ -34,7 +34,8 @@ atiende el webhook de WhatsApp y corre los cuatro hilos de barrido; no tiene por
 qué cargar el relay ni tener `git` para instalarlo desde un pin de commit. Por
 eso `requirements-voz.txt` existe y `requirements.txt` no lo menciona.
 
-Abrí la página y tocá **Start conversation**. `localhost` es el único origen que
+Abrí la página, poné tu número si querés que te tome un pedido, y tocá
+**Llamar**. `localhost` es el único origen que
 los navegadores eximen de HTTPS para el micrófono; en cualquier otro lado hace
 falta un certificado de verdad.
 
@@ -52,6 +53,29 @@ por eso dos pestañas abiertas a la vez no se pisan.
 | `VOZ_CONFIA_EN_CALLER_ID` | Si el número de la telefonía alcanza para SER un cliente. **Apagado por default.** Ver abajo. |
 
 ---
+
+## La página
+
+`plus-agent/static_voz/index.html`, y el `Dockerfile.voz` la pone en lugar de la
+del relay. La del relay es el sitio de un producto de restaurantes —«tableline»,
+«Busy tables», «Ask for a table»—: servírsela a un cliente de una distribuidora
+es el mismo error que el agente de restaurante atendiendo el teléfono, una capa
+más arriba.
+
+Sólo se reemplaza el `index.html`. El núcleo —websocket, reconecte, audio— sigue
+siendo `js/call-session.js` y `js/audio.js` del relay, pinneados con él. Lo que
+no se reusa es `js/app.js`, que es el controlador de esa landing.
+
+El nombre del negocio lo trae `/experience` (el compose le pasa `NOMBRE_NEGOCIO`
+al relay como `RESTAURANT_NAME`), así que la misma página sirve para cualquier
+cliente sin tocar el HTML.
+
+`scripts/test-voz-ui.mjs` la corre contra un DOM falso, sin navegador. Prueba lo
+que falla en silencio: que el número tipeado viaje en el `passthrough` y no en
+la conversación, que sin número no se mande un parámetro vacío, y que la
+conversación se vea venga el texto en `text` o en `transcript` —el proveedor usa
+uno u otro según el mensaje, y contemplar sólo uno deja la pantalla en blanco
+mientras la llamada anda perfecto—.
 
 ## Qué puede hacer y qué no
 

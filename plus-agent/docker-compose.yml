@@ -98,6 +98,9 @@ services:
     env_file: .env
     environment:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      # El relay publica este nombre en /experience y la página lo muestra, así
+      # que la misma página sirve para cualquier cliente sin tocar el HTML.
+      RESTAURANT_NAME: ${NOMBRE_NEGOCIO:-Lácteos Plus}
     ports:
       # El micrófono del navegador exige HTTPS en todo origen que no sea
       # localhost, así que en el server esto va detrás del reverse proxy.

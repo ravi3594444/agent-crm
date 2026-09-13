@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Asistente telefónico</title>
+    <!--
+      LA PÁGINA DEL CANAL DE VOZ DEL CRM.
+
+      Reemplaza la del repo del relay, que es el sitio de un producto de
+      restaurantes («tableline», «Busy tables», «Ask for a table»). Servírsela a
+      un cliente de una distribuidora de lácteos es el mismo error que el agente
+      de restaurante atendiendo el teléfono, una capa más arriba — y la calidad
+      de la demo es parte del producto.
+
+      Reusa el núcleo del relay tal cual: `js/call-session.js` y `js/audio.js`
+      manejan el websocket, el reconecte y el audio. Lo que NO se reusa es
+      `js/app.js`, que es el controlador de esa landing y depende de sus ids.
+    -->
+    <style>
+      :root {
+        --tinta: #10221c;
+        --papel: #f6f7f5;
+        --tarjeta: #ffffff;
+        --borde: #dfe3de;
+        --suave: #6b7a72;
+        --acento: #1f6f4f;
+        --acento-suave: #e8f2ec;
+        --alarma: #9c2b2b;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--papel);
+        color: var(--tinta);
+        font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      .envoltorio { max-width: 720px; margin: 0 auto; padding: 32px 20px 64px; }
+      header { margin-bottom: 28px; }
+      h1 { margin: 0 0 4px; font-size: 1.5rem; letter-spacing: -0.01em; }
+      .subtitulo { margin: 0; color: var(--suave); font-size: 0.95rem; }
+      .tarjeta {
+        background: var(--tarjeta);
+        border: 1px solid var(--borde);
+        border-radius: 14px;
+        padding: 20px;
+        margin-bottom: 18px;
+      }
+      label { display: block; font-size: 0.85rem; color: var(--suave); margin-bottom: 6px; }
+      .fila { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+      .fila > div { flex: 1 1 220px; }
+      input[type="tel"] {
+        width: 100%;
+        padding: 11px 12px;
+        border: 1px solid var(--borde);
+        border-radius: 9px;
+        font-size: 1rem;
+        font-family: inherit;
+        background: var(--papel);
+        color: inherit;
+      }
+      input[type="tel"]:focus { outline: 2px solid var(--acento); outline-offset: 1px; }
+      button {
+        padding: 11px 18px;
+        border-radius: 9px;
+        border: 1px solid transparent;
+        font-size: 1rem;
+        font-family: inherit;
+        font-weight: 600;
+        cursor: pointer;
+        background: var(--acento);
+        color: #fff;
+      }
+      button.secundario { background: transparent; color: var(--tinta); border-color: var(--borde); font-weight: 500; }
+      button[disabled] { opacity: 0.45; cursor: not-allowed; }
+      .ayuda { margin: 10px 0 0; font-size: 0.82rem; color: var(--suave); }
+      .estado { display: flex; align-items: center; gap: 10px; font-size: 0.95rem; }
+      .punto {
+        width: 10px; height: 10px; border-radius: 50%;
+        background: var(--borde); flex: none;
+      }
+      .punto.viva { background: var(--acento); box-shadow: 0 0 0 4px var(--acento-suave); }
+      .punto.error { background: var(--alarma); }
+      .charla { display: flex; flex-direction: column; gap: 12px; min-height: 120px; }
+      .turno { max-width: 88%; padding: 10px 13px; border-radius: 12px; white-space: pre-wrap; }
+      .turno.cliente { align-self: flex-end; background: var(--acento-suave); }
+      .turno.agente { align-self: flex-start; background: var(--papel); border: 1px solid var(--borde); }
+      .quien { display: block; font-size: 0.72rem; color: var(--suave); margin-bottom: 3px; }
+      .vacio { color: var(--suave); font-size: 0.9rem; }
+      .herramienta { align-self: center; font-size: 0.78rem; color: var(--suave); font-style: italic; }
+      .aviso { margin-top: 14px; padding: 11px 13px; border-radius: 9px; background: #fdf3f3; color: var(--alarma); font-size: 0.9rem; }
+      .aviso[hidden] { display: none; }
+      @media (max-width: 480px) { .envoltorio { padding: 20px 16px 48px; } }
+    </style>
+  </head>
+  <body>
+    <div class="envoltorio">
+      <header>
+        <h1 id="negocio">Asistente telefónico</h1>
+        <p class="subtitulo">
+          Atiende pedidos por voz. Deja el pedido en borrador; lo confirma una persona.
+        </p>
+      </header>
+
+      <section class="tarjeta">
+        <div class="fila">
+          <div>
+            <label for="telefono">Tu número (opcional)</label>
+            <input
+              id="telefono"
+              type="tel"
+              inputmode="tel"
+              autocomplete="tel"
+              placeholder="+54 9 351 123 4567"
+            />
+          </div>
+          <button id="llamar">Llamar</button>
+          <button id="cortar" class="secundario" hidden>Cortar</button>
+          <button id="silenciar" class="secundario" hidden>Silenciar micrófono</button>
+        </div>
+        <p class="ayuda" id="ayuda-numero">
+          Sin número te atiende como a un desconocido: catálogo, precios y stock. Con número
+          puede darte de alta y tomarte el pedido.
+        </p>
+        <div class="aviso" id="aviso" hidden></div>
+      </section>
+
+      <section class="tarjeta">
+        <div class="estado">
+          <span class="punto" id="punto"></span>
+          <span id="estado">Sin llamada.</span>
+        </div>
+      </section>
+
+      <section class="tarjeta">
+        <div class="charla" id="charla">
+          <p class="vacio" id="vacio">La conversación aparece acá mientras hablás.</p>
+        </div>
+      </section>
+    </div>
+
+    <script type="module">
+      import { CallSession } from './js/call-session.js';
+
+      const $ = (id) => document.getElementById(id);
+      const charla = $('charla');
+      let silenciado = false;
+
+      // El número va por la URL del websocket y NO por la conversación: se fija
+      // antes de que nadie hable y el modelo no lo ve, así que nadie puede
+      // hablar para cambiarlo. Sólo significa algo con VOZ_NUMERO_POR_PARAMETRO
+      // encendido, que es de demo; sin eso el servidor lo ignora.
+      const desdeLaUrl = new URLSearchParams(location.search).get('telefono') || '';
+      if (desdeLaUrl) $('telefono').value = desdeLaUrl;
+
+      let sesion = null;
+
+      const FRASES = {
+        connecting: 'Conectando…',
+        listening: 'Escuchando.',
+        hearing: 'Te está escuchando.',
+        thinking: 'Pensando…',
+        working: 'Consultando el sistema…',
+        speaking: 'Hablando.',
+        ended: 'Sin llamada.',
+      };
+
+      function estado(fase, mensaje) {
+        $('estado').textContent = mensaje || FRASES[fase] || fase;
+        const punto = $('punto');
+        punto.classList.toggle('viva', fase !== 'ended' && fase !== 'idle');
+        punto.classList.toggle('error', fase === 'error');
+      }
+
+      function agregar(clase, quien, texto) {
+        $('vacio').hidden = true;
+        const linea = document.createElement('div');
+        linea.className = `turno ${clase}`;
+        const etiqueta = document.createElement('span');
+        etiqueta.className = 'quien';
+        etiqueta.textContent = quien;
+        linea.append(etiqueta, document.createTextNode(texto));
+        charla.append(linea);
+        charla.scrollTop = charla.scrollHeight;
+      }
+
+      function avisar(texto) {
+        const aviso = $('aviso');
+        aviso.textContent = texto;
+        aviso.hidden = !texto;
+      }
+
+      function enLlamada(activa) {
+        $('llamar').hidden = activa;
+        $('cortar').hidden = !activa;
+        $('silenciar').hidden = !activa;
+        $('telefono').disabled = activa;
+      }
+
+      function manejar(evento) {
+        switch (evento.type) {
+          case 'state':
+            estado(evento.phase, evento.message);
+            if (!evento.active) enLlamada(false);
+            break;
+          // El proveedor manda el texto en `text` o en `transcript` según el
+          // mensaje; la página del relay contempla los dos y ésta también, o
+          // la conversación se ve vacía sin que nada falle.
+          case 'transcript.user': {
+            const dicho = evento.text || evento.transcript || '';
+            if (dicho) agregar('cliente', 'Vos', dicho);
+            break;
+          }
+          case 'transcript.agent': {
+            const dicho = evento.text || evento.transcript || '';
+            if (dicho) agregar('agente', 'Asistente', dicho);
+            break;
+          }
+          case 'tool.activity':
+            if (evento.status === 'started') {
+              const nota = document.createElement('div');
+              nota.className = 'herramienta';
+              nota.textContent = `consultando ${evento.name}…`;
+              charla.append(nota);
+              charla.scrollTop = charla.scrollHeight;
+            }
+            break;
+          case 'session.error':
+          case 'error':
+            estado('error', evento.message || 'Se cortó la llamada.');
+            avisar(evento.message || 'Se cortó la llamada.');
+            break;
+        }
+      }
+
+      $('llamar').addEventListener('click', async () => {
+        avisar('');
+        const telefono = $('telefono').value.trim();
+        // Una sesión nueva por llamada: el `passthrough` se fija al construirla
+        // y viaja también en cada reconecte.
+        sesion = new CallSession({
+          emit: manejar,
+          passthrough: telefono ? { telefono } : {},
+        });
+        enLlamada(true);
+        silenciado = false;
+        $('silenciar').textContent = 'Silenciar micrófono';
+        await sesion.start();
+      });
+
+      $('cortar').addEventListener('click', () => {
+        sesion?.stop('Cortaste la llamada.');
+        enLlamada(false);
+      });
+
+      $('silenciar').addEventListener('click', () => {
+        silenciado = !silenciado;
+        sesion?.setMuted(silenciado);
+        $('silenciar').textContent = silenciado ? 'Activar micrófono' : 'Silenciar micrófono';
+      });
+
+      // El nombre del negocio sale del servidor, así que la página no lo
+      // hardcodea y la misma sirve para cualquier cliente.
+      fetch('/experience')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((datos) => {
+          if (datos?.restaurant) {
+            $('negocio').textContent = datos.restaurant;
+            document.title = `${datos.restaurant} · asistente telefónico`;
+          }
+          if (datos && datos.live_configured === false) {
+            avisar('El servidor no tiene ASSEMBLYAI_API_KEY: la llamada no va a conectar.');
+          }
+        })
+        .catch(() => {});
+    </script>
+  </body>
+</html>
