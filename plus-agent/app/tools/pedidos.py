@@ -1142,7 +1142,14 @@ def dar_de_baja_pedido(
     # en que `soltar_reserva` también lo refuse: eso pasa en el barrido, una
     # hora después y fuera de la vista del cliente, y un test que sólo mirara
     # «el documento quedó intacto» seguiría verde con esta guarda borrada.
-    if int(doc.get("docstatus") or 0) != 0:
+    try:
+        borrador = int(doc.get("docstatus") or 0) == 0
+    except (TypeError, ValueError):
+        # Un `docstatus` ilegible NO es un borrador. Falla cerrado, igual que
+        # `agenda.por_que_ya_no_vive`: lo caro es dar de baja algo que no se
+        # entendió, no negarse una vez de más.
+        borrador = False
+    if not borrador:
         return (
             f"El pedido {pedido} ya está confirmado: darlo de baja lo decide "
             "una persona del equipo. Derivá."

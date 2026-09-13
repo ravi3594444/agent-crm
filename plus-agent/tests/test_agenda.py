@@ -906,6 +906,24 @@ def test_un_pedido_confirmado_no_se_da_de_baja_y_se_deriva_a_una_persona(
     assert agenda.vivas(PEDIDO, agenda.BAJA_DE_PEDIDO) == []
 
 
+def test_un_docstatus_ilegible_no_cuenta_como_borrador_y_no_rompe_el_turno(
+    herramienta_con_reloj,
+) -> None:
+    """Fallar cerrado, y sin excepción.
+
+    `int("vaya")` levanta, y una excepción adentro de una herramienta rompe el
+    hilo de conversación del cliente en vez de contestarle. Lo ilegible NO es
+    un borrador: se niega, como hace `agenda.por_que_ya_no_vive` con el mismo
+    campo.
+    """
+    herramienta_con_reloj["docs"][PEDIDO] = {**_borrador_de(), "docstatus": "vaya"}
+
+    respuesta = _dar_de_baja()
+
+    assert "confirmado" in respuesta.lower()
+    assert agenda.vivas(PEDIDO, agenda.BAJA_DE_PEDIDO) == []
+
+
 def test_la_baja_de_un_pedido_ajeno_se_niega_con_LA_MISMA_frase_que_uno_que_no_existe(
     herramienta_con_reloj,
 ) -> None:
