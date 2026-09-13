@@ -200,7 +200,13 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
     Returns {"ok", "aviso_cliente", "detalle"} — `detalle` is the text shown to
     the manager.
     """
-    ventana = True
+    # La ventana de anulación por WhatsApp la abre la marca durable, y el
+    # default NO puede ser «sí»: por la rama de `ya_confirmado` no se pasa por
+    # `registrar`, así que un segundo toque después de que la marca falló —o un
+    # pedido confirmado a mano en ERPNext— informaba una anulación disponible
+    # que el camino de cancelación después rechaza. Se comprueba, y `momento`
+    # devuelve None para «no se puede probar»: eso es fallar cerrado.
+    ventana = False
     try:
         actual = _leer_doc("Sales Order", nombre)
         ya_confirmado = actual.get("docstatus") == 1
@@ -263,6 +269,9 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
 
     # Stage 2e: the manager team gets ONE confirmed-order notice per order, no
     # matter which path confirmed it or how many times the button is tapped.
+    if ya_confirmado:
+        # No lo escribió esta llamada, así que hay que ir a mirarlo.
+        ventana = confirmacion.momento(nombre) is not None
     _notificar_confirmada(nombre, actual, ventana=ventana)
 
     prefix = "ℹ️ Ya estaba confirmado." if ya_confirmado else f"✅ {nombre} confirmado."

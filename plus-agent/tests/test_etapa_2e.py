@@ -430,3 +430,38 @@ def test_sin_la_marca_durable_no_se_le_promete_al_encargado_una_anulacion(
     assert "ERPNext" in cuerpo
     # Y al encargado se le dice en el acto, no sólo en el aviso durable.
     assert "ERPNext" in respuesta
+
+
+def test_un_segundo_toque_no_promete_una_ventana_que_nadie_escribio(
+    canal, monkeypatch
+) -> None:
+    """Por la rama de «ya estaba confirmado» no se pasa por `registrar`.
+
+    Así que el default no puede ser «hay ventana»: después de que la marca
+    falló, o sobre un pedido confirmado a mano en ERPNext, el segundo toque
+    informaba una anulación disponible que el camino de cancelación después
+    rechaza. Se va a mirar la marca, y `momento` devuelve None para «no se
+    puede probar» — eso es fallar cerrado.
+
+    Las dos mitades: SIN marca no se promete, y CON marca sí — si no, bastaría
+    con no prometer nunca.
+    """
+    monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
+    monkeypatch.setattr(aprobacion, "_leer_doc", lambda dt, name: dict(SO))
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
+    submit = Mock()
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
+
+    monkeypatch.setattr(aprobacion.confirmacion, "momento", lambda p: None)
+    respuesta = aprobacion.manejar_boton(f"ok:{SO['name']}", STAFF)
+
+    submit.assert_not_called()  # ya estaba confirmado: no se re-envía
+    assert "ERPNext" in respuesta
+    assert "cancelar" not in canal["enviados"][0][1].lower(), canal["enviados"][0][1]
+
+    # Y con la marca puesta, el mensaje vuelve a ofrecer la anulación.
+    canal["enviados"].clear()
+    monkeypatch.setattr(aprobacion.confirmacion, "momento", lambda p: 1_700_000_000.0)
+    monkeypatch.setattr(aprobacion.notificar, "claim_once", lambda *a, **k: True)
+    aprobacion.manejar_boton(f"ok:{SO['name']}", STAFF)
+    assert "cancelar" in canal["enviados"][0][1].lower()

@@ -12,7 +12,7 @@ import math
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta
 from html import unescape
 from urllib.parse import quote, unquote, urlsplit
 
@@ -287,6 +287,25 @@ def conversation(customer_id: str) -> dict:
     return base
 
 
+def _dia_local(sello: str) -> str:
+    """El día DEL NEGOCIO de un sello ISO, o "" si no se entiende.
+
+    El checkpoint se sella en UTC y el día del panel sale de `reloj.ahora()`,
+    que es la zona del negocio (UTC-3). Comparar los textos hacía desaparecer
+    de «Hoy» toda conversación de después de las 21:00 —ya es mañana en UTC—,
+    que en un distribuidor de lácteos es la franja en que el almacén cierra la
+    caja y encarga para el día siguiente. O sea, justo las que importan.
+    """
+    from app import reloj
+
+    try:
+        return (
+            datetime.fromisoformat(sello).astimezone(reloj.zona()).date().isoformat()
+        )
+    except (TypeError, ValueError):
+        return ""
+
+
 def _dias_de_retencion() -> int:
     """Lo que dice el .env, para no prometer un archivo que no existe."""
     try:
@@ -351,9 +370,14 @@ def _leer_hilo(thread_id: str) -> tuple[list, list[str], bool] | None:
     try:
         from app.graph import checkpointer
 
+        # UNO DE MÁS, y es lo único que distingue «éste es el principio del
+        # hilo» de «acá se cortó la página». Sin esa distinción, el checkpoint
+        # más viejo que vuelve parece el primero, y los mensajes que ya traía
+        # acumulados se fechan con SU sello — que es justo la hora inventada
+        # que esta función existe para no dar.
         historia = list(
             checkpointer().list(
-                {"configurable": {"thread_id": thread_id}}, limit=HISTORIA_MAX
+                {"configurable": {"thread_id": thread_id}}, limit=HISTORIA_MAX + 1
             )
         )
     except Exception as exc:
@@ -361,24 +385,28 @@ def _leer_hilo(thread_id: str) -> tuple[list, list[str], bool] | None:
         return None
     if not historia:
         return None
+    cortado = len(historia) > HISTORIA_MAX
+    historia = historia[:HISTORIA_MAX]
 
     # `list` devuelve del más NUEVO al más viejo; fechar necesita el orden
     # inverso, porque lo que fecha un mensaje es la primera vez que aparece.
     historia.reverse()
     sellos: list[str] = []
     mensajes: list = []
-    for tupla in historia:
+    for indice, tupla in enumerate(historia):
         actuales = list((tupla.checkpoint.get("channel_values") or {}).get("messages") or [])
+        if len(actuales) < len(mensajes):
+            continue
         sello = str(tupla.checkpoint.get("ts") or "")
-        if len(actuales) >= len(mensajes):
-            mensajes = actuales
-        while len(sellos) < len(mensajes):
-            sellos.append(sello)
-    # Si la historia se cortó, los primeros mensajes no tienen fecha propia.
-    sin_fecha = len(mensajes) - len(sellos)
-    if sin_fecha > 0:
-        mensajes = mensajes[sin_fecha:]
-    return mensajes, sellos, sin_fecha > 0
+        # Los que YA estaban en el checkpoint más viejo retenido sólo se pueden
+        # fechar si ese checkpoint es de verdad el principio del hilo.
+        nuevos = len(actuales) - len(mensajes)
+        desconocido = indice == 0 and cortado
+        sellos.extend(["" if desconocido else sello] * nuevos)
+        mensajes = actuales
+    # Un sello vacío no se muestra: `_mensajes_visibles` lo saltea. La punta
+    # vieja se pierde y `truncado` lo dice, que es la mitad que faltaba.
+    return mensajes, sellos, cortado
 
 
 # ----------------------------------------------------------------------- hoy
@@ -414,16 +442,20 @@ def today() -> dict:
 
     with erpnext.manager_scope():
         empresa = erpnext.default_company()
-        try:
-            pedidos = erpnext.get_list(
-                "Sales Order",
-                filters=[["company", "=", empresa], ["transaction_date", "=", hoy]],
-                fields=ORDER_FIELDS, limit=LIMIT, order_by="creation desc, name desc",
-                timeout=READ_TIMEOUT,
-            )
-        except Exception:
-            errors.append("orders")
-            pedidos = []
+        # SIN LOS PEDIDOS NO HAY PANTALLA, y devolver la mitad es peor que no
+        # devolver nada: cada fila lleva un `orderId`, y con la lista vacía
+        # TODAS dirían «habló y no compró». Esa fila es justo la que el dueño
+        # va a mirar —una venta perdida— así que inventarla por una lectura
+        # que falló es la peor forma de equivocarse acá. Se levanta y la ruta
+        # contesta 502; la UI ya tiene reintento para eso.
+        pedidos = erpnext.get_list(
+            "Sales Order",
+            filters=[["company", "=", empresa], ["transaction_date", "=", hoy]],
+            # `creation` además de los de siempre: es la hora que lleva la fila
+            # de un cliente nuevo que todavía no tiene conversación.
+            fields=[*ORDER_FIELDS, "creation"], limit=LIMIT,
+            order_by="creation desc, name desc", timeout=READ_TIMEOUT,
+        )
         # Los candidatos a «habló hoy» son los clientes de esta empresa, y se
         # los busca por pedidos recientes: es el mismo recorte que `snapshot`.
         try:
@@ -436,7 +468,18 @@ def today() -> dict:
         except Exception:
             errors.append("customers")
             recientes = []
-        cuentas = sorted({str(x.get("customer") or "") for x in recientes} - {""})
+        # SE DEDUPLICA CONSERVANDO EL ORDEN, que viene de ERPNext por fecha
+        # descendente. Un `sorted(set(...))` lo cambiaba por orden alfabético
+        # justo antes de cortar en 120: con más clientes que el tope, el que
+        # compró hoy y se llama «Zunino» quedaba afuera y entraba uno que no
+        # compra desde marzo y se llama «Almacén».
+        cuentas: list[str] = []
+        vistos: set[str] = set()
+        for fila_r in recientes:
+            cuenta_r = str(fila_r.get("customer") or "")
+            if cuenta_r and cuenta_r not in vistos:
+                vistos.add(cuenta_r)
+                cuentas.append(cuenta_r)
         if len(cuentas) > HOY_MAX_CLIENTES:
             truncated.append("conversations")
             cuentas = cuentas[:HOY_MAX_CLIENTES]
@@ -464,7 +507,7 @@ def today() -> dict:
         if hilo is None:
             continue
         mensajes, sello = hilo
-        if not sello.startswith(hoy):
+        if _dia_local(sello) != hoy:
             continue  # el hilo existe, pero no se movió hoy
         del_cliente = [
             m for m in _mensajes_visibles(mensajes, None) if m["role"] == "customer"
@@ -507,8 +550,34 @@ def today() -> dict:
                 # tenía; el error al revés sólo omite una fila.
                 errors.append("new customers")
                 con_historia = set(de_hoy)
-    nuevos = [c for c in conversaciones
-              if c["orderId"] and c["customerId"] not in con_historia]
+    # SALE DE LOS PEDIDOS, no de las conversaciones. Filtrar `conversaciones`
+    # exigía además teléfono, hilo legible y un mensaje del cliente hoy — así
+    # que un cliente nuevo cuyo primer pedido se cargó a mano, o cuyo chat ya
+    # expiró, no aparecía nunca. La pantalla dice «primer pedido hoy», y eso es
+    # un hecho de ERPNext: la conversación, si está, es un adorno.
+    por_cliente = {c["customerId"]: c for c in conversaciones}
+    nuevos = []
+    for fila_p in pedidos:
+        cuenta = str(fila_p.get("customer") or "")
+        if not cuenta or cuenta in con_historia or cuenta in {n["customerId"] for n in nuevos}:
+            continue
+        charla = por_cliente.get(cuenta)
+        if charla is not None:
+            nuevos.append(charla)
+            continue
+        # Sin conversación no se inventa ninguna: cero turnos, sin última
+        # línea, y la hora es la del PEDIDO, que es el hecho que lo pone acá.
+        cuando = _momento_iso(fila_p.get("creation"))
+        if not cuando:
+            continue  # sin hora legible no sale: no se inventa una
+        nuevos.append({
+            "customerId": cuenta,
+            "customerName": str(fila_p.get("customer_name") or cuenta),
+            "turns": 0,
+            "lastAt": cuando,
+            "lastLine": "",
+            "orderId": str(fila_p.get("name") or ""),
+        })
 
     return {
         "date": hoy,
@@ -576,6 +645,17 @@ def queue() -> dict:
 
     with erpnext.manager_scope():
         empresa = erpnext.default_company()
+        # ESTA CONSULTA AUTORIZA, NO DECORA — y la diferencia es una fuga.
+        #
+        # El índice de agenda es UNO SOLO para todo el sitio y no sabe de
+        # empresas. Usar esta lectura sólo para ponerle el nombre al cliente
+        # dejaba pasar las filas de pedidos de OTRA empresa: se iban con su id
+        # de pedido, su tipo de acción, su hora y su descripción, y lo único
+        # que les faltaba era el nombre. Un pedido de otra empresa no es un
+        # registro de este panel, así que si no está acá, no sale.
+        #
+        # Y si la consulta falla, no sale NINGUNA: sin poder comprobar la
+        # pertenencia, mostrar es adivinar.
         nombres: dict[str, str] = {}
         pedidos_citados = sorted({p["orderId"] for p in proximas})
         if pedidos_citados:
@@ -591,6 +671,7 @@ def queue() -> dict:
                     )
             except Exception:
                 nombres = {}
+        proximas = [p for p in proximas if p["orderId"] in nombres]
         # LO QUE ESPERA A UNA PERSONA: el dueño es el cuello de botella de esto
         # y hoy no lo ve en ninguna parte. Son los borradores todavía abiertos,
         # que es la misma consulta que `snapshot` ya hace para `pendingOrders`.
@@ -616,7 +697,7 @@ def queue() -> dict:
             })
 
     for p in proximas:
-        p["customer"] = nombres.get(p["orderId"], "")
+        p["customer"] = nombres[p["orderId"]]
 
     pendientes_avisos = avisos.pendientes()
     return {
