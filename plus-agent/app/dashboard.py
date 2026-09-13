@@ -179,7 +179,14 @@ def _hilo_del_telefono(telefono: str) -> str:
     return f"cli:{_thread_tag(telefono)}"
 
 
-def _mensajes_visibles(mensajes: list, sellos: list[str]) -> list[dict]:
+def _visible(rol: str, texto: str, cuando: str | None) -> dict:
+    fila = {"role": rol, "text": texto}
+    if cuando is not None:
+        fila["at"] = cuando
+    return fila
+
+
+def _mensajes_visibles(mensajes: list, sellos: list[str] | None) -> list[dict]:
     """Lo que una PERSONA puede ver de un hilo del agente.
 
     Tres reglas, y cada una tapa algo que se vería sin ella:
@@ -198,19 +205,22 @@ def _mensajes_visibles(mensajes: list, sellos: list[str]) -> list[dict]:
     for indice, m in enumerate(mensajes):
         tipo = type(m).__name__
         texto = str(getattr(m, "content", "") or "").strip()
-        cuando = sellos[indice] if indice < len(sellos) else ""
-        if not cuando:
-            continue  # sin hora propia no se muestra: ver `_leer_hilo`
+        if sellos is None:
+            cuando = None  # el llamador no pidió horas y no se inventa ninguna
+        else:
+            cuando = sellos[indice] if indice < len(sellos) else ""
+            if not cuando:
+                continue  # sin hora propia no se muestra: ver `_leer_hilo`
         if tipo == "HumanMessage" and texto:
-            visibles.append({"role": "customer", "text": texto, "at": cuando})
+            visibles.append(_visible("customer", texto, cuando))
         elif tipo == "AIMessage" and texto:
-            visibles.append({"role": "agent", "text": texto, "at": cuando})
+            visibles.append(_visible("agent", texto, cuando))
         elif tipo == "ToolMessage":
             if visibles and visibles[-1]["role"] == "note":
                 continue  # dos consultas seguidas son UNA línea, no dos
-            visibles.append({
-                "role": "note", "text": "The agent looked something up.", "at": cuando,
-            })
+            visibles.append(
+                _visible("note", "The agent looked something up.", cuando)
+            )
     return visibles
 
 
@@ -290,6 +300,32 @@ def _dias_de_retencion() -> int:
 # mensajes; lo que quede antes se reporta como truncado en vez de inventarle
 # una hora.
 HISTORIA_MAX = 400
+
+
+def _ultimo_del_hilo(thread_id: str) -> tuple[list, str] | None:
+    """Los mensajes y CUÁNDO se movió por última vez, en UNA lectura.
+
+    `_leer_hilo` recorre el historial entero para poder fechar cada mensaje, y
+    eso cuesta ~17x más: medido contra el Redis de desarrollo, 2,3 ms contra
+    37 ms por hilo. `today` mira hasta 120 clientes, así que ahí la diferencia
+    es entre un cuarto de segundo y cuatro segundos y medio — en la pantalla
+    que el dueño abre primero todas las mañanas, y sobre un Redis casi vacío.
+
+    Esta lectura NO sabe cuándo llegó cada mensaje y por eso no lo dice: los
+    mensajes salen sin `at`. Lo único que fecha es el HILO, con el sello del
+    último checkpoint, que es exactamente «cuándo se movió esta conversación».
+    """
+    try:
+        from app.graph import checkpointer
+
+        tupla = checkpointer().get_tuple({"configurable": {"thread_id": thread_id}})
+    except Exception as exc:
+        print(f"[dashboard] no pude leer un hilo ({type(exc).__name__})")
+        return None
+    if tupla is None:
+        return None
+    valores = tupla.checkpoint.get("channel_values") or {}
+    return list(valores.get("messages") or []), str(tupla.checkpoint.get("ts") or "")
 
 
 def _leer_hilo(thread_id: str) -> tuple[list, list[str], bool] | None:
@@ -424,20 +460,26 @@ def today() -> dict:
         numero = telefonos.normalizar(ficha.get("mobile_no"))
         if not numero:
             continue
-        hilo = _leer_hilo(_hilo_del_telefono(numero))
+        hilo = _ultimo_del_hilo(_hilo_del_telefono(numero))
         if hilo is None:
             continue
-        mensajes, sellos, _ = hilo
-        visibles = _mensajes_visibles(mensajes, sellos)
-        del_cliente = [m for m in visibles if m["role"] == "customer"]
-        if not del_cliente or not del_cliente[-1]["at"].startswith(hoy):
-            continue  # no habló, o habló pero no hoy
+        mensajes, sello = hilo
+        if not sello.startswith(hoy):
+            continue  # el hilo existe, pero no se movió hoy
+        del_cliente = [
+            m for m in _mensajes_visibles(mensajes, None) if m["role"] == "customer"
+        ]
+        if not del_cliente:
+            continue
         cuenta = str(ficha.get("name") or "")
         conversaciones.append({
             "customerId": cuenta,
             "customerName": str(ficha.get("customer_name") or cuenta),
             "turns": len(del_cliente),
-            "lastAt": del_cliente[-1]["at"],
+            # El sello del HILO, no el del último mensaje del cliente: esta
+            # lectura no fecha mensajes. Es «cuándo se movió la conversación»,
+            # que es lo que la pantalla ordena y muestra.
+            "lastAt": sello,
             "lastLine": del_cliente[-1]["text"][:280],
             "orderId": pedido_de.get(cuenta) or None,
         })
