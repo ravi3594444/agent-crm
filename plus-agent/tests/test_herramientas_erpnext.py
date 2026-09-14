@@ -503,3 +503,45 @@ def test_ficha_cliente_sigue_pidiendo_gerencia(monkeypatch: pytest.MonkeyPatch) 
 
     assert salida == SIN_PERMISO
     assert vistos == [], "no se consultó ERPNext sin permiso"
+
+
+# ------------------------------- una tabla hija se pide con su padre, o falla
+# `Item Reorder` es una tabla hija de Item. Frappe se niega a listar una tabla
+# hija sin `parent` —lo dice el comentario de `erpnext._list`— y las siete
+# consultas a tablas hijas del repo lo pasaban... menos una, la de `stock_bajo`,
+# o sea que «¿de qué estoy corto?» nunca contestó contra un ERPNext real.
+#
+# El doble se porta como Frappe y SE NIEGA, en vez de mirar qué argumentos le
+# pasaron. Un test que afirmara `get_list.assert_called_with(..., parent="Item")`
+# fijaría la ortografía de la llamada; éste puede estar en desacuerdo con el
+# código sobre si la herramienta CONTESTA.
+
+
+def test_stock_bajo_le_pide_a_frappe_la_tabla_hija_como_frappe_la_acepta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.tools.gerencia import informe
+
+    HIJAS = {"Item Reorder", "Sales Order Item", "Delivery Note Item"}
+
+    def get_list(doctype, filters=None, fields=None, limit=None, parent=None, **kw):
+        if doctype in HIJAS and not parent:
+            raise erpnext.ERPNextError(
+                f"No permitted records found for {doctype}", status_code=403
+            )
+        if doctype == "Item Reorder":
+            return [{"parent": "LECHE-ENT-1L", "warehouse": "Dep",
+                     "warehouse_reorder_level": 10}]
+        if doctype == "Bin":
+            return [{"actual_qty": 2}]
+        return []
+
+    from app import router, telefono
+
+    monkeypatch.setattr(router, "STAFF", [telefono.normalizar(_GERENTE)])
+    monkeypatch.setattr(erpnext, "get_list", get_list)
+
+    salida = informe.invoke({"que": "stock_bajo"}, config=_config_gerencia())
+
+    assert "LECHE-ENT-1L" in salida, salida
+    assert "2" in salida

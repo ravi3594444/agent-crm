@@ -255,6 +255,14 @@ def _stock_bajo(config: RunnableConfig) -> str:
         "Item Reorder",
         fields=["parent", "warehouse", "warehouse_reorder_level"],
         limit=200,
+        # `Item Reorder` es una TABLA HIJA de Item, y Frappe se niega a listar
+        # una tabla hija sin que le digan de qué padre cuelga —lo dice el
+        # comentario de `erpnext._list`, y las otras seis consultas a tablas
+        # hijas del repo lo pasan—. Sin esto, «¿de qué estoy corto?» nunca
+        # contestó contra un ERPNext de verdad: devolvía el error de la
+        # herramienta. No se vio antes porque el banco de pruebas usa un
+        # ERPNext falso, al que el parámetro no le importa.
+        parent="Item",
     )
     alertas = []
     for it in items:
