@@ -38,7 +38,7 @@ Cada herramienta verifica de nuevo que quien habla sea del equipo
 """
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
@@ -102,13 +102,57 @@ def _mostrar(fila: dict) -> str:
     return linea
 
 
-@tool
-def ver_limites(config: RunnableConfig) -> str:
-    """Muestra los límites vigentes de auto-confirmación y de dónde salen.
+# TRES LECTURAS DE LOS AJUSTES DEL DUEÑO, UNA HERRAMIENTA
+# -------------------------------------------------------
+# Misma regla que se escribió hoy arriba de `informe` en app/tools/gerencia.py:
+# detrás de un `Literal` van LECTURAS de un mismo tema, nunca una escritura.
+# «Qué tengo configurado» es un solo tema y tenía tres puertas —los límites de
+# plata, las reglas de entrega y el historial— con la misma guarda y la misma
+# negativa. Lo que degrada la elección es el solapamiento: presentar cinco
+# candidatos donde alcanzan dos cuesta ~6 puntos de acierto (arXiv:2605.24660),
+# y «¿qué tengo puesto?» daba en tres.
+#
+# `proponer_limite` NO entra acá y la línea es dura: propone un CAMBIO, y el
+# cambio se confirma con un código de cuatro dígitos que el modelo no ve nunca.
+# Una herramienta que lee y escribe detrás de un enum es una donde una rama
+# equivocada escribe.
 
-    Usala cuando el dueño pregunta qué límites hay, cuánto es el tope, cuánto
-    colchón de stock se guarda, o antes de proponerle un cambio.
+
+@tool
+def ver_ajustes(
+    config: RunnableConfig,
+    que: Annotated[
+        Literal["limites", "entrega", "historial"],
+        Field(
+            description=(
+                "Qué parte mirar. "
+                "limites = los topes de auto-confirmación (monto, cantidad por "
+                "producto, colchón de stock, clientes nuevos, deuda, descuentos). "
+                "entrega = dónde y qué días se reparte, entrega fuera de día, "
+                "cargo y retiro por el local. "
+                "historial = los últimos cambios, qué se cambió y desde qué número."
+            )
+        ),
+    ] = "limites",
+) -> str:
+    """Lo que el dueño tiene configurado hoy. Sólo lectura: no cambia nada.
+
+    Ejemplos de cómo se mapea lo que dice:
+    - «¿cuánto es el tope?» / «¿qué límites tengo?» -> que=limites
+    - «¿a Alta Gracia llego?» / «¿qué días reparto?» -> que=entrega
+    - «¿qué cambié la semana pasada?» -> que=historial
+
+    Usala también ANTES de proponer un cambio, para decirle de qué número sale.
     """
+    if que == "entrega":
+        return _ver_reglas_de_entrega(config)
+    if que == "historial":
+        return _historial_limites(config)
+    return _ver_limites(config)
+
+
+def _ver_limites(config: RunnableConfig) -> str:
+    """Los límites vigentes de auto-confirmación y de dónde salen."""
     try:
         require_management(config)
     except RuntimeContextError:
@@ -125,8 +169,7 @@ def ver_limites(config: RunnableConfig) -> str:
         "Límites de auto-confirmación:\n"
         f"{cuerpo}\n\n"
         "Para cambiar uno, decime cuál y el valor nuevo. Te pido confirmación "
-        "antes de aplicarlo. Las reglas de entrega se ven con «reglas de "
-        "entrega»."
+        "antes de aplicarlo."
     )
 
 
@@ -180,15 +223,8 @@ def proponer_limite(
     return ajustes.preparar(limite, valor, actor.actor_phone)
 
 
-@tool
-def ver_reglas_de_entrega(config: RunnableConfig) -> str:
-    """Muestra las reglas de entrega vigentes: zonas, reparto, excepciones y retiro.
-
-    Usala cuando el dueño pregunta dónde se reparte, en qué localidades o
-    códigos postales, qué días se reparte, si se entrega fuera de día, cuánto
-    se cobra por eso, o si se puede retirar por el local — y antes de
-    proponerle un cambio.
-    """
+def _ver_reglas_de_entrega(config: RunnableConfig) -> str:
+    """Las reglas de entrega vigentes: zonas, reparto, excepciones y retiro."""
     try:
         require_management(config)
     except RuntimeContextError:
@@ -228,9 +264,8 @@ def ver_reglas_de_entrega(config: RunnableConfig) -> str:
     )
 
 
-@tool
-def historial_limites(config: RunnableConfig) -> str:
-    """Muestra los últimos cambios de límites: qué, cuándo y desde qué número."""
+def _historial_limites(config: RunnableConfig) -> str:
+    """Los últimos cambios de ajustes: qué, cuándo y desde qué número."""
     try:
         require_management(config)
     except RuntimeContextError:

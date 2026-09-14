@@ -119,14 +119,14 @@ def test_only_an_authorized_manager_can_see_or_change_a_limit(
 ) -> None:
     """A customer, a stranger, or a request with no phone at all gets nothing —
     not the values, not the history, and above all not a change."""
-    assert "no está autorizado" in configuracion.ver_limites.invoke(
-        {}, config=config
+    assert "no está autorizado" in configuracion.ver_ajustes.invoke(
+        {"que": "limites"}, config=config
     )
     assert "no está autorizado" in configuracion.proponer_limite.invoke(
         {"limite": "tope", "valor": "999999"}, config=config
     )
-    assert "no está autorizado" in configuracion.historial_limites.invoke(
-        {}, config=config
+    assert "no está autorizado" in configuracion.ver_ajustes.invoke(
+        {"que": "historial"}, config=config
     )
     # And nobody outside the staff list can confirm one either: the router only
     # reaches the handler for a phone router.es_equipo authenticated.
@@ -238,7 +238,8 @@ def test_every_change_records_who_when_and_from_what_to_what(
     assert entrada["telefono"] == EQUIPO
     assert entrada["ts"]
 
-    historial = configuracion.historial_limites.invoke({}, config=_gerencia())
+    historial = configuracion.ver_ajustes.invoke(
+        {"que": "historial"}, config=_gerencia())
     assert "0 → 12000" in historial
     assert EQUIPO in historial
 
@@ -594,7 +595,8 @@ def test_a_broken_stored_value_is_reported_not_replaced(
     with pytest.raises(limites.LimiteError):
         limites.configuracion()
 
-    aviso = configuracion.ver_limites.invoke({}, config=_gerencia())
+    aviso = configuracion.ver_ajustes.invoke(
+        {"que": "limites"}, config=_gerencia())
     assert "mal configurado" in aviso
 
 
@@ -603,7 +605,8 @@ def test_the_owner_sees_where_each_value_comes_from(
 ) -> None:
     monkeypatch.setenv("AUTO_CONFIRM_MAX", "1000")
 
-    vista = configuracion.ver_limites.invoke({}, config=_gerencia())
+    vista = configuracion.ver_ajustes.invoke(
+        {"que": "limites"}, config=_gerencia())
 
     assert "valor de arranque" in vista  # AUTO_CONFIRM_MAX, from the env
     assert "default del sistema" in vista  # the ones nobody has touched
@@ -626,7 +629,8 @@ def test_the_owner_is_told_the_new_customer_ceiling_needs_a_checked_address(
     assert policy.CLIENTE_NUEVO_HABILITADO is True
     monkeypatch.setenv("AUTO_CONFIRM_MAX_CLIENTE_NUEVO", "5000")
 
-    vista = configuracion.ver_limites.invoke({}, config=_gerencia())
+    vista = configuracion.ver_ajustes.invoke(
+        {"que": "limites"}, config=_gerencia())
 
     assert "zona de reparto configurada" in vista
     assert "queda en borrador igual" in vista
@@ -688,8 +692,8 @@ def _confirmar(codigo: str = "4242", telefono: str = EQUIPO) -> str:
 def test_only_an_authorized_manager_can_see_or_change_a_delivery_rule(
     almacen: FakeRedis, config: dict
 ) -> None:
-    assert "no está autorizado" in configuracion.ver_reglas_de_entrega.invoke(
-        {}, config=config
+    assert "no está autorizado" in configuracion.ver_ajustes.invoke(
+        {"que": "entrega"}, config=config
     )
     configuracion.proponer_limite.invoke(
         {"limite": "días de reparto", "valor": "martes"}, config=config
@@ -742,16 +746,19 @@ def test_the_llm_can_propose_a_delivery_rule_but_never_apply_one(
     call, and none of them moves a setting without the owner's own code."""
     from app import graph
 
-    assert {t.name for t in graph.TOOLS_GERENCIA if "limite" in t.name} == {
-        "ver_limites",
-        "proponer_limite",
-        "historial_limites",
-    }
+    # `ver_ajustes` LEE los tres registros (límites, entrega, historial);
+    # `proponer_limite` es la única que escribe, y sigue sola a propósito: una
+    # herramienta que lee y escribe detrás del mismo enum es una donde la rama
+    # equivocada escribe.
+    assert {
+        t.name for t in graph.TOOLS_GERENCIA if "limite" in t.name or "ajuste" in t.name
+    } == {"ver_ajustes", "proponer_limite"}
     # There is no confirm tool at all — not unregistered, ABSENT.
     assert not hasattr(configuracion, "confirmar_limite")
 
     # Reading changes nothing; proposing changes nothing.
-    configuracion.ver_reglas_de_entrega.invoke({}, config=_gerencia())
+    configuracion.ver_ajustes.invoke(
+        {"que": "entrega"}, config=_gerencia())
     _proponer("retiro en el local", "sí")
     assert almacen.hashes == {}
     assert limites.entrega().retiro_activo is False
@@ -782,7 +789,8 @@ def test_every_delivery_change_is_audited_in_redis_and_in_erpnext(
     assert limites.MARCA_DURABLE not in texto
     assert "RETIRO_LOCAL_HORA" in texto and "10:30" in texto and EQUIPO in texto
 
-    historial = configuracion.historial_limites.invoke({}, config=_gerencia())
+    historial = configuracion.ver_ajustes.invoke(
+        {"que": "historial"}, config=_gerencia())
     assert "hora de retiro" in historial
 
 
@@ -1549,7 +1557,8 @@ def test_the_owner_tool_says_the_delivery_rules_have_to_be_set_again(
     _historia_durable(monkeypatch, limite=False, entrega=True)
     almacen.hashes.clear()
 
-    vista = configuracion.ver_reglas_de_entrega.invoke({}, config=_gerencia())
+    vista = configuracion.ver_ajustes.invoke(
+        {"que": "entrega"}, config=_gerencia())
 
     assert "Se perdieron tus reglas de entrega" in vista
     assert "vuelvas a fijar" in vista

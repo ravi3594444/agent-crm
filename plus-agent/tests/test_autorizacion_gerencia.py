@@ -61,10 +61,8 @@ ARGUMENTOS: dict[str, dict] = {
     "contar_stock": {"item_code": "LECHE-ENT-1L", "cantidad_real": 12},
     "confirmar_entrega": {"numero_pedido": "SAL-ORD-2026-00001"},
     "redactar_mensaje_cliente": {"cliente": "Don José", "intencion": "llegó el queso"},
-    "ver_limites": {},
+    "ver_ajustes": {"que": "limites"},
     "proponer_limite": {"limite": "tope", "valor": "50000"},
-    "historial_limites": {},
-    "ver_reglas_de_entrega": {},
     "estado_del_sistema": {},
     "ver_avisos_fallidos": {},
     "detalle_de_pedido": {"pedido": "SAL-ORD-2026-00001"},
@@ -77,37 +75,43 @@ NEGATIVAS = {
     "contar_stock": "No pude autenticar quién cuenta; no cargué el conteo.",
     "estado_del_sistema": "Ese número no está autorizado para ver el estado del sistema.",
     "ver_avisos_fallidos": "Ese número no está autorizado para ver el estado del sistema.",
-    "ver_limites": "Ese número no está autorizado",
+    "ver_ajustes": "Ese número no está autorizado",
     "proponer_limite": "Ese número no está autorizado",
-    "historial_limites": "Ese número no está autorizado",
-    "ver_reglas_de_entrega": "Ese número no está autorizado",
 }
 
 
-# `informe` es UNA herramienta con cinco cuerpos detrás de `que`, así que la
+# UNA HERRAMIENTA COLAPSADA TIENE VARIOS CUERPOS, Y CADA UNO TIENE SU GUARDA.
+# `informe` son cinco lecturas detrás de un `que`, `ver_ajustes` son tres. La
 # cobertura POR NOMBRE dejó de alcanzar el día que se colapsaron: probar sólo
-# `que="pendientes"` dejaría las otras cuatro ramas sin su guarda probada —que
-# es exactamente el agujero que este archivo existe para que no vuelva. Los
-# valores se LEEN del esquema de la herramienta, no se escriben acá, así que un
-# sexto informe sin caso de prueba rompe el archivo en vez de colarse.
-_QUE: tuple[str, ...] = tuple(
-    SOLO_GERENCIA["informe"].args_schema.model_json_schema()["properties"]["que"]["enum"]
-)
+# la primera rama dejaría las otras sin su guarda probada —que es exactamente
+# el agujero que este archivo existe para que no vuelva—. Los valores se LEEN
+# del esquema de cada herramienta, no se escriben acá, así que una rama nueva
+# sin caso de prueba rompe el archivo en vez de colarse.
+def _ramas(herramienta) -> tuple[str, ...]:
+    que = herramienta.args_schema.model_json_schema()["properties"].get("que", {})
+    return tuple(que.get("enum", ()))
 
-# Cada llamada que se prueba, como (nombre, argumentos).
+
+COLAPSADAS: dict[str, tuple[str, ...]] = {
+    nombre: _ramas(h) for nombre, h in SOLO_GERENCIA.items() if _ramas(h)
+}
+
+# Cada llamada que se prueba, como (nombre, argumentos): una por herramienta,
+# más una por cada rama que ARGUMENTOS no eligió.
 LLAMADAS: list[tuple[str, dict]] = [
     *((nombre, ARGUMENTOS[nombre]) for nombre in sorted(ARGUMENTOS)),
     *(
-        ("informe", {"que": que})
-        for que in _QUE
-        if que != ARGUMENTOS["informe"]["que"]
+        (nombre, {**ARGUMENTOS[nombre], "que": que})
+        for nombre in sorted(COLAPSADAS)
+        for que in COLAPSADAS[nombre]
+        if que != ARGUMENTOS[nombre].get("que")
     ),
 ]
 
 
 def _id(llamada: tuple[str, dict]) -> str:
     nombre, args = llamada
-    return f"{nombre}:{args['que']}" if nombre == "informe" else nombre
+    return f"{nombre}:{args['que']}" if "que" in args else nombre
 
 
 @pytest.fixture(autouse=True)
@@ -217,11 +221,15 @@ def test_every_management_only_tool_is_covered_by_this_file() -> None:
         "una herramienta sólo-de-gerencia sin caso de prueba: agregala a "
         "ARGUMENTOS con sus argumentos mínimos"
     )
-    # Las cinco ramas de `informe` se prueban todas, no sólo la de ARGUMENTOS.
-    assert {a["que"] for n, a in LLAMADAS if n == "informe"} == set(_QUE)
+    # Toda rama de toda herramienta colapsada se prueba, no sólo la que eligió
+    # ARGUMENTOS. Hoy: informe (5) y ver_ajustes (3).
+    assert COLAPSADAS, "ninguna herramienta colapsada detectada: ¿cambió el esquema?"
+    for nombre, ramas in COLAPSADAS.items():
+        probadas = {a["que"] for n, a in LLAMADAS if n == nombre}
+        assert probadas == set(ramas), f"{nombre}: faltan ramas {set(ramas) - probadas}"
     # 15 hoy —eran 19, con cinco informes sueltos que ahora son uno. El número
     # está acá para que un cambio de superficie se note.
-    assert len(SOLO_GERENCIA) == 15
+    assert len(SOLO_GERENCIA) == 13
 
 
 def test_no_management_tool_accepts_a_phone_or_an_identity_argument() -> None:

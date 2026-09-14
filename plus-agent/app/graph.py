@@ -35,10 +35,8 @@ from app.tools.catalogo import (
     pedido_habitual,
 )
 from app.tools.configuracion import (
-    historial_limites,
     proponer_limite,
-    ver_limites,
-    ver_reglas_de_entrega,
+    ver_ajustes,
 )
 from app.tools.gerencia import (
     ejecutar_reporte,
@@ -104,10 +102,11 @@ TOOLS_GERENCIA = [
     # this agent's context and the deterministic router in app/main.py is what
     # applies the change. An agent that could call both steps is one step.
     # NEVER in TOOLS_CLIENTES — a customer cannot be allowed near these.
-    ver_limites, proponer_limite, historial_limites,
-    # ...and his delivery rules, through the SAME propose/confirm pair. Reading
-    # them is its own tool; changing one is proponer_limite like everything else.
-    ver_reglas_de_entrega,
+    # ver_ajustes reads all THREE (limits, delivery rules, history) behind one
+    # closed Literal; proponer_limite is the only one that writes, and it stays
+    # its own tool — a read and a write behind one enum is one where the wrong
+    # branch writes.
+    ver_ajustes, proponer_limite,
     # read-only operational status. No writes, no retries, no secrets, and
     # NEVER in TOOLS_CLIENTES: these count queues and name the provider.
     estado_del_sistema, ver_avisos_fallidos,

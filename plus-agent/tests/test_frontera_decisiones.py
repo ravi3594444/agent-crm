@@ -96,7 +96,10 @@ def test_a_customer_is_never_offered_the_tools_that_move_a_limit() -> None:
     one — not even by asking nicely, because the tool is not there."""
     from app import graph
 
-    de_limites = {"ver_limites", "proponer_limite", "historial_limites"}
+    # ver_ajustes LEE los tres (límites, entrega, historial); proponer_limite
+    # es la única que escribe. Ninguna de las dos puede estar del lado del
+    # cliente: leer los topes ya le dice cuánto pedir para no despertar a nadie.
+    de_limites = {"ver_ajustes", "proponer_limite"}
     de_clientes = {t.name for t in graph.TOOLS_CLIENTES}
     de_gerencia = {t.name for t in graph.TOOLS_GERENCIA}
 
