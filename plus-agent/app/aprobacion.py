@@ -335,7 +335,43 @@ def anunciar(emision: Emision, por: str, *, canal: str) -> dict:
     uno por pedido sin importar qué camino confirmó ni cuántas veces se tocó el
     botón. Ya tenía que ser así antes de este cambio, porque el botón de
     WhatsApp se toca dos veces.
+
+    NADA DE ACÁ ADENTRO PUEDE CONTESTAR «falló la confirmación», porque para
+    cuando esta función empieza el Submit YA COMMITEÓ y eso no se deshace. El
+    pedido está emitido: lo que puede fallar es contarlo. Si una excepción
+    subiera, `decisiones.confirmar` la propagaría, el panel la convertiría en
+    502 y el camino de WhatsApp en su error técnico genérico — y el encargado
+    leería «no se pudo» sobre una venta que sí se cerró, y la confirmaría de
+    nuevo o la daría por perdida.
+
+    Cada pieza ya absorbe su propio fallo —`add_comment` atrapa `ERPNextError`
+    y loguea (es best-effort a propósito), `confirmacion.registrar` atrapa y
+    devuelve False, `_encolar_confirmacion` no levanta nunca—, así que el
+    `except` de abajo no es el mecanismo principal: es el piso. Cubre lo que
+    ninguna de ellas prometió, como un error que no sea `ERPNextError` (el
+    cliente sólo envuelve `httpx.HTTPError`) o un fallo en `_notificar_confirmada`.
     """
+    nombre = emision.nombre
+    try:
+        return _anunciar_o_fallar(emision, por, canal=canal)
+    except Exception as exc:
+        # El pedido ESTÁ confirmado. Lo único que se perdió es el aviso, y eso
+        # es lo que se informa — con `ok` True, porque la pregunta que el
+        # encargado hizo («¿confirmalo?») se contestó que sí.
+        print(f"[approval] {nombre}: el anuncio falló después del submit ({type(exc).__name__})")
+        return {
+            "ok": True,
+            "aviso_cliente": False,
+            "detalle": (
+                f"✅ {nombre} quedó confirmado, pero no pude completar los avisos. "
+                "Confirmá vos que el cliente se haya enterado, y revisá el pedido "
+                "en ERPNext."
+            ),
+        }
+
+
+def _anunciar_o_fallar(emision: Emision, por: str, *, canal: str) -> dict:
+    """El cuerpo de `anunciar`. Separado para que el piso de arriba sea legible."""
     nombre, actual = emision.nombre, emision.doc
     if emision.ya_estaba:
         # No lo escribió esta llamada, así que hay que ir a mirarlo.

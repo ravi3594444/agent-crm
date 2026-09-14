@@ -602,6 +602,62 @@ def test_un_erpnext_que_no_contesta_deja_el_pedido_en_ESTADO_INCIERTO(
     assert cancelado["emitido"] is False
 
 
+def test_un_aviso_que_falla_no_informa_que_la_confirmacion_fallo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Después del Submit no se puede contestar «falló»: el pedido YA está emitido.
+
+    Para cuando `anunciar` empieza, el Submit commiteó y eso no se deshace. Si
+    algo de ahí adentro levantara, la excepción subiría por
+    `decisiones.confirmar`, el panel la convertiría en 502 y WhatsApp en su
+    error técnico genérico — y el encargado leería «no se pudo» sobre una venta
+    que sí se cerró. Vuelve a confirmarla, o la da por perdida: las dos están
+    mal, y la segunda le cuesta el pedido.
+
+    Cada pieza del anuncio ya absorbe su propio fallo (`add_comment` atrapa
+    `ERPNextError` y loguea, `confirmacion.registrar` atrapa y devuelve False),
+    así que esto es el PISO, no el mecanismo: cubre lo que ninguna prometió —un
+    error que no sea `ERPNextError`, que es lo único que envuelve el cliente, o
+    un fallo en `_notificar_confirmada`—. Se usa un `RuntimeError` justamente
+    porque no es de los que alguien ya atrapa.
+
+    Las DOS mitades, y la segunda es la que impide que el piso se coma todo:
+    que `ok` siga siendo True Y que el texto DIGA que los avisos no salieron.
+    Un `except` que contestara el mensaje de éxito normal cumpliría la primera y
+    dejaría al encargado creyendo que al cliente se le avisó.
+
+    Mutación dirigida: cambiar el `return` del `except` de `anunciar` por un
+    `raise`. Mata a este test y a ninguno otro.
+    """
+    from app import solicitudes
+
+    pedido = "SAL-ORD-AVISO-ROTO-1"
+    submit = Mock()
+    monkeypatch.setattr(solicitudes, "leer_estricto", lambda nombre: None)
+    monkeypatch.setattr(
+        aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 0}
+    )
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
+    monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
+    monkeypatch.setattr(decisiones, "cerrar_revision_si_hay", lambda *a, **k: None)
+
+    def revienta(*args, **kwargs):
+        raise RuntimeError("Meta no contesta de una forma que nadie previó")
+
+    monkeypatch.setattr(aprobacion, "_notificar_confirmada", revienta)
+
+    resultado = decisiones.confirmar(
+        pedido, "5493511111111", canal=decisiones.CANAL_WHATSAPP
+    )
+
+    submit.assert_called_once()
+    assert resultado["ok"] is True
+    assert resultado["emitido"] is True
+    assert resultado["aviso_cliente"] is False
+    assert "avisos" in resultado["detalle"]
+
+
 def test_el_rastro_en_erpnext_nombra_el_canal_por_el_que_se_confirmo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
