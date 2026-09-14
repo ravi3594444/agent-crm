@@ -73,8 +73,17 @@ def distributed_lock(
         if acquired:
             try:
                 lock.release()
-            except (RedisError, LockError):
-                # The operation has already ended.  A lost/expired lease is
-                # logged by callers and must never turn a known order into an
-                # unknown customer-facing result.
-                pass
+            except (RedisError, LockError) as exc:
+                # SE LOGUEA ACÁ, que es el único lugar donde se puede.
+                # Decía «a lost/expired lease is logged by callers» y era
+                # falso: ningún llamador lo logueaba y ninguno PODÍA —este
+                # `contextmanager` hace `yield None` y nunca expone el lock, ni
+                # `owned()`, ni el token—, así que un lease vencido en mitad de
+                # una sección crítica era un evento que no dejaba rastro en
+                # ninguna parte. Con `LockNotOwnedError` la sección que acaba de
+                # terminar corrió SIN exclusión mutua un rato: no se puede
+                # deshacer desde acá, pero tiene que poder verse.
+                #
+                # Sigue sin levantar: un lease perdido no puede convertir un
+                # pedido conocido en un resultado incierto para el cliente.
+                print(f"[locks] {name}: el lease no estaba al soltarlo ({type(exc).__name__})")

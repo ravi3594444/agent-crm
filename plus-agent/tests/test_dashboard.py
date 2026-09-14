@@ -166,48 +166,96 @@ class DashboardIdentityTest(unittest.TestCase):
             self.assertFalse(dashboard.puede_decidir(None))
             self.assertFalse(dashboard.puede_decidir("5493510009999"))
 
-    def test_one_token_per_person_and_a_second_one_is_refused(self):
-        """Un teléfono, un token. El segundo no entra.
+    def test_two_tokens_for_one_person_leave_that_person_with_none(self):
+        """Un teléfono repetido tumba TODAS sus entradas, no sólo la segunda.
 
-        La versión anterior afirmaba que dos tokens de la misma persona daban la
-        MISMA identidad, y esa mitad sigue valiendo y sigue afirmada: el teléfono
-        se normaliza, así que `+54 9 351 000 0001` y `005493510000001` son la
-        misma persona y no dos. Lo que estaba mal era la conclusión — que los DOS
-        sirvieran.
+        ESTO INVIERTE LO QUE ESTE TEST AFIRMABA ANTES, que era que el primero
+        siguiera entrando para no romperle el acceso a quien ya lo tenía. Era una
+        decisión deliberada y estaba equivocada, porque lo único que un token por
+        persona compra es poder revocarlo, y revocar es sacar una línea del
+        `.env`. Con dos líneas y el primero válido, las dos son indistinguibles
+        en el archivo: el dueño saca una, cree que cortó el acceso, y la otra
+        sigue confirmando pedidos; saca la otra y ASCIENDE un token que hasta ese
+        momento no hacía nada. Aceptar la primera y aceptar las dos le dan al
+        dueño EL MISMO resultado para cualquier línea que borre, así que la
+        versión vieja no protegía nada — sólo bajaba el número de credenciales
+        vivas, que es otro objetivo y menor.
 
-        Revocar el acceso de alguien es sacar su línea del `.env`. Con dos
-        tokens, el dueño saca una, cree que le cortó el acceso, y la otra sigue
-        entrando y sigue pudiendo confirmar pedidos. `configurar_dashboard.py` ya
-        rechazaba emitir el segundo; el panel lo aceptaba igual si la
-        configuración venía editada a mano o de antes, que es el único caso en el
-        que esto pasa de verdad. Hallazgo 3 de la review de #45.
+        Fallar cerrado cuesta poco acá y por razones que hay que nombrar, porque
+        en otro sistema no valdrían: el panel no es la única puerta para
+        confirmar (el botón de WhatsApp no mira `DASHBOARD_TOKENS`), y
+        `configurar_dashboard.py` se niega a emitir el segundo, así que para
+        llegar a este estado hay que haber editado el `.env` a mano.
 
-        Las dos mitades: que el primero SIGA entrando (rechazar los dos sería
-        romperle el acceso al que ya lo tenía) y que el segundo NO.
+        La mitad que NO cambia y sigue afirmada acá: el teléfono se normaliza,
+        así que `+54 9 351 000 0001` y `005493510000001` son una persona y no
+        dos — sin eso no habría duplicado que detectar.
         """
         otro = "second-token-for-the-same-person-32-plus"
         env = {"DASHBOARD_TOKENS": f"{PERSONAL}:+54 9 351 000 0001,{otro}:005493510000001"}
         with patch.dict(os.environ, env):
-            self.assertEqual(dashboard.quien("Bearer " + PERSONAL), STAFF_CANONICAL)
+            self.assertIsNone(dashboard.quien("Bearer " + PERSONAL))
             self.assertIsNone(dashboard.quien("Bearer " + otro))
 
-    def test_the_refusal_of_a_second_token_says_why_without_printing_it(self):
-        """El motivo llega a `readiness`, y no lleva el token adentro.
+    def test_one_token_written_twice_never_resolves_to_the_first_phone(self):
+        """El MISMO token en dos entradas con teléfonos distintos no es nadie.
 
-        Un descarte mudo es la forma en que el dueño pega un token en el `.env`,
-        no entra, y no tiene dónde enterarse. Y el motivo se lee en la salida del
-        preflight, que es exactamente lo que una persona pega en un chat: por eso
-        nombra la ENTRADA y no el token.
+        Es el duplicado que menos se veía y el que más caro sale. El token
+        repetido se comprobaba ANTES que el teléfono, así que las dos entradas
+        caían en esa rama y el token se quedaba resolviendo al PRIMER teléfono.
+        O sea: a alguien se le da ese token para que mire, y entra con la
+        identidad de la otra persona — y si esa otra está en `TELEFONOS_EQUIPO`,
+        con el derecho a confirmar pedidos, que es lo único que el panel puede
+        hacer que mueva plata.
+
+        No alcanza con comprobar que el token no entra: hay que comprobar que no
+        entra COMO EL PRIMERO, que es la escalada.
+        """
+        env = {"DASHBOARD_TOKENS": f"{PERSONAL}:+54 9 351 000 0001,{PERSONAL}:5493519998888"}
+        with patch.dict(os.environ, env):
+            self.assertIsNone(dashboard.quien("Bearer " + PERSONAL))
+            self.assertNotEqual(dashboard.quien("Bearer " + PERSONAL), STAFF_CANONICAL)
+
+    def test_the_refusal_of_every_duplicate_says_why_without_printing_it(self):
+        """Un motivo POR ENTRADA caída, y ninguno lleva el token adentro.
+
+        Dos motivos, no uno: las dos entradas se rechazan, así que las dos
+        tienen que poder nombrarse. Con un solo motivo el dueño borra la que el
+        mensaje nombra y sigue sin panel, sin saber por qué.
+
+        Y el motivo se lee en la salida del preflight, que es exactamente lo que
+        una persona pega en un chat cuando algo no anda: por eso nombra la
+        ENTRADA y nunca el token.
         """
         otro = "second-token-for-the-same-person-32-plus"
         _, problemas = dashboard.entradas_de_tokens(
             f"{PERSONAL}:+54 9 351 000 0001,{otro}:005493510000001"
         )
 
-        self.assertEqual(len(problemas), 1)
-        self.assertIn("entrada 2", problemas[0])
-        self.assertNotIn(otro, problemas[0])
-        self.assertNotIn(PERSONAL, problemas[0])
+        self.assertEqual(len(problemas), 2)
+        self.assertIn("entrada 1", problemas[0])
+        self.assertIn("entrada 2", problemas[1])
+        for motivo in problemas:
+            self.assertNotIn(otro, motivo)
+            self.assertNotIn(PERSONAL, motivo)
+
+    def test_a_good_entry_still_enters_when_another_one_is_a_duplicate(self):
+        """Fallar cerrado es por TELÉFONO, no por archivo.
+
+        La otra mitad de la de arriba, y la que impide que el arreglo se pase de
+        largo: una entrada repetida tumba a sus gemelas y a nadie más. Sin esto,
+        «rechazá el duplicado» podía escribirse como «rechazá el archivo entero»
+        y dejar sin panel a todo el equipo por una línea mal pegada de otro.
+        """
+        otro = "second-token-for-the-same-person-32-plus"
+        tercero = "a-token-for-somebody-else-entirely-32-plus"
+        env = {"DASHBOARD_TOKENS": (
+            f"{PERSONAL}:+54 9 351 000 0001,{otro}:005493510000001,"
+            f"{tercero}:5493519998888"
+        )}
+        with patch.dict(os.environ, env):
+            self.assertEqual(dashboard.quien("Bearer " + tercero), "5493519998888")
+            self.assertIsNone(dashboard.quien("Bearer " + PERSONAL))
 
     def test_a_shared_token_with_spaces_around_it_still_authenticates(self):
         """El token compartido se compara con la MISMA regla en los dos lados.
