@@ -136,8 +136,17 @@ def test_unauthorized_phone_cannot_confirm_reject_or_read(
 def test_manual_confirmation_uses_the_policy_credential_not_the_agent_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Submitting is only ever erpnext.submit_doc, which is the policy client."""
-    monkeypatch.setattr(aprobacion, "es_equipo", lambda phone: True)
+    """Submitting is only ever erpnext.submit_doc, which is the policy client.
+
+    LO QUE ESTE TEST NO PRUEBA, dicho acá porque parecía que sí: `decisiones.
+    confirmar` **no verifica a nadie**. Acá había un `monkeypatch` de
+    `aprobacion.es_equipo` a True que este camino NUNCA consulta — el test
+    pasaba idéntico con la función devolviendo False—, así que se leía como
+    cobertura de autorización y no lo era. Se sacó. `es_equipo` se comprueba en
+    `aprobacion.manejar_boton`, que es hoy el único llamador; el día que haya un
+    segundo (un endpoint del panel), la autorización tiene que bajar acá adentro
+    y ESE test va a ser otro.
+    """
     monkeypatch.setattr(
         aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 0}
     )

@@ -58,6 +58,18 @@ _checkpointer = RedisSaver(
 )
 _checkpointer.setup()
 
+
+def checkpointer():
+    """El checkpointer, para quien necesite LEER un hilo sin correr el grafo.
+
+    Lo usa el panel para mostrarle al dueño la conversación de un cliente. Se
+    expone como función y no como el global a secas para que el que lee tenga
+    que pedirlo —y para que este módulo siga siendo el único que lo construye:
+    un segundo `RedisSaver` con otra configuración de TTL sería un segundo
+    dueño del mismo dato.
+    """
+    return _checkpointer
+
 # Cheap+fast for the high-volume customer bot; stronger model for analysis.
 # One provider, chosen explicitly with LLM_PROVIDER (app/modelos.py). Missing
 # configuration raises here, at import: there is deliberately no fallback.

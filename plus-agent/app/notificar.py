@@ -312,9 +312,22 @@ def direccion_de_entrega(so: dict) -> str:
 
 
 def texto_confirmacion(
-    so: dict, fuente: str, momento: str | None = None, lengua: str | None = None
+    so: dict,
+    fuente: str,
+    momento: str | None = None,
+    lengua: str | None = None,
+    *,
+    ventana: bool = True,
 ) -> str:
-    """What the manager reads: every field the client asked for, in order."""
+    """What the manager reads: every field the client asked for, in order.
+
+    `ventana` es si la cancelación por WhatsApp está DISPONIBLE, y decide la
+    última línea. La abre la marca durable de `confirmacion.registrar`, que
+    puede fallar sola —el pedido queda confirmado igual—, y hasta ahora el
+    mensaje la prometía siempre. El default es True porque los caminos que no
+    saben nada de la marca no cambian de comportamiento; el que sí sabe la
+    pasa.
+    """
     direccion = _direccion_de_entrega(so)
     entrega_txt = " — ".join(
         parte for parte in (direccion, str(so.get("delivery_date") or "")) if parte
@@ -326,7 +339,7 @@ def texto_confirmacion(
 
     lengua_final = lengua if lengua is not None else _lengua_equipo()
     return idioma_mod.t(
-        "gerencia.confirmado_detalle",
+        "gerencia.confirmado_detalle" if ventana else "gerencia.confirmado_sin_ventana",
         lengua_final,
         pedido=so.get("name"),
         cliente=so.get("customer_name") or so.get("customer") or "Cliente",
@@ -355,7 +368,7 @@ def _fuente(fuente: str, lengua: str | None = None) -> str:
     return idioma_mod.t(fuente, lengua) if fuente in idioma_mod.CATALOGO else fuente
 
 
-def notificar_confirmacion(so: dict, fuente: str) -> bool:
+def notificar_confirmacion(so: dict, fuente: str, *, ventana: bool = True) -> bool:
     """Tell the human manager an order is confirmed — exactly once per order.
 
     ``fuente`` is a catalogue key: ``gerencia.fuente_automatica``,
@@ -374,7 +387,7 @@ def notificar_confirmacion(so: dict, fuente: str) -> bool:
         print(f"[staff-notify] {nombre}: claim no disponible ({type(exc).__name__})")
 
     momento = _momento_negocio()
-    texto = texto_confirmacion(so, fuente, momento)
+    texto = texto_confirmacion(so, fuente, momento, ventana=ventana)
     plantilla = os.getenv("WHATSAPP_STAFF_CONFIRMED_TEMPLATE", "").strip()
     locale_plantilla = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"
     # LA CLAVE SE RESUELVE EN LAS TRES SALIDAS, no sólo en el texto libre.

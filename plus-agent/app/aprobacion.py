@@ -200,6 +200,13 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
     Returns {"ok", "aviso_cliente", "detalle"} — `detalle` is the text shown to
     the manager.
     """
+    # La ventana de anulación por WhatsApp la abre la marca durable, y el
+    # default NO puede ser «sí»: por la rama de `ya_confirmado` no se pasa por
+    # `registrar`, así que un segundo toque después de que la marca falló —o un
+    # pedido confirmado a mano en ERPNext— informaba una anulación disponible
+    # que el camino de cancelación después rechaza. Se comprueba, y `momento`
+    # devuelve None para «no se puede probar»: eso es fallar cerrado.
+    ventana = False
     try:
         actual = _leer_doc("Sales Order", nombre)
         ya_confirmado = actual.get("docstatus") == 1
@@ -240,7 +247,16 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
             )
             # Durable record of WHEN, in ERPNext: it opens the manual
             # cancellation window and survives any Redis restart.
-            confirmacion.registrar(nombre, f"manual (confirmación humana, {por})")
+            #
+            # EL BOOLEANO SE MIRA. `registrar` atrapa su propia excepción,
+            # imprime y devuelve False (app/confirmacion.py), así que un fallo
+            # NO llega al `except` de abajo: el pedido quedaba confirmado, la
+            # ventana de cancelación no existía, y al encargado se le mandaba
+            # igual «para anularlo dentro de las 24 h: cancelar …». Se le
+            # prometía algo que el sistema iba a rechazar.
+            ventana = confirmacion.registrar(
+                nombre, f"manual (confirmación humana, {por})"
+            )
     except erpnext.ERPNextError as error:
         print(f"[approval] {nombre}: {type(error).__name__}")
         return {
@@ -253,11 +269,22 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
 
     # Stage 2e: the manager team gets ONE confirmed-order notice per order, no
     # matter which path confirmed it or how many times the button is tapped.
-    _notificar_confirmada(nombre, actual)
+    if ya_confirmado:
+        # No lo escribió esta llamada, así que hay que ir a mirarlo.
+        ventana = confirmacion.momento(nombre) is not None
+    _notificar_confirmada(nombre, actual, ventana=ventana)
 
     prefix = "ℹ️ Ya estaba confirmado." if ya_confirmado else f"✅ {nombre} confirmado."
     estado_aviso = _encolar_confirmacion(nombre, actual)
-    return {"ok": True, "aviso_cliente": estado_aviso[0], "detalle": f"{prefix} {estado_aviso[1]}"}
+    detalle = f"{prefix} {estado_aviso[1]}"
+    if not ventana:
+        # Lo que el encargado tiene delante en el acto, no sólo el aviso
+        # durable: si toca «cancelar» creyendo que puede, pierde el tiempo.
+        detalle += (
+            " No pude dejar el registro de la confirmación: la anulación por "
+            "WhatsApp no está disponible, hacelo en ERPNext si hace falta."
+        )
+    return {"ok": True, "aviso_cliente": estado_aviso[0], "detalle": detalle}
 
 
 def _encolar_confirmacion(nombre: str, conocido: dict) -> tuple[bool, str]:
@@ -284,7 +311,7 @@ def _encolar_confirmacion(nombre: str, conocido: dict) -> tuple[bool, str]:
     return True, "El cliente ya tenía su confirmación; no le mando otra."
 
 
-def _notificar_confirmada(nombre: str, conocido: dict) -> None:
+def _notificar_confirmada(nombre: str, conocido: dict, *, ventana: bool = True) -> None:
     """Never raises: a notice problem must not change what the manager is told."""
     try:
         try:
@@ -294,6 +321,8 @@ def _notificar_confirmada(nombre: str, conocido: dict) -> None:
         # La CLAVE, no el texto: el mensaje se arma en el idioma del dueño. El
         # registro durable de más arriba sigue guardando su español, que es lo
         # que ya está escrito en los ERPNext de los despliegues.
-        notificar.notificar_confirmacion(completo, "gerencia.fuente_manual")
+        notificar.notificar_confirmacion(
+            completo, "gerencia.fuente_manual", ventana=ventana
+        )
     except Exception as exc:
         print(f"[approval] {nombre}: aviso de confirmación falló ({type(exc).__name__})")
