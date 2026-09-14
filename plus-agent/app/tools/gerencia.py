@@ -335,6 +335,12 @@ def ficha_cliente(
         filters=[["customer", "=", c["name"]], ["docstatus", "=", 1]],
         fields=["name", "transaction_date", "grand_total", "status"],
         limit=10,
+        # Mismo motivo que en `pedido_habitual` (app/tools/catalogo.py): sin
+        # esto, «Últimos pedidos» eran los diez últimos MODIFICADOS, porque es
+        # como ordena Frappe cuando nadie le dice otra cosa. Acá el efecto es
+        # peor que allá: la respuesta imprime la fecha de cada uno, así que el
+        # dueño leía una lista fechada que no estaba ordenada por fecha.
+        order_by="transaction_date desc, creation desc",
     )
     hist = "\n".join(
         f"  · {s['transaction_date']} {s['name']} {pesos(s['grand_total'])} ({s['status']})"

@@ -395,6 +395,53 @@ def _erpnext_con_un_cliente(monkeypatch: pytest.MonkeyPatch) -> list[list]:
     return vistos
 
 
+def test_ficha_cliente_lista_los_pedidos_por_FECHA_no_por_ultima_modificacion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """«Últimos pedidos» eran los últimos MODIFICADOS: Frappe ordena por
+    `modified desc` cuando nadie le pide otra cosa, y a un pedido viejo lo toca
+    cualquier cosa meses después. Acá el efecto es peor que en
+    `pedido_habitual`, porque la respuesta IMPRIME la fecha de cada uno: el
+    dueño leía una lista fechada que no estaba ordenada por fecha.
+
+    El doble ORDENA con el `order_by` que recibe. Si devolviera las filas en el
+    orden en que están escritas acá, el assert no podría estar en desacuerdo con
+    el código, y el bug seguiría invisible.
+    """
+    from app.tools.gerencia import ficha_cliente
+
+    pedidos = [
+        {"name": "SO-VIEJO", "transaction_date": "2026-01-10", "creation": "2026-01-10",
+         "modified": "2026-09-13", "grand_total": 1000.0, "status": "To Deliver"},
+        {"name": "SO-NUEVO", "transaction_date": "2026-09-01", "creation": "2026-09-01",
+         "modified": "2026-09-01", "grand_total": 2000.0, "status": "Completed"},
+    ]
+
+    def get_list(doctype, filters=None, fields=None, limit=None, **kw):
+        if doctype == "Customer":
+            for campo, operador, valor in filters or []:
+                if campo == "name" and operador == "=" and valor == _FICHA["name"]:
+                    return [dict(_FICHA)]
+            return []
+        if doctype != "Sales Order":
+            return []
+        campo, _, sentido = (kw.get("order_by") or "modified desc").split(",")[0].partition(" ")
+        return sorted(pedidos, key=lambda f: f[campo], reverse=sentido.strip() == "desc")
+
+    from app import router, telefono
+
+    monkeypatch.setattr(router, "STAFF", [telefono.normalizar(_GERENTE)])
+    monkeypatch.setattr(erpnext, "get_list", get_list)
+
+    salida = ficha_cliente.invoke(
+        {"nombre_o_codigo": "CUST-0009"}, config=_config_gerencia()
+    )
+
+    # Los dos están, y el nuevo va PRIMERO. Afirmar sólo que aparecen dejaría
+    # sin probar la mitad que importa, que es el orden.
+    assert salida.index("SO-NUEVO") < salida.index("SO-VIEJO"), salida
+
+
 def test_ficha_cliente_encuentra_por_codigo_exacto(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.tools.gerencia import ficha_cliente
 
