@@ -2136,7 +2136,7 @@ def test_a_decision_that_lands_DURING_the_checks_stops_the_submit(
     """
     from app import policy
 
-    _, solicitud = _respaldo(mundo, monkeypatch)
+    _respaldo(mundo, monkeypatch)
     original = mundo["decision"]
 
     def decide_otro(sales_order, *, entrega_acordada=False):
