@@ -734,3 +734,44 @@ def avisar_escalamiento(
         urgencia=URGENCIA_ALTA,
         plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE",
     )
+
+
+def pedir_visto_bueno_de_envio(
+    telefono: str,
+    id_salida: str,
+    cliente: str,
+    telefono_cliente: str,
+    texto: str,
+) -> bool:
+    """Mostrarle al que lo pidió el mensaje EXACTO, con un botón para mandarlo.
+
+    Está por definición dentro de la ventana de 24 h —acaba de escribir para
+    pedirlo— así que un interactivo libre alcanza y no hace falta plantilla.
+
+    El texto va completo y entre comillas: lo que aprueba tiene que ser
+    exactamente lo que va a salir. Un resumen sería aprobar otra cosa.
+
+    Nunca levanta. Si el botón no sale, el que llama tiene que decirlo y NO
+    dejar la salida esperando: un mensaje guardado que nadie puede aprobar es
+    un mensaje que vence solo y nunca llega.
+    """
+    from app import idioma as idioma_mod
+    from app import whatsapp
+
+    lengua = _lengua_equipo()
+    try:
+        whatsapp.enviar_botones(
+            telefono,
+            idioma_mod.t(
+                "salida.pedir_visto_bueno", lengua,
+                cliente=cliente, telefono=telefono_cliente, texto=texto,
+            ),
+            [
+                {"id": f"mandar:{id_salida}", "title": _boton("boton.mandar", lengua)},
+                {"id": f"nomandar:{id_salida}", "title": _boton("boton.no_mandar", lengua)},
+            ],
+        )
+        return True
+    except Exception as exc:
+        print(f"[staff-notify] visto bueno de envío falló ({type(exc).__name__})")
+        return False

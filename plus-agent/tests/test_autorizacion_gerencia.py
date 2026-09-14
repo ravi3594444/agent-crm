@@ -60,7 +60,7 @@ ARGUMENTOS: dict[str, dict] = {
     },
     "contar_stock": {"item_code": "LECHE-ENT-1L", "cantidad_real": 12},
     "confirmar_entrega": {"numero_pedido": "SAL-ORD-2026-00001"},
-    "redactar_mensaje_cliente": {"cliente": "Don José", "intencion": "llegó el queso"},
+    "avisar_al_cliente": {"cliente": "Don José", "mensaje": "Llegó el queso cremoso."},
     "ver_ajustes": {"que": "limites"},
     "proponer_limite": {"limite": "tope", "valor": "50000"},
     "estado_del_sistema": {},

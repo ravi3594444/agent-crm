@@ -1299,6 +1299,103 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "Confirmar conteo",
         EN: "Confirm count",
     },
+    # Los dos del mensaje al cliente. «Mandarlo»/«No mandarlo» y no
+    # «Sí»/«No»: el botón se ve solo, sin la pregunta, cuando llega una
+    # notificación al celular.
+    "boton.mandar": {ES: "Mandarlo", EN: "Send it"},
+    "boton.no_mandar": {ES: "No mandarlo", EN: "Do not send"},
+    # La negativa GENÉRICA de una herramienta de gerencia. Hasta acá era sólo
+    # la constante `runtime_context.SIN_PERMISO`, en castellano y sin gemelo en
+    # inglés: el dueño que habla inglés recibía su única negativa en castellano.
+    # El ES de acá tiene que seguir siendo igual a esa constante, y hay un test
+    # que lo afirma — son dos literales en dos archivos distintos, así que
+    # cambiar uno no mueve al otro y el assert sirve de verdad.
+    "permiso.sin_autorizacion": {
+        ES: "Ese número no está autorizado para esto. No consulté ni cambié nada.",
+        EN: "That number is not authorized for this. I checked nothing and "
+            "changed nothing.",
+    },
+    # La negativa GENÉRICA de una herramienta de gerencia. Hasta acá era sólo
+    # la constante `runtime_context.SIN_PERMISO`, en castellano y sin gemelo en
+    # inglés: el dueño que habla inglés recibía su única negativa en castellano.
+    # El ES de acá tiene que seguir siendo igual a esa constante, y hay un test
+    # que lo afirma — son dos literales en dos archivos distintos, así que
+    # cambiar uno no mueve al otro y el assert sirve de verdad.
+    "permiso.sin_autorizacion": {
+        ES: "Ese número no está autorizado para esto. No consulté ni cambié nada.",
+        EN: "That number is not authorized for this. I checked nothing and "
+            "changed nothing.",
+    },
+    # ------------------------------------------------ mensajes a un cliente
+    # Lo que el dueño ve antes de aprobar. El texto va ENTRE COMILLAS y
+    # completo: lo que aprueba es exactamente lo que va a salir, y si se
+    # resumiera estaría aprobando otra cosa.
+    "salida.pedir_visto_bueno": {
+        ES: "Para {cliente} ({telefono}):\n\n«{texto}»\n\n¿Se lo mando?",
+        EN: "To {cliente} ({telefono}):\n\n\u201c{texto}\u201d\n\nShall I send it?",
+    },
+    "salida.mandado": {
+        ES: "Listo, se lo mandé a {cliente}.",
+        EN: "Done, I sent it to {cliente}.",
+    },
+    "salida.descartado": {
+        ES: "Listo, no se lo mando.",
+        EN: "Fine, I will not send it.",
+    },
+    # Venció o ya se usó. NO se distinguen los dos casos a propósito: el
+    # remedio del dueño es el mismo —pedirlo de nuevo— y decirle «ya se mandó»
+    # cuando en realidad venció sería decirle que el cliente fue avisado.
+    "salida.ya_no_esta": {
+        ES: "Ese mensaje ya no está para mandar: o salió, o pasó más de una "
+            "hora. Pedímelo de nuevo si querés.",
+        EN: "That message is no longer waiting: it either went out or it is "
+            "over an hour old. Ask me again if you still want it.",
+    },
+    "salida.sin_telefono": {
+        ES: "{cliente} no tiene teléfono cargado en el sistema, así que no le "
+            "puedo escribir. Cargáselo en ERPNext y volvé a pedírmelo.",
+        EN: "{cliente} has no phone number on file, so I cannot write to them. "
+            "Add it in ERPNext and ask me again.",
+    },
+    # La ventana de 24 h de Meta. Se le explica en sus términos —«hace más de
+    # un día que no te escribe»— y no con la palabra «ventana», que no
+    # significa nada para él.
+    "salida.fuera_de_ventana": {
+        ES: "Hace más de un día que {cliente} no te escribe, y WhatsApp no deja "
+            "escribirle primero salvo con un mensaje ya aprobado por Meta, que "
+            "para esto no hay. Te queda escribirle vos desde tu WhatsApp.",
+        EN: "{cliente} has not written to you in over a day, and WhatsApp only "
+            "allows starting a conversation with a message Meta approved in "
+            "advance, and there is none for this. You would have to write from "
+            "your own WhatsApp.",
+    },
+    "salida.no_encontre": {
+        ES: "No encontré a «{quien}» en el sistema.",
+        EN: "I could not find \u201c{quien}\u201d in the system.",
+    },
+    # Lo que la herramienta le devuelve AL MODELO. Dice explícitamente que no
+    # salió nada, porque el fallo natural del modelo acá es contestarle al
+    # dueño «ya le avisé» cuando todavía no tocó el botón.
+    "salida.esperando_visto_bueno": {
+        ES: "Le mandé el mensaje al dueño con un botón para aprobarlo. TODAVÍA "
+            "NO SALIÓ: no digas que el cliente fue avisado. Decile en una línea "
+            "que se lo pasaste para que lo apruebe.",
+        EN: "I sent the owner the message with a button to approve it. IT HAS "
+            "NOT GONE OUT YET: do not say the customer was told. Say in one "
+            "line that you passed it to them to approve.",
+    },
+    "salida.no_pude_pedir": {
+        ES: "No pude mandarle el mensaje al dueño para que lo apruebe, así que "
+            "no quedó nada pendiente. Decíselo y que le escriba él.",
+        EN: "I could not send the owner the message to approve, so nothing is "
+            "pending. Tell them, and that they should write to the customer.",
+    },
+    "salida.no_salio": {
+        ES: "Aprobaste el mensaje pero no lo pude poner en la cola de salida, "
+            "así que NO salió. Escribíle vos.",
+        EN: "You approved the message but I could not queue it, so it did NOT "
+            "go out. Write to them yourself.",
+    },
     # Qué le falta a unos términos para ser una oferta. Son las piezas de una
     # frase («de eso falta qué día y a qué hora»), así que son prosa: antes
     # viajaban como literales adentro de `TERMINOS_DE_UNA_OFERTA`.

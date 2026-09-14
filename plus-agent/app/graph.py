@@ -24,9 +24,9 @@ from app.conversacion import (
     texto_plano,
 )
 from app.tools.captura import (
+    avisar_al_cliente,
     confirmar_entrega,
     contar_stock,
-    redactar_mensaje_cliente,
     registrar_venta_offline,
 )
 from app.tools.catalogo import (
@@ -97,7 +97,9 @@ TOOLS_GERENCIA = [
     escalar_a_humano,
     # offline capture — how reality gets back into the system
     registrar_venta_offline, contar_stock, confirmar_entrega,
-    redactar_mensaje_cliente,
+    # ...y el mensaje al cliente, que ahora SALE —con el botón del dueño— en
+    # vez de devolver un borrador con un hueco para copiar a mano.
+    avisar_al_cliente,
     # the owner's own limits: read them out and PROPOSE a change. There is no
     # tool that confirms one, deliberately — the four-digit code never enters
     # this agent's context and the deterministic router in app/main.py is what
