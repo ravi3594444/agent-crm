@@ -754,6 +754,118 @@ def test_una_herramienta_que_si_existe_pasa_como_siempre() -> None:
     )
 
 
+# ------------------- un valor de enum equivocado no es una herramienta rota
+# Desde que cinco informes son `informe(que=…)` y tres lecturas de ajustes son
+# `ver_ajustes(que=…)`, hay una falla que antes no existía: el modelo elige bien
+# la herramienta y escribe mal el valor. Y es la falla PROBABLE, no una rara —
+# el `Literal` no lo garantiza nadie en la red (Gemini ignora `strict` en su
+# capa compatible con OpenAI), y con herramientas en castellano la falla medida
+# más común es que el modelo escriba el valor en el idioma del usuario:
+# `que="ventas del día"` en vez de `que="ventas"` (arXiv:2601.05366).
+#
+# Sin manejo propio eso caía en `_ERROR_MSG`, que manda a escalar_a_humano: el
+# dueño preguntaba «¿cómo venimos?» y quedaba esperando a una persona por un
+# guión bajo.
+
+
+# NO se arma un ValidationError a mano. La excepción que se le pasa al
+# manejador es la que LEVANTÓ la herramienta de verdad, con un valor de verdad:
+# un doble construido acá derivaría de lo que este archivo supone sobre
+# pydantic, y entonces el assert de al lado no podría estar en desacuerdo con
+# el código. Si una versión de pydantic cambia la forma de `errors()`, esto
+# falla en CI —que es el punto— en vez de seguir verde sobre una forma que ya
+# no existe.
+def _la_excepcion_de(herramienta, args: dict):
+    from pydantic import ValidationError
+
+    try:
+        # Sin config a propósito: la validación del esquema corre ANTES del
+        # cuerpo, así que ni siquiera llega a require_management. Que levante
+        # acá es justamente lo que se afirma.
+        herramienta.invoke(args)
+    except ValidationError as exc:
+        return exc
+    raise AssertionError(f"{herramienta.name} aceptó {args}: el Literal no valida")
+
+
+def test_un_valor_de_enum_equivocado_vuelve_con_los_valores_validos() -> None:
+    from app import graph
+
+    exc = _la_excepcion_de(
+        {t.name: t for t in graph.TOOLS_GERENCIA}["informe"],
+        # La falla medida más común con herramientas en castellano: el valor
+        # escrito en el idioma del usuario en vez del token del enum.
+        {"que": "ventas del día"},
+    )
+
+    mensaje = graph._error_de_herramienta(exc)
+
+    # Los cinco valores, para que el modelo pueda reintentar solo.
+    for valor in ("pendientes", "ventas", "stock_bajo", "cobranzas", "autonomia"):
+        assert valor in mensaje, mensaje
+    # Y NO la salida de emergencia: esto se arregla reintentando, no llamando a
+    # una persona. Ésta es la mitad que importa —«devolvió algo» pasaba también
+    # antes del arreglo, porque _ERROR_MSG también es algo—.
+    assert "escalar_a_humano" not in mensaje
+    assert mensaje != graph._ERROR_MSG
+    # El registro de herramientas sigue sin leerse en voz alta: los valores de
+    # UN parámetro de la herramienta que ya llamó no son el inventario.
+    for otra in ("proponer_limite", "contar_stock", "ver_ajustes", "buscar_producto"):
+        assert otra not in mensaje
+
+
+def test_la_otra_herramienta_colapsada_tambien_recupera_sus_valores() -> None:
+    """Dos consumidores del mismo manejador, así que se miran los dos: cablear
+    `informe` y olvidarse de `ver_ajustes` deja al dueño esperando a una persona
+    porque escribió «reglas de entrega» en vez de «entrega»."""
+    from app import graph
+
+    exc = _la_excepcion_de(
+        {t.name: t for t in graph.TOOLS_GERENCIA}["ver_ajustes"],
+        {"que": "reglas de entrega"},
+    )
+
+    mensaje = graph._error_de_herramienta(exc)
+
+    for valor in ("limites", "entrega", "historial"):
+        assert valor in mensaje, mensaje
+    assert mensaje != graph._ERROR_MSG
+
+
+def test_una_herramienta_que_falla_de_verdad_sigue_mandando_a_una_persona() -> None:
+    """La otra rama del mismo manejador, que es la que ya existía. Una excepción
+    que NO es de validación no puede volverse recuperable de rebote."""
+    from app import graph
+
+    assert graph._error_de_herramienta(RuntimeError("erpnext se cayó")) == (
+        graph._ERROR_MSG
+    )
+    # Y un ValidationError que no es de un enum tampoco inventa una lista.
+    from pydantic import BaseModel, ValidationError
+
+    class Pide(BaseModel):
+        cuantos: int
+
+    try:
+        Pide(cuantos="muchos")
+    except ValidationError as exc:
+        assert graph._error_de_herramienta(exc) == graph._ERROR_MSG
+
+
+def test_los_dos_agentes_tienen_instalado_el_manejador_que_deja_reintentar() -> None:
+    """El manejador que quedó instalado en cada agente COMPILADO, no el del
+    archivo. `_handle_tool_errors` es API interna de LangGraph, igual que el
+    `_validate_tool_call` de más abajo, y por el mismo motivo: si una versión la
+    mueve, esto explota en CI y alguien vuelve a mirar el cableado."""
+    from app import graph
+
+    for nombre in ("agente_clientes", "agente_gerencia"):
+        instalado = getattr(graph, nombre).nodes["tools"].bound
+        assert instalado._handle_tool_errors is graph._error_de_herramienta, (
+            f"{nombre}: quedó {instalado._handle_tool_errors!r}"
+        )
+
+
 def test_el_gancho_que_se_reemplaza_sigue_existiendo_en_langgraph() -> None:
     """Es un método privado de LangGraph. Si una versión le cambia el nombre, el
     override deja de correr y la lista vuelve a salir — así que la que falla es

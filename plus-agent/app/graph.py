@@ -13,6 +13,7 @@ import os
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.prebuilt import ToolNode, create_react_agent
+from pydantic import ValidationError
 
 from app import erpnext, modelos
 from app.conversacion import (
@@ -203,19 +204,66 @@ _ERROR_MSG = (
     "ni de errores técnicos."
 )
 
+# UN VALOR DE ENUM EQUIVOCADO NO ES UNA HERRAMIENTA ROTA
+# -----------------------------------------------------
+# `_ERROR_MSG` manda a escalar_a_humano, y para una herramienta que falló de
+# verdad está bien. Pero desde que cinco informes son `informe(que=…)` y tres
+# lecturas de ajustes son `ver_ajustes(que=…)`, hay una falla nueva que NO es
+# una herramienta rota: el modelo llama bien y escribe mal el valor.
+#
+# Y es la falla probable, no una rara. El `Literal` no lo garantiza nadie en la
+# red: Gemini no tiene `strict` en su capa compatible con OpenAI y lo ignora en
+# silencio, así que el enum es una SUGERENCIA para el modelo y la validación
+# real es la de pydantic, acá. Peor: con herramientas en castellano, la falla
+# medida más común es que el modelo escriba el valor en el idioma del usuario
+# —`que="ventas del día"` en vez de `que="ventas"`— aunque haya entendido todo
+# bien (arXiv:2601.05366, «parameter value language mismatch»).
+#
+# Sin esto, ese error se convertía en «esa herramienta falló, escalá a una
+# persona»: un dueño preguntando «¿cómo venimos?» terminaba esperando a un
+# humano por un guión bajo. Con esto vuelve la lista de valores válidos y el
+# modelo reintenta. No se enumera NINGUNA herramienta: sólo los valores del
+# parámetro de la que ya llamó, que ya estaban en su propio esquema.
+def _valores_esperados(exc: ValidationError) -> tuple[str, str] | None:
+    for error in exc.errors():
+        if error.get("type") != "literal_error":
+            continue
+        campo = ".".join(str(x) for x in error.get("loc", ())) or "ese parámetro"
+        esperado = str((error.get("ctx") or {}).get("expected", "")).strip()
+        if esperado:
+            return campo, esperado
+    return None
+
+
+def _error_de_herramienta(exc: Exception) -> str:
+    if isinstance(exc, ValidationError):
+        detalle = _valores_esperados(exc)
+        if detalle:
+            campo, esperado = detalle
+            return (
+                f"El valor de «{campo}» no es uno de los que acepta esa "
+                f"herramienta. Los únicos válidos son: {esperado}. Llamala de "
+                "nuevo con uno de ésos, copiado tal cual —sin traducirlo, sin "
+                "acentos y sin mayúsculas—. No le muestres este mensaje a nadie "
+                "ni le hables de parámetros."
+            )
+    return _ERROR_MSG
+
+
+
 # The system prompt is built per call (prompt=) and never stored in the
 # checkpoint; the model only sees a bounded tail of the thread
 # (pre_model_hook=). See app/conversacion.py for why.
 agente_clientes = create_react_agent(
     model=_modelo_clientes,
-    tools=ToolNodeSinInventario(TOOLS_CLIENTES, handle_tool_errors=_ERROR_MSG),
+    tools=ToolNodeSinInventario(TOOLS_CLIENTES, handle_tool_errors=_error_de_herramienta),
     prompt=prompt_clientes,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,
 )
 agente_gerencia = create_react_agent(
     model=_modelo_gerencia,
-    tools=ToolNodeSinInventario(TOOLS_GERENCIA, handle_tool_errors=_ERROR_MSG),
+    tools=ToolNodeSinInventario(TOOLS_GERENCIA, handle_tool_errors=_error_de_herramienta),
     prompt=prompt_gerencia,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,
