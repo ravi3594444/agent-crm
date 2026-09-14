@@ -457,7 +457,13 @@ def _evaluar(
         for (code, warehouse), qty in cantidades.items():
             # Is what ERPNext says about THIS product recent enough to promise?
             # A stock figure nobody has counted in three weeks is a guess.
-            fresco, sin_confianza = inventario.confiable(code, warehouse)
+            # El MISMO `ignorar_postura` que apartó la postura arriba. Sin
+            # esto el `inventario_habilitado = True` de la línea 285 era
+            # mentira: se entraba al bloque y se preguntaba a una función que
+            # volvía a mirar el interruptor.
+            fresco, sin_confianza = inventario.confiable(
+                code, warehouse, ignorar_postura=ignorar_postura
+            )
             if not fresco:
                 motivos.append(sin_confianza or f"stock de {code} sin verificar")
                 continue

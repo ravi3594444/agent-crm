@@ -220,6 +220,20 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
         estado["locks"].append(nombre)
         yield
 
+    # Los límites del dueño, anotados. `revalidar` los consulta cuando NADIE
+    # miró el pedido, así que sin un doble acá todo test de aceptación se caería
+    # con «auto-confirmación desactivada» (el tope arranca en 0). Anota el
+    # pedido que recibió —no un booleano— porque lo que un test necesita
+    # afirmar es QUE SE CONSULTÓ, y sobre cuál.
+    estado["evaluados"] = []
+
+    def evaluar(sales_order):
+        estado["evaluados"].append(str(sales_order.get("name") or ""))
+        return estado["decision"]
+
+    estado["decision"] = _policy.Decision(True, [])
+    monkeypatch.setattr(_policy, "evaluar", evaluar)
+
     monkeypatch.setattr("app.locks.distributed_lock", lock)
     monkeypatch.setattr(decisiones, "distributed_lock", lock)
     monkeypatch.setattr(decisiones, "es_equipo", lambda phone: phone == STAFF)
@@ -1973,6 +1987,73 @@ def test_the_fallback_confirms_nothing_before_the_customer_answers(
     assert mundo["submits"] == []
     assert mundo["aplicados"] == []
     assert solicitudes.leer(SO).estado == solicitudes.ESPERANDO_CLIENTE
+
+
+def test_a_fallback_nobody_looked_at_still_has_to_pass_the_owners_limits(
+    mundo, monkeypatch, lunes
+) -> None:
+    """El respaldo lo decide una REGLA, no una persona — y una regla no ve la plata.
+
+    Era una emisión automática con TODOS los límites del dueño salteados. La
+    cadena: la solicitud original venció sin que nadie contestara, el sistema
+    ofreció el respaldo que el dueño dejó configurado, el cliente aceptó, y acá
+    se emitía el pedido. `revalidar` comprobaba lo que CAMBIÓ desde la oferta
+    —stock, cantidades, total, descuento, fecha— y nada más: ni el tope, ni la
+    deuda vencida, ni el cliente nuevo, ni la cantidad por producto.
+
+    Lo mismo entraba por la otra puerta automática, la excepción de entrega
+    pre-autorizada: `app/excepciones.py` no importa `policy` ni `limites`, así
+    que lo único que miraba era que la excepción estuviera activa y el mínimo.
+    Un pedido de cualquier monto, de un cliente con cualquier deuda, pedía un
+    sábado y se emitía solo. **Pasaba incluso con `AUTO_CONFIRM_MAX=0`**, que es
+    exactamente el dueño diciendo «ningún pedido se emite sin mí».
+
+    Las DOS mitades: que se consulte —anotado en `evaluados`— y que un rechazo
+    FRENE de verdad. Afirmar sólo lo segundo lo cumpliría un código que nunca
+    emite; afirmar sólo lo primero, uno que consulta y tira la respuesta.
+    """
+    from app import policy
+
+    _respaldo(mundo, monkeypatch)
+    mundo["decision"] = policy.Decision(False, ["tiene $80.000 vencidos"])
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["evaluados"] == [SO]
+    assert mundo["submits"] == []
+    assert "necesito revisarlo con una persona" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_HUMANA
+
+
+def test_what_a_person_approved_is_not_re_judged_by_the_limits(
+    mundo, monkeypatch, lunes
+) -> None:
+    """Con una persona detrás, los límites NO se vuelven a correr. Ella decidió.
+
+    La otra mitad de la regla de arriba, y sin ella el arreglo se pasa de largo:
+    si se consultara siempre, un encargado que aprueba a mano una excepción por
+    encima del tope vería su propia decisión rechazada por el tope — y con
+    `AUTO_CONFIRM_MAX=0` la rama de aprobación humana dejaría de funcionar
+    entera, que es el único camino que hoy existe.
+
+    El encargado miró ESTE pedido; la regla del dueño autorizó una FORMA de
+    entrega. `lo_decidio_una_persona` es la única definición de esa diferencia.
+
+    Mutación dirigida: sacarle el `not` al `if not lo_decidio_una_persona(...)`
+    de `revalidar`. Mata a este test y deja verde al de arriba.
+    """
+    from app import policy
+
+    _, solicitud = _respaldo(mundo, monkeypatch)
+    # El mismo respaldo, pero firmado por una persona.
+    solicitudes.registrar(solicitud, "aprobada", decidida_por=STAFF)
+    mundo["decision"] = policy.Decision(False, ["tiene $80.000 vencidos"])
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["evaluados"] == []
+    assert mundo["submits"] == [SO]
+    assert "quedó confirmado" in respuesta
 
 
 def test_stock_that_went_while_the_fallback_waited_stops_the_order(

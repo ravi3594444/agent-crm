@@ -963,6 +963,12 @@ def pedir_excepcion_de_entrega(
             "preautorizada",
             estado=solicitudes.ESPERANDO_CLIENTE,
             decision="preautorizada",
+            # QUIÉN decidió, y acá no fue nadie. Se dejaba vacío, así que el
+            # rastro del pedido decía «preautorizada por » y nada más, y el
+            # predicado que distingue una decisión humana de una regla tenía que
+            # apoyarse en un string vacío. Es la misma firma que usa el respaldo
+            # de una solicitud vencida (`solicitudes.DECIDE_EL_SISTEMA`).
+            decidida_por=solicitudes.DECIDE_EL_SISTEMA,
             ofrecido=evaluacion.oferta.como_dict(),
             motivo="condiciones que el dueño dejó autorizadas",
         )

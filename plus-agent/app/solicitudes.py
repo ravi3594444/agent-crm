@@ -165,6 +165,23 @@ RETIRO = "retiro"
 RESPALDO = "respaldo_automatico"
 DECIDE_EL_SISTEMA = "el sistema (regla configurada por el dueño)"
 
+
+def lo_decidio_una_persona(solicitud: Solicitud) -> bool:
+    """¿Miró esto un ser humano, o lo resolvió una regla sola?
+
+    Son dos caminos automáticos y hasta ahora se marcaban distinto: la
+    pre-autorización de una excepción de entrega no escribía `decidida_por` en
+    absoluto (quedaba ""), y el respaldo de una solicitud vencida escribía
+    `DECIDE_EL_SISTEMA`. Un predicado en un solo lugar es lo que evita que la
+    respuesta dependa de por cuál de los dos se llegó.
+
+    Importa porque lo que una persona aprueba y lo que aprueba una regla NO
+    tienen el mismo alcance: el encargado miró ESTE pedido; la regla del dueño
+    autorizó una FORMA de entrega, sin mirar el monto, la deuda ni el cliente.
+    """
+    quien = str(solicitud.decidida_por or "").strip()
+    return bool(quien) and quien != DECIDE_EL_SISTEMA
+
 CLAVE_INDICE = "wa:{inbound}:solicitudes"
 CACHE_TTL_SEGUNDOS = 30 * 24 * 60 * 60
 # Most drafts never carry a decision request, and app/policy.py asks about all
@@ -2724,6 +2741,32 @@ def revalidar(so: dict, solicitud: Solicitud) -> list[str]:
         ]
     if policy.sin_reserva(so.get("status")):
         return [f"el pedido está {so.get('status')} y ya no reserva stock"]
+
+    # LA PRE-AUTORIZACIÓN CUBRE LA ENTREGA, NUNCA LA PLATA — y sin esto el
+    # camino automático emitía pedidos salteándose TODOS los límites del dueño.
+    #
+    # Cuando nadie miró el pedido, lo único que se autorizó fue una FORMA de
+    # entrega: `excepciones.evaluar_entrega` mira si la excepción está activa,
+    # los días, la hora, el cargo y el mínimo, y NADA más — `app/excepciones.py`
+    # ni siquiera importa `policy` ni `limites`. Así que el cliente pedía un
+    # sábado, la regla del dueño lo pre-autorizaba, la oferta salía sola, el
+    # cliente aceptaba, y acá se emitía el pedido sin haber comprobado el tope,
+    # la deuda vencida, el cliente nuevo ni la cantidad por producto. Pasaba
+    # incluso con `AUTO_CONFIRM_MAX=0`, que es justamente el dueño diciendo
+    # «ningún pedido se emite sin mí»: esta puerta no lo leía.
+    #
+    # Con una persona detrás NO se vuelve a correr: el encargado miró este
+    # pedido y él es la autoridad. Lo que cambió desde su visto bueno lo
+    # comprueba el resto de esta función, que para eso existe.
+    #
+    # No hace falta apagarle la regla de entrega a `policy`: el día de la
+    # semana no es suyo. `entrega.autorizada` mira la ZONA (la dirección), y
+    # `policy` no lee `ENTREGA_DIAS` en ninguna parte — así que un sábado
+    # ofrecido por la excepción no se cae acá por ser sábado.
+    if not lo_decidio_una_persona(solicitud):
+        decision = policy.evaluar(so)
+        if not decision.auto:
+            problemas.extend(decision.motivos)
 
     cantidades_ahora = _cantidades(so)
     if solicitud.cantidades and cantidades_ahora != solicitud.cantidades:
