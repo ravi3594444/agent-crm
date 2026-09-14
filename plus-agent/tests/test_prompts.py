@@ -88,6 +88,20 @@ TONO_CLIENTE = (
     "Perdón una sola vez",
     # Cuando no decide, lo dice como una persona.
     "eso lo ve el encargado, ya le aviso",
+    # PROTEGE COMPORTAMIENTO, no redacción: estas cuatro entran por el mismo
+    # motivo que las de arriba —el dueño leyó respuestas que sonaban a
+    # formulario— y el test que las usa afirma DOS cosas de cada una: que está
+    # escrita, y que está ARRIBA de «REGLAS QUE NO PODÉS ROMPER». Lo segundo es
+    # lo que importa: una regla de tono adentro del sobre de seguridad es la
+    # única forma en que un cambio de redacción podría aflojar una garantía.
+    # El voseo y el registro: es lo que el dueño pidió con todas las letras.
+    "de VOS, siempre",
+    # Nada de «Su pedido», «Estimado», «A la brevedad».
+    "Una frase que suena a formulario está mal escrita",
+    # El dato primero, sin preámbulo de call center.
+    "La PRIMERA línea contesta lo que preguntó",
+    # Un «no» pelado es una puerta en la cara: siempre se dice qué sí hay.
+    "Un «no» nunca va solo",
 )
 
 

@@ -152,24 +152,31 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "Perdón, no pude armar la respuesta. ¿Me lo escribís de nuevo?",
         EN: "Sorry, I couldn't put together a reply. Could you send that again?",
     },
+    # OJO CON LAS PRIMERAS 24 LETRAS DE ESTOS CUATRO TEXTOS.
+    # `demo/piloto.py::_es_disculpa` reconoce una disculpa técnica comparando
+    # `texto[:24]` contra el catálogo, así que el arranque —«Perdón, tuve un
+    # problema» / «Sorry, I hit a technical»— es un contrato con el banco de
+    # pruebas y con los casos escritos a mano de tests/test_demo.py. La COLA se
+    # reescribe libremente; el arranque, no, o el banco deja de ver un turno roto.
+    # «no pude procesar tu mensaje» era lo único de acá que hablaba de máquinas.
     "fallback.problema_tecnico": {
         ES: (
-            "Perdón, tuve un problema técnico y no pude procesar tu mensaje. "
-            "Probá de nuevo en unos minutos."
+            "Perdón, tuve un problema técnico y no te pude contestar. "
+            "Probá de nuevo en un rato."
         ),
         EN: (
-            "Sorry, I hit a technical problem and couldn't process your message. "
-            "Try again in a few minutes."
+            "Sorry, I hit a technical problem and couldn't get back to you. "
+            "Try again in a bit."
         ),
     },
     "fallback.problema_tecnico_avisado": {
         ES: (
-            "Perdón, tuve un problema técnico. Ya avisé al equipo y te responden "
-            "en un rato."
+            "Perdón, tuve un problema técnico. Ya le avisé al equipo, "
+            "te contestan en un rato."
         ),
         EN: (
-            "Sorry, I hit a technical problem. I've told the team and they'll get "
-            "back to you shortly."
+            "Sorry, I hit a technical problem. I've told the team, they'll get "
+            "back to you in a bit."
         ),
     },
     # ------------------------------------------------------ estado de pedido
@@ -183,24 +190,34 @@ CATALOGO: dict[str, dict[str, str]] = {
     # al cliente no le sirven de nada y que además prometen un chequeo. Queda
     # sólo lo que necesita saber: quedó anotado, no está confirmado, le
     # contestamos. Sin día, sin hora y sin precio.
+    # El mensaje que más clientes leen de todo el producto: sale con CADA pedido
+    # que no se auto-confirma. Decía «Te anoté el pedido X. Todavía no está
+    # confirmado; te contesto dentro de N h.» — el punto y coma es de un mail,
+    # no de un WhatsApp, y «dentro de N h» es de un formulario. Lo que promete
+    # es exactamente lo mismo: no está confirmado, y contesto antes de N horas.
     "pedido.pendiente": {
         ES: (
-            "Te anoté el pedido {pedido}. Todavía no está confirmado; "
-            "te contesto dentro de {horas} h."
+            "Listo, te lo anoté: {pedido}. Todavía no está confirmado, "
+            "pero te contesto antes de {horas} h."
         ),
         EN: (
-            "I have noted down order {pedido}. It is not confirmed yet; "
-            "I will get back to you within {horas} h."
+            "Done, I've got it down: {pedido}. It's not confirmed yet, "
+            "but I'll get back to you within {horas} h."
         ),
     },
+    # La confirmación. La etiqueta «Items:» era una palabra en inglés adentro de
+    # un mensaje en español y convertía el recibo en un formulario; los renglones
+    # se entienden solos debajo del título. «Total:» y «Entrega:» se quedan: así
+    # escribe un remito cualquier almacenero, y son los dos datos que se buscan
+    # de un vistazo.
     "pedido.confirmado_cliente": {
         ES: (
             "✅ Pedido {pedido} confirmado\n"
-            "Items: {renglones}\nTotal: {total}\nEntrega: {entrega}"
+            "{renglones}\nTotal: {total}\nEntrega: {entrega}"
         ),
         EN: (
             "✅ Order {pedido} confirmed\n"
-            "Items: {renglones}\nTotal: {total}\nDelivery: {entrega}"
+            "{renglones}\nTotal: {total}\nDelivery: {entrega}"
         ),
     },
     "pedido.entrega_a_coordinar": {
@@ -210,24 +227,27 @@ CATALOGO: dict[str, dict[str, str]] = {
     # Sin saludo: estos llegan cuando ya se estuvo hablando, y el saludo va una
     # sola vez por conversación. «Hola!» en la mitad de una charla es lo que
     # delata que del otro lado hay un programa que no leyó lo anterior.
+    # «cumplirlo», «En breve» y «Perdón por la molestia» son de una carta
+    # documento. Lo que dice no cambia: no se hace, alguien del equipo escribe,
+    # y hubo una sola disculpa.
     "pedido.rechazado": {
         ES: (
-            "Sobre tu pedido {pedido}: no vamos a poder cumplirlo{motivo}. "
-            "En breve te escribe alguien del equipo. Perdón por la molestia."
+            "Sobre tu pedido {pedido}: no lo vamos a poder hacer{motivo}. "
+            "Ya te escribe alguien del equipo. Perdón."
         ),
         EN: (
-            "About your order {pedido}: we won't be able to fulfil it{motivo}. "
-            "Someone from our team will message you shortly. Sorry about that."
+            "About your order {pedido}: we can't do it{motivo}. "
+            "Someone from the team is writing to you now. Sorry about that."
         ),
     },
     "pedido.cancelado": {
         ES: (
             "Tu pedido {pedido} quedó cancelado ({motivo}). Si fue un error, "
-            "escribinos y lo revisamos."
+            "escribime y lo vemos."
         ),
         EN: (
-            "Your order {pedido} has been cancelled ({motivo}). If this is a "
-            "mistake, message us and we will sort it out."
+            "Your order {pedido} is cancelled ({motivo}). If that's a mistake, "
+            "message me and we'll sort it out."
         ),
     },
     "pedido.sin_confirmar": {
@@ -280,8 +300,8 @@ CATALOGO: dict[str, dict[str, str]] = {
         EN: "I don't have an open offer for you.",
     },
     "oferta.no_registre": {
-        ES: "No me quedó registrada tu respuesta. Escribime de nuevo en un momento.",
-        EN: "Your reply did not get saved. Message me again in a moment.",
+        ES: "No me llegó bien tu respuesta. Mandámela de nuevo en un minuto.",
+        EN: "Your reply didn't come through. Send it to me again in a minute.",
     },
     "oferta.procesando": {
         ES: "Justo estoy con algo de este pedido. Escribime en un minuto.",
@@ -315,10 +335,13 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "{pedido} ya quedó confirmado con lo que acordamos.",
         EN: "{pedido} is already closed on what we agreed.",
     },
+    # «está mirándolo una persona» es otra de las frases que
+    # tests/test_solicitudes.py usa para reconocer ESTE mensaje: queda igual, y
+    # lo que se arregla es el «Sobre {pedido} está mirándolo…» de adelante.
     "oferta.en_revision": {
         ES: (
-            "Sobre {pedido} está mirándolo una persona antes de cerrarlo. Te "
-            "contestamos en cuanto lo revise."
+            "El {pedido} está mirándolo una persona antes de cerrarlo. Te "
+            "contesto en cuanto lo vea."
         ),
         EN: (
             "Someone is looking at {pedido} before we close it. We'll get back to "
@@ -389,28 +412,34 @@ CATALOGO: dict[str, dict[str, str]] = {
             "you the details right away."
         ),
     },
+    # «a la brevedad» es de una nota de la municipalidad. «Te contesto en un
+    # rato» dice lo mismo y lo dice una persona.
+    # «necesito revisarlo con una persona» y «necesito que lo vea una persona»
+    # (abajo) NO son sólo redacción: tests/test_solicitudes.py las usa para
+    # distinguir ESTE mensaje del de al lado, incluso con un `not in`. Se
+    # conservan tal cual; lo que se arregla es el marco que las rodeaba.
     "oferta.a_revision": {
         ES: (
-            "Gracias por confirmar. Sobre {pedido} necesito revisarlo con una "
-            "persona antes de cerrarlo: cambió algo desde la oferta. Te "
-            "contestamos a la brevedad."
+            "Gracias por confirmar. Antes de cerrar el {pedido} necesito "
+            "revisarlo con una persona: cambió algo desde la oferta. Te "
+            "contesto en un rato."
         ),
         EN: (
             "Thanks for confirming. Someone has to look at {pedido} with me before "
-            "we close it: something moved since the offer. We'll get back to you "
-            "shortly."
+            "we close it: something moved since the offer. I'll get back to you "
+            "in a bit."
         ),
     },
     "oferta.revision_sin_registro": {
         ES: (
-            "Gracias por confirmar. Sobre {pedido} se me complicó algo y necesito "
-            "que lo vea una persona. No queda nada confirmado a tu nombre; te "
-            "contestamos a la brevedad."
+            "Gracias por confirmar. Con el {pedido} se me complicó algo y "
+            "necesito que lo vea una persona. No queda nada confirmado a tu "
+            "nombre. Te contesto en un rato."
         ),
         EN: (
             "Thanks for confirming. Something went wrong with {pedido} on my side "
-            "and a person has to look at it. Nothing is closed in your name; we'll "
-            "get back to you shortly."
+            "and someone has to look at it. Nothing is closed in your name. I'll "
+            "get back to you in a bit."
         ),
     },
     # ------------------------------------------------- avisos a la gerencia
@@ -665,8 +694,8 @@ CATALOGO: dict[str, dict[str, str]] = {
     },
     # --------------------------------------------------- entrega / vencimiento
     "entrega.fuera_de_dia": {
-        ES: "Esa entrega queda fuera de los días de reparto. La decide una persona.",
-        EN: "That delivery falls outside the delivery days. A person decides it.",
+        ES: "Ese día no salimos a repartir, así que eso lo decide el encargado.",
+        EN: "We don't run deliveries that day, so the manager decides that one.",
     },
     "entrega.fuera_de_zona": {
         ES: "No repartimos en esa zona por ahora.",
@@ -674,12 +703,12 @@ CATALOGO: dict[str, dict[str, str]] = {
     },
     "entrega.solicitud_vencida": {
         ES: (
-            "Se venció la espera por tu pedido {pedido} y no pude ofrecerte una "
-            "alternativa. Lo ve una persona."
+            "Sobre tu pedido {pedido}: se me pasó el tiempo y no pude ofrecerte "
+            "otra cosa. Lo está viendo el encargado."
         ),
         EN: (
-            "The wait on your order {pedido} expired and I couldn't offer an "
-            "alternative. A person will look at it."
+            "About your order {pedido}: time ran out and I couldn't offer you "
+            "anything else. The manager is looking at it."
         ),
     },
     # Sin «respondé con el botón»: al cliente la oferta le llega como texto o
@@ -708,16 +737,19 @@ CATALOGO: dict[str, dict[str, str]] = {
             "We can schedule it for a normal delivery day instead."
         ),
     },
+    # «no llegué a tener UNA respuesta» separa este mensaje de `entrega.respaldo`
+    # («la respuesta»), y tests/test_solicitudes.py se apoya en esa diferencia de
+    # un artículo, con un `in` de un lado y un `not in` del otro. No se toca.
     "entrega.vencida": {
         ES: (
             "Sobre tu pedido {pedido}: no llegué a tener una respuesta del "
-            "encargado, así que por ahora no queda confirmado. Escribime y lo "
-            "volvemos a ver con el stock del momento."
+            "encargado, así que no te lo puedo dar por confirmado. Escribime y "
+            "lo vemos de nuevo con lo que haya."
         ),
         EN: (
-            "About your order {pedido}: I did not get an answer in time, so it "
-            "is not confirmed. Message me and we will look at it again with "
-            "current stock."
+            "About your order {pedido}: the manager didn't get back to me in "
+            "time, so I can't call it confirmed. Message me and we'll look at it "
+            "again with whatever we have."
         ),
     },
     "entrega.respaldo_retiro": {
@@ -747,32 +779,35 @@ CATALOGO: dict[str, dict[str, str]] = {
             "confirming."
         ),
     },
+    # El inglés decía «nothing is charged» —«no se te cobra nada»— donde el
+    # español dice «no queda nada a tu nombre». No son lo mismo: uno habla de
+    # plata y el otro de que no hay pedido agendado, y la promesa que importa es
+    # la segunda. Se corrige junto con el tono.
     "entrega.revision_vencida": {
         ES: (
-            "Sobre tu pedido {pedido}: te había dicho que lo revisaba una "
-            "persona y no llegamos a hacerlo, así que no lo dejo agendado y no "
-            "queda nada a tu nombre. Perdón. Cuando quieras lo armamos de nuevo "
-            "con el stock del momento."
+            "Sobre tu pedido {pedido}: te dije que lo miraba una persona y no "
+            "llegamos a hacerlo, así que no lo dejo agendado y no queda nada a "
+            "tu nombre. Perdón. Cuando quieras lo armamos de nuevo con lo que "
+            "haya."
         ),
         EN: (
-            "About your order {pedido}: I said a person would review it and we "
-            "did not get to it, so it is not scheduled and nothing is charged. "
-            "Sorry. Message me and we will put it together again with current "
-            "stock."
+            "About your order {pedido}: I said someone would look at it and we "
+            "didn't get to it. Nothing is booked in your name. Sorry. Message me "
+            "whenever you like and we'll put it together again with whatever we "
+            "have."
         ),
     },
     "entrega.respaldo_vencido": {
         ES: (
             "Sobre tu pedido {pedido}: se venció el plazo de esa opción "
             "({terminos}), así que no queda agendada y no hay nada confirmado a "
-            "tu nombre. Cuando quieras, escribime y lo armamos con el stock del "
-            "momento."
+            "tu nombre. Cuando quieras escribime y lo armamos con lo que haya."
         ),
         EN: (
-            "About your order {pedido}: that option has run out, so it is not "
-            "scheduled and nothing is confirmed in your name ({terminos}). "
-            "Message me whenever you like and we will put it together with "
-            "current stock."
+            "About your order {pedido}: that option has run out, so it isn't "
+            "booked and nothing is confirmed in your name ({terminos}). Message "
+            "me whenever you like and we'll put it together with whatever we "
+            "have."
         ),
     },
     "entrega.aprobacion_vencida": {
@@ -1189,9 +1224,13 @@ CATALOGO: dict[str, dict[str, str]] = {
     },
     # ---------------------------------------- stock / precio / entrega
     "stock.no_confiable": {
-        ES: "No puedo prometer disponibilidad de {producto} ahora mismo.",
-        EN: "I can't promise availability of {producto} right now.",
+        ES: "Ahora mismo no te puedo asegurar que tengamos {producto}.",
+        EN: "Right now I can't promise we have {producto}.",
     },
+    # «el stock de {producto}» y no «el {producto}»: el nombre del catálogo lleva
+    # su propio género («Leche entera 1 L» es femenino, «Queso cremoso»
+    # masculino) y ninguna plantilla puede concordar con los dos. «Stock» es
+    # palabra de mostrador acá, así que no suena a sistema.
     "stock.insuficiente": {
         ES: "No me alcanza el stock de {producto} para esa cantidad.",
         EN: "I don't have enough stock of {producto} for that quantity.",
@@ -1304,17 +1343,6 @@ CATALOGO: dict[str, dict[str, str]] = {
     # notificación al celular.
     "boton.mandar": {ES: "Mandarlo", EN: "Send it"},
     "boton.no_mandar": {ES: "No mandarlo", EN: "Do not send"},
-    # La negativa GENÉRICA de una herramienta de gerencia. Hasta acá era sólo
-    # la constante `runtime_context.SIN_PERMISO`, en castellano y sin gemelo en
-    # inglés: el dueño que habla inglés recibía su única negativa en castellano.
-    # El ES de acá tiene que seguir siendo igual a esa constante, y hay un test
-    # que lo afirma — son dos literales en dos archivos distintos, así que
-    # cambiar uno no mueve al otro y el assert sirve de verdad.
-    "permiso.sin_autorizacion": {
-        ES: "Ese número no está autorizado para esto. No consulté ni cambié nada.",
-        EN: "That number is not authorized for this. I checked nothing and "
-            "changed nothing.",
-    },
     # La negativa GENÉRICA de una herramienta de gerencia. Hasta acá era sólo
     # la constante `runtime_context.SIN_PERMISO`, en castellano y sin gemelo en
     # inglés: el dueño que habla inglés recibía su única negativa en castellano.
@@ -1760,12 +1788,12 @@ CATALOGO: dict[str, dict[str, str]] = {
     # ------------------------------------------------ fallback / revisión
     "fallback.error_tecnico": {
         ES: (
-            "Tuve un problema técnico con eso. Ya avisé al equipo y te "
-            "responden a la brevedad."
+            "Tuve un problema técnico con eso. Ya le avisé al equipo, "
+            "te contestan en un rato."
         ),
         EN: (
-            "I hit a technical problem with that. I've told the team and "
-            "they'll get back to you shortly."
+            "I hit a technical problem with that. I've told the team, "
+            "they'll get back to you in a bit."
         ),
     },
     "fallback.revisa_persona": {
@@ -1792,14 +1820,17 @@ CATALOGO: dict[str, dict[str, str]] = {
     # Las filas de `app/agenda.py`. El aviso al cliente NO promete día, hora ni
     # precio: `{hora}` es la hora de reparto que el cliente YA conocía, y la
     # frase dice justamente que a esa hora todavía no está confirmado.
+    # El número iba de yapa al final, entre paréntesis, como el pie de un
+    # formulario. Va adelante, que es donde lo pone una persona cuando retoma un
+    # pedido del que ya venían hablando.
     "pedido.aviso_antes_de_entrega": {
         ES: (
-            "Todavía no te lo pude confirmar para las {hora}. "
-            "Apenas lo vea el encargado te aviso. (Pedido {pedido})"
+            "Sobre el {pedido}: todavía no te lo pude confirmar para las {hora}. "
+            "Apenas lo vea el encargado te aviso."
         ),
         EN: (
-            "I haven't been able to confirm it for {hora} yet. "
-            "As soon as the manager sees it I'll let you know. (Order {pedido})"
+            "About {pedido}: I haven't been able to confirm it for {hora} yet. "
+            "As soon as the manager sees it I'll let you know."
         ),
     },
     "gerencia.plazo_asunto": {
