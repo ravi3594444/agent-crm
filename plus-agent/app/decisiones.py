@@ -84,20 +84,124 @@ def telefono_del_cliente(nombre_so: str) -> str:
     return telefono.normalizar(cliente.get("mobile_no")) or ""
 
 
-def confirmar(nombre: str, por: str) -> dict:
-    """Confirm an exception order by hand. HUMAN MANAGER ONLY.
+# POR DÓNDE ENTRÓ LA PERSONA QUE CONFIRMÓ, que es lo que se firma en el
+# historial del pedido en ERPNext. Eran la palabra «WhatsApp» escrita a mano
+# adentro del rastro, cuando WhatsApp era el único camino posible; en cuanto hay
+# un segundo, ese literal pasa a ser una firma falsa en una auditoría. No hay
+# default en ninguna de las dos funciones que lo reciben: el que confirma lo
+# dice, o no compila.
+CANAL_WHATSAPP = "WhatsApp"
+CANAL_PANEL = "el panel"
 
-    The implementation lives in app/aprobacion.py, where it is already proven
-    against duplicate taps and submit timeouts that commit after the client
-    gives up. This is the stable entry point for the manual path; the import is
-    late so the two modules do not depend on each other at import time.
 
-    The caller is responsible for having authenticated the manager
-    (aprobacion.manejar_boton checks router.es_equipo on the signed webhook).
+def confirmar(nombre: str, por: str, *, canal: str) -> dict:
+    """Confirmar un pedido a mano. SÓLO UNA PERSONA DEL EQUIPO.
+
+    LA PUERTA, y hasta este cambio no lo era. Esta función era un alias pelado
+    de `aprobacion.confirmar_pedido`, y las tres cosas que hacen que confirmar
+    sea seguro vivían en `aprobacion.manejar_boton`, o sea en el camino de
+    WhatsApp y en ninguna otra parte:
+
+      * **la autorización** — `es_equipo`, que acá no se comprobaba;
+      * **la bifurcación por solicitud abierta** — sin ella, un pedido con una
+        contraoferta esperando respuesta se confirmaba AL PRECIO ORIGINAL
+        mientras el cliente mira los términos nuevos que todavía no aceptó;
+      * **el cierre de la revisión humana** — sin él el borrador sigue en el
+        índice de vencimientos y el barrido lo cierra más tarde por su cuenta.
+
+    Las tres se movieron acá adentro, que es la forma que ya tienen `cancelar`,
+    `despreparar` y `_decidir` en este mismo archivo: comprueban quién llama,
+    toman su lock, y recién ahí hacen algo. `confirmar` era la única decisión
+    del módulo que no hacía ninguna de las dos.
+
+    `aprobacion.confirmar_pedido` sigue siendo el MECANISMO —es lo que está
+    probado contra el toque repetido y contra un submit que commitea después de
+    que el cliente HTTP se dio por vencido— y esta función es la POLÍTICA. El
+    Submit lo sigue haciendo `erpnext.submit_doc` con la credencial de
+    política, acá no cambia nada de eso.
+
+    `canal` es `CANAL_WHATSAPP` o `CANAL_PANEL` y va al rastro durable: sin
+    él el historial del pedido firmaría un camino por el que nadie pasó.
+
+    Devuelve {"ok", "aviso_cliente", "detalle"}.
     """
-    from app.aprobacion import confirmar_pedido
+    if not es_equipo(por):
+        return _resultado(False, False, "No tenés permiso para confirmar pedidos.")
 
-    return confirmar_pedido(nombre, por)
+    # EL LOCK NO SE LLAMA `accion:` A PROPÓSITO, y no es cosmético.
+    # `acciones.py` envuelve TODO `manejar_boton` en `accion:{pedido}` para el
+    # camino autorizado por código, y `locks.distributed_lock` arma el lock de
+    # redis con `thread_local=False`: no es reentrante. Un lock con el mismo
+    # nombre acá adentro esperaría 10 s por sí mismo y levantaría
+    # `CoordinationError`, o sea que confirmar con código dejaría de funcionar.
+    # `cancelar:{...}` y `despreparar:{...}` ya anidan así dentro de `accion:`.
+    try:
+        with distributed_lock(f"confirmar:{nombre}", lease_seconds=60, wait_seconds=10):
+            return _confirmar_autorizado(nombre, por, canal)
+    except CoordinationError:
+        return _resultado(
+            False,
+            False,
+            f"No pude coordinar la confirmación de {nombre}; probá de nuevo en un momento.",
+        )
+
+
+def _confirmar_autorizado(nombre: str, por: str, canal: str) -> dict:
+    """Lo que hace «confirmar» con quien llama ya comprobado y el lock tomado.
+
+    LA COMPROBACIÓN Y EL SUBMIT VAN EN LA MISMA SECCIÓN CRÍTICA, y el lock que
+    la arma es `solicitud:{pedido}` y no `confirmar:{pedido}`: el segundo no lo
+    toma NADIE del lado del cliente, así que leer «no hay solicitud» bajo él no
+    impedía que se abriera una un instante después. La ventana era chica y
+    cuesta el pedido entero — el cliente pide una excepción, `solicitudes.crear`
+    la registra, y para cuando el encargado ve la pregunta el borrador ya se
+    emitió a los términos viejos. `solicitudes.crear` toma AHORA el mismo lock y
+    relee el borrador adentro, que es la otra mitad: sin ella el lock serializa
+    y el segundo igual hace lo que iba a hacer.
+
+    El orden es `accion:` ⊃ `confirmar:` ⊃ `solicitud:`, siempre en ese sentido
+    y sin ciclos. `aprobar_solicitud` y `cerrar_revision_si_hay` se llaman
+    FUERA del `with` a propósito: las dos vuelven a tomar `solicitud:{pedido}` y
+    `locks.distributed_lock` no es reentrante (`thread_local=False`), así que
+    desde adentro esperarían 10 s por un lock que ya tiene este mismo hilo.
+    """
+    from app.aprobacion import confirmar_pedido, solicitud_abierta_estricta
+    from app.solicitudes import LecturaIncierta
+
+    resultado: dict | None = None
+    # CoordinationError sube hasta `confirmar`, que ya la contesta.
+    with distributed_lock(f"solicitud:{nombre}", lease_seconds=60, wait_seconds=10):
+        try:
+            abierta = solicitud_abierta_estricta(nombre)
+        except LecturaIncierta as exc:
+            # NO se emite nada. «No pude leer el estado» no es «no hay
+            # contraoferta esperando», y confundirlos con ERPNext caído emite
+            # el borrador sin poder probar que nadie está esperando otra cosa.
+            print(f"[decisiones] {nombre}: no confirmo, estado incierto ({exc})")
+            return _resultado(
+                False,
+                False,
+                f"No pude verificar el estado de {nombre} y no lo confirmé. "
+                "Probá de nuevo en un momento.",
+            )
+        # «Aprobar» no quiere decir «confirmar» cuando hay una solicitud
+        # abierta: quiere decir «aprobá lo que pidió el cliente», y los términos
+        # todavía tienen que ir al cliente antes de que se emita nada
+        # (app/solicitudes.py).
+        if abierta is None:
+            resultado = confirmar_pedido(nombre, por, canal=canal)
+
+    if resultado is None:
+        return aprobar_solicitud(nombre, por)
+    # «Confirmar» es también la salida documentada de una revisión humana, y
+    # por eso REVISION_HUMANA NO es uno de `solicitudes.ABIERTOS`: esta palabra
+    # tiene que seguir queriendo decir «emití este borrador». Cerrar la
+    # revisión acá lo saca del índice de vencimientos en el acto en vez de
+    # esperar al barrido; es un no-op cuando no hay revisión, así que un
+    # encargado que la escribe tres veces paga tres lecturas.
+    if resultado.get("ok"):
+        cerrar_revision_si_hay(nombre, por, "una persona confirmó el pedido")
+    return resultado
 
 
 def confirmar_conteo(nombre: str, por: str) -> dict:

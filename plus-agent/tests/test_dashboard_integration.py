@@ -14,7 +14,16 @@ from conftest import RelojDePrueba
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app import avisos, dashboard, erpnext, limites, locks, outbound_status, reloj
+from app import (
+    avisos,
+    dashboard,
+    erpnext,
+    limites,
+    locks,
+    outbound_status,
+    reloj,
+    router,
+)
 from demo import datos
 from demo.falso_erpnext import DEPOSITO, EMPRESA, Almacen, manejar
 
@@ -25,6 +34,11 @@ TODAY = date(2026, 9, 10)
 # la celda `BUSINESS_TIMEZONE=Asia/Kolkata` de CI probara otra cosa que el
 # código: ver `RelojDePrueba` en tests/conftest.py.
 RELOJ = RelojDePrueba(TODAY.isoformat())
+# Un token POR PERSONA y el teléfono al que pertenece. El largo no es
+# decorativo: `dashboard.TOKEN_MINIMO` descarta cualquier entrada más corta,
+# así que un token de juguete daría 401 y el test mediría eso y no el permiso.
+TOKEN_PERSONA = "t" * 44
+GERENTE = "5493511111111"
 
 
 @pytest.fixture
@@ -269,6 +283,260 @@ def test_setup_preserves_agent_configuration_and_does_not_rotate_token(tmp_path)
     assert module.configure(path) is None
 
 
+def _confirmable(monkeypatch, resultado=None, registro=None):
+    """`decisiones.confirmar` de mentira, que ANOTA cómo la llamaron.
+
+    Anota porque los tres argumentos son el contrato entero del endpoint: el
+    pedido, QUIÉN decide —el teléfono que sale del token, no el token— y el
+    canal que va a quedar firmado en ERPNext. Un doble que devolviera siempre lo
+    mismo sin mirar los argumentos no podría discreparle al código sobre ninguno
+    de los tres.
+    """
+    from app import decisiones
+
+    llamadas = registro if registro is not None else []
+
+    def falso(nombre, por, *, canal):
+        llamadas.append({"pedido": nombre, "por": por, "canal": canal})
+        return resultado or {"ok": True, "aviso_cliente": True, "detalle": f"✅ {nombre} confirmado."}
+
+    monkeypatch.setattr(decisiones, "confirmar", falso)
+    return llamadas
+
+
+def test_el_panel_confirma_a_nombre_del_telefono_del_token(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """El endpoint pasa el TELÉFONO, no el token, y dice que viene del panel.
+
+    Las tres mitades del contrato, y ninguna es decorativa: el pedido, la
+    persona a cuyo nombre queda la decisión firmada en el historial de ERPNext,
+    y el canal —sin el cual el rastro diría «mediante WhatsApp» sobre algo que
+    pasó por una pantalla.
+    """
+    from app import decisiones
+
+    client, registrar = almacen_con_cliente
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
+    # `router.STAFF` y no `TELEFONOS_EQUIPO` + `recargar()`: `recargar` escribe un
+    # global que `monkeypatch` no deshace, así que el equipo se le quedaría puesto
+    # al archivo siguiente. Es además lo único que leen las DOS puertas de
+    # `es_equipo`, así que acá corre la autorización de verdad.
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    llamadas = _confirmable(monkeypatch)
+
+    respuesta = client.post(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm",
+        headers={"Authorization": f"Bearer {TOKEN_PERSONA}"},
+    )
+
+    assert respuesta.status_code == 200
+    cuerpo = respuesta.json()
+    assert cuerpo["ok"] is True
+    assert cuerpo["orderId"] == registrar["pedido"]
+    assert cuerpo["customerNotified"] is True
+    assert llamadas == [{
+        "pedido": registrar["pedido"], "por": GERENTE, "canal": decisiones.CANAL_PANEL,
+    }]
+
+
+def test_el_token_compartido_puede_mirar_y_no_puede_confirmar(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """`ANONIMO` es `""`: falsy y VÁLIDO. Entra al panel y no decide.
+
+    Es la trampa que `quien()` documenta. Una guarda escrita `if not mirando`
+    trataría al token compartido como «no autenticado» y devolvería 401, que
+    parece seguro y esconde el caso; lo que hace falta es que entre —porque es
+    un token válido— y que se le diga que no en la línea de decidir. Y el
+    endpoint no puede haber llamado a `confirmar` ni una vez.
+    """
+    client, registrar = almacen_con_cliente
+    llamadas = _confirmable(monkeypatch)
+
+    respuesta = client.post(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+
+    assert respuesta.status_code == 403
+    assert "cannot confirm" in respuesta.json()["error"]
+    assert llamadas == []
+    # La otra mitad: el MISMO token sigue leyendo, así que el 403 es de decidir
+    # y no de estar mal autenticado.
+    assert client.get("/api/dashboard/snapshot").status_code == 200
+
+
+def test_un_token_de_alguien_que_no_es_del_equipo_tampoco_confirma(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """Tener nombre no alcanza: el nombre tiene que estar en el equipo.
+
+    `puede_decidir` son DOS condiciones —un token con nombre Y `es_equipo`— y
+    afirmar sólo la primera dejaría pasar a cualquiera con token propio.
+    """
+    client, registrar = almacen_con_cliente
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:5490000000000")
+    # El equipo NO está vacío: con la lista vacía este test pasaría porque no
+    # hay equipo, no porque este número quede afuera de uno que existe.
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    llamadas = _confirmable(monkeypatch)
+
+    respuesta = client.post(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm",
+        headers={"Authorization": f"Bearer {TOKEN_PERSONA}"},
+    )
+
+    assert respuesta.status_code == 403
+    assert llamadas == []
+
+
+def test_no_se_confirma_un_pedido_de_otra_empresa(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """404, y sin llamar a `confirmar`: un token válido no emite lo que no ve.
+
+    Es la misma comprobación de pertenencia que la lectura, y tiene que correr
+    ANTES de decidir nada: si corriera después, el pedido ya estaría emitido
+    cuando el panel contesta que no existe.
+
+    ESTE TEST NACIÓ ROTO Y LA MUTACIÓN LO CAZÓ. La primera versión usaba el
+    token COMPARTIDO, así que moría en el 403 de `puede_decidir` y no llegaba
+    nunca a la comprobación de empresa: borrar esa comprobación entera dejaba
+    las 2889 pruebas en verde. Va con un token que SÍ puede decidir, que es la
+    única forma de que lo único que quede entre él y el Submit sea la
+    pertenencia.
+    """
+    client, _ = almacen_con_cliente
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    llamadas = _confirmable(monkeypatch)
+
+    respuesta = client.post(
+        "/api/dashboard/orders/SAL-ORD-DE-OTRA-EMPRESA/confirm",
+        headers={"Authorization": f"Bearer {TOKEN_PERSONA}"},
+    )
+
+    assert respuesta.status_code == 404
+    assert llamadas == []
+
+
+def test_el_resto_del_panel_sigue_siendo_de_solo_lectura(
+    connected, almacen_con_cliente
+) -> None:
+    """Se abrió UNA ruta, no el método.
+
+    Un POST a cualquier otra cosa sigue siendo 405, y un GET a la ruta de
+    confirmar también: la excepción es (ruta, método), no una de las dos.
+    """
+    client, registrar = almacen_con_cliente
+
+    assert client.post("/api/dashboard/snapshot").status_code == 405
+    assert client.post(f"/api/dashboard/orders/{registrar['pedido']}").status_code == 405
+    assert client.get(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm"
+    ).status_code == 405
+
+
+def _herramienta():
+    spec = importlib.util.spec_from_file_location(
+        "dashboard_setup", Path(__file__).parents[1] / "deploy" / "configurar_dashboard.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_el_token_que_escribe_la_herramienta_es_el_que_el_panel_acepta(
+    tmp_path, monkeypatch
+) -> None:
+    """De punta a punta: lo que el script deja en el `.env` lo LEE `quien()`.
+
+    Es la mitad que ningún test de la herramienta sola puede dar. El script
+    escribe `<token>:<teléfono>` y el panel lo parsea con
+    `dashboard.entradas_de_tokens`; si el formato se separara —una coma de más,
+    el teléfono escrito de otra forma, un largo mínimo distinto— el token
+    quedaría prolijo en el archivo y no entraría, sin que nada avise. Acá se
+    escribe con uno y se entra con el otro.
+    """
+    modulo = _herramienta()
+    numero = "+54 9 351 111 1111"
+    ruta = tmp_path / ".env"
+    ruta.write_text(f"TELEFONOS_EQUIPO={datos.TELEFONO_HABITUAL},5493511111111\n")
+
+    token, normalizado = modulo.agregar_persona(ruta, numero)
+
+    assert normalizado == "5493511111111", "lo guarda como lo busca el webhook"
+    escrito = ruta.read_text()
+    assert f"{token}:{normalizado}" in escrito
+    assert ruta.stat().st_mode & 0o777 == 0o600
+
+    # Y ahora el panel, leyendo lo mismo.
+    monkeypatch.setenv(
+        "DASHBOARD_TOKENS",
+        escrito.split("DASHBOARD_TOKENS=", 1)[1].strip(),
+    )
+    assert dashboard.quien(f"Bearer {token}") == normalizado
+
+
+def test_la_herramienta_no_mina_un_token_para_alguien_que_no_es_del_equipo(
+    tmp_path,
+) -> None:
+    """Un dígito mal tipeado da un token que entra y no puede confirmar nada.
+
+    `puede_decidir` exige `router.es_equipo`, así que un número que no está en
+    `TELEFONOS_EQUIPO` produce un panel que «no anda» sin que nada lo explique.
+    Se puede hacer a propósito —alguien que sólo mira— y para eso está la
+    bandera; lo que no se puede es hacerlo sin querer.
+    """
+    modulo = _herramienta()
+    ruta = tmp_path / ".env"
+    ruta.write_text("TELEFONOS_EQUIPO=5493511111111\n")
+
+    with pytest.raises(ValueError, match="no está en TELEFONOS_EQUIPO"):
+        modulo.agregar_persona(ruta, "5493512222222")
+    assert "DASHBOARD_TOKENS" not in ruta.read_text()
+
+    token, numero = modulo.agregar_persona(ruta, "5493512222222", solo_lectura=True)
+    assert f"{token}:{numero}" in ruta.read_text()
+
+
+def test_la_herramienta_no_le_da_un_segundo_token_a_la_misma_persona(tmp_path) -> None:
+    """Dos tokens vivos para una persona es uno que nadie sabe que existe.
+
+    Y se comprueba contra el teléfono NORMALIZADO: pedirlo la segunda vez
+    escrito distinto —con `+`, con espacios— es la misma persona, así que
+    comparar los textos crudos dejaría pasar exactamente el caso que más se da.
+    """
+    modulo = _herramienta()
+    ruta = tmp_path / ".env"
+    ruta.write_text("TELEFONOS_EQUIPO=5493511111111\n")
+    modulo.agregar_persona(ruta, "5493511111111")
+    antes = ruta.read_text()
+
+    with pytest.raises(ValueError, match="ya tiene un token"):
+        modulo.agregar_persona(ruta, "+54 9 351 111-1111")
+
+    assert ruta.read_text() == antes
+
+
+def test_la_herramienta_agrega_sin_pisar_a_los_que_ya_estaban(tmp_path) -> None:
+    """El segundo token no borra al primero: se agrega a la lista."""
+    modulo = _herramienta()
+    ruta = tmp_path / ".env"
+    ruta.write_text(
+        "TELEFONOS_EQUIPO=5493511111111,5493512222222\nWHATSAPP_TOKEN=intacto\n"
+    )
+
+    primero, _ = modulo.agregar_persona(ruta, "5493511111111")
+    segundo, _ = modulo.agregar_persona(ruta, "5493512222222")
+
+    escrito = ruta.read_text()
+    assert primero in escrito and segundo in escrito
+    assert escrito.count("DASHBOARD_TOKENS=") == 1
+    assert "WHATSAPP_TOKEN=intacto\n" in escrito
+
+
 @pytest.fixture
 def almacen_con_cliente(connected):
     """El cliente habitual, con un pedido de ESTA empresa y su WhatsApp.
@@ -278,11 +546,14 @@ def almacen_con_cliente(connected):
     así que sin uno este cliente no es nuestro y la ruta contesta 404.
     """
     client, almacen, _ = connected
-    create_order(almacen, docstatus=1)
+    # BORRADOR, no confirmado: los tests de lectura sólo necesitan que exista
+    # para probar pertenencia, y los de confirmar necesitan algo confirmable.
+    pedido = create_order(almacen, docstatus=0)
     return client, {
         "cliente": datos.CLIENTE_HABITUAL,
         "telefono": datos.TELEFONO_HABITUAL,
         "almacen": almacen,
+        "pedido": pedido if isinstance(pedido, str) else str(pedido.get("name")),
     }
 
 

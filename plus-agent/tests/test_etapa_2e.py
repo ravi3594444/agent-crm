@@ -19,6 +19,29 @@ from app import aprobacion, decisiones, digest, erpnext, inventario, notificar, 
 pytestmark = [pytest.mark.idioma("es"), pytest.mark.locale("es_AR")]
 
 STAFF = "5493511111111"
+
+
+@pytest.fixture(autouse=True)
+def _el_equipo_de_verdad(monkeypatch: pytest.MonkeyPatch):
+    """Los teléfonos que estos tests usan de encargado, en la lista DE VERDAD.
+
+    `es_equipo` se comprueba en DOS puertas —`aprobacion.manejar_boton` y
+    `decisiones.confirmar`— y cada módulo tiene su propia referencia a la
+    función, así que `monkeypatch.setattr(aprobacion, "es_equipo", ...)` tapa
+    una sola. Tampoco debería alcanzar: un test que DESACTIVA la autorización
+    en una puerta no puede discreparle al código sobre la otra, que es la forma
+    exacta del parche inerte que este repo ya se sacó de encima una vez
+    (tests/test_frontera_decisiones.py).
+
+    Se parchea `router.STAFF`, que es lo único que las dos puertas leen, y con
+    eso corre el `es_equipo` real en las dos. Los tests que afirman un RECHAZO
+    siguen parcheando lo suyo y siguen rechazando: un número que no está en
+    esta lista no confirma nada.
+    """
+    from app import router
+
+    monkeypatch.setattr(router, "STAFF", [STAFF])
+
 SO = {
     "name": "SAL-ORD-2026-00009",
     "docstatus": 1,
@@ -36,6 +59,39 @@ SO = {
     ],
 }
 ADDRESS = {"address_line1": "Av. Colón 1234", "city": "Córdoba", "pincode": "5000"}
+
+
+@pytest.fixture(autouse=True)
+def _la_lectura_de_solicitudes_contesta(monkeypatch: pytest.MonkeyPatch):
+    """La consulta de solicitudes ANDA, y contesta que este pedido no tiene.
+
+    Estos tests no montan ERPNext, así que `marcas.filas` levantaba
+    `ERPNextError` — y `solicitudes.leer` lo colapsaba en `None`, o sea en «no
+    hay solicitud abierta». Ocho tests de confirmación pasaban POR ESE BUG: la
+    lectura fallaba, se leía como una ausencia verificada, y el borrador se
+    emitía igual. Es el hallazgo 1 de la review de #45, y que estos tests no lo
+    notaran es la parte que más dice.
+
+    Ahora `decisiones.confirmar` lee con `leer_estricto`, que distingue «no hay»
+    de «no sé», y sin este doble se negaría a confirmar (correctamente). El
+    doble hace que la consulta CONTESTE, que es la premisa real de estos tests:
+    el pedido no tiene solicitud.
+
+    Deriva de lo que se le PASA: sólo la marca `solicitud` se contesta vacía, y
+    cualquier otra sigue yendo a la de verdad. Un doble que devolviera `[]` para
+    todo taparía también las marcas de confirmación y de anulación, que son
+    justamente lo que varios de estos tests afirman.
+    """
+    from app import marcas
+
+    real = marcas.filas
+
+    def filas(nombre, *args, **kwargs):
+        if nombre == "solicitud":
+            return []
+        return real(nombre, *args, **kwargs)
+
+    monkeypatch.setattr(marcas, "filas", filas)
 
 
 class _RedisMarcas:

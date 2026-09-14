@@ -130,18 +130,33 @@ def operations() -> dict:
     }
 
 
+def _pedido_de_la_empresa(order_id: str) -> dict:
+    """El pedido, o `RecordNotFound` si no es de ESTA empresa. Bajo `manager_scope`.
+
+    `Customer` y `Sales Order` son maestros globales en ERPNext, así que la
+    pertenencia no es un campo que se pueda filtrar en la ruta: hay que leer el
+    documento y comparar la empresa. Está acá y no copiado en cada ruta porque
+    el segundo llamador escribe —confirma un pedido— y dos comprobaciones de
+    pertenencia que nadie obliga a coincidir es como se cuela la que falta.
+    """
+    from app import erpnext
+
+    try:
+        doc = erpnext.get_doc("Sales Order", order_id, timeout=READ_TIMEOUT)
+    except erpnext.ERPNextError as exc:
+        if exc.status_code in {403, 404}:
+            raise RecordNotFound from exc
+        raise
+    if doc.get("company") != erpnext.default_company():
+        raise RecordNotFound
+    return doc
+
+
 def order_detail(order_id: str) -> dict:
     from app import erpnext
 
     with erpnext.manager_scope():
-        try:
-            doc = erpnext.get_doc("Sales Order", order_id, timeout=READ_TIMEOUT)
-        except erpnext.ERPNextError as exc:
-            if exc.status_code in {403, 404}:
-                raise RecordNotFound from exc
-            raise
-        if doc.get("company") != erpnext.default_company():
-            raise RecordNotFound
+        doc = _pedido_de_la_empresa(order_id)
         result = order_row(doc)
         result["items"] = [{
             "code": str(item.get("item_code") or ""),
@@ -285,6 +300,53 @@ def conversation(customer_id: str) -> dict:
     base["truncated"] = cortado or len(visibles) > CONVERSACION_MAX
     base["messages"] = visibles[-CONVERSACION_MAX:]
     return base
+
+
+def confirmar_desde_el_panel(order_id: str, quien_decide: str) -> dict:
+    """NO se llama `confirmar_pedido`, y el nombre viejo era una trampa: hay una
+    `aprobacion.confirmar_pedido` que es el MECANISMO del submit, ésta no la
+    llama, y las dos no son intercambiables — ésta entra por la puerta
+    (`decisiones.confirmar`) y aquélla está del otro lado de la puerta.
+
+    Confirmar UN pedido desde el panel, a nombre de una persona con nombre.
+
+    LO QUE ESTA FUNCIÓN NO HACE, y es la mitad del diseño: no decide nada. No
+    mira si hay una solicitud abierta, no cierra la revisión, no toma el lock y
+    no comprueba `es_equipo` por su cuenta — todo eso vive adentro de
+    `decisiones.confirmar`, que es la puerta, y si viviera también acá serían
+    dos copias de la misma política que nadie obliga a estar de acuerdo. Lo
+    único propio del panel es lo de arriba: que el pedido sea de ESTA empresa.
+
+    LA REGLA DURA 2 NO SE TOCA. El Submit lo sigue haciendo `erpnext.submit_doc`
+    con la credencial de política, que no es alcanzable desde ninguna
+    herramienta del modelo. Un endpoint no es una herramienta en ese sentido: lo
+    invoca una PERSONA autenticada, y ejecuta el mismo Python determinista que
+    corre cuando esa misma persona toca el botón de WhatsApp.
+
+    `detail` es el texto del agente tal cual, en el idioma del negocio: es
+    exactamente lo que se le habría dicho por WhatsApp a quien confirma. Se
+    devuelve sin traducir a propósito — dos canales que explican el mismo
+    resultado con palabras distintas terminan discrepando, y acá el motivo de un
+    rechazo («se rechazó antes y ya no reserva stock») es lo único que dice qué
+    hacer después.
+    """
+    from app import decisiones, erpnext
+
+    with erpnext.manager_scope():
+        # LA PERTENENCIA PRIMERO, y con la misma lectura que `order_detail`:
+        # levanta `RecordNotFound` para un pedido de otra empresa, así que un
+        # token válido no puede confirmar un pedido que ni siquiera puede ver.
+        _pedido_de_la_empresa(order_id)
+
+    resultado = decisiones.confirmar(
+        order_id, quien_decide, canal=decisiones.CANAL_PANEL
+    )
+    return {
+        "orderId": order_id,
+        "ok": bool(resultado.get("ok")),
+        "customerNotified": bool(resultado.get("aviso_cliente")),
+        "detail": str(resultado.get("detalle") or ""),
+    }
 
 
 def _dia_local(sello: str) -> str:
@@ -751,27 +813,96 @@ TOKEN_MINIMO = 32
 ANONIMO = ""
 
 
-def _tokens_por_persona() -> dict[str, str]:
-    """`DASHBOARD_TOKENS` -> {token: teléfono}. Entradas rotas se ignoran.
+def normalizar_token(crudo: object) -> str:
+    """Cómo se compara un token. UNA regla, y todos los lados la llaman a ella.
+
+    Había tres, y no coincidían: `entradas_de_tokens` recortaba los espacios de
+    cada token por persona, `readiness` recortaba el compartido antes de
+    validarlo, y `quien()` comparaba el compartido CRUDO contra lo que llega en
+    el header. Con `DASHBOARD_API_TOKEN=" abc… "` en el `.env` —entre comillas,
+    que es como se pega un secreto— el preflight decía LISTO sobre un valor
+    recortado que nadie usaba, el panel recorta lo que la persona tipea
+    (`dashboard_ui/app.js`), y todas las peticiones daban 401 contra un
+    preflight en verde. Una sola función es lo que hace que eso no pueda volver.
+    """
+    return str(crudo or "").strip()
+
+
+def token_compartido() -> str:
+    """`DASHBOARD_API_TOKEN` tal como se compara. Ver `normalizar_token`."""
+    return normalizar_token(os.getenv("DASHBOARD_API_TOKEN", ""))
+
+
+def entradas_de_tokens(crudo: str) -> tuple[dict[str, str], list[str]]:
+    """`DASHBOARD_TOKENS` -> ({token: teléfono}, motivos de lo que NO entró).
 
     Formato: ``<token>:<teléfono>,<token>:<teléfono>``. El teléfono se
     normaliza acá una vez, con el mismo `telefono.normalizar` que usa el
     webhook, así que `+54 9 11 …` y `5491…` son la misma persona en los dos
     lados. Un token más corto que TOKEN_MINIMO no entra: adivinable no es
     autenticación.
+
+    DEVUELVE LAS DOS MITADES porque las dos hacen falta, y en lugares distintos:
+    el panel usa las válidas y `readiness` necesita saber qué se descartó. El
+    descarte era MUDO —una entrada rota simplemente no existía—, así que un
+    token que el dueño pegó en el `.env` y no funciona no tenía dónde
+    explicarse: ni un log, ni un error, ni una línea en el preflight. Con un
+    solo parser, además, el chequeo no puede discrepar con el panel sobre qué
+    entrada es válida.
+
+    EL TOKEN NUNCA SALE EN UN MOTIVO: los motivos se leen en la salida de
+    `readiness`, que es lo que la gente pega en un chat cuando algo no anda.
     """
     from app import telefono as telefonos
 
     pares: dict[str, str] = {}
-    for entrada in os.getenv("DASHBOARD_TOKENS", "").split(","):
+    personas: set[str] = set()
+    problemas: list[str] = []
+    for posicion, entrada in enumerate(crudo.split(","), start=1):
         entrada = entrada.strip()
+        if not entrada:
+            continue
         if ":" not in entrada:
+            problemas.append(f"la entrada {posicion} no tiene «token:teléfono»")
             continue
         token, _, numero = entrada.partition(":")
-        token, numero = token.strip(), telefonos.normalizar(numero)
-        if len(token) >= TOKEN_MINIMO and numero:
+        token, numero = normalizar_token(token), telefonos.normalizar(numero)
+        if len(token) < TOKEN_MINIMO:
+            problemas.append(
+                f"el token de la entrada {posicion} tiene {len(token)} caracteres "
+                f"y el mínimo es {TOKEN_MINIMO}"
+            )
+        elif not numero:
+            problemas.append(
+                f"el teléfono de la entrada {posicion} no se puede interpretar"
+            )
+        elif token in pares:
+            problemas.append(f"la entrada {posicion} repite un token que ya estaba")
+        elif numero in personas:
+            # DOS tokens distintos para la MISMA persona. El duplicado de token
+            # de arriba no lo ve —son textos distintos— y el teléfono tampoco
+            # si se comparan crudos: `+54 9 11 …` y `5491…` son la misma persona
+            # y dos strings. Se compara el NORMALIZADO, que es lo que quedó en
+            # `numero`, igual que en `deploy/configurar_dashboard.py`.
+            #
+            # Importa porque revocar es «sacá la línea del .env»: con dos, el
+            # dueño saca una, cree que le cortó el acceso a esa persona, y la
+            # otra sigue entrando y sigue pudiendo confirmar pedidos. La
+            # herramienta que emite tokens ya lo rechaza; una configuración
+            # editada a mano o vieja entraba igual, y era la que nadie miraba.
+            problemas.append(
+                f"la entrada {posicion} es un segundo token para un teléfono que "
+                "ya tenía uno: sacar una sola línea no le corta el acceso"
+            )
+        else:
             pares[token] = numero
-    return pares
+            personas.add(numero)
+    return pares, problemas
+
+
+def _tokens_por_persona() -> dict[str, str]:
+    """Las entradas válidas de `DASHBOARD_TOKENS`. Ver `entradas_de_tokens`."""
+    return entradas_de_tokens(os.getenv("DASHBOARD_TOKENS", ""))[0]
 
 
 def quien(header: str) -> str | None:
@@ -804,7 +935,7 @@ def quien(header: str) -> str | None:
     if encontrado is not None:
         return encontrado
 
-    compartido = os.getenv("DASHBOARD_API_TOKEN", "")
+    compartido = token_compartido()
     if len(compartido) >= TOKEN_MINIMO and hmac.compare_digest(
         supplied, compartido.encode()
     ):
@@ -838,7 +969,7 @@ def hay_acceso_configurado() -> bool:
     para una instalación configurada entera con `DASHBOARD_TOKENS`.
     """
     return (
-        len(os.getenv("DASHBOARD_API_TOKEN", "")) >= TOKEN_MINIMO
+        len(token_compartido()) >= TOKEN_MINIMO
         or bool(_tokens_por_persona())
     )
 
@@ -1026,7 +1157,7 @@ class DashboardAPI:
         if cors:
             response_headers.extend([
                 (b"access-control-allow-origin", origin.encode()),
-                (b"access-control-allow-methods", b"GET, OPTIONS"),
+                (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
                 (b"access-control-allow-headers", b"Authorization"),
             ])
 
@@ -1037,6 +1168,9 @@ class DashboardAPI:
         path = scope.get("path", "").removeprefix(scope.get("root_path", ""))
         detail_match = re.fullmatch(r"/orders/([^/]{1,140})", path)
         conversation_match = re.fullmatch(r"/customers/([^/]{1,140})/conversation", path)
+        # La ÚNICA ruta que escribe. `[^/]` la mantiene fuera de `detail_match`,
+        # que es `fullmatch` sobre un segmento sin barras.
+        confirm_match = re.fullmatch(r"/orders/([^/]{1,140})/confirm", path)
         readers = {
             "/snapshot": snapshot, "/controls": controls, "/operations": operations,
             "/today": today, "/queue": queue,
@@ -1046,13 +1180,20 @@ class DashboardAPI:
             await reply(200, {"service": "plus-agent", "apiVersion": 1,
                               "configured": hay_acceso_configurado()})
             return
-        if path not in readers and not detail_match and not conversation_match:
+        if (path not in readers and not detail_match and not conversation_match
+                and not confirm_match):
             await reply(404, {"error": "Not found"})
             return
         if scope["method"] == "OPTIONS":
             await reply(200 if cors else 403, {"ok": cors})
             return
-        if scope["method"] != "GET":
+        # El panel sigue siendo de sólo lectura salvo en UNA ruta, y se dice así:
+        # la excepción se nombra donde está la regla, en vez de aflojar la regla.
+        if confirm_match:
+            if scope["method"] != "POST":
+                await reply(405, {"error": "Confirming an order is a POST"})
+                return
+        elif scope["method"] != "GET":
             await reply(405, {"error": "This dashboard is read-only"})
             return
         if not hay_acceso_configurado():
@@ -1064,6 +1205,18 @@ class DashboardAPI:
             response_headers.append((b"www-authenticate", b"Bearer"))
             await reply(401, {"error": "A valid dashboard access token is required"})
             return
+        # ESCRIBIR PIDE UN NOMBRE. `quien` devuelve tres cosas y el token
+        # COMPARTIDO (`ANONIMO`, `""`) es una de ellas: está autenticado y no es
+        # nadie en particular, así que puede mirar y nunca decidir — una
+        # confirmación sin nombre no se puede auditar. `puede_decidir` además
+        # exige `router.es_equipo`, o sea las MISMAS guardas que valen sobre el
+        # webhook firmado de Meta; el token no inventa permisos nuevos, sólo es
+        # otra forma de probar «soy este teléfono».
+        if confirm_match and not puede_decidir(mirando):
+            await reply(403, {
+                "error": "This token can read the dashboard but cannot confirm orders"
+            })
+            return
         # Same-origin requests need no CORS. Cross-origin access is explicit.
         host = headers.get("host", "")
         same_origin = origin == f"{scope.get('scheme', 'http')}://{host}"
@@ -1071,7 +1224,12 @@ class DashboardAPI:
             await reply(403, {"error": "This dashboard origin is not allowed"})
             return
         try:
-            if detail_match:
+            if confirm_match:
+                order_id = unquote(confirm_match[1])
+                if "/" in order_id or "\\" in order_id or order_id in {".", ".."}:
+                    raise RecordNotFound
+                data = await _en_hilo(confirmar_desde_el_panel, order_id, mirando)
+            elif detail_match:
                 order_id = unquote(detail_match[1])
                 if "/" in order_id or "\\" in order_id or order_id in {".", ".."}:
                     raise RecordNotFound

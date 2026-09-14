@@ -303,6 +303,94 @@ def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
             )
 
 
+# ------------------------------------------------------------------- Panel
+
+
+def chequear_panel(env: Mapping[str, str], reporte: Reporte) -> None:
+    """El panel: quién entra, y quién de los que entran puede decidir.
+
+    El panel es OPCIONAL —un despliegue que no lo usa está bien— así que «no hay
+    ninguno» es un aviso y no un bloqueo. Lo que sí bloquea es un panel
+    configurado MAL, que es peor que no tenerlo: hasta ahora una entrada rota de
+    `DASHBOARD_TOKENS` simplemente se descartaba en silencio, o sea que el dueño
+    pegaba un token en el `.env`, no funcionaba, y no había ni un log donde
+    enterarse.
+
+    Se parsea con `dashboard.entradas_de_tokens`, el MISMO parser que usa el
+    panel, así que este chequeo no puede aprobar una entrada que el panel
+    después rechaza ni al revés.
+
+    Ningún token se imprime, ni entero ni cortado, igual que con
+    TELEFONOS_EQUIPO: esta salida es lo que la gente pega en un chat.
+    """
+    from app import dashboard
+
+    # `dashboard.normalizar_token` y no `_valor`: los dos recortan espacios, pero
+    # sólo uno de los dos es LA MISMA FUNCIÓN que usa `quien()` para comparar. Con
+    # `_valor` el chequeo validaba una cosa y el panel comparaba otra, y un
+    # `DASHBOARD_API_TOKEN=" … "` entrecomillado daba preflight en verde y 401 en
+    # todas las peticiones. Ver `dashboard.normalizar_token`.
+    compartido = dashboard.normalizar_token(env.get("DASHBOARD_API_TOKEN", ""))
+    validos, problemas = dashboard.entradas_de_tokens(_valor(env, "DASHBOARD_TOKENS"))
+
+    for motivo in problemas:
+        reporte.error("DASHBOARD_TOKENS", f"{motivo}: esa persona no entra al panel")
+
+    if compartido and len(compartido) < dashboard.TOKEN_MINIMO:
+        reporte.error(
+            "DASHBOARD_API_TOKEN",
+            f"tiene {len(compartido)} caracteres y el mínimo es "
+            f"{dashboard.TOKEN_MINIMO}: no lo acepta nadie",
+        )
+    elif compartido and compartido in validos:
+        # `quien()` recorre los tokens POR PERSONA antes que el compartido, así
+        # que con este choque el token que comparte todo el equipo pasa a
+        # resolver a esa persona — y con ella, al derecho de confirmar pedidos.
+        # Un copy-paste sube privilegios sin que nada lo diga.
+        reporte.error(
+            "DASHBOARD_API_TOKEN",
+            "es igual a uno de DASHBOARD_TOKENS: el token compartido pasaría a ser "
+            "esa persona y podría confirmar pedidos",
+        )
+
+    if not compartido and not validos:
+        reporte.aviso(
+            "Panel",
+            "sin DASHBOARD_API_TOKEN ni DASHBOARD_TOKENS: contesta 503 y no "
+            "muestra ningún dato",
+        )
+        return
+
+    del_equipo = {
+        numero
+        for numero in (
+            telefono.normalizar(t) for t in _valor(env, "TELEFONOS_EQUIPO").split(",")
+        )
+        if numero
+    }
+    mirones = {n for n in validos.values() if n not in del_equipo}
+    deciden = {n for n in validos.values() if n in del_equipo}
+
+    if validos:
+        reporte.ok(
+            "DASHBOARD_TOKENS",
+            f"{len(validos)} token(s) por persona, {len(deciden)} de ellos del "
+            "equipo (no se muestran)",
+        )
+    if mirones:
+        reporte.aviso(
+            "DASHBOARD_TOKENS",
+            f"{len(mirones)} número(s) con token no están en TELEFONOS_EQUIPO: "
+            "entran y miran, pero no pueden confirmar nada",
+        )
+    if compartido and not deciden:
+        reporte.aviso(
+            "Panel",
+            "sólo hay token compartido: alcanza para mirar, y ninguna decisión se "
+            "puede tomar desde el panel (un token sin nombre no se puede auditar)",
+        )
+
+
 # --------------------------------------------------------------- WhatsApp
 
 
@@ -1179,6 +1267,7 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
     http = _http_real if con_red else None
     chequear_modelos(env, reporte)
     chequear_equipo(env, reporte)
+    chequear_panel(env, reporte)
     waba = chequear_whatsapp(env, reporte, http)
     # El resumen de límites se resuelve ANTES de las plantillas: dos de ellas
     # sólo bloquean si el dueño encendió el límite que las gatea.
