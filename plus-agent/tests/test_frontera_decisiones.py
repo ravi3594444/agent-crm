@@ -185,7 +185,9 @@ def test_manual_confirmation_uses_the_policy_credential_not_the_agent_one(
     monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
     monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
 
-    resultado = decisiones.confirmar("SAL-ORD-0001", "5493511111111")
+    resultado = decisiones.confirmar(
+        "SAL-ORD-0001", "5493511111111", canal=decisiones.CANAL_WHATSAPP
+    )
 
     assert resultado["ok"] is True
     submit.assert_called_once_with("Sales Order", "SAL-ORD-0001")
@@ -227,12 +229,58 @@ def test_confirmar_adentro_del_lock_de_acciones_no_se_bloquea_contra_si_mismo(
     try:
         with locks.distributed_lock(pedido_lock := f"accion:{pedido}", lease_seconds=30, wait_seconds=2):
             assert pedido_lock  # el de afuera está tomado mientras corre lo de adentro
-            resultado = decisiones.confirmar(pedido, "5493511111111")
+            resultado = decisiones.confirmar(
+                pedido, "5493511111111", canal=decisiones.CANAL_WHATSAPP
+            )
     except locks.CoordinationError:
         pytest.fail("no se pudo tomar el lock de afuera; ¿hay un Redis en REDIS_URL?")
 
     assert resultado["ok"] is True, resultado["detalle"]
     assert "coordinar" not in resultado["detalle"]
+
+
+def test_el_rastro_en_erpnext_nombra_el_canal_por_el_que_se_confirmo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lo que queda firmado en el pedido dice por dónde entró la persona.
+
+    El historial del pedido y la marca durable decían «mediante WhatsApp» como
+    literal, de cuando WhatsApp era el único camino. El panel es el segundo, y
+    un rastro de auditoría que nombra un canal por el que nadie pasó es peor que
+    no tenerlo: alguien que audite una confirmación discutida va a buscar el
+    mensaje de WhatsApp que la respalda y no existe.
+
+    Las DOS mitades. Que aparezca «el panel» lo cumpliría igual un texto que
+    dijera las dos cosas —«mediante WhatsApp … el panel»— que es exactamente lo
+    que deja un literal al que se le agregó una interpolación al lado. Que no
+    aparezca «WhatsApp» es la mitad que mata al literal.
+    """
+    pedido = "SAL-ORD-CANAL-1"
+    comentarios: list[str] = []
+    marcas: list[str] = []
+    monkeypatch.setattr(
+        aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 0}
+    )
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", Mock())
+    monkeypatch.setattr(
+        aprobacion.erpnext, "add_comment",
+        lambda dt, name, texto: comentarios.append(texto),
+    )
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
+    monkeypatch.setattr(
+        aprobacion.confirmacion, "registrar",
+        lambda nombre, fuente: marcas.append(fuente) or True,
+    )
+    monkeypatch.setattr(decisiones, "cerrar_revision_si_hay", lambda *a, **k: True)
+    monkeypatch.setattr(aprobacion.solicitudes, "leer", lambda nombre: None)
+
+    decisiones.confirmar(pedido, "5493511111111", canal=decisiones.CANAL_PANEL)
+
+    assert comentarios and marcas
+    assert "el panel" in comentarios[0]
+    assert "WhatsApp" not in comentarios[0]
+    assert "por el panel" in marcas[0]
+    assert "WhatsApp" not in marcas[0]
 
 
 # ---------------------------- el registro de herramientas no se lee en voz alta

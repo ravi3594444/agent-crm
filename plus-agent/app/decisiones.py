@@ -84,7 +84,17 @@ def telefono_del_cliente(nombre_so: str) -> str:
     return telefono.normalizar(cliente.get("mobile_no")) or ""
 
 
-def confirmar(nombre: str, por: str) -> dict:
+# POR DÓNDE ENTRÓ LA PERSONA QUE CONFIRMÓ, que es lo que se firma en el
+# historial del pedido en ERPNext. Eran la palabra «WhatsApp» escrita a mano
+# adentro del rastro, cuando WhatsApp era el único camino posible; en cuanto hay
+# un segundo, ese literal pasa a ser una firma falsa en una auditoría. No hay
+# default en ninguna de las dos funciones que lo reciben: el que confirma lo
+# dice, o no compila.
+CANAL_WHATSAPP = "WhatsApp"
+CANAL_PANEL = "el panel"
+
+
+def confirmar(nombre: str, por: str, *, canal: str) -> dict:
     """Confirmar un pedido a mano. SÓLO UNA PERSONA DEL EQUIPO.
 
     LA PUERTA, y hasta este cambio no lo era. Esta función era un alias pelado
@@ -110,6 +120,9 @@ def confirmar(nombre: str, por: str) -> dict:
     Submit lo sigue haciendo `erpnext.submit_doc` con la credencial de
     política, acá no cambia nada de eso.
 
+    `canal` es `CANAL_WHATSAPP` o `CANAL_PANEL` y va al rastro durable: sin
+    él el historial del pedido firmaría un camino por el que nadie pasó.
+
     Devuelve {"ok", "aviso_cliente", "detalle"}.
     """
     if not es_equipo(por):
@@ -124,7 +137,7 @@ def confirmar(nombre: str, por: str) -> dict:
     # `cancelar:{...}` y `despreparar:{...}` ya anidan así dentro de `accion:`.
     try:
         with distributed_lock(f"confirmar:{nombre}", lease_seconds=60, wait_seconds=10):
-            return _confirmar_autorizado(nombre, por)
+            return _confirmar_autorizado(nombre, por, canal)
     except CoordinationError:
         return _resultado(
             False,
@@ -133,7 +146,7 @@ def confirmar(nombre: str, por: str) -> dict:
         )
 
 
-def _confirmar_autorizado(nombre: str, por: str) -> dict:
+def _confirmar_autorizado(nombre: str, por: str, canal: str) -> dict:
     """Lo que hace «confirmar» con quien llama ya comprobado y el lock tomado."""
     from app.aprobacion import confirmar_pedido, solicitud_abierta
 
@@ -143,7 +156,7 @@ def _confirmar_autorizado(nombre: str, por: str) -> dict:
     if solicitud_abierta(nombre) is not None:
         return aprobar_solicitud(nombre, por)
 
-    resultado = confirmar_pedido(nombre, por)
+    resultado = confirmar_pedido(nombre, por, canal=canal)
     # «Confirmar» es también la salida documentada de una revisión humana, y
     # por eso REVISION_HUMANA NO es uno de `solicitudes.ABIERTOS`: esta palabra
     # tiene que seguir queriendo decir «emití este borrador». Cerrar la

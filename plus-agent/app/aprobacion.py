@@ -72,7 +72,9 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
         # `decisiones.confirmar` y este camino no es especial.
         from app import decisiones
 
-        return decisiones.confirmar(nombre, telefono)["detalle"]
+        return decisiones.confirmar(
+            nombre, telefono, canal=decisiones.CANAL_WHATSAPP
+        )["detalle"]
 
     if accion == "contraoferta":
         # "contraoferta:<pedido>:<fecha> <hora> <cargo>"
@@ -186,17 +188,25 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
     return "Acción desconocida."
 
 
-def confirmar_pedido(nombre: str, por: str) -> dict:
-    """Confirm one order on behalf of an ALREADY AUTHENTICATED human manager.
+def confirmar_pedido(nombre: str, por: str, *, canal: str) -> dict:
+    """El MECANISMO de confirmar, con quien llama YA autenticado y autorizado.
 
-    Moved out of manejar_boton unchanged so app/decisiones.py can offer it as
-    the manual-path entry point without duplicating logic that is already
-    proven against duplicate taps and submit timeouts that commit after the
-    HTTP client gives up. Submission still uses the policy credential via
-    erpnext.submit_doc; nothing here is reachable from an LLM tool.
+    Acá está lo que está probado contra el toque repetido y contra un submit que
+    commitea DESPUÉS de que el cliente HTTP se dio por vencido. Quién puede
+    hacerlo, si hay una solicitud abierta y el lock son de `decisiones.confirmar`,
+    que es la puerta; esta función no comprueba nada de eso y no debe. El Submit
+    sigue siendo `erpnext.submit_doc`, la credencial de política, y nada de acá
+    es alcanzable desde una herramienta del modelo.
 
-    Returns {"ok", "aviso_cliente", "detalle"} — `detalle` is the text shown to
-    the manager.
+    `canal` NO TIENE DEFAULT, y ésa es la mitad que importa. El rastro que se
+    escribe en ERPNext decía «mediante WhatsApp» como literal, así que el primer
+    llamador que no fuera WhatsApp —el panel— iba a firmar en el historial del
+    pedido un canal por el que nadie pasó, y un rastro de auditoría que miente
+    es peor que no tenerlo. Un default habría hecho exactamente eso en silencio:
+    acá el que confirma tiene que DECIR por dónde entró.
+
+    Devuelve {"ok", "aviso_cliente", "detalle"} — `detalle` es lo que se le
+    muestra al encargado.
     """
     # La ventana de anulación por WhatsApp la abre la marca durable, y el
     # default NO puede ser «sí»: por la rama de `ya_confirmado` no se pasa por
@@ -241,7 +251,7 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
             erpnext.add_comment(
                 "Sales Order",
                 nombre,
-                f"Confirmado por un integrante autorizado mediante WhatsApp ({por}).",
+                f"Confirmado por un integrante autorizado mediante {canal} ({por}).",
             )
             # Durable record of WHEN, in ERPNext: it opens the manual
             # cancellation window and survives any Redis restart.
@@ -253,7 +263,7 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
             # igual «para anularlo dentro de las 24 h: cancelar …». Se le
             # prometía algo que el sistema iba a rechazar.
             ventana = confirmacion.registrar(
-                nombre, f"manual (confirmación humana, {por})"
+                nombre, f"manual (confirmación humana por {canal}, {por})"
             )
     except erpnext.ERPNextError as error:
         print(f"[approval] {nombre}: {type(error).__name__}")

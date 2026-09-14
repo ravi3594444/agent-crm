@@ -1340,7 +1340,7 @@ def test_una_solicitud_abierta_no_se_confirma_al_precio_viejo(mundo) -> None:
     _abrir(mundo, solicitado=COMPLETO)
     mundo["submits"].clear()
 
-    resultado = decisiones.confirmar(SO, STAFF)
+    resultado = decisiones.confirmar(SO, STAFF, canal=decisiones.CANAL_WHATSAPP)
 
     assert mundo["submits"] == []
     # Y no es que no haya pasado nada: la solicitud quedó decidida y esperando
@@ -1364,7 +1364,9 @@ def test_confirmar_le_dice_que_no_a_un_telefono_que_no_es_del_equipo(mundo) -> N
     mundo["submits"].clear()
     mundo["locks"].clear()
 
-    resultado = decisiones.confirmar(SO, "5490000000000")
+    resultado = decisiones.confirmar(
+        SO, "5490000000000", canal=decisiones.CANAL_PANEL
+    )
 
     assert resultado["ok"] is False
     assert "permiso" in resultado["detalle"]
