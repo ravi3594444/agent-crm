@@ -325,7 +325,12 @@ def chequear_panel(env: Mapping[str, str], reporte: Reporte) -> None:
     """
     from app import dashboard
 
-    compartido = _valor(env, "DASHBOARD_API_TOKEN")
+    # `dashboard.normalizar_token` y no `_valor`: los dos recortan espacios, pero
+    # sólo uno de los dos es LA MISMA FUNCIÓN que usa `quien()` para comparar. Con
+    # `_valor` el chequeo validaba una cosa y el panel comparaba otra, y un
+    # `DASHBOARD_API_TOKEN=" … "` entrecomillado daba preflight en verde y 401 en
+    # todas las peticiones. Ver `dashboard.normalizar_token`.
+    compartido = dashboard.normalizar_token(env.get("DASHBOARD_API_TOKEN", ""))
     validos, problemas = dashboard.entradas_de_tokens(_valor(env, "DASHBOARD_TOKENS"))
 
     for motivo in problemas:

@@ -302,8 +302,13 @@ def conversation(customer_id: str) -> dict:
     return base
 
 
-def confirmar_pedido(order_id: str, quien_decide: str) -> dict:
-    """Confirmar UN pedido desde el panel, a nombre de una persona con nombre.
+def confirmar_desde_el_panel(order_id: str, quien_decide: str) -> dict:
+    """NO se llama `confirmar_pedido`, y el nombre viejo era una trampa: hay una
+    `aprobacion.confirmar_pedido` que es el MECANISMO del submit, ésta no la
+    llama, y las dos no son intercambiables — ésta entra por la puerta
+    (`decisiones.confirmar`) y aquélla está del otro lado de la puerta.
+
+    Confirmar UN pedido desde el panel, a nombre de una persona con nombre.
 
     LO QUE ESTA FUNCIÓN NO HACE, y es la mitad del diseño: no decide nada. No
     mira si hay una solicitud abierta, no cierra la revisión, no toma el lock y
@@ -808,6 +813,26 @@ TOKEN_MINIMO = 32
 ANONIMO = ""
 
 
+def normalizar_token(crudo: object) -> str:
+    """Cómo se compara un token. UNA regla, y todos los lados la llaman a ella.
+
+    Había tres, y no coincidían: `entradas_de_tokens` recortaba los espacios de
+    cada token por persona, `readiness` recortaba el compartido antes de
+    validarlo, y `quien()` comparaba el compartido CRUDO contra lo que llega en
+    el header. Con `DASHBOARD_API_TOKEN=" abc… "` en el `.env` —entre comillas,
+    que es como se pega un secreto— el preflight decía LISTO sobre un valor
+    recortado que nadie usaba, el panel recorta lo que la persona tipea
+    (`dashboard_ui/app.js`), y todas las peticiones daban 401 contra un
+    preflight en verde. Una sola función es lo que hace que eso no pueda volver.
+    """
+    return str(crudo or "").strip()
+
+
+def token_compartido() -> str:
+    """`DASHBOARD_API_TOKEN` tal como se compara. Ver `normalizar_token`."""
+    return normalizar_token(os.getenv("DASHBOARD_API_TOKEN", ""))
+
+
 def entradas_de_tokens(crudo: str) -> tuple[dict[str, str], list[str]]:
     """`DASHBOARD_TOKENS` -> ({token: teléfono}, motivos de lo que NO entró).
 
@@ -831,6 +856,7 @@ def entradas_de_tokens(crudo: str) -> tuple[dict[str, str], list[str]]:
     from app import telefono as telefonos
 
     pares: dict[str, str] = {}
+    personas: set[str] = set()
     problemas: list[str] = []
     for posicion, entrada in enumerate(crudo.split(","), start=1):
         entrada = entrada.strip()
@@ -840,7 +866,7 @@ def entradas_de_tokens(crudo: str) -> tuple[dict[str, str], list[str]]:
             problemas.append(f"la entrada {posicion} no tiene «token:teléfono»")
             continue
         token, _, numero = entrada.partition(":")
-        token, numero = token.strip(), telefonos.normalizar(numero)
+        token, numero = normalizar_token(token), telefonos.normalizar(numero)
         if len(token) < TOKEN_MINIMO:
             problemas.append(
                 f"el token de la entrada {posicion} tiene {len(token)} caracteres "
@@ -852,8 +878,25 @@ def entradas_de_tokens(crudo: str) -> tuple[dict[str, str], list[str]]:
             )
         elif token in pares:
             problemas.append(f"la entrada {posicion} repite un token que ya estaba")
+        elif numero in personas:
+            # DOS tokens distintos para la MISMA persona. El duplicado de token
+            # de arriba no lo ve —son textos distintos— y el teléfono tampoco
+            # si se comparan crudos: `+54 9 11 …` y `5491…` son la misma persona
+            # y dos strings. Se compara el NORMALIZADO, que es lo que quedó en
+            # `numero`, igual que en `deploy/configurar_dashboard.py`.
+            #
+            # Importa porque revocar es «sacá la línea del .env»: con dos, el
+            # dueño saca una, cree que le cortó el acceso a esa persona, y la
+            # otra sigue entrando y sigue pudiendo confirmar pedidos. La
+            # herramienta que emite tokens ya lo rechaza; una configuración
+            # editada a mano o vieja entraba igual, y era la que nadie miraba.
+            problemas.append(
+                f"la entrada {posicion} es un segundo token para un teléfono que "
+                "ya tenía uno: sacar una sola línea no le corta el acceso"
+            )
         else:
             pares[token] = numero
+            personas.add(numero)
     return pares, problemas
 
 
@@ -892,7 +935,7 @@ def quien(header: str) -> str | None:
     if encontrado is not None:
         return encontrado
 
-    compartido = os.getenv("DASHBOARD_API_TOKEN", "")
+    compartido = token_compartido()
     if len(compartido) >= TOKEN_MINIMO and hmac.compare_digest(
         supplied, compartido.encode()
     ):
@@ -926,7 +969,7 @@ def hay_acceso_configurado() -> bool:
     para una instalación configurada entera con `DASHBOARD_TOKENS`.
     """
     return (
-        len(os.getenv("DASHBOARD_API_TOKEN", "")) >= TOKEN_MINIMO
+        len(token_compartido()) >= TOKEN_MINIMO
         or bool(_tokens_por_persona())
     )
 
@@ -1185,7 +1228,7 @@ class DashboardAPI:
                 order_id = unquote(confirm_match[1])
                 if "/" in order_id or "\\" in order_id or order_id in {".", ".."}:
                     raise RecordNotFound
-                data = await _en_hilo(confirmar_pedido, order_id, mirando)
+                data = await _en_hilo(confirmar_desde_el_panel, order_id, mirando)
             elif detail_match:
                 order_id = unquote(detail_match[1])
                 if "/" in order_id or "\\" in order_id or order_id in {".", ".."}:

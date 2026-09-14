@@ -147,16 +147,52 @@ def confirmar(nombre: str, por: str, *, canal: str) -> dict:
 
 
 def _confirmar_autorizado(nombre: str, por: str, canal: str) -> dict:
-    """Lo que hace «confirmar» con quien llama ya comprobado y el lock tomado."""
-    from app.aprobacion import confirmar_pedido, solicitud_abierta
+    """Lo que hace «confirmar» con quien llama ya comprobado y el lock tomado.
 
-    # «Aprobar» no quiere decir «confirmar» cuando hay una solicitud abierta:
-    # quiere decir «aprobá lo que pidió el cliente», y los términos todavía
-    # tienen que ir al cliente antes de que se emita nada (app/solicitudes.py).
-    if solicitud_abierta(nombre) is not None:
+    LA COMPROBACIÓN Y EL SUBMIT VAN EN LA MISMA SECCIÓN CRÍTICA, y el lock que
+    la arma es `solicitud:{pedido}` y no `confirmar:{pedido}`: el segundo no lo
+    toma NADIE del lado del cliente, así que leer «no hay solicitud» bajo él no
+    impedía que se abriera una un instante después. La ventana era chica y
+    cuesta el pedido entero — el cliente pide una excepción, `solicitudes.crear`
+    la registra, y para cuando el encargado ve la pregunta el borrador ya se
+    emitió a los términos viejos. `solicitudes.crear` toma AHORA el mismo lock y
+    relee el borrador adentro, que es la otra mitad: sin ella el lock serializa
+    y el segundo igual hace lo que iba a hacer.
+
+    El orden es `accion:` ⊃ `confirmar:` ⊃ `solicitud:`, siempre en ese sentido
+    y sin ciclos. `aprobar_solicitud` y `cerrar_revision_si_hay` se llaman
+    FUERA del `with` a propósito: las dos vuelven a tomar `solicitud:{pedido}` y
+    `locks.distributed_lock` no es reentrante (`thread_local=False`), así que
+    desde adentro esperarían 10 s por un lock que ya tiene este mismo hilo.
+    """
+    from app.aprobacion import confirmar_pedido, solicitud_abierta_estricta
+    from app.solicitudes import LecturaIncierta
+
+    resultado: dict | None = None
+    # CoordinationError sube hasta `confirmar`, que ya la contesta.
+    with distributed_lock(f"solicitud:{nombre}", lease_seconds=60, wait_seconds=10):
+        try:
+            abierta = solicitud_abierta_estricta(nombre)
+        except LecturaIncierta as exc:
+            # NO se emite nada. «No pude leer el estado» no es «no hay
+            # contraoferta esperando», y confundirlos con ERPNext caído emite
+            # el borrador sin poder probar que nadie está esperando otra cosa.
+            print(f"[decisiones] {nombre}: no confirmo, estado incierto ({exc})")
+            return _resultado(
+                False,
+                False,
+                f"No pude verificar el estado de {nombre} y no lo confirmé. "
+                "Probá de nuevo en un momento.",
+            )
+        # «Aprobar» no quiere decir «confirmar» cuando hay una solicitud
+        # abierta: quiere decir «aprobá lo que pidió el cliente», y los términos
+        # todavía tienen que ir al cliente antes de que se emita nada
+        # (app/solicitudes.py).
+        if abierta is None:
+            resultado = confirmar_pedido(nombre, por, canal=canal)
+
+    if resultado is None:
         return aprobar_solicitud(nombre, por)
-
-    resultado = confirmar_pedido(nombre, por, canal=canal)
     # «Confirmar» es también la salida documentada de una revisión humana, y
     # por eso REVISION_HUMANA NO es uno de `solicitudes.ABIERTOS`: esta palabra
     # tiene que seguir queriendo decir «emití este borrador». Cerrar la

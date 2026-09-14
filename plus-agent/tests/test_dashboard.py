@@ -166,22 +166,77 @@ class DashboardIdentityTest(unittest.TestCase):
             self.assertFalse(dashboard.puede_decidir(None))
             self.assertFalse(dashboard.puede_decidir("5493510009999"))
 
-    def test_two_tokens_for_one_person_are_ONE_identity(self):
-        """La identidad que devuelve `quien` tiene que ser canónica.
+    def test_one_token_per_person_and_a_second_one_is_refused(self):
+        """Un teléfono, un token. El segundo no entra.
 
-        La versión anterior de este test afirmaba
-        `puede_decidir(quien(...))` con el teléfono escrito raro, y NO PODÍA
-        FALLAR: `router.es_equipo` vuelve a normalizar lo que le pasen
-        (`app/router.py:52`), así que tragaba el bug entero. Lo que la
-        normalización compra de verdad está un paso más allá de `es_equipo`:
-        el string que sale de acá es la identidad con la que se audita una
-        decisión, y dos tokens de la MISMA persona escritos distinto tienen
-        que dar la MISMA identidad, o el registro dice que fueron dos.
+        La versión anterior afirmaba que dos tokens de la misma persona daban la
+        MISMA identidad, y esa mitad sigue valiendo y sigue afirmada: el teléfono
+        se normaliza, así que `+54 9 351 000 0001` y `005493510000001` son la
+        misma persona y no dos. Lo que estaba mal era la conclusión — que los DOS
+        sirvieran.
+
+        Revocar el acceso de alguien es sacar su línea del `.env`. Con dos
+        tokens, el dueño saca una, cree que le cortó el acceso, y la otra sigue
+        entrando y sigue pudiendo confirmar pedidos. `configurar_dashboard.py` ya
+        rechazaba emitir el segundo; el panel lo aceptaba igual si la
+        configuración venía editada a mano o de antes, que es el único caso en el
+        que esto pasa de verdad. Hallazgo 3 de la review de #45.
+
+        Las dos mitades: que el primero SIGA entrando (rechazar los dos sería
+        romperle el acceso al que ya lo tenía) y que el segundo NO.
         """
         otro = "second-token-for-the-same-person-32-plus"
         env = {"DASHBOARD_TOKENS": f"{PERSONAL}:+54 9 351 000 0001,{otro}:005493510000001"}
         with patch.dict(os.environ, env):
-            uno = dashboard.quien("Bearer " + PERSONAL)
-            dos = dashboard.quien("Bearer " + otro)
-            self.assertEqual(uno, dos)
-            self.assertEqual(uno, STAFF_CANONICAL)
+            self.assertEqual(dashboard.quien("Bearer " + PERSONAL), STAFF_CANONICAL)
+            self.assertIsNone(dashboard.quien("Bearer " + otro))
+
+    def test_the_refusal_of_a_second_token_says_why_without_printing_it(self):
+        """El motivo llega a `readiness`, y no lleva el token adentro.
+
+        Un descarte mudo es la forma en que el dueño pega un token en el `.env`,
+        no entra, y no tiene dónde enterarse. Y el motivo se lee en la salida del
+        preflight, que es exactamente lo que una persona pega en un chat: por eso
+        nombra la ENTRADA y no el token.
+        """
+        otro = "second-token-for-the-same-person-32-plus"
+        _, problemas = dashboard.entradas_de_tokens(
+            f"{PERSONAL}:+54 9 351 000 0001,{otro}:005493510000001"
+        )
+
+        self.assertEqual(len(problemas), 1)
+        self.assertIn("entrada 2", problemas[0])
+        self.assertNotIn(otro, problemas[0])
+        self.assertNotIn(PERSONAL, problemas[0])
+
+    def test_a_shared_token_with_spaces_around_it_still_authenticates(self):
+        """El token compartido se compara con la MISMA regla en los dos lados.
+
+        `readiness` lo recortaba antes de validarlo y `quien()` lo comparaba
+        crudo, así que un `DASHBOARD_API_TOKEN=" … "` entrecomillado —que es como
+        se pega un secreto— daba preflight en VERDE y 401 en todas las
+        peticiones: el panel recorta lo que la persona tipea
+        (`dashboard_ui/app.js`), y eso no coincidía nunca con el valor del
+        entorno. Hallazgo 4 de la review de #45.
+
+        La mutación que mata a este test: que `token_compartido()` vuelva a
+        `os.getenv(...)` sin `.strip()`.
+        """
+        with patch.dict(os.environ, {"DASHBOARD_API_TOKEN": f"  {TOKEN}  "}):
+            self.assertEqual(dashboard.quien("Bearer " + TOKEN), dashboard.ANONIMO)
+            self.assertTrue(dashboard.hay_acceso_configurado())
+
+    def test_a_per_person_token_with_spaces_around_it_also_authenticates(self):
+        """El TERCER consumidor de la misma regla, y no tenía test.
+
+        `normalizar_token` la usan tres: el token por persona, el compartido y
+        `readiness`. Los otros dos los cuida un test cada uno; éste no lo cuidaba
+        ninguno —sacarle el recorte a esta línea dejaba las 2897 en verde—, y es
+        el mismo síntoma del hallazgo 4 en el otro lado del `.env`: una entrada
+        `DASHBOARD_TOKENS=" tok ":<tel>` que el preflight cuenta como válida y
+        que después no autentica a nadie.
+        """
+        with patch.dict(
+            os.environ, {"DASHBOARD_TOKENS": f"  {PERSONAL}  :{STAFF_CANONICAL}"}
+        ):
+            self.assertEqual(dashboard.quien("Bearer " + PERSONAL), STAFF_CANONICAL)

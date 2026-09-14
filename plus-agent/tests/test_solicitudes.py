@@ -410,12 +410,102 @@ def test_the_customer_is_told_at_once_and_promised_nothing(mundo) -> None:
         assert adentro not in texto.lower(), adentro
 
 
-def test_opening_a_request_holds_no_lock_and_blocks_no_worker(mundo) -> None:
+def test_opening_a_request_takes_the_orders_lock_and_still_blocks_no_worker(
+    mundo,
+) -> None:
+    """Abrir una solicitud toma el lock DEL PEDIDO, y ése es el único que toma.
+
+    Este test afirmaba `mundo["locks"] == []`, y el nombre decía por qué: abrir
+    una solicitud no tenía que trabar a un worker. Esa preocupación sigue siendo
+    cierta y sigue afirmada acá abajo —el aviso al equipo se ENCOLA, no se manda
+    inline, así que Meta no puede estirar el turno del cliente—, pero «ningún
+    lock» nunca fue esa mitad: lo que cuelga un turno es una llamada de red
+    adentro, no un lock por pedido que no toca la red.
+
+    Y era incorrecto. `decisiones.confirmar` lee «¿hay solicitud abierta?» y
+    después emite el borrador; sin un lock compartido, `crear` se mete justo en
+    el medio y el pedido se emite a los términos VIEJOS mientras al cliente se
+    le está preguntando por unos nuevos. El submit no se deshace. Es el hallazgo
+    2 de la review de #45, y este test era la razón por la que el lock no
+    estaba: estaba escrito que no tenía que estar.
+    """
     _abrir(mundo)
-    assert mundo["locks"] == []
+    assert mundo["locks"] == [f"solicitud:{SO}"]
     # The team's notice is queued, not sent inline, so Meta cannot stall the turn.
     assert mundo["enviados"] == []
     assert avisos.pendientes() == 1
+
+
+def test_no_se_abre_una_solicitud_sobre_un_pedido_que_ya_se_emitio(mundo) -> None:
+    """La RELECTURA adentro del lock, que es la otra mitad del hallazgo 2.
+
+    El lock solo serializa: el segundo en entrar espera y después hace igual lo
+    que iba a hacer. Si el que ganó fue `confirmar`, cuando `crear` entra el
+    pedido ya es un pedido EMITIDO, y abrirle una solicitud le reserva stock de
+    algo ya comprometido y le hace al encargado una pregunta sobre términos que
+    ya no puede cambiar. Por eso adentro del lock se vuelve a leer el pedido.
+
+    La mutación que mata a este test y no a otro: borrar la relectura
+    (`_sigue_en_borrador`) de `_crear_bajo_lock`. Con el lock puesto pero sin la
+    relectura, este test es el único que se pone en rojo.
+    """
+    mundo["so"]["docstatus"] = 1
+
+    solicitud = solicitudes.crear(
+        dict(mundo["so"]), solicitado=dict(PROSA), nota_cliente="¿me lo traen hoy?"
+    )
+
+    assert solicitud is None
+    assert [f for f in mundo["durables"] if solicitudes.MARCA in f["content"]] == []
+
+
+def test_la_misma_lectura_caida_no_rompe_el_enrutado_del_boton_no(
+    mundo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """La misma lectura rota, el OTRO consumidor, y la postura contraria.
+
+    `leer_estricto` tiene dos lectores y tienen que hacer cosas distintas con el
+    mismo error. `decisiones.confirmar` lee con el estricto y NO emite (el test
+    de acá abajo). `aprobacion.solicitud_abierta` lee con el indulgente porque
+    sólo ENRUTA —el «no» del botón deriva a rechazar la solicitud o a rechazar el
+    pedido, y ninguna de las dos emite nada—, así que ahí una lectura caída tiene
+    que seguir contestando `None` y no romper el turno del encargado.
+
+    Su docstring decía «Never raises» y nada lo comprobaba: sacarle el `try`
+    dejaba las 2897 en verde, y un toque de «no» con ERPNext caído pasaba de
+    contestar algo a levantar una excepción. Dos consumidores, dos mutaciones,
+    que es la regla de CLAUDE.md que encontró esto.
+    """
+    monkeypatch.setattr(
+        solicitudes.marcas, "filas", Mock(side_effect=erpnext.ERPNextError("caído"))
+    )
+
+    assert aprobacion.solicitud_abierta(SO) is None
+
+
+def test_una_lectura_de_solicitudes_que_no_contesta_no_emite_el_borrador(
+    mundo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«No pude leer» no es «no hay contraoferta»: con eso no se emite nada.
+
+    Las dos cosas viajaban dentro del mismo `None` —`marcas.filas` no atrapa
+    nada, `solicitudes.leer` atrapaba todo— y `decisiones.confirmar` leía ese
+    `None` como una ausencia verificada. Con ERPNext caído, entonces, confirmar
+    emitía el borrador sin poder probar que nadie estaba esperando otros
+    términos. Es el hallazgo 1 de la review de #45.
+
+    Las DOS mitades, porque una sola se cumple sin arreglar nada: que conteste
+    que no (`ok is False`) lo cumpliría igual una excepción que se escapa, y que
+    NO HAYA SUBMIT es lo que dice que falló para el lado seguro.
+    """
+    monkeypatch.setattr(
+        solicitudes.marcas, "filas", Mock(side_effect=erpnext.ERPNextError("caído"))
+    )
+
+    resultado = decisiones.confirmar(SO, STAFF, canal=decisiones.CANAL_WHATSAPP)
+
+    assert resultado["ok"] is False
+    assert mundo["submits"] == []
 
 
 def test_a_repeated_request_for_the_same_order_reuses_the_open_one(mundo) -> None:
@@ -1376,31 +1466,46 @@ def test_confirmar_le_dice_que_no_a_un_telefono_que_no_es_del_equipo(mundo) -> N
     assert mundo["locks"] == []
 
 
-def test_los_dos_locks_de_una_decision_se_anidan_y_no_se_llaman_igual(mundo) -> None:
-    """Dos locks, en ese orden, y con NOMBRES DISTINTOS.
+def test_los_locks_de_una_decision_van_en_un_solo_orden_y_el_de_adentro_se_suelta(
+    mundo,
+) -> None:
+    """`confirmar:` afuera, `solicitud:` adentro — y `solicitud:` se SUELTA.
 
-    `decisiones.confirmar` toma `confirmar:{pedido}` antes de mirar si hay una
-    solicitud abierta, porque la bifurcación es un leer-y-después-actuar: entre
-    la lectura y el submit el cliente puede abrir una excepción, y confirmar
-    ahí emite el pedido al precio viejo mientras el cliente mira términos que
-    todavía no aceptó. El de adentro, `solicitud:{pedido}`, sigue siendo el que
-    guarda la escritura.
+    Tres tomas, y la tercera es la que cambió. Antes eran dos: `confirmar:` y
+    después el `solicitud:` que tomaba `_decidir` al derivar. La lectura de «¿hay
+    solicitud abierta?» quedaba AFUERA de todo lock que el lado del cliente
+    tomara, así que entre esa lectura y el submit `solicitudes.crear` se metía y
+    el pedido se emitía a los términos viejos (hallazgo 2 de la review de #45).
+    Ahora la lectura y el submit van los dos adentro de `solicitud:{pedido}`,
+    que es el mismo lock que `crear` toma.
 
-    QUE NO SE LLAMEN IGUAL NO ES ESTILO. `acciones.py` envuelve todo
-    `manejar_boton` en `accion:{pedido}` para el camino autorizado por código, y
-    `locks.distributed_lock` arma el lock de redis con `thread_local=False`: no
-    es reentrante. Dos locks con el mismo nombre en el mismo hilo esperan 10 s
-    uno por el otro y levantan `CoordinationError`. El orden es siempre
-    `accion:` ⊃ `confirmar:` ⊃ `solicitud:`, uno solo y sin ciclos, que es lo
-    que hace que anidar sea seguro.
+    La tercera toma es esa misma `solicitud:` OTRA VEZ, y que sea otra vez es el
+    punto: `aprobar_solicitud` vuelve a tomarla, así que hay que haberla soltado
+    antes de llamarla. `locks.distributed_lock` arma el lock con
+    `thread_local=False` —no es reentrante—, y llamar a `aprobar_solicitud`
+    desde adentro del `with` colgaría 10 s y contestaría «no pude coordinar»: la
+    rama de solicitud abierta dejaría de funcionar entera.
+
+    ESO NO LO PRUEBA ESTE TEST, y decirlo es la mitad honesta: el doble de locks
+    de `mundo` anota nombres y no bloquea nunca, así que acá una toma anidada y
+    una toma secuencial se escriben igual. Quien prueba que la de adentro se
+    soltó de verdad es
+    `test_confirmar_con_solicitud_abierta_no_se_traba_contra_su_propio_lock` en
+    tests/test_frontera_decisiones.py, contra el Redis real.
     """
     _abrir(mundo, solicitado=COMPLETO)
     mundo["locks"].clear()
 
     aprobacion.manejar_boton(f"ok:{SO}", STAFF)
 
-    assert mundo["locks"] == [f"confirmar:{SO}", f"solicitud:{SO}"]
-    assert len(set(mundo["locks"])) == len(mundo["locks"])
+    assert mundo["locks"] == [
+        f"confirmar:{SO}",
+        f"solicitud:{SO}",
+        f"solicitud:{SO}",
+    ]
+    # El de afuera no se llama como ninguno de los de adentro: con el mismo
+    # nombre, anidarlos cuelga (ver el docstring).
+    assert mundo["locks"][0] != mundo["locks"][1]
 
 
 # ---------------------------------------------------------------------------

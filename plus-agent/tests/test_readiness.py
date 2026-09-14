@@ -1235,6 +1235,60 @@ def test_el_token_compartido_igual_a_uno_por_persona_es_un_bloqueo() -> None:
     assert _bloqueos_del_panel(reporte)
 
 
+def test_dos_tokens_para_la_misma_persona_bloquean_el_despliegue() -> None:
+    """Sacar una línea del `.env` tiene que alcanzar para revocar a alguien.
+
+    Con dos tokens para el mismo teléfono no alcanza: el dueño saca uno, cree
+    que le cortó el acceso, y el otro sigue entrando y sigue pudiendo confirmar
+    pedidos. Lo que hace que esto exista de verdad es que los dos números se
+    escriban distinto —`+54 9 …` y `0054 9 …` son la misma persona y dos
+    strings—, así que el chequeo compara el teléfono NORMALIZADO, igual que el
+    panel y que `deploy/configurar_dashboard.py`.
+
+    La mutación que mata a este test: comparar el teléfono crudo en
+    `entradas_de_tokens` en vez del normalizado. Con los dos números escritos
+    igual el test pasaría igual, y por eso están escritos distinto.
+    """
+    uno = "primer-token-de-esta-persona-32-o-mas-chars"
+    dos = "segundo-token-de-esta-persona-32-o-mas-chars"
+    env = dict(BASE, DASHBOARD_TOKENS=f"{uno}:+54 9 351 111 1111,{dos}:005493511111111")
+
+    reporte = readiness.ejecutar(env, con_red=False)
+    texto = reporte.texto()
+
+    assert "la entrada 2" in texto
+    assert uno not in texto and dos not in texto
+    assert _bloqueos_del_panel(reporte)
+
+
+def test_el_choque_del_token_compartido_se_ve_aunque_venga_con_espacios() -> None:
+    """El preflight y el panel normalizan el compartido con la MISMA función.
+
+    `_valor` recortaba los espacios para validar y `quien()` comparaba el valor
+    crudo, así que las dos mitades podían discrepar sobre qué token es. Un
+    `DASHBOARD_API_TOKEN=" … "` entrecomillado pasaba el preflight y después no
+    autenticaba a nadie; acá se mira la otra cara del mismo desacuerdo, que es
+    peor: con espacios, el choque de privilegios que el chequeo de al lado
+    detecta dejaba de detectarse, y el token de todo el equipo se volvía una
+    persona sin que nada lo dijera.
+
+    La mutación que mata a este test: que `chequear_panel` vuelva a leer el
+    compartido con algo que no sea `dashboard.normalizar_token`.
+    """
+    personal = "token-de-una-persona-de-32-o-mas-caracteres"
+    env = dict(
+        BASE,
+        DASHBOARD_API_TOKEN=f"  {personal}  ",
+        DASHBOARD_TOKENS=f"{personal}:{STAFF}",
+    )
+
+    reporte = readiness.ejecutar(env, con_red=False)
+
+    bloqueos = _bloqueos_del_panel(reporte)
+    assert any(clave == "DASHBOARD_API_TOKEN" for clave, _ in bloqueos)
+    assert personal not in reporte.texto()
+
+
 def test_un_token_de_alguien_que_no_es_del_equipo_avisa_y_no_bloquea() -> None:
     """Mira pero no decide: es una configuración legítima, no un error.
 

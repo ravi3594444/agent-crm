@@ -8,6 +8,22 @@ from app.formato import pesos
 from app.router import es_equipo
 
 
+def solicitud_abierta_estricta(nombre: str):
+    """La solicitud ABIERTA del pedido, o None — y `None` SÓLO quiere decir que no hay.
+
+    Levanta `solicitudes.LecturaIncierta` si el estado no se pudo leer. Es el
+    mismo predicado que `solicitud_abierta` y la misma única definición de
+    «abierta»; lo único distinto es qué hace cuando ERPNext no contesta.
+
+    Lo usa `decisiones.confirmar`, que es la única decisión irreversible del
+    sistema: ahí «no pude leer» leído como «no hay solicitud» emite el pedido al
+    precio viejo mientras el cliente tiene la contraoferta abierta en el
+    teléfono, y el submit no se deshace. Ver `solicitudes.LecturaIncierta`.
+    """
+    solicitud = solicitudes.leer_estricto(nombre)
+    return solicitud if solicitud is not None and solicitud.abierta else None
+
+
 def solicitud_abierta(nombre: str):
     """The order's open decision request, or None. Never raises.
 
@@ -15,13 +31,17 @@ def solicitud_abierta(nombre: str):
     que es donde vive ahora la bifurcación que este predicado decide. Una copia
     más de esto —`acciones.py` ya tiene la suya— sería un concepto escrito tres
     veces y ningún test podría notar que discrepan.
+
+    Colapsa la lectura fallida en `None`, que es lo que un llamador que sólo
+    ENRUTA puede permitirse (el «no» de `manejar_boton` deriva a rechazar la
+    solicitud o a rechazar el pedido: ninguna de las dos emite nada). El que
+    decide algo irreversible usa `solicitud_abierta_estricta`.
     """
     try:
-        solicitud = solicitudes.leer(nombre)
+        return solicitud_abierta_estricta(nombre)
     except Exception as exc:
         print(f"[approval] {nombre}: solicitud no legible ({type(exc).__name__})")
         return None
-    return solicitud if solicitud is not None and solicitud.abierta else None
 
 
 def _texto_solicitud(nombre: str) -> str:
