@@ -1,6 +1,8 @@
 const $ = (s, root = document) => root.querySelector(s);
 const escape = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const paths = {
+  today: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 11h18m-13 5 3 3 5-5"/>',
+  queue: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l4 2M3 3l3 3"/>',
   overview: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   orders: '<path d="M8 3H5v18h14V3h-3M8 3v4h8V3zM8 12h8M8 16h5"/>',
   inventory: '<path d="m3 7 9-4 9 4v10l-9 4-9-4zM3 7l9 4 9-4M12 11v10M7.5 5l9 4"/>',
@@ -54,7 +56,7 @@ function makeDemo() {
   const orders = [];
   [4,6,5,7,6,8,9].forEach((count, day) => {
     for (let i=0;i<count;i++) {
-      const index=orders.length, customer=customers[index%customers.length], product=products[index%products.length];
+      const index=orders.length, customer=customers[index%(day===6?6:5)], product=products[index%products.length];
       const items=[{name:product.name,qty:(i+1)*4,rate:product.price}];
       if (i%2===0) items.push({name:products[(index+2)%6].name,qty:6,rate:products[(index+2)%6].price});
       const total=items.reduce((sum,item)=>sum+item.qty*item.rate,0);
@@ -62,18 +64,25 @@ function makeDemo() {
       orders.unshift({id:`SAL-ORD-2026-${String(index+101).padStart(5,'0')}`,customer:customer.name,customerId:customer.id,date:dateShift(today,day-6),deliveryDate:dateShift(today,day-5),total,currency:'ARS',status,channel:'WhatsApp',items,erpStatus:status==='pending'?'Draft':status==='completed'?'Completed':'To Deliver and Bill'});
     }
   });
-  return {mode:'demo',company:'Plus Dairy',today,since:dateShift(today,-29),currency:'ARS',generatedAt:new Date().toISOString(),orders,customers,products,errors:[],truncated:[],limit:250,policies:[{name:'Order ceiling',value:'$ 150.000',note:'Maximum order value for automatic confirmation'},{name:'New customer ceiling',value:'$ 30.000',note:'Separate limit until a customer has order history'},{name:'Stock buffer',value:'20%',note:'Keep a buffer before confirming an order'},{name:'Stock trust window',value:'24 hours',note:'Require a recent confirmed stock count'}],agents:[{id:'sales',name:'Sales agent',role:'Customer conversations & order drafts',model:'Qwen · sales model',status:'Demo'},{id:'manager',name:'Management agent',role:'Business reports & manager assistance',model:'Qwen · management model',status:'Demo'}]};
+  const at=time=>`${today}T${time}:00Z`;
+  const conversationRows=[0,1,5,6,7].map((index,i)=>({customerId:customers[index].id,customerName:customers[index].name,turns:6-i,lastAt:at(`1${5-i}:30`),lastLine:index>=6?'Gracias, lo consulto y te aviso.':'Perfecto, dejame el pedido para mañana.',orderId:orders.find(o=>o.customerId===customers[index].id&&o.date===today)?.id||null}));
+  const activity={date:today,conversations:conversationRows,newCustomers:conversationRows.filter(c=>c.customerId==='CUST-006'),truncated:[]};
+  const conversations=Object.fromEntries(customers.map((c,i)=>[c.id,{customerId:c.id,customerName:c.name,reachable:i!==3,messages:i===3||i===4?[]:[{role:'customer',text:'Hola, ¿tenés leche entera para mañana?',at:at('11:12')},{role:'note',text:'The agent looked up the catalogue.',at:at('11:13')},{role:'agent',text:'Sí, tenemos leche entera de 1 L. ¿Cuántas unidades necesitás?',at:at('11:14')},{role:'customer',text:i>=6?'Gracias, lo consulto y te aviso.':'Preparame 12 unidades, por favor.',at:at('11:15')},{role:'agent',text:i>=6?'Dale, quedo atento.':'Dejé el pedido en borrador para que lo revise el equipo.',at:at('11:16')}],truncated:i===1,retentionDays:30}]));
+  const queue={upcoming:[{id:'demo-delivery',type:'delivery_notice',orderId:orders[3].id,customer:orders[3].customer,dueAt:at('20:00'),what:'Remind the customer their order arrives at 17:00.'},{id:'demo-review',type:'owner_reminder',orderId:orders[0].id,customer:orders[0].customer,dueAt:at('19:00'),what:'Remind the owner that this draft still needs a decision.'}],waitingOnAPerson:orders.filter(o=>o.status==='pending').map(o=>({orderId:o.id,customer:o.customer,since:at('13:00'),what:'The order needs a manager’s review before it can be confirmed.'})),undelivered:{replies:2,notices:1}};
+  const operations={redis:'Connected',worker:'Active lease',queuedMessages:0,queuedNotices:2,failedReplies:2,failedNotices:1};
+  return {mode:'demo',company:'Plus Dairy',today,since:dateShift(today,-29),currency:'ARS',generatedAt:new Date().toISOString(),orders,customers,products,activity:validateActivity(activity),conversations,queue:validateQueue(queue),operations,errors:[],truncated:[],limit:250,policies:[{name:'Order ceiling',value:'$ 150.000',note:'Maximum order value for automatic confirmation'},{name:'New customer ceiling',value:'$ 30.000',note:'Separate limit until a customer has order history'},{name:'Stock buffer',value:'20%',note:'Keep a buffer before confirming an order'},{name:'Stock trust window',value:'24 hours',note:'Require a recent confirmed stock count'}],agents:[{id:'sales',name:'Sales agent',role:'Customer conversations & order drafts',model:'Qwen · sales model',status:'Demo'},{id:'manager',name:'Management agent',role:'Business reports & manager assistance',model:'Qwen · management model',status:'Demo'}]};
 }
 const repoHosted = /\/dashboard(?:\/|$)/.test(location.pathname);
 const demoRequested = new URLSearchParams(location.search).get('demo') === '1';
 function disconnectedData() {
-  return {mode:'disconnected',company:'Plus CRM',today,since:dateShift(today,-29),currency:'',generatedAt:new Date().toISOString(),orders:null,pendingOrders:null,customers:null,products:null,policies:null,agents:[],operations:null,errors:[],truncated:[],limit:250};
+  return {mode:'disconnected',company:'Plus CRM',today,since:dateShift(today,-29),currency:'',generatedAt:new Date().toISOString(),orders:null,pendingOrders:null,customers:null,products:null,policies:null,agents:[],operations:null,activity:null,queue:null,conversations:null,errors:[],truncated:[],limit:250};
 }
+function freshReads(){return Object.fromEntries(['activity','queue','operations'].map(key=>[key,{busy:false,error:'',loadedAt:null,pending:null}]));}
 let data=demoRequested?makeDemo():disconnectedData();
-const state={view:'overview',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,extrasBusy:false,extrasError:'',detailRequest:0,connectRequest:0,configured:null,displayCurrency:'',currencyPreference:readCurrencyPreference(),fx:null,fxLoading:false,fxRequest:0,fxError:'',fxFailedTarget:''};
+const state={view:'today',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,reads:freshReads(),extrasBusy:false,extrasError:'',extrasLoadedAt:null,detailRequest:0,connectRequest:0,configured:null,displayCurrency:'',currencyPreference:readCurrencyPreference(),fx:null,fxLoading:false,fxRequest:0,fxError:'',fxFailedTarget:''};
 const currencyNames={ARS:'Argentine peso',INR:'Indian rupee',USD:'US dollar',EUR:'Euro',GBP:'British pound',BRL:'Brazilian real',UYU:'Uruguayan peso',CLP:'Chilean peso',MXN:'Mexican peso',CAD:'Canadian dollar',AUD:'Australian dollar',CHF:'Swiss franc',CNY:'Chinese yuan',JPY:'Japanese yen',AED:'UAE dirham'};
 const fxCache=new Map();
-const nav=[['overview','Overview'],['orders','Orders'],['inventory','Inventory'],['customers','Customers'],['agents','AI agents']];
+const nav=[['today','Today'],['overview','Overview'],['queue','Coming up'],['orders','Orders'],['inventory','Inventory'],['customers','Customers'],['agents','AI agents']];
 const labels={pending:'Pending review',confirmed:'Confirmed',completed:'Completed',cancelled:'Cancelled',closed:'Closed','on-hold':'On hold',unknown:'Unknown'};
 const badge=(status)=>`<span class="badge badge-${escape(status)}">${icon(status==='pending'?'clock':status==='confirmed'||status==='completed'?'check':'info')}${escape(labels[status] || status)}</span>`;
 function periodOrders() { const start=dateShift(data.today,-state.range+1); return (data.orders||[]).filter((o)=>o.date>=start && o.date<=data.today); }
@@ -83,7 +92,7 @@ function selectedOrders() {return (state.filter==='pending'?(pendingOrders()||[]
 function sumSales(orders) {return orders.filter(o=>['confirmed','completed'].includes(o.status)&&o.currency===data.currency).reduce((s,o)=>s+(o.total??0),0);}
 function daysSeries() {return Array.from({length:state.range},(_,i)=>{const date=dateShift(data.today,-state.range+1+i);return {date,orders:periodOrders().filter(o=>o.date===date)};});}
 function toast(message) { const node=$('#toast');node.textContent=message;node.classList.add('visible');clearTimeout(toast.timer);toast.timer=setTimeout(()=>node.classList.remove('visible'),4000); }
-function goto(view) {if(!Object.hasOwn(views,view))return;state.view=view;state.search='';state.filter='all';state.stockFilter='all';state.page=1;state.menu=false;history.replaceState(null,'','#'+view);render();window.scrollTo({top:0,behavior:'instant'});if(view==='agents'&&data.mode==='live')loadExtras();}
+function goto(view) {if(!Object.hasOwn(views,view))return;state.view=view;state.search='';state.filter='all';state.stockFilter='all';state.page=1;state.menu=false;history.replaceState(null,'','#'+view);render();window.scrollTo({top:0,behavior:'instant'});return loadViewReads();}
 function avatar(name,index=0) {return `<span class="avatar avatar-${index%5}" aria-hidden="true">${escape(initials(name))}</span>`;}
 function shell() {
   const pending=(pendingOrders()||[]).length;
@@ -91,7 +100,7 @@ function shell() {
   return `<div class="dashboard ${state.menu?'menu-open':''}">
     <button class="sidebar-shade" data-action="close-menu" aria-label="Close navigation"></button>
     <aside class="sidebar" aria-label="Main navigation">
-      <a class="brand" href="#overview" data-view="overview"><span class="brand-symbol">+</span><span>plus<span class="brand-period">.</span></span><span class="brand-tag">CRM</span></a>
+      <a class="brand" href="#today" data-view="today"><span class="brand-symbol">+</span><span>plus<span class="brand-period">.</span></span><span class="brand-tag">CRM</span></a>
       <div class="workspace"><span class="workspace-icon">${icon('inventory')}</span><div><strong>${escape(data.company)}</strong><span>Operations workspace</span></div></div>
       <div class="nav-label">WORKSPACE</div>
       <nav>${nav.map(([key,label])=>`<a href="#${key}" data-view="${key}" class="nav-item ${state.view===key?'active':''}" ${state.view===key?'aria-current="page"':''}>${icon(key)}<span>${label}</span>${key==='orders'&&pending?`<span class="nav-count">${pending}</span>`:''}${key==='agents'?'<span class="new-tag">AI</span>':''}</a>`).join('')}</nav>
@@ -105,8 +114,7 @@ function shell() {
       <main id="main" tabindex="-1">
         ${state.stale?'<div class="notice error-notice">Connection interrupted. The last snapshot remains visible; refresh to try again.</div>':''}
         ${data.errors.length?`<div class="notice error-notice">Some data could not be read: ${escape(data.errors.join(', '))}. Missing information is shown as unavailable.</div>`:''}
-        ${data.truncated.length?`<div class="notice">Showing up to ${data.limit} records per section. Totals cover the loaded records only.</div>`:''}
-        <div class="page-heading"><div><div class="eyebrow">YOUR OPERATIONS, CONNECTED</div><h1>${title}</h1><p>${{overview:'A clear view of your business. Every order, every day.',orders:'Follow each order from received to fulfilled.',inventory:'Know what is on the shelf and already reserved.',customers:'The people and businesses behind your orders.',agents:'Your team behind the conversations.',settings:'Connect your dashboard to the agent service.'}[state.view]}</p></div>
+        <div class="page-heading"><div><div class="eyebrow">YOUR OPERATIONS, CONNECTED</div><h1>${title}</h1><p>${{today:'Who talked to your agent, and what they needed.',queue:'See the work scheduled next and the decisions waiting for you.',overview:'A clear view of your business. Every order, every day.',orders:'Follow each order from received to fulfilled.',inventory:'Know what is on the shelf and already reserved.',customers:'The people and businesses behind your orders.',agents:'Your team behind the conversations.',settings:'Connect your dashboard to the agent service.'}[state.view]}</p></div>
         <div class="heading-actions">${currencySelector()}${['overview','orders'].includes(state.view)?`<label class="select-wrap">${icon('calendar')}<select id="range" aria-label="Reporting period"><option value="7" ${state.range===7?'selected':''}>Last 7 days</option><option value="30" ${state.range===30?'selected':''}>Last 30 days</option></select></label>`:''}<button class="button ${data.mode!=='live'?'primary':''}" data-action="${data.mode!=='live'?'connect':'refresh'}" ${state.busy?'disabled':''}>${icon(data.mode!=='live'?'link':'refresh')}${state.busy?'Refreshing…':data.mode!=='live'?'Connect live data':'Refresh'}</button></div></div>
         ${currencyNotice()}<div id="view-content">${data.mode==='disconnected'?connectionGate():views[state.view]()}</div>
         <footer class="footer"><span>Plus CRM <span class="footer-dot">·</span> ${data.mode==='disconnected'?'Sign in to read your CRM':data.mode==='demo'?'Sample data for exploring the dashboard':`Snapshot · ${escape(new Date(data.generatedAt).toLocaleString('en-GB'))}`}</span><span>${data.currency?escape(state.displayCurrency||data.currency)+(state.displayCurrency?' display currency · ':' currency · '):''}Read-only workspace</span></footer>
@@ -152,7 +160,7 @@ function moneyFor(value,currency,compact=false) {
   const shown=displayAmount(value,currency);
   return formatMoney(shown.value,shown.currency,compact)+(shown.unavailable?' · original':'');
 }
-function empty(title,note) {return `<div class="empty">${icon('search')}<h3>${title}</h3><p>${note}</p></div>`;}
+function empty(title,note) {return `<div class="empty">${icon('search')}<h3>${escape(title)}</h3><p>${escape(note)}</p></div>`;}
 function agentsMini() {
   return `<section class="card agents-strip"><div class="strip-title"><span class="stat-icon violet">${icon('agents')}</span><div><h2>Your AI team</h2><p>Two roles. One connected business.</p></div></div>${data.agents.map(a=>`<div class="mini-agent"><span class="agent-avatar ${a.id}">${icon(a.id==='sales'?'bolt':'shield')}</span><div><strong>${escape(a.name)}</strong><span>${escape(a.role)}</span></div><span class="subtle-pill">${escape(a.status)}</span></div>`).join('')}<button class="icon-button" data-view="agents" aria-label="View AI agents">${icon('arrow')}</button></section>`;
 }
@@ -161,7 +169,55 @@ function attention() {
   return `<section class="card attention-card"><div class="card-heading"><div><h2>Needs attention <span class="count-bubble">${pendingOrders()===null||data.products===null?'—':pending.length+low.length}</span></h2><p>The exceptions worth a closer look</p></div></div>${pending.length?`<button class="attention-item" data-action="pending"><span class="attention-icon amber">${icon('clock')}</span><div><strong>${pending.length} orders awaiting review</strong><span>Waiting for a manager’s decision</span></div>${icon('arrow')}</button>`:''}${low.map(p=>`<button class="attention-item" data-product="${escape(p.id)}"><span class="attention-icon rose">${icon('inventory')}</span><div><strong>${escape(p.name)}</strong><span>${number(p.available)} ${escape(p.unit)} of ERP stock available</span></div>${icon('arrow')}</button>`).join('')}${pendingOrders()===null||data.products===null?'<div class="quiet-state">Some alert data is unavailable. Refresh to check again.</div>':!pending.length&&!low.length?'<div class="quiet-state">No alerts in the loaded records.</div>':''}<div class="attention-foot">${icon('shield')}<span>Approvals stay with your manager.</span></div></section>`;
 }
 function overview() {
-  return `${stats()}<div class="overview-top">${chart()}${orderMix()}</div>${agentsMini()}<div class="overview-bottom"><section class="card orders-card"><div class="card-heading"><div><h2>Recent orders</h2><p>The latest activity in your business</p></div><button class="text-link" data-view="orders">View all ${icon('arrow')}</button></div>${orderTable(periodOrders().slice(0,5),true)}</section>${attention()}</div>`;
+  return `${listLimit('orders','pending orders')}${stats()}<div class="overview-activity">${comingUpCard()}${deliveryHealth()}</div><div class="overview-top">${chart()}${orderMix()}</div>${agentsMini()}<div class="overview-bottom"><section class="card orders-card"><div class="card-heading"><div><h2>Recent orders</h2><p>The latest activity in your business</p></div><button class="text-link" data-view="orders">View all ${icon('arrow')}</button></div>${listLimit('orders')}${orderTable(periodOrders().slice(0,5),true)}</section>${attention()}</div>`;
+}
+function listLimit(...keys) {
+  return keys.some(key=>data.truncated.includes(key))?`<p class="list-notice">This list is limited to ${escape(data.limit)} source records per section. Some records are not shown; counts and totals cover loaded records only.</p>`:'';
+}
+function prettyMoment(value) {
+  return new Intl.DateTimeFormat('en-GB',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(new Date(value));
+}
+function timeZoneNote(){return `Times shown in ${Intl.DateTimeFormat().resolvedOptions().timeZone}.`;}
+function readStatus(key) {
+  const read=state.reads[key];
+  return `<span class="read-status" role="status">${escape(data.mode==='demo'?'Sample data':read.busy?'Reading…':read.loadedAt?'Last read · '+prettyMoment(read.loadedAt):'Not yet available')}</span>`;
+}
+function readButton(key) {
+  return data.mode==='live'?`<button class="button" data-read="${escape(key)}" ${state.reads[key].busy?'disabled':''}>${icon('refresh')}Refresh</button>`:'';
+}
+function readEmpty(key,title) {
+  return empty(state.reads[key].busy?'Loading…':title,state.reads[key].busy?'Reading from your agent service.':state.reads[key].error||'Open this view or refresh to read the latest information.');
+}
+function activityList(rows) {
+  return `<div class="activity-list">${rows.map(row=>`<article class="activity-row ${row.orderId===null?'without-order':''}"><div class="activity-person">${avatar(row.customerName)}<div><button class="text-link customer-name" data-customer="${escape(row.customerId)}">${escape(row.customerName)} ${icon('arrow')}</button><span>${escape(number(row.turns))} turns · ${escape(prettyMoment(row.lastAt))}</span></div>${row.orderId===null?'<span class="no-order-label">No order yet</span>':''}</div><p class="last-line">${escape(row.lastLine||'No message preview available.')}</p><div class="activity-links"><button class="text-link" data-customer="${escape(row.customerId)}">Open customer & conversation ${icon('arrow')}</button>${row.orderId!==null?`<button class="text-link" data-order="${escape(row.orderId)}">View order ${escape(row.orderId)} ${icon('arrow')}</button>`:'<span class="muted">Talked to the agent without placing an order.</span>'}</div></article>`).join('')}</div>`;
+}
+function todayView() {
+  const activity=data.activity;
+  const header=`<div class="card-heading"><div><h2>${activity?'Activity · '+escape(prettyDate(activity.date,{year:'numeric'})):'Customer activity'}</h2><p>${escape(timeZoneNote())}</p>${readStatus('activity')}</div>${readButton('activity')}</div>`;
+  if(!activity)return `<section class="card">${header}${readEmpty('activity','Today is unavailable')}</section>`;
+  const without=activity.conversations.filter(row=>row.orderId===null),withOrder=activity.conversations.filter(row=>row.orderId!==null);
+  const cut=activity.truncated.length?'<p class="list-notice">Today’s lists are incomplete. Some records are not shown; counts cover loaded activity only.</p>':'';
+  return `<div class="day-summary"><div><strong>${escape(number(activity.conversations.length))}</strong><span>Customers who talked to the agent</span></div><div class="opportunity-summary"><strong>${escape(number(without.length))}</strong><span>Conversations without an order</span></div><div><strong>${escape(number(activity.newCustomers.length))}</strong><span>Customers with a first order today</span></div></div><section class="card today-card">${header}${cut}<div class="section-heading"><h3>Conversations without an order</h3><p>Start here: these customers showed interest and have not ordered.</p></div>${without.length?activityList(without):empty('No conversations without an order','Every conversation in this list is linked to an order, or no activity has been recorded.')}<div class="section-heading"><h3>Conversations with an order</h3></div>${withOrder.length?activityList(withOrder):empty('No conversations with an order','New orders linked to today’s conversations will appear here.')}</section><section class="card today-card"><div class="card-heading"><div><h2>First orders today</h2><p>The beginning of a customer relationship</p></div></div>${cut}${activity.newCustomers.length?activityList(activity.newCustomers):empty('No first orders today','Customers placing their first order today will appear here.')}</section>`;
+}
+function queueRows(rows,waiting=false) {
+  return `<div class="queue-list">${rows.map(row=>`<article class="queue-row"><span class="stat-icon ${waiting?'amber':'violet'}">${icon(waiting?'clock':'queue')}</span><div><p class="queue-what">${escape(row.what)}</p><span>${escape(row.customer)}</span><small>${waiting?'Waiting since':'Scheduled for'} ${escape(prettyMoment(waiting?row.since:row.dueAt))}</small></div><button class="text-link" data-order="${escape(row.orderId)}">${escape(row.orderId)} ${icon('arrow')}</button></article>`).join('')}</div>`;
+}
+function comingUpCard() {
+  const queue=data.queue;
+  return `<section class="card coming-up-card"><div class="card-heading"><div><h2>Coming up</h2><p>The agent’s next scheduled work</p>${readStatus('queue')}</div><button class="text-link" data-view="queue">View all ${icon('arrow')}</button></div>${queue?`${queue.waitingOnAPerson.length?`<button class="waiting-banner" data-view="queue">${icon('clock')}<span><strong>${escape(number(queue.waitingOnAPerson.length))} ${queue.waitingOnAPerson.length===1?'order':'orders'} waiting on a person</strong><small>A decision is needed before these orders can move forward.</small></span>${icon('arrow')}</button>`:'<p class="list-note">No orders waiting on a person in this read.</p>'}${queueRows(queue.upcoming.slice(0,3))}${queue.upcoming.length?'':empty('Nothing scheduled','The agent has no upcoming work in this read.')}${queue.upcoming.length>3?`<p class="list-note">Showing the next 3 of ${escape(number(queue.upcoming.length))} scheduled actions.</p>`:''}`:readEmpty('queue','Scheduled work is unavailable')}</section>`;
+}
+function failureCounts(replies,notices) {
+  return `<div class="delivery-counts"><p class="${replies>0?'delivery-warning':''}"><strong>${escape(number(replies))}</strong> ${replies===1?'reply never reached a customer':'replies never reached a customer'}</p><p class="${notices>0?'delivery-warning':''}"><strong>${escape(number(notices))}</strong> ${notices===1?'notice was not delivered':'notices were not delivered'}</p></div>`;
+}
+function deliveryHealth() {
+  const ops=data.operations;
+  return `<section class="card delivery-card"><div class="card-heading"><div><h2>Delivery health</h2><p>Check messages that need attention</p>${readStatus('operations')}</div>${readButton('operations')}</div>${ops?`${failureCounts(ops.failedReplies,ops.failedNotices)}<dl class="health-fields"><div><dt>Redis</dt><dd>${escape(ops.redis)}</dd></div><div><dt>Worker</dt><dd>${escape(ops.worker)}</dd></div><div><dt>Queued replies / notices</dt><dd>${escape(number(ops.queuedMessages))} / ${escape(number(ops.queuedNotices))}</dd></div></dl><div class="card-footer"><button class="text-link" data-view="agents">Open service details ${icon('arrow')}</button></div>`:readEmpty('operations','Delivery status is unavailable')}</section>`;
+}
+function queueView() {
+  const queue=data.queue;
+  const header=`<div class="card-heading"><div><h2>Scheduled work</h2><p>${escape(timeZoneNote())} Refresh to see scheduling changes.</p>${readStatus('queue')}</div>${readButton('queue')}</div>`;
+  if(!queue)return `<section class="card">${header}${readEmpty('queue','Scheduled work is unavailable')}</section>`;
+  return `<section class="card queue-card">${header}${queue.upcoming.length?queueRows(queue.upcoming):empty('Nothing scheduled','The agent has no upcoming work in this read.')}</section><section class="card queue-card"><div class="card-heading"><div><h2>${escape(number(queue.waitingOnAPerson.length))} ${queue.waitingOnAPerson.length===1?'order':'orders'} waiting on a person</h2><p>The decisions holding up the next step</p></div></div>${queue.waitingOnAPerson.length?queueRows(queue.waitingOnAPerson,true):empty('No decisions waiting','No orders are waiting on a person in this read.')}</section><section class="card queue-card"><div class="card-heading"><div><h2>Messages that did not arrive</h2><p>Failed delivery counts from this queue read</p></div></div>${failureCounts(queue.undelivered.replies,queue.undelivered.notices)}</section>`;
 }
 function filterTabs() {
   const opts=[['all','All orders'],['pending','Awaiting review'],['confirmed','Confirmed'],['completed','Completed']];
@@ -170,22 +226,22 @@ function filterTabs() {
 function searchField(placeholder) {return `<label class="search-field">${icon('search')}<input id="search" type="search" placeholder="${placeholder}" aria-label="${placeholder}" value="${escape(state.search)}"></label>`;}
 function ordersView() {
   const selected=selectedOrders(),maxPage=Math.max(1,Math.ceil(selected.length/10));state.page=Math.min(state.page,maxPage);
-  return `${stats()}<section class="card orders-full"><div class="orders-toolbar">${filterTabs()}<button class="button" data-action="export" ${state.filter==='pending'?pendingOrders()===null?'disabled':'':data.orders===null?'disabled':''}>${icon('export')}Export CSV</button></div><div class="search-toolbar">${searchField('Search orders or customers…')}<span>${selected.length} orders${state.filter==='pending'?' · all dates':''}</span></div><div id="orders-results">${orderTable(selected.slice((state.page-1)*10,state.page*10),false,state.filter==='pending'?pendingOrders()===null:data.orders===null)}</div><div class="pagination"><span>Page ${state.page} of ${maxPage}</span><div><button class="button" data-action="prev" ${state.page===1?'disabled':''}>Previous</button><button class="button" data-action="next" ${state.page>=maxPage?'disabled':''}>Next ${icon('arrow')}</button></div></div></section>`;
+  return `${stats()}<section class="card orders-full"><div class="orders-toolbar">${filterTabs()}<button class="button" data-action="export" ${state.filter==='pending'?pendingOrders()===null?'disabled':'':data.orders===null?'disabled':''}>${icon('export')}Export CSV</button></div><div class="search-toolbar">${searchField('Search orders or customers…')}<span>${selected.length} orders${state.filter==='pending'?' · all dates':''}</span></div><div id="orders-results">${listLimit(state.filter==='pending'?'pending orders':'orders')}${orderTable(selected.slice((state.page-1)*10,state.page*10),false,state.filter==='pending'?pendingOrders()===null:data.orders===null)}</div><div class="pagination"><span>Page ${state.page} of ${maxPage}</span><div><button class="button" data-action="prev" ${state.page===1?'disabled':''}>Previous</button><button class="button" data-action="next" ${state.page>=maxPage?'disabled':''}>Next ${icon('arrow')}</button></div></div></section>`;
 }
 function inventoryView() {
   const rows=(data.products||[]).filter(p=>`${p.name} ${p.id}`.toLowerCase().includes(state.search.toLowerCase())&&(state.stockFilter!=='low'||p.available!==null&&p.available<=10));
   const low=(data.products||[]).filter(p=>p.available!==null&&p.available<=10).length;
-  return `<div class="inventory-summary"><div><span class="stat-icon blue">${icon('inventory')}</span><div><strong>${data.products===null?'—':data.products.length}</strong><span>Products in the warehouse</span></div></div><div><span class="stat-icon amber">${icon('clock')}</span><div><strong>${data.products===null?'—':low}</strong><span>At or below 10 available units</span></div></div><div class="inventory-definition">${icon('info')}<p>ERP available = physical stock − submitted reservations. Open drafts and safety rules can reduce what an agent may confirm.</p></div></div><section class="card"><div class="search-toolbar">${searchField('Search products or item codes…')}<label class="select-wrap"><select id="stock-filter" aria-label="Filter inventory"><option value="all">All products</option><option value="low" ${state.stockFilter==='low'?'selected':''}>Low stock · 10 or fewer</option></select></label></div>${data.products===null?empty('Inventory is unavailable','Refresh the connection to try again.'):rows.length?`<div class="table-scroll"><table><thead><tr><th>Product</th><th>On hand</th><th>Reserved</th><th>ERP available</th><th>Stock position</th><th></th></tr></thead><tbody>${rows.map(p=>`<tr><td><button class="product-cell" data-product="${escape(p.id)}"><span class="product-icon">${icon('inventory')}</span><span><strong>${escape(p.name)}</strong><small>${escape(p.id)}</small></span></button></td><td>${number(p.stock)} <span class="muted">${escape(p.unit)}</span></td><td>${number(p.reserved)}</td><td><strong>${number(p.available)}</strong></td><td><div class="stock-meter"><span style="width:${p.stock?Math.max(0,Math.min(100,p.available/p.stock*100)):0}%" class="${p.available!==null&&p.available<=10?'low':''}"></span></div><span class="cell-note">${p.available===null?'Unknown':p.available<=10?'Low stock':'In stock'}</span></td><td><button class="icon-button" data-product="${escape(p.id)}" aria-label="View ${escape(p.name)}">${icon('arrow')}</button></td></tr>`).join('')}</tbody></table></div>`:empty('No matching products','Try a different search or stock filter.')}</section>`;
+  return `<div class="inventory-summary"><div><span class="stat-icon blue">${icon('inventory')}</span><div><strong>${data.products===null?'—':data.products.length}</strong><span>Products in the warehouse</span></div></div><div><span class="stat-icon amber">${icon('clock')}</span><div><strong>${data.products===null?'—':low}</strong><span>At or below 10 available units</span></div></div><div class="inventory-definition">${icon('info')}<p>ERP available = physical stock − submitted reservations. Open drafts and safety rules can reduce what an agent may confirm.</p></div></div><section class="card"><div class="search-toolbar">${searchField('Search products or item codes…')}<label class="select-wrap"><select id="stock-filter" aria-label="Filter inventory"><option value="all">All products</option><option value="low" ${state.stockFilter==='low'?'selected':''}>Low stock · 10 or fewer</option></select></label></div>${listLimit('inventory','product names')}${data.products===null?empty('Inventory is unavailable','Refresh the connection to try again.'):rows.length?`<div class="table-scroll"><table><thead><tr><th>Product</th><th>On hand</th><th>Reserved</th><th>ERP available</th><th>Stock position</th><th></th></tr></thead><tbody>${rows.map(p=>`<tr><td><button class="product-cell" data-product="${escape(p.id)}"><span class="product-icon">${icon('inventory')}</span><span><strong>${escape(p.name)}</strong><small>${escape(p.id)}</small></span></button></td><td>${number(p.stock)} <span class="muted">${escape(p.unit)}</span></td><td>${number(p.reserved)}</td><td><strong>${number(p.available)}</strong></td><td><div class="stock-meter"><span style="width:${p.stock?Math.max(0,Math.min(100,p.available/p.stock*100)):0}%" class="${p.available!==null&&p.available<=10?'low':''}"></span></div><span class="cell-note">${p.available===null?'Unknown':p.available<=10?'Low stock':'In stock'}</span></td><td><button class="icon-button" data-product="${escape(p.id)}" aria-label="View ${escape(p.name)}">${icon('arrow')}</button></td></tr>`).join('')}</tbody></table></div>`:empty('No matching products','Try a different search or stock filter.')}</section>`;
 }
 function customersView() {
   const rows=(data.customers||[]).filter(c=>`${c.name} ${c.territory}`.toLowerCase().includes(state.search.toLowerCase()));
-  return `<section class="card"><div class="search-toolbar">${searchField('Search customers or locations…')}<span>${rows.length} customers</span></div>${data.customers===null?empty('Customer data is unavailable','Refresh the connection to try again.'):rows.length?`<div class="customer-grid">${rows.map((c,i)=>{const orders=(data.orders||[]).filter(o=>o.customerId===c.id);return `<button class="customer-card" data-customer="${escape(c.id)}"><div class="customer-card-top">${avatar(c.name,i)}${icon('arrow')}</div><h2>${escape(c.name)}</h2><p>${escape(c.group)} · ${escape(c.territory || 'Location unavailable')}</p><div class="customer-card-stats"><div><strong>${data.orders===null?'—':orders.length}</strong><span>Loaded orders</span></div><div><strong>${data.orders===null?'—':money(sumSales(orders))}</strong><span>Booked sales</span></div></div></button>`;}).join('')}</div>`:empty('No customers found','Try another name or location.')}</section>`;
+  return `<section class="card"><div class="search-toolbar">${searchField('Search customers or locations…')}<span>${rows.length} customers</span></div>${listLimit('customers','orders','pending orders')}${data.customers===null?empty('Customer data is unavailable','Refresh the connection to try again.'):rows.length?`<div class="customer-grid">${rows.map((c,i)=>{const orders=(data.orders||[]).filter(o=>o.customerId===c.id);return `<button class="customer-card" data-customer="${escape(c.id)}"><div class="customer-card-top">${avatar(c.name,i)}${icon('arrow')}</div><h2>${escape(c.name)}</h2><p>${escape(c.group)} · ${escape(c.territory || 'Location unavailable')}</p><div class="customer-card-stats"><div><strong>${data.orders===null?'—':orders.length}</strong><span>Loaded orders</span></div><div><strong>${data.orders===null?'—':money(sumSales(orders))}</strong><span>Booked sales</span></div></div></button>`;}).join('')}</div>`:empty('No customers found','Try another name or location.')}</section>`;
 }
 
 function agentsView() {
   const ops=data.operations;
   const service=data.mode==='live'?`<section class="card service-card">
-    <div class="card-heading"><div><h2>Agent service</h2><p>Current Redis queue state · provider availability is not probed</p></div>
+    <div class="card-heading"><div><h2>Agent service</h2><p>Current Redis queue state · provider availability is not probed</p>${readStatus('operations')}</div>
     <button class="button" data-action="retry-extras" ${state.extrasBusy?'disabled':''}>${icon('refresh')}${state.extrasBusy?'Reading…':'Refresh status'}</button></div>
     <div class="service-grid">
       <div><span>Redis</span><strong>${escape(ops?.redis||'Unavailable')}</strong></div>
@@ -202,14 +258,14 @@ function agentsView() {
     <div class="model-line"><span>Model</span><strong>${escape(a.model)}</strong></div>
     <ul class="capabilities">${(a.id==='sales'?['Answers product and stock questions','Finds or registers customers','Creates order drafts for policy evaluation']:['Reads sales, stock, and customer reports','Prepares actions requested by the manager','Helps the owner review orders and limits']).map(t=>`<li>${icon('check')}${t}</li>`).join('')}</ul>
     <div class="agent-boundary">${icon('shield')}${a.id==='sales'?'Customer-scoped access · draft-only writes':'Management-scoped access · approved actions only'}</div></section>`).join('')}</div>
-    <section class="card policy-card"><div class="card-heading"><div><h2>Automation controls</h2><p>Saved limits in their original units. The policy checks every order.</p></div><span class="subtle-pill">${data.mode==='demo'?'Example settings':'Current agent settings'}</span></div>
+    <section class="card policy-card"><div class="card-heading"><div><h2>Automation controls</h2><p>Saved limits in their original units. The policy checks every order.</p>${state.extrasLoadedAt?`<span class="read-status">Last read · ${escape(prettyMoment(state.extrasLoadedAt))}</span>`:''}</div><span class="subtle-pill">${data.mode==='demo'?'Example settings':'Current agent settings'}</span></div>
     ${data.policies?`<div class="policy-grid">${data.policies.map(p=>`<div class="${p.valid===false?'invalid-policy':''}"><span>${escape(p.name)}</span><strong>${escape(p.value)}${p.unit?` <small>${escape(p.unit)}</small>`:''}</strong><p>${escape(p.note)}</p>${p.source?`<small>Source: ${escape(p.source)}</small>`:''}</div>`).join('')}</div>`:`<div class="policy-explanation"><p>${state.extrasBusy?'Reading current limits from the agent…':'Current limits are unavailable. The manager can still check them through the authorized WhatsApp workflow.'}</p></div>`}
     <div class="policy-footer">${icon('shield')}<span>Changing limits still requires the manager’s existing confirmation code. This dashboard reads the same guarded settings store.</span></div></section>`;
 }
 function settingsView() {
   return `<div class="settings-grid"><section class="card connection-card"><span class="stat-icon violet">${icon('link')}</span><h2>${data.mode==='demo'?'Connect your business':'Your CRM connection'}</h2><p>${data.mode==='demo'?'Explore sample orders now, or connect to your deployed Plus Agent for a live view of ERPNext.':'This workspace reads orders, customers, and inventory from your agent service.'}</p><dl><div><dt>Workspace</dt><dd>${escape(data.company)}</dd></div><div><dt>Data source</dt><dd>${data.mode==='demo'?'Sample dataset':'ERPNext via Plus Agent'}</dd></div><div><dt>Access</dt><dd>Read-only</dd></div><div><dt>Connection</dt><dd>${data.mode==='demo'?'Not connected':state.stale?'Interrupted':'Connected'}</dd></div></dl><div class="connection-buttons"><button class="button primary" data-action="connect">${icon('link')}${data.mode==='demo'?'Connect live data':'Change connection'}</button>${data.mode==='live'?'<button class="button" data-action="disconnect">Disconnect</button>':''}</div></section><section class="card setting-notes"><h2>Designed around your workflow</h2><div>${icon('orders')}<section><h3>ERPNext is the source of truth</h3><p>The dashboard reads recent orders, all-date pending orders, and up to 250 records per section. Loaded totals are labeled when a limit is reached.</p></section></div><div>${icon('shield')}<section><h3>Approvals stay protected</h3><p>Confirm orders and change rules through your existing manager workflow. This dashboard does not submit or modify business records.</p></section></div><div>${icon('link')}<section><h3>A connection for this session</h3><p>Your access token stays in memory. Reloading the page signs you out. While you are signed in, visible dashboards refresh every minute.</p></section></div></section></div>`;
 }
-const views={overview,orders:ordersView,inventory:inventoryView,customers:customersView,agents:agentsView,settings:settingsView};
+const views={today:todayView,queue:queueView,overview,orders:ordersView,inventory:inventoryView,customers:customersView,agents:agentsView,settings:settingsView};
 function render() {
   const focused=document.activeElement, preserve=focused?.id==='search', cursor=preserve?focused.selectionStart:null;
   $('#app').innerHTML=shell();
@@ -228,11 +284,33 @@ function showProduct(id) {
   const p=(data.products||[]).find(p=>p.id===id);if(!p)return;
   detail(p.name,`<p class="muted">${escape(p.id)}</p><div class="product-detail-number"><strong>${number(p.available)}</strong><span>${escape(p.unit)} ERP available</span></div><dl class="detail-fields"><div><dt>Physical stock</dt><dd>${number(p.stock)}</dd></div><div><dt>Submitted reservations</dt><dd>${number(p.reserved)}</dd></div><div><dt>Warehouse</dt><dd>${escape(p.warehouse)}</dd></div></dl><div class="detail-callout">${icon('info')}<p>These are ERPNext warehouse quantities. Draft reservations, stock freshness, and your safety buffer are evaluated separately by the order policy.</p></div>`);
 }
-function showCustomer(id) {
-  state.detailRequest++;
-  const c=(data.customers||[]).find(c=>c.id===id);if(!c)return;
-  const orders=(data.orders||[]).filter(o=>o.customerId===id);
-  detail(c.name,`<p class="muted">${escape(c.group)} · ${escape(c.territory)}</p><dl class="detail-fields"><div><dt>Customer ID</dt><dd>${escape(c.id)}</dd></div><div><dt>Loaded orders</dt><dd>${data.orders===null?'—':orders.length}</dd></div><div><dt>Booked sales</dt><dd>${data.orders===null?'—':money(sumSales(orders))}</dd></div></dl><h3>Recent orders</h3><div class="customer-order-list">${orders.length?orders.slice(0,10).map(o=>`<button data-order="${escape(o.id)}"><span><strong>${escape(o.id)}</strong><small>${prettyDate(o.date)}</small></span><span>${moneyFor(o.total,o.currency)}${icon('arrow')}</span></button>`).join(''):data.orders===null?'<p>Order data is unavailable. Refresh to try again.</p>':'<p>No orders in the loaded snapshot.</p>'}</div>`);
+function renderCustomer(c,conversation) {
+  const orders=allOrders().filter(o=>o.customerId===c.id),unavailable=data.orders===null;
+  detail(c.name,`<p class="muted">${escape([c.group,c.territory].filter(Boolean).join(' · '))}</p><dl class="detail-fields"><div><dt>Customer ID</dt><dd>${escape(c.id)}</dd></div><div><dt>Loaded orders</dt><dd>${escape(number(unavailable?null:orders.length))}</dd></div><div><dt>Booked sales</dt><dd>${escape(unavailable?'—':money(sumSales(orders)))}</dd></div></dl><h3>Recent orders</h3>${listLimit('orders','pending orders','customers')}<p class="list-note">Orders from the loaded snapshot and open drafts. This is not a complete order history.</p><div class="customer-order-list">${orders.length?orders.slice(0,10).map(o=>`<button data-order="${escape(o.id)}"><span><strong>${escape(o.id)}</strong><small>${escape(prettyDate(o.date))}</small></span><span>${escape(moneyFor(o.total,o.currency))}${icon('arrow')}</span></button>`).join(''):unavailable?empty('Order data is unavailable','Refresh to try again.'):empty('No loaded orders','No orders for this customer are in the current snapshot.')}</div>${orders.length>10?`<p class="list-notice">Showing 10 of ${escape(number(orders.length))} loaded orders for this customer.</p>`:''}<section class="customer-conversation" aria-labelledby="conversation-title"><h3 id="conversation-title">WhatsApp conversation</h3><div class="conversation-privacy">${icon('shield')}<p>Conversations are opened through a customer in your company’s workspace. There is no public inbox or phone directory.</p></div>${conversation}</section>`);
+}
+function conversationView(value) {
+  const retention=`<p class="retention-note">Messages are retained for ${escape(number(value.retentionDays))} days. Older conversations expire; this is not a permanent archive.</p>`;
+  if(!value.reachable)return `${empty('No WhatsApp number on file','No WhatsApp number on file for this customer, so there is no conversation to show.')}${retention}`;
+  return `${retention}${value.truncated?'<p class="list-notice">Earlier messages were omitted. Only the most recent part of this conversation is shown.</p>':''}${value.messages.length?`<p class="list-note">Oldest first. ${escape(timeZoneNote())}</p><ol class="transcript">${value.messages.map(message=>`<li class="message message-${escape(message.role)}"><div class="message-meta"><strong>${escape({customer:'Customer',agent:'Agent',note:'Activity note'}[message.role])}</strong><time datetime="${escape(message.at)}">${escape(prettyMoment(message.at))}</time></div><p>${escape(message.text)}</p></li>`).join('')}</ol>`:empty('No retained messages','There are no messages within this customer’s retention window.')}`;
+}
+async function showCustomer(id) {
+  const activity=[...(data.activity?.conversations||[]),...(data.activity?.newCustomers||[])].find(c=>c.customerId===id);
+  const c=(data.customers||[]).find(c=>c.id===id)||(activity?{id:activity.customerId,name:activity.customerName}:null);
+  if(!c)return;
+  const connection=state.connection,session=state.session,request=++state.detailRequest;
+  if(data.mode==='demo'){renderCustomer(c,conversationView(validateConversation(data.conversations[id],id)));return;}
+  if(data.mode!=='live')return;
+  renderCustomer(c,empty('Loading conversation…','Reading retained messages for this customer.'));
+  try {
+    const value=validateConversation(await apiRead(connection,'/customers/'+encodeURIComponent(id)+'/conversation'),id);
+    if(state.session!==session||state.detailRequest!==request||!$('#detail-dialog').open)return;
+    renderCustomer(c,conversationView(value));
+  }catch(error){
+    if(state.session!==session)return;
+    if(error.status===401){cerrarSesion('Your dashboard access is no longer valid. Sign in again.');return;}
+    if(state.detailRequest!==request||!$('#detail-dialog').open)return;
+    renderCustomer(c,`${empty('Conversation is unavailable',readError(error))}<button class="button" data-customer="${escape(id)}">Try again</button>`);
+  }
 }
 function openConnection() {
   state.connectRequest++;
@@ -247,7 +325,7 @@ function validateSnapshot(value) {
   for(const o of [...(value.orders||[]),...(value.pendingOrders||[])])if(typeof o.id!=='string'||typeof o.customer!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(o.date))throw new Error('The service returned an invalid order.');
   if(value.currency){try{new Intl.NumberFormat('en',{style:'currency',currency:value.currency});}catch{throw new Error('The service returned an invalid currency.');}}
   if(!value.orders&&!value.customers&&!value.products)throw new Error('The agent is reachable but its ERPNext data is unavailable. Check the manager connection.');
-  value.policies=null;value.operations=null;return value;
+  value.policies=null;value.operations=null;value.activity=null;value.queue=null;value.conversations=null;return value;
 }
 async function fetchData(connection) {
   const response=await fetch(connection.base+'/api/dashboard/snapshot',{headers:{Authorization:'Bearer '+connection.token},cache:'no-store',credentials:'omit',redirect:'error',signal:AbortSignal.timeout(45000)});
@@ -270,7 +348,7 @@ function cerrarSesion(aviso) {
   state.connection=null;state.session++;state.busy=false;
   state.detailRequest++;state.fxRequest++;state.fxLoading=false;state.fxError='';
   data=disconnectedData();state.stale=false;
-  state.extrasBusy=false;state.extrasError='';
+  state.extrasBusy=false;state.extrasError='';state.extrasLoadedAt=null;state.reads=freshReads();
   render();toast(aviso);
 }
 async function refresh(silent=false) {
@@ -280,8 +358,8 @@ async function refresh(silent=false) {
   try{
     const snapshot=await fetchData(connection);
     if(state.session!==session)return;
-    data=snapshot;state.stale=false;if(state.displayCurrency&&Date.now()-(state.fx?.fetchedAt||0)>=3600000)setDisplayCurrency(state.displayCurrency);if(!silent)toast('Dashboard refreshed.');
-    if(state.view==='agents')loadExtras(true);
+    data={...snapshot,activity:data.activity,queue:data.queue,operations:data.operations,policies:data.policies};state.stale=false;if(state.displayCurrency&&Date.now()-(state.fx?.fetchedAt||0)>=3600000)setDisplayCurrency(state.displayCurrency);if(!silent)toast('Dashboard refreshed.');
+    if(!silent)await loadViewReads(true);
   }catch(e){
     if(state.session===session){
       // Un 401 NO es un fallo pasajero: el token dejó de servir. Guardar la
@@ -304,7 +382,7 @@ function exportOrders() {
 }
 document.addEventListener('click',async e=>{
   const target=e.target.closest('button,a');if(!target)return;
-  if(target.dataset.view){e.preventDefault();goto(target.dataset.view);}
+  if(target.dataset.view){e.preventDefault();await goto(target.dataset.view);}
   if(target.dataset.close)$('#'+target.dataset.close).close();
   if(target.dataset.order)showOrder(target.dataset.order);
   if(target.dataset.product)showProduct(target.dataset.product);
@@ -314,9 +392,10 @@ document.addEventListener('click',async e=>{
   if(target.dataset.chartDate){const d=target.dataset.chartDate,orders=periodOrders().filter(o=>o.date===d);$('#chart-detail').textContent=`${prettyDate(d)} · ${orders.length} orders · ${money(sumSales(orders))} booked sales`;document.querySelectorAll('.bar').forEach(b=>b.classList.toggle('inspected',b===target));}
   const action=target.dataset.action;
   if(action==='connect')openConnection();
-  if(action==='demo'){state.connectRequest++;state.detailRequest++;data=makeDemo();state.session++;state.connection=null;state.stale=false;state.busy=false;state.extrasBusy=false;state.extrasError='';render();restoreDisplayCurrency();}
+  if(action==='demo'){state.connectRequest++;state.detailRequest++;data=makeDemo();state.session++;state.connection=null;state.stale=false;state.busy=false;state.extrasBusy=false;state.extrasError='';state.extrasLoadedAt=null;state.reads=freshReads();render();restoreDisplayCurrency();}
   if(action==='retry-currency')setDisplayCurrency(state.fxFailedTarget||state.displayCurrency);
   if(action==='retry-extras')loadExtras(true);
+  if(target.dataset.read)await loadRead(target.dataset.read,true);
   if(action==='refresh')refresh();
   if(action==='menu'){state.menu=!state.menu;render();}
   if(action==='close-menu'){state.menu=false;render();}
@@ -346,13 +425,13 @@ document.addEventListener('submit',async e=>{
     button.disabled=true;button.textContent='Connecting…';error.textContent='';
     const connection={base:url.origin,token},snapshot=await fetchData(connection);
     if(attempt!==state.connectRequest||!$('#connection-dialog').open)return;
-    data=snapshot;state.connection=connection;state.session++;state.detailRequest++;state.busy=false;state.stale=false;state.page=1;state.extrasError='';state.extrasBusy=false;$('#connection-dialog').close();form.reset();render();restoreDisplayCurrency();toast('Connected to your live CRM.');if(state.view==='agents')loadExtras();
+    data=snapshot;state.connection=connection;state.session++;state.detailRequest++;state.busy=false;state.stale=false;state.page=1;state.extrasError='';state.extrasBusy=false;state.extrasLoadedAt=null;state.reads=freshReads();$('#detail-dialog').close();$('#connection-dialog').close();form.reset();render();restoreDisplayCurrency();toast('Connected to your live CRM.');loadViewReads();
   }catch(ex){if(attempt!==state.connectRequest||!$('#connection-dialog').open)return;error.textContent=ex.name==='TimeoutError'?'The service took too long to respond. Try again.':ex.message==='Failed to fetch'?'Could not reach the service. Check its address, HTTPS, and allowed dashboard origin.':ex.message;button.disabled=false;button.textContent='Connect workspace';}
 });
 document.querySelectorAll('dialog').forEach(dialog=>{dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}});dialog.addEventListener('close',()=>{if(dialog.id==='connection-dialog'){state.connectRequest++;dialog.innerHTML='';}if(dialog.id==='detail-dialog'){state.detailRequest++;dialog.innerHTML='';}});});
-window.addEventListener('hashchange',()=>{const view=location.hash.slice(1);if(views[view])goto(view);});
+window.addEventListener('hashchange',()=>{const view=location.hash.slice(1);if(Object.hasOwn(views,view))goto(view);});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&state.menu){state.menu=false;render();}});
-if(views[location.hash.slice(1)])state.view=location.hash.slice(1);
+if(Object.hasOwn(views,location.hash.slice(1)))state.view=location.hash.slice(1);
 render();
 if(data.mode!=='disconnected')restoreDisplayCurrency();
 
@@ -478,13 +557,90 @@ async function apiRead(connection, path) {
     headers:{Authorization:'Bearer '+connection.token},cache:'no-store',credentials:'omit',
     redirect:'error',signal:AbortSignal.timeout(45000),
   });
-  if(!response.ok)throw new Error(({
+  if(!response.ok){const error=new Error(({
     401:'Your dashboard token was not accepted. Sign in again.',
     403:'This dashboard origin is not allowed by the agent.',
     404:'The requested record or dashboard endpoint was not found.',
     503:'Enable dashboard access on the agent first.',
-  })[response.status]||'The agent could not read this information. Check its ERPNext or Redis connection.');
+  })[response.status]||'The agent could not read this information. Check its ERPNext or Redis connection.');error.status=response.status;throw error;}
   return response.json();
+}
+
+// Each read has its own contract. Project only display fields: no phone,
+// checkpoint metadata, system messages, tool names or arguments enter the view.
+function requireValue(ok,label){if(!ok)throw new Error('The agent returned invalid '+label+'.');}
+function isText(value){return typeof value==='string';}
+function isId(value){return isText(value)&&value.trim().length>0;}
+function isCount(value){return Number.isSafeInteger(value)&&value>=0;}
+function isDay(value){return isText(value)&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&!Number.isNaN(Date.parse(value))&&new Date(value).toISOString().slice(0,10)===value;}
+function isMoment(value){return isText(value)&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)&&isDay(value.slice(0,10))&&!Number.isNaN(Date.parse(value));}
+function validateConversation(value,id) {
+  requireValue(value?.customerId===id&&isText(value.customerName)&&typeof value.reachable==='boolean'&&typeof value.truncated==='boolean'&&isCount(value.retentionDays)&&Array.isArray(value.messages),'conversation information');
+  requireValue(value.reachable||value.messages.length===0,'conversation reachability');
+  const messages=value.messages.map(message=>{
+    requireValue(message&&['customer','agent','note'].includes(message.role)&&isText(message.text)&&isMoment(message.at),'conversation messages');
+    return {role:message.role,text:message.text,at:message.at};
+  });
+  requireValue(messages.every((message,i)=>!i||Date.parse(message.at)>=Date.parse(messages[i-1].at)),'conversation order');
+  return {customerId:value.customerId,customerName:value.customerName,reachable:value.reachable,messages,truncated:value.truncated,retentionDays:value.retentionDays};
+}
+function validateActivity(value) {
+  requireValue(value&&isDay(value.date)&&Array.isArray(value.conversations)&&Array.isArray(value.newCustomers)&&Array.isArray(value.truncated)&&value.truncated.every(isText),'today information');
+  const rows=items=>items.map(row=>{
+    requireValue(row&&isId(row.customerId)&&isText(row.customerName)&&isCount(row.turns)&&isMoment(row.lastAt)&&isText(row.lastLine)&&(row.orderId===null||isId(row.orderId)),'customer activity');
+    return {customerId:row.customerId,customerName:row.customerName,turns:row.turns,lastAt:row.lastAt,lastLine:row.lastLine,orderId:row.orderId};
+  }).sort((a,b)=>Date.parse(b.lastAt)-Date.parse(a.lastAt));
+  return {date:value.date,conversations:rows(value.conversations),newCustomers:rows(value.newCustomers),truncated:[...value.truncated]};
+}
+function validateQueue(value) {
+  requireValue(value&&Array.isArray(value.upcoming)&&Array.isArray(value.waitingOnAPerson)&&isCount(value.undelivered?.replies)&&isCount(value.undelivered?.notices),'scheduled work');
+  const upcoming=value.upcoming.map(row=>{
+    requireValue(row&&isId(row.id)&&isText(row.type)&&isId(row.orderId)&&isText(row.customer)&&isMoment(row.dueAt)&&isText(row.what),'scheduled action');
+    return {id:row.id,type:row.type,orderId:row.orderId,customer:row.customer,dueAt:row.dueAt,what:row.what};
+  }).sort((a,b)=>Date.parse(a.dueAt)-Date.parse(b.dueAt));
+  const waitingOnAPerson=value.waitingOnAPerson.map(row=>{
+    requireValue(row&&isId(row.orderId)&&isText(row.customer)&&isMoment(row.since)&&isText(row.what),'waiting decision');
+    return {orderId:row.orderId,customer:row.customer,since:row.since,what:row.what};
+  }).sort((a,b)=>Date.parse(a.since)-Date.parse(b.since));
+  return {upcoming,waitingOnAPerson,undelivered:{replies:value.undelivered.replies,notices:value.undelivered.notices}};
+}
+function validateOperations(value) {
+  requireValue(value&&isText(value.redis)&&isText(value.worker)&&['queuedMessages','queuedNotices','failedReplies','failedNotices'].every(key=>value[key]===null||isCount(value[key])),'delivery status');
+  return {redis:value.redis,worker:value.worker,queuedMessages:value.queuedMessages,queuedNotices:value.queuedNotices,failedReplies:value.failedReplies,failedNotices:value.failedNotices};
+}
+function readError(error) {
+  if(error.status===404||error.status===405)return 'This view is not available on this agent yet, or the record is no longer available. Refresh after the service is updated.';
+  if(error.name==='TypeError'||error.name==='TimeoutError')return 'The agent could not be reached. Check your connection and try again.';
+  return error.message||'This information could not be read. Please try again.';
+}
+async function loadRead(key,force=false) {
+  if(!Object.hasOwn(state.reads,key))return;
+  const contract={activity:['/today',validateActivity],queue:['/queue',validateQueue],operations:['/operations',validateOperations]}[key];
+  if(!contract||data.mode!=='live')return;
+  const read=state.reads[key];
+  if(read.busy)return read.pending;
+  if(!force&&data[key]&&Date.now()-Date.parse(read.loadedAt)<60000)return;
+  const connection=state.connection,session=state.session;
+  read.busy=true;read.error='';render();
+  read.pending=(async()=>{
+  try {
+    const value=contract[1](await apiRead(connection,contract[0]));
+    if(state.session!==session)return;
+    data[key]=value;read.loadedAt=new Date().toISOString();
+  }catch(error){
+    if(state.session!==session)return;
+    if(error.status===401){cerrarSesion('Your dashboard access is no longer valid. Sign in again.');return;}
+    data[key]=null;read.error=readError(error);read.loadedAt=null;
+  }finally{if(state.session===session){read.busy=false;read.pending=null;render();}}
+  })();
+  return read.pending;
+}
+async function loadViewReads(force=false) {
+  if(data.mode!=='live')return;
+  if(state.view==='today')await loadRead('activity',force);
+  if(state.view==='queue')await loadRead('queue',force);
+  if(state.view==='overview')await Promise.all([loadRead('queue',force),loadRead('operations',force)]);
+  if(state.view==='agents')await loadExtras(force);
 }
 
 async function showOrder(id) {
@@ -500,22 +656,23 @@ async function showOrder(id) {
     if(order.id!==id||!Array.isArray(order.items))throw new Error('The agent returned an invalid order.');
     renderOrder(order);
   }catch(error){
+    if(state.session===session&&error.status===401){cerrarSesion('Your dashboard access is no longer valid. Sign in again.');return;}
     if(state.session===session&&state.detailRequest===request&&$('#detail-dialog').open)
       detail(id,`<div class="notice error-notice">${escape(error.message)}</div><button class="button" data-order="${escape(id)}">Try again</button>`);
   }
 }
 
 async function loadExtras(force=false) {
-  if(data.mode!=='live'||state.extrasBusy||(!force&&data.policies&&data.operations))return;
+  if(data.mode!=='live'||state.extrasBusy||(!force&&data.policies&&data.operations&&Date.now()-state.extrasLoadedAt<60000&&Date.now()-Date.parse(state.reads.operations.loadedAt)<60000))return;
   const connection=state.connection,session=state.session;
   state.extrasBusy=true;state.extrasError='';if(state.view==='agents')render();
-  const results=await Promise.allSettled([apiRead(connection,'/controls'),apiRead(connection,'/operations')]);
+  const results=await Promise.allSettled([apiRead(connection,'/controls'),loadRead('operations',force)]);
   if(state.session!==session)return;
+  if(results[0].status==='rejected'&&results[0].reason.status===401){cerrarSesion('Your dashboard access is no longer valid. Sign in again.');return;}
   const failures=[];
-  if(results[0].status==='fulfilled'&&Array.isArray(results[0].value.policies))data.policies=results[0].value.policies;
-  else {data.policies=null;failures.push('Current limits could not be read.');}
-  if(results[1].status==='fulfilled'&&typeof results[1].value.queuedMessages==='number')data.operations=results[1].value;
-  else {data.operations=null;failures.push('Queue status could not be read.');}
+  if(results[0].status==='fulfilled'&&Array.isArray(results[0].value.policies)){data.policies=results[0].value.policies;state.extrasLoadedAt=Date.now();}
+  else {data.policies=null;state.extrasLoadedAt=null;failures.push('Current limits could not be read.');}
+  if(!data.operations)failures.push('Queue status could not be read.');
   state.extrasError=failures.join(' ');state.extrasBusy=false;
   if(state.view==='agents')render();
 }

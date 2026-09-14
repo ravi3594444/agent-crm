@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import importlib.util
-from datetime import date, datetime, timedelta
+import json
+from datetime import UTC, date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs
-from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+from conftest import RelojDePrueba
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -19,6 +20,11 @@ from demo.falso_erpnext import DEPOSITO, EMPRESA, Almacen, manejar
 
 TOKEN = "integration-dashboard-token-with-enough-entropy"
 TODAY = date(2026, 9, 10)
+# El día que este archivo NOMBRA, con sus horas de pared en la zona que el
+# negocio tenga configurada. Escribir la zona a mano acá es lo que hacía que
+# la celda `BUSINESS_TIMEZONE=Asia/Kolkata` de CI probara otra cosa que el
+# código: ver `RelojDePrueba` en tests/conftest.py.
+RELOJ = RelojDePrueba(TODAY.isoformat())
 
 
 @pytest.fixture
@@ -27,7 +33,7 @@ def connected(monkeypatch):
     monkeypatch.setenv("ERPNEXT_WAREHOUSE", DEPOSITO)
     monkeypatch.setenv("DASHBOARD_API_TOKEN", TOKEN)
     monkeypatch.setenv("ERPNEXT_PUBLIC_URL", "https://crm.example")
-    monkeypatch.setattr(reloj, "ahora", lambda: datetime(2026, 9, 10, 12, tzinfo=ZoneInfo("America/Argentina/Buenos_Aires")))
+    monkeypatch.setattr(reloj, "ahora", lambda: RELOJ.a_las(12))
     almacen = Almacen()
     datos.sembrar(almacen, hoy=TODAY)
     calls = []
@@ -261,3 +267,403 @@ def test_setup_preserves_agent_configuration_and_does_not_rotate_token(tmp_path)
     assert path.stat().st_mode & 0o777 == 0o600
     path.write_text(f'DASHBOARD_API_TOKEN="{token}" # preserve this existing token\n')
     assert module.configure(path) is None
+
+
+@pytest.fixture
+def almacen_con_cliente(connected):
+    """El cliente habitual, con un pedido de ESTA empresa y su WhatsApp.
+
+    El pedido no es decorado: la pertenencia de un `Customer` —que en ERPNext
+    es un maestro global sin campo `company`— se comprueba contra sus pedidos,
+    así que sin uno este cliente no es nuestro y la ruta contesta 404.
+    """
+    client, almacen, _ = connected
+    create_order(almacen, docstatus=1)
+    return client, {
+        "cliente": datos.CLIENTE_HABITUAL,
+        "telefono": datos.TELEFONO_HABITUAL,
+        "almacen": almacen,
+    }
+
+
+def _hilo(monkeypatch, mensajes, sellos=None):
+    """Un checkpointer de mentira que HONRA el thread_id que le pasan.
+
+    Devuelve mensajes sólo para el hilo del teléfono que se le declara, así que
+    un código que buscara otro hilo —o que se armara el sha por su cuenta y se
+    le fuera un byte— recibe vacío y el test cae. Un doble que contestara lo
+    mismo para cualquier id no podría discrepar con el código sobre la única
+    cosa que esta función hace: encontrar el hilo correcto.
+    """
+    from types import SimpleNamespace
+
+    from app import graph
+
+    sellos = sellos or [
+        f"2026-09-10T12:0{i}:00+00:00" for i in range(len(mensajes))
+    ]
+    esperado = {}
+
+    def registrar(telefono):
+        from app.main import _thread_tag
+
+        esperado["id"] = f"cli:{_thread_tag(telefono)}"
+
+    def listar(config, limit=None):
+        """El historial como lo devuelve LangGraph: del más NUEVO al más viejo.
+
+        Un checkpoint por mensaje, con la lista creciendo, que es la forma real
+        —y es la que hace que la fecha de cada mensaje sea la del checkpoint
+        donde aparece por primera vez—. Un doble que devolviera un solo
+        checkpoint con todo adentro no podría discrepar con el código sobre
+        ese fechado, que es justo lo que el código hace.
+
+        Y HONRA `limit`, que es lo que hace posible el caso del corte: sin eso
+        el doble devolvía el hilo entero por mucho que el código pidiera una
+        página, así que la rama que decide si la historia se cortó no se podía
+        ejercitar. El mismo defecto que este archivo viene arreglando.
+        """
+        if config["configurable"]["thread_id"] != esperado.get("id"):
+            return []
+        historia = [
+            SimpleNamespace(checkpoint={
+                "channel_values": {"messages": mensajes[: i + 1]},
+                "ts": sellos[i],
+            })
+            for i in range(len(mensajes))
+        ]
+        recientes = list(reversed(historia))
+        return recientes if limit is None else recientes[:limit]
+
+    def get_tuple(config):
+        """El checkpoint MÁS NUEVO, que es lo que usa la lectura barata.
+
+        El doble tiene que modelar los DOS accesos: `conversation` recorre el
+        historial con `list` para fechar cada mensaje y `today` pide sólo el
+        último con `get_tuple`. Un doble que implementara uno solo dejaría la
+        mitad del código sin poder discrepar con él.
+        """
+        historia = listar(config)
+        return historia[0] if historia else None
+
+    monkeypatch.setattr(
+        graph, "checkpointer",
+        lambda: SimpleNamespace(list=listar, get_tuple=get_tuple),
+    )
+    return registrar
+
+
+def test_una_transcripcion_no_muestra_lo_que_el_agente_hace_por_dentro(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """Las dos mitades: la conversación SE VE, y lo de adentro NO.
+
+    Un `ToolMessage` trae la salida cruda de la herramienta y un `AIMessage`
+    vacío es el turno en que el modelo la llamó. Devolver la lista tal cual le
+    mostraba al dueño el stock interno y globos en blanco. Afirmar sólo que el
+    texto crudo no está lo cumpliría también una respuesta vacía, que es la
+    otra forma de estar roto.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    client, registrar = almacen_con_cliente
+    registrar_hilo = _hilo(monkeypatch, [
+        HumanMessage(content="cuánta leche hay?"),
+        AIMessage(content=""),
+        ToolMessage(content="stock de leche: 12", tool_call_id="t1"),
+        AIMessage(content="Hay 12 de leche."),
+    ])
+    registrar_hilo(registrar["telefono"])
+
+    cuerpo = client.get(
+        f"/api/dashboard/customers/{registrar['cliente']}/conversation"
+    ).json()
+
+    assert cuerpo["reachable"] is True
+    assert [m["role"] for m in cuerpo["messages"]] == ["customer", "note", "agent"]
+    assert cuerpo["messages"][0]["text"] == "cuánta leche hay?"
+    assert cuerpo["messages"][2]["text"] == "Hay 12 de leche."
+    # Y CADA MENSAJE TRAE SU HORA, que sale del checkpoint donde apareció por
+    # primera vez: el `AIMessage` vacío se saltea, así que la nota hereda la
+    # hora del ToolMessage —la tercera— y no la del globo que no se muestra.
+    assert [m["at"] for m in cuerpo["messages"]] == [
+        "2026-09-10T12:00:00+00:00",
+        "2026-09-10T12:02:00+00:00",
+        "2026-09-10T12:03:00+00:00",
+    ]
+    # Lo de adentro no sale, ni el número del stock ni el globo vacío.
+    assert "stock de leche" not in json.dumps(cuerpo)
+    assert all(m["text"].strip() for m in cuerpo["messages"])
+    # Y el teléfono tampoco: se usa para encontrar el hilo y se descarta.
+    assert registrar["telefono"] not in json.dumps(cuerpo)
+
+
+def test_la_conversacion_de_un_cliente_de_otra_empresa_no_se_lee(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """`Customer` es un maestro GLOBAL: existe aunque no sea nuestro.
+
+    La pertenencia se comprueba contra los pedidos de ESTA empresa, igual que
+    en `snapshot`. Sin eso, un token de este panel leería las conversaciones de
+    los clientes de otra empresa del mismo ERPNext — que es peor que ver sus
+    nombres, porque son sus mensajes.
+    """
+    client, _ = almacen_con_cliente
+    _hilo(monkeypatch, [])
+
+    respuesta = client.get(
+        f"/api/dashboard/customers/{datos.CLIENTE_MOROSO}/conversation"
+    )
+
+    assert respuesta.status_code == 404
+
+
+def test_un_cliente_sin_whatsapp_no_es_un_error(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """Un cliente cargado a mano puede no tener número, y eso es un estado."""
+    client, registrar = almacen_con_cliente
+    _hilo(monkeypatch, [])
+    registrar["almacen"].docs["Customer"][registrar["cliente"]]["mobile_no"] = ""
+
+    cuerpo = client.get(
+        f"/api/dashboard/customers/{registrar['cliente']}/conversation"
+    ).json()
+
+    assert cuerpo["reachable"] is False
+    assert cuerpo["messages"] == []
+    assert cuerpo["retentionDays"] >= 1
+
+
+def test_la_cola_no_muestra_trabajo_de_otra_empresa(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """La consulta por empresa AUTORIZA la fila, no la decora.
+
+    El índice de agenda es UNO SOLO para todo el sitio y no sabe de empresas.
+    Usarlo para listar y después pedir los nombres sólo a los pedidos de ESTA
+    empresa dejaba pasar las filas ajenas enteras —id de pedido, tipo de
+    acción, hora y descripción— con el nombre vacío.
+
+    Las dos mitades: la fila propia SÍ sale con su cliente —si no, un endpoint
+    que devuelva siempre vacío pasaría igual— y la ajena no sale en absoluto.
+    """
+    from app import agenda, outbound_status
+
+    client, registrar = almacen_con_cliente
+    ajeno = create_order(registrar["almacen"], company="Other Company")
+    propio = create_order(registrar["almacen"], docstatus=1)
+    cliente_redis = outbound_status.cliente()
+    ahora = 1_000_000.0
+    monkeypatch.setattr(agenda, "_ahora", lambda: ahora)
+    for pedido in (propio["name"], ajeno["name"]):
+        fila = agenda.crear(
+            pedido, agenda.SEGUIMIENTO, ahora + 3600,
+            params={"por_que": "x"}, ahora=ahora,
+        )
+        assert fila is not None
+    assert cliente_redis.zcard(agenda.CLAVE_INDICE) == 2, "las dos filas están en el índice"
+
+    cuerpo = client.get("/api/dashboard/queue").json()
+
+    pedidos = {p["orderId"] for p in cuerpo["upcoming"]}
+    assert propio["name"] in pedidos
+    assert ajeno["name"] not in pedidos, cuerpo["upcoming"]
+    assert all(p["customer"] for p in cuerpo["upcoming"])
+
+
+def test_una_charla_de_la_noche_sigue_siendo_de_hoy(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """El sello del checkpoint es UTC y el día del panel es el del negocio.
+
+    A las 21:00 de Buenos Aires ya son las 00:00 del día siguiente en UTC, así
+    que comparar los textos borraba de «Hoy» toda la franja en que un almacén
+    cierra la caja y encarga para mañana. Se compara el día LOCAL.
+
+    LA FRANJA SALE DE LA ZONA, NO ESTÁ ESCRITA A MANO, y ésa es la mitad que
+    importa. Al oeste de Greenwich la charla que discrepa es la de la noche
+    —23:30 locales ya son de mañana en UTC— y al este es la de la madrugada
+    —00:30 locales todavía son de ayer—. Con Buenos Aires escrito acá el test
+    fijaba el sentido occidental, y la celda `BUSINESS_TIMEZONE=Asia/Kolkata`
+    de CI lo hacía caer con el código correcto: el sello caía en el día
+    siguiente en las dos zonas, pero en Kolkata ese día siguiente también es el
+    local. El momento se arma con `RELOJ`, que resuelve la zona por
+    `reloj.zona()` —el mismo reloj que usa el panel—, así que lo que se afirma
+    es la regla y no una zona.
+    """
+    from langchain_core.messages import HumanMessage
+
+    client, registrar = almacen_con_cliente
+    # El instante DEL NEGOCIO cuyo sello UTC cae en el otro día del calendario.
+    charla = RELOJ.a_las(0, 30) if RELOJ.a_las(12).utcoffset() > timedelta(0) else RELOJ.a_las(23, 30)
+    if charla.astimezone(UTC).date() == charla.date():
+        pytest.skip("con el negocio en UTC no hay día local del que discrepar")
+    reg = _hilo(monkeypatch, [HumanMessage(content="mandame 10 sachets")],
+                sellos=[charla.astimezone(UTC).isoformat()])
+    reg(registrar["telefono"])
+    monkeypatch.setattr(reloj, "ahora", lambda: charla + timedelta(minutes=15))
+
+    cuerpo = client.get("/api/dashboard/today").json()
+
+    assert cuerpo["date"] == "2026-09-10"
+    assert [c["customerId"] for c in cuerpo["conversations"]] == [registrar["cliente"]]
+
+
+def test_una_charla_de_ayer_no_entra_en_hoy(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """La otra mitad de «Hoy»: el hilo existe y NO se movió hoy, así que no sale.
+
+    La mitad que faltaba, y se midió: con el filtro del día borrado entero
+    —`if _dia_local(sello) != hoy` cambiado por `if False`— la suite entera
+    pasaba en las dos celdas de zona. O sea que nada impedía que «Hoy» listara
+    a un cliente cuya última charla fue hace tres semanas, que es la pantalla
+    que el dueño abre a la mañana para saber con quién habló el agente HOY.
+
+    Y las dos fases son una sola cosa: afirmar nada más que la lista viene
+    vacía lo cumple igual un hilo que no se encontró —teléfono mal normalizado,
+    sha distinto, doble sin registrar—, que es la otra forma de estar roto y la
+    que deja el vacío pareciendo correcto. Primero se ve al MISMO cliente con
+    el MISMO doble apareciendo con el sello de hoy; recién entonces el vacío
+    con el sello de ayer dice lo que el test dice.
+    """
+    from langchain_core.messages import HumanMessage
+
+    client, registrar = almacen_con_cliente
+    mensaje = [HumanMessage(content="ayer te pedí dos cajones")]
+
+    reg = _hilo(monkeypatch, mensaje,
+                sellos=[RELOJ.a_las(12).astimezone(UTC).isoformat()])
+    reg(registrar["telefono"])
+    de_hoy = client.get("/api/dashboard/today").json()
+    assert [c["customerId"] for c in de_hoy["conversations"]] == [registrar["cliente"]]
+
+    reg = _hilo(monkeypatch, mensaje,
+                sellos=[RELOJ.a_las(12, dia=TODAY.day - 1).astimezone(UTC).isoformat()])
+    reg(registrar["telefono"])
+
+    cuerpo = client.get("/api/dashboard/today").json()
+
+    assert cuerpo["date"] == "2026-09-10"
+    assert cuerpo["conversations"] == []
+
+
+def test_si_los_pedidos_no_se_pueden_leer_no_se_inventan_ventas_perdidas(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """La lista vacía convertía a TODOS en «habló y no compró».
+
+    Esa fila es la que el dueño va a mirar —una venta perdida—, así que
+    fabricarla por una lectura que falló es la peor forma de equivocarse acá.
+    La ruta contesta 502 y la UI reintenta, en vez de devolver media pantalla
+    que se lee como un hecho.
+    """
+    client, _ = almacen_con_cliente
+    original = erpnext.get_list
+
+    def falla_los_de_hoy(doctype, **kwargs):
+        filtros = kwargs.get("filters") or []
+        if doctype == "Sales Order" and any(
+            f[0] == "transaction_date" and f[1] == "=" for f in filtros
+        ):
+            raise erpnext.ERPNextError("private upstream text")
+        return original(doctype, **kwargs)
+
+    monkeypatch.setattr(erpnext, "get_list", falla_los_de_hoy)
+
+    respuesta = client.get("/api/dashboard/today")
+
+    assert respuesta.status_code == 502
+    assert "private" not in respuesta.text
+
+
+def test_un_cliente_nuevo_sin_conversacion_igual_aparece(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """«Primer pedido hoy» es un hecho de ERPNext, no de Redis.
+
+    Salir de `conversaciones` exigía además teléfono, hilo legible y un mensaje
+    de hoy, así que el cliente nuevo cuyo pedido se cargó a mano no aparecía
+    nunca — justo el que el dueño quiere ver.
+
+    Y sin conversación no se le inventa una: cero turnos y sin última línea.
+    """
+    client, registrar = almacen_con_cliente
+    _hilo(monkeypatch, [])
+    nuevo = create_order(registrar["almacen"], customer=datos.CLIENTE_MOROSO)
+
+    cuerpo = client.get("/api/dashboard/today").json()
+
+    fila = next(c for c in cuerpo["newCustomers"] if c["customerId"] == datos.CLIENTE_MOROSO)
+    assert fila["orderId"] == nuevo["name"]
+    assert fila["turns"] == 0
+    assert fila["lastLine"] == ""
+
+
+def test_una_conversacion_mas_larga_que_la_historia_no_inventa_horas(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """El checkpoint más viejo que vuelve NO es el principio del hilo.
+
+    Trae mensajes ya acumulados de antes de la página, y fecharlos con SU
+    sello es exactamente la hora inventada que este endpoint existe para no
+    dar — y encima dejaba `truncated` en falso, así que ni siquiera avisaba.
+    Se pide UNO de más para poder distinguir «éste es el principio» de «acá se
+    cortó».
+
+    Las dos mitades: los viejos NO salen, y los nuevos SÍ con su hora — si
+    saliera vacío también pasaría la primera.
+    """
+    from langchain_core.messages import HumanMessage
+
+    client, registrar = almacen_con_cliente
+    monkeypatch.setattr(dashboard, "HISTORIA_MAX", 3)
+    mensajes = [HumanMessage(content=f"m{i}") for i in range(5)]
+    sellos = [f"2026-09-10T12:0{i}:00+00:00" for i in range(5)]
+    reg = _hilo(monkeypatch, mensajes, sellos=sellos)
+    reg(registrar["telefono"])
+
+    cuerpo = client.get(
+        f"/api/dashboard/customers/{registrar['cliente']}/conversation"
+    ).json()
+
+    # Con la página en 3 se retienen los checkpoints de m2, m3 y m4; el más
+    # viejo de ellos YA TRAE m0, m1 y m2 acumulados, así que los tres quedan
+    # sin fecha propia y no salen. Sólo m3 y m4 aparecen por primera vez
+    # adentro de la página, y son los únicos que se pueden fechar.
+    assert [m["text"] for m in cuerpo["messages"]] == ["m3", "m4"]
+    assert cuerpo["truncated"] is True
+    assert all(m["at"] for m in cuerpo["messages"])
+
+
+def test_el_tope_de_clientes_corta_por_recencia_y_no_por_alfabeto(
+    connected, monkeypatch
+) -> None:
+    """ERPNext los devuelve por fecha descendente; un `sorted(set(...))` lo tiraba.
+
+    Con más clientes que el tope, el corte pasaba a ser alfabético: el que
+    compró HOY y se llama «Kiosco» quedaba afuera y entraba uno que no compra
+    desde hace dos meses y se llama «Almacén». Justo al revés de lo que la
+    pantalla dice ser.
+
+    El tope se baja a 1 para que el corte sea lo único que decide, y las fechas
+    son distintas a propósito: si el test dependiera del desempate entre dos
+    pedidos del mismo día, estaría probando el orden del doble y no la regla.
+    """
+    from langchain_core.messages import HumanMessage
+
+    client, almacen, _ = connected
+    monkeypatch.setattr(dashboard, "HOY_MAX_CLIENTES", 1)
+    # El habitual («Almacen…», alfabéticamente primero) compró hace 60 días; el
+    # moroso («Kiosco…», alfabéticamente después) compró hoy.
+    create_order(almacen, days=60)
+    create_order(almacen, customer=datos.CLIENTE_MOROSO)
+    almacen.docs["Customer"][datos.CLIENTE_MOROSO]["mobile_no"] = "5493511111333"
+    reg = _hilo(monkeypatch, [HumanMessage(content="mandame 20")])
+    reg("5493511111333")
+
+    cuerpo = client.get("/api/dashboard/today").json()
+
+    assert [c["customerId"] for c in cuerpo["conversations"]] == [datos.CLIENTE_MOROSO]
+    assert "conversations" in cuerpo["truncated"]

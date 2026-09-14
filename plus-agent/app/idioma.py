@@ -581,6 +581,36 @@ CATALOGO: dict[str, dict[str, str]] = {
             "To void it within {horas} h: cancelar {pedido} <reason>"
         ),
     },
+    # EL MISMO MENSAJE CUANDO LA VENTANA NO EXISTE.
+    #
+    # `confirmacion.registrar` escribe la marca durable que ABRE la cancelación
+    # por WhatsApp, y puede fallar sola: el pedido queda confirmado igual —eso
+    # es irreversible— pero la ventana no se abre. El mensaje de arriba la
+    # promete siempre, así que en ese caso le decía al encargado que podía
+    # anular algo que el sistema iba a rechazar. Es la clase de mentira que
+    # `app/confirmacion.py` existe para que este sistema no pueda contar.
+    #
+    # Cambia SÓLO la última línea. Las otras siete son las mismas a propósito:
+    # lo que pasó es lo mismo, y lo único distinto es lo que se puede hacer
+    # después.
+    "gerencia.confirmado_sin_ventana": {
+        ES: (
+            "✅ Pedido {pedido} confirmado\nCliente: {cliente}\nItems: {detalle}\n"
+            "Total: {total}\nEntrega: {entrega}\nOrigen: {fuente}\n"
+            "Confirmado: {momento}\n"
+            "Informativo: no hace falta responder, el pedido queda confirmado.\n"
+            "No pude dejar el registro de la confirmación, así que la anulación "
+            "por WhatsApp no está disponible: si hay que anularlo, hacelo en ERPNext."
+        ),
+        EN: (
+            "✅ Order {pedido} confirmed\nCustomer: {cliente}\nItems: {detalle}\n"
+            "Total: {total}\nDelivery: {entrega}\nSource: {fuente}\n"
+            "Confirmed: {momento}\n"
+            "For your information: no reply needed, the order is confirmed.\n"
+            "I could not write the confirmation record, so voiding it over "
+            "WhatsApp is unavailable: if it has to be voided, do it in ERPNext."
+        ),
+    },
     # DE DÓNDE SALIÓ UNA CONFIRMACIÓN, que es el campo «Origen:» del mensaje de
     # arriba. Se armaba como literal en los tres que confirman —«automática
     # (política)», «manual (confirmación humana)», «solicitud aprobada y

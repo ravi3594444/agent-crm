@@ -6,7 +6,7 @@ import vm from 'node:vm';
 
 const source = readFileSync(new URL('../plus-agent/app/dashboard_ui/app.js', import.meta.url), 'utf8');
 
-function workspace() {
+function workspace(options = {}) {
   const listeners = {}, nodes = {}, copied = [], downloads = [], requests = [];
   const preferences = new Map();
   let document;
@@ -37,7 +37,7 @@ function workspace() {
     createElement: element,
   };
   const context = vm.createContext({
-    document, location: { pathname: '/', search: '', hash: '', origin: 'https://dashboard.example' },
+    document, location: { pathname: '/', search: options.search || '', hash: options.hash || '', origin: 'https://dashboard.example' },
     history: { replaceState() {} }, window: { addEventListener() {}, scrollTo() {} },
     navigator: { clipboard: { async writeText(value) { copied.push(value); } } },
     URL: class extends URL {
@@ -348,4 +348,341 @@ test('the sidebar names the connected workspace, never a hard-coded person', asy
   const company = w.run('data.company');
   assert.ok(company);
   assert.match(sidebar, new RegExp(company.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+const activityFixture = () => ({
+  date: '2026-09-13',
+  conversations: [
+    { customerId: 'CUST-001', customerName: 'Ordered shop', turns: 4, lastAt: '2026-09-13T15:00:00Z', lastLine: 'Please deliver tomorrow.', orderId: 'ORDER-PLACED' },
+    { customerId: 'CUST-OUTSIDE-SNAPSHOT', customerName: 'Bakery <North>', turns: 2, lastAt: '2026-09-13T16:00:00Z', lastLine: '<img src=x onerror=alert(1)> & maybe tomorrow', orderId: null },
+  ],
+  newCustomers: [{ customerId: 'CUST-001', customerName: 'Ordered shop', turns: 4, lastAt: '2026-09-13T15:00:00Z', lastLine: 'My first order.', orderId: 'ORDER-PLACED' }],
+  truncated: ['conversations'],
+});
+const queueFixture = () => ({
+  upcoming: [
+    { id: 'FUTURE-2', type: 'a_new_server_type', orderId: 'ORDER-LATER', customer: 'Later shop', dueAt: '2026-09-14T20:00:00Z', what: 'Ask whether the delivery arrived safely.' },
+    { id: 'FUTURE-1', type: 'another_new_type', orderId: 'ORDER-SOON', customer: 'Soon shop', dueAt: '2026-09-13T18:00:00Z', what: 'Remind the customer <tomorrow> & check their address.' },
+  ],
+  waitingOnAPerson: [{ orderId: 'ORDER-REVIEW', customer: 'Waiting shop', since: '2026-09-13T12:00:00Z', what: 'Price above the auto-confirm limit.' }],
+  undelivered: { replies: 3, notices: 1 },
+});
+const operationsFixture = () => ({ redis: 'Connected', worker: 'Active lease', queuedMessages: 4, queuedNotices: null, failedReplies: 7, failedNotices: 2 });
+const transcriptFixture = (id, text = 'Retained customer message') => ({
+  customerId: id, customerName: `Customer ${id}`, reachable: true, truncated: true, retentionDays: 14,
+  mobile_no: 'PHONE-FIELD-MUST-NOT-RENDER', systemPrompt: 'SYSTEM-PROMPT-MUST-NOT-RENDER',
+  messages: [
+    { role: 'customer', text, at: '2026-09-13T12:00:00Z' },
+    { role: 'note', text: 'The agent looked up the catalogue.', at: '2026-09-13T12:01:00Z', tool: 'PRIVATE-TOOL-NAME', args: { private: 'PRIVATE-ARGUMENT' } },
+    { role: 'agent', text: 'I can prepare a draft for you.', at: '2026-09-13T12:02:00Z' },
+  ],
+});
+function apiFixture(w, routes) {
+  w.context.fetch = async (url, options) => {
+    w.requests.push([url, options]);
+    assert.equal(options.credentials, 'omit');
+    assert.equal(options.redirect, 'error');
+    assert.equal(options.cache, 'no-store');
+    assert.equal(options.headers.Authorization, 'Bearer dashboard-fixture-token-at-least-32-characters');
+    assert.equal(options.body, undefined);
+    const path = new URL(url).pathname;
+    assert.ok(Object.hasOwn(routes, path), `Unexpected read: ${path}`);
+    return response(typeof routes[path] === 'function' ? routes[path](path) : routes[path]);
+  };
+}
+
+test('demo starts on Today and supplies all new panels and conversation empty states', async () => {
+  const w = workspace({ search: '?demo=1' });
+  assert.equal(w.run('state.view'), 'today');
+  assert.match(w.nodes.app.innerHTML, /No order yet/);
+  assert.match(w.nodes.app.innerHTML, /First orders today/);
+  const nav = JSON.parse(w.run('JSON.stringify(nav)'));
+  assert.deepEqual(nav[0], ['today', 'Today']);
+  assert.ok(!nav.some(([id]) => id === 'conversations'));
+  assert.equal(w.requests.length, 0);
+  await w.click({ view: 'queue' });
+  assert.match(w.nodes.app.innerHTML, /orders waiting on a person/);
+  assert.match(w.nodes.app.innerHTML, /Remind the customer their order arrives/);
+  await w.run("showCustomer('CUST-002')");
+  assert.match(w.nodes['detail-dialog'].innerHTML, /Earlier messages were omitted/);
+  assert.match(w.nodes['detail-dialog'].innerHTML, /The agent looked up the catalogue/);
+  await w.run("showCustomer('CUST-004')");
+  assert.match(w.nodes['detail-dialog'].innerHTML, /No WhatsApp number on file for this customer/);
+  await w.run("showCustomer('CUST-005')");
+  assert.match(w.nodes['detail-dialog'].innerHTML, /No retained messages/);
+  assert.equal(w.requests.length, 0);
+  const linked = workspace({ search: '?demo=1', hash: '#queue' });
+  assert.match(linked.nodes.app.innerHTML, /Scheduled work/);
+});
+
+test('Today reads its own contract and opens customers absent from the capped snapshot', async () => {
+  const w = workspace();
+  w.live();
+  apiFixture(w, {
+    '/api/dashboard/today': activityFixture(),
+    '/api/dashboard/customers/CUST-OUTSIDE-SNAPSHOT/conversation': transcriptFixture('CUST-OUTSIDE-SNAPSHOT'),
+  });
+  await w.click({ view: 'today' });
+  assert.equal(w.requests.length, 1);
+  const html = w.nodes.app.innerHTML;
+  assert.match(html, /without-order/);
+  assert.match(html, /Bakery &lt;North&gt;/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt; &amp; maybe tomorrow/);
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /lists are incomplete/);
+  assert.match(html, /data-order="ORDER-PLACED"/);
+  assert.ok(html.indexOf('Bakery &lt;North&gt;') < html.indexOf('Ordered shop'));
+  await w.run("showCustomer('CUST-OUTSIDE-SNAPSHOT')");
+  assert.match(w.nodes['detail-dialog'].innerHTML, /Retained customer message/);
+  assert.match(w.nodes['detail-dialog'].innerHTML, /Bakery &lt;North&gt;/);
+  assert.equal(w.requests.length, 2);
+});
+
+test('Overview and Coming up show server prose, waiting decisions, and independent delivery counts', async () => {
+  const w = workspace();
+  w.live();
+  apiFixture(w, { '/api/dashboard/queue': queueFixture(), '/api/dashboard/operations': operationsFixture() });
+  await w.click({ view: 'overview' });
+  let html = w.nodes.app.innerHTML;
+  assert.match(html, /1 order waiting on a person/);
+  assert.match(html, /<strong>7<\/strong> replies never reached a customer/);
+  assert.match(html, /<strong>2<\/strong> notices were not delivered/);
+  assert.match(html, /Remind the customer &lt;tomorrow&gt; &amp; check their address/);
+  assert.ok(html.indexOf('ORDER-SOON') < html.indexOf('ORDER-LATER'));
+  assert.doesNotMatch(html, /a_new_server_type|another_new_type/);
+  assert.deepEqual(w.requests.map(([url]) => new URL(url).pathname).sort(), ['/api/dashboard/operations', '/api/dashboard/queue']);
+  await w.click({ view: 'queue' });
+  html = w.nodes.app.innerHTML;
+  assert.match(html, /1 order waiting on a person/);
+  assert.match(html, /Remind the customer &lt;tomorrow&gt; &amp; check their address/);
+  assert.ok(html.indexOf('ORDER-SOON') < html.indexOf('ORDER-LATER'));
+  assert.match(html, /Price above the auto-confirm limit/);
+  assert.match(html, /data-order="ORDER-REVIEW"/);
+  assert.match(html, /<strong>3<\/strong> replies never reached a customer/);
+  assert.equal(w.requests.length, 2, 'navigation reuses a recent read');
+  apiFixture(w, { '/api/dashboard/queue': { upcoming: [], waitingOnAPerson: [], undelivered: { replies: 0, notices: 0 } } });
+  await w.click({ read: 'queue' });
+  assert.match(w.nodes.app.innerHTML, /Nothing scheduled/);
+  assert.match(w.nodes.app.innerHTML, /No decisions waiting/);
+  assert.doesNotMatch(w.nodes.app.innerHTML, /ORDER-REVIEW/);
+});
+
+test('transcripts display only permitted fields, escape text, and state retention honestly', async () => {
+  const w = workspace();
+  w.live();
+  apiFixture(w, { '/api/dashboard/customers/CUST-001/conversation': transcriptFixture('CUST-001', '<script>bad()</script> & hello') });
+  await w.run("showCustomer('CUST-001')");
+  const html = w.nodes['detail-dialog'].innerHTML;
+  assert.match(html, /&lt;script&gt;bad\(\)&lt;\/script&gt; &amp; hello/);
+  assert.doesNotMatch(html, /<script>|PHONE-FIELD|SYSTEM-PROMPT|PRIVATE-TOOL|PRIVATE-ARGUMENT/);
+  assert.ok(html.indexOf('Recent orders') < html.indexOf('WhatsApp conversation'));
+  assert.ok(html.indexOf('bad()') < html.indexOf('The agent looked up'));
+  assert.ok(html.indexOf('The agent looked up') < html.indexOf('I can prepare'));
+  assert.match(html, /retained for 14 days/);
+  assert.match(html, /Earlier messages were omitted/);
+  const unreachable = { ...transcriptFixture('CUST-001'), reachable: false, messages: [] };
+  apiFixture(w, { '/api/dashboard/customers/CUST-001/conversation': unreachable });
+  await w.run("showCustomer('CUST-001')");
+  assert.match(w.nodes['detail-dialog'].innerHTML, /No WhatsApp number on file/);
+  assert.match(w.nodes['detail-dialog'].innerHTML, /retained for 14 days/);
+});
+
+test('new validators reject malformed fields independently and accept a long retained transcript', async () => {
+  const w = workspace();
+  w.live();
+  const ordersBefore = w.run('JSON.stringify(data.orders)');
+  const invalids = [
+    ['validateActivity', { ...activityFixture(), date: '2026-02-31' }],
+    ['validateActivity', { ...activityFixture(), conversations: [{ ...activityFixture().conversations[0], orderId: undefined }] }],
+    ['validateActivity', { ...activityFixture(), newCustomers: [{ ...activityFixture().newCustomers[0], lastAt: 'yesterday' }] }],
+    ['validateQueue', { ...queueFixture(), upcoming: [{ ...queueFixture().upcoming[0], dueAt: '2026-02-31T12:00:00Z' }] }],
+    ['validateQueue', { ...queueFixture(), undelivered: { replies: -1, notices: 0 } }],
+    ['validateQueue', { ...queueFixture(), waitingOnAPerson: [{ ...queueFixture().waitingOnAPerson[0], since: 'invalid' }] }],
+    ['validateQueue', { ...queueFixture(), upcoming: [{ ...queueFixture().upcoming[0], what: { unsafe: true } }] }],
+    ['validateOperations', { ...operationsFixture(), failedReplies: '7' }],
+  ];
+  for (const [validator, fixture] of invalids) {
+    w.context.invalidFixture = fixture;
+    assert.throws(() => w.run(`${validator}(invalidFixture)`), /invalid/);
+  }
+  for (const fixture of [
+    { ...transcriptFixture('WRONG-CUSTOMER') },
+    { ...transcriptFixture('CUST-001'), messages: [{ role: 'tool', text: 'secret', at: '2026-09-13T12:00:00Z' }] },
+    { ...transcriptFixture('CUST-001'), messages: [{ role: 'system', text: 'secret', at: '2026-09-13T12:00:00Z' }] },
+    { ...transcriptFixture('CUST-001'), retentionDays: 'forever' },
+    { ...transcriptFixture('CUST-001'), reachable: false },
+  ]) {
+    w.context.invalidFixture = fixture;
+    assert.throws(() => w.run("validateConversation(invalidFixture,'CUST-001')"), /invalid/);
+  }
+  w.context.longTranscript = { ...transcriptFixture('CUST-001'), messages: Array.from({ length: 300 }, (_, i) => ({ role: 'customer', text: `Turn ${i}`, at: '2026-09-13T12:00:00Z' })) };
+  assert.equal(w.run("validateConversation(longTranscript,'CUST-001').messages.length"), 300);
+  assert.equal(w.run('JSON.stringify(data.orders)'), ordersBefore);
+});
+
+test('late transcripts cannot replace another customer, an order, or a closed dialog', async () => {
+  for (const destination of ['customer', 'order', 'close']) {
+    const w = workspace();
+    w.live();
+    const pending = deferred();
+    w.context.fetch = () => pending.promise;
+    const reading = w.run("showCustomer('CUST-001')");
+    if (destination === 'customer') {
+      apiFixture(w, { '/api/dashboard/customers/CUST-002/conversation': transcriptFixture('CUST-002', 'The second customer') });
+      await w.run("showCustomer('CUST-002')");
+    } else if (destination === 'order') {
+      apiFixture(w, { '/api/dashboard/orders/ORDER-NEXT': { ...w.fixture().orders[0], id: 'ORDER-NEXT' } });
+      await w.run("showOrder('ORDER-NEXT')");
+    } else {
+      await w.click({ close: 'detail-dialog' });
+    }
+    const expected = w.nodes['detail-dialog'].innerHTML;
+    pending.resolve(response(transcriptFixture('CUST-001', 'LATE PRIVATE MESSAGE')));
+    await reading;
+    assert.equal(w.nodes['detail-dialog'].innerHTML, expected, destination);
+    assert.doesNotMatch(w.nodes['detail-dialog'].innerHTML, /LATE PRIVATE MESSAGE/);
+  }
+});
+
+test('every authenticated detail or lazy read handles a revoked token with the single session reset', async () => {
+  for (const [action, revokedPath] of [
+    ["loadRead('activity',true)", '/today'], ["loadRead('queue',true)", '/queue'],
+    ["loadRead('operations',true)", '/operations'], ["showCustomer('CUST-001')", '/customers/CUST-001/conversation'],
+    ["showOrder('REVOKED-ORDER')", '/orders/REVOKED-ORDER'], ['loadExtras(true)', '/controls'],
+  ]) {
+    const w = workspace();
+    w.live();
+    w.context.activity = activityFixture();
+    w.context.queue = queueFixture();
+    w.run('data.activity=activity;data.queue=queue');
+    // Revoke only this endpoint: a second 401 must not conceal a missing guard.
+    w.context.fetch = async url => {
+      const path = new URL(url).pathname;
+      if (path === '/api/dashboard' + revokedPath) return { ok: false, status: 401 };
+      assert.equal(path, '/api/dashboard/operations');
+      return response(operationsFixture());
+    };
+    await w.run(action);
+    assert.equal(w.run('data.mode'), 'disconnected', action);
+    assert.equal(w.run('data.activity'), null);
+    assert.equal(w.run('data.queue'), null);
+    assert.equal(w.run('data.operations'), null);
+    assert.equal(w.run('state.connection'), null);
+    assert.equal(w.run('Object.values(state.reads).some(r=>r.busy||r.error||r.loadedAt||r.pending)'), false);
+    assert.equal(w.nodes['detail-dialog'].innerHTML, '');
+    assert.doesNotMatch(w.nodes.app.innerHTML, /Bakery|ORDER-REVIEW/);
+  }
+});
+
+test('snapshot timer preserves explicit reads while manual refresh updates only the visible view', async () => {
+  const w = workspace();
+  w.live();
+  apiFixture(w, { '/api/dashboard/queue': queueFixture(), '/api/dashboard/operations': operationsFixture() });
+  await w.click({ view: 'overview' });
+  const cached = w.run('JSON.stringify([data.queue,data.operations,state.reads])');
+  for (const view of ['today', 'overview', 'queue', 'agents']) {
+    w.run(`state.view='${view}'`);
+    w.requests.length = 0;
+    apiFixture(w, { '/api/dashboard/snapshot': w.fixture() });
+    await w.run('refresh(true)');
+    assert.deepEqual(w.requests.map(([url]) => new URL(url).pathname), ['/api/dashboard/snapshot']);
+    assert.equal(w.run('JSON.stringify([data.queue,data.operations,state.reads])'), cached);
+  }
+  w.run("state.view='today'");
+  w.requests.length = 0;
+  apiFixture(w, { '/api/dashboard/snapshot': w.fixture(), '/api/dashboard/today': activityFixture() });
+  await w.run('refresh()');
+  assert.deepEqual(w.requests.map(([url]) => new URL(url).pathname), ['/api/dashboard/snapshot', '/api/dashboard/today']);
+  assert.match(w.nodes.app.innerHTML, /Bakery &lt;North&gt;/);
+});
+
+test('missing reads stay unavailable, retry works, and a signed-out session ignores late results', async () => {
+  const w = workspace();
+  w.live();
+  const original = w.run('JSON.stringify(data.orders)');
+  for (const [key, view] of [['activity', 'today'], ['queue', 'queue']]) {
+    w.run(`state.view='${view}'`);
+    w.context.fetch = async () => ({ ok: false, status: 404 });
+    await w.click({ read: key });
+    assert.match(w.nodes.app.innerHTML, /not available on this agent yet/);
+    assert.equal(w.run(`data.${key}`), null);
+    assert.equal(w.run('data.mode'), 'live');
+    assert.doesNotMatch(w.nodes.app.innerHTML, /Sample data for exploring/);
+  }
+  apiFixture(w, { '/api/dashboard/queue': queueFixture() });
+  await w.click({ read: 'queue' });
+  assert.match(w.nodes.app.innerHTML, /Price above the auto-confirm limit/);
+  assert.equal(w.run('JSON.stringify(data.orders)'), original);
+  for (const [action, fixture] of [
+    ["loadRead('activity',true)", activityFixture()],
+    ["loadRead('queue',true)", queueFixture()],
+    ["loadRead('operations',true)", operationsFixture()],
+    ["showCustomer('CUST-001')", transcriptFixture('CUST-001')],
+  ]) {
+    w.live();
+    const pending = deferred();
+    w.context.fetch = () => pending.promise;
+    const reading = w.run(action);
+    await w.click({ action: 'disconnect' });
+    pending.resolve(response(fixture));
+    await reading;
+    assert.equal(w.run('data.mode'), 'disconnected', action);
+    assert.equal(w.run('data.activity'), null);
+    assert.equal(w.run('data.queue'), null);
+    assert.equal(w.run('data.operations'), null);
+    assert.equal(w.nodes['detail-dialog'].innerHTML, '');
+  }
+});
+
+test('record caps are visible beside each affected list and inside customer details', async () => {
+  const w = workspace();
+  w.live();
+  apiFixture(w, { '/api/dashboard/queue': queueFixture(), '/api/dashboard/operations': operationsFixture(), '/api/dashboard/customers/CUST-001/conversation': transcriptFixture('CUST-001') });
+  w.run("data.truncated=['orders','pending orders','inventory','product names','customers']");
+  for (const view of ['orders', 'inventory', 'customers']) {
+    await w.click({ view });
+    assert.match(w.nodes.app.innerHTML, /<p class="list-notice">This list is limited to 250/, view);
+  }
+  await w.click({ view: 'overview' });
+  assert.match(w.nodes.app.innerHTML.split('Recent orders')[1], /<p class="list-notice">This list is limited to 250/);
+  await w.run("showCustomer('CUST-001')");
+  assert.match(w.nodes['detail-dialog'].innerHTML, /<p class="list-notice">This list is limited to 250/);
+  assert.match(w.nodes['detail-dialog'].innerHTML, /not a complete order history/);
+});
+
+test('agent controls wait for a shared operations read already started by Overview', async () => {
+  const w = workspace();
+  w.live();
+  const pending = deferred();
+  w.context.fetch = async url => {
+    w.requests.push(url);
+    if (url.endsWith('/operations')) return pending.promise;
+    assert.equal(url, 'https://agent.example/api/dashboard/controls');
+    return response({ policies: [{ name: 'Saved order ceiling', value: '0', note: 'Owner setting' }] });
+  };
+  const reading = w.run("loadRead('operations')");
+  w.run("state.view='agents'");
+  const extras = w.run('loadExtras()');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(w.run('state.extrasBusy'), true, 'controls wait for the pending operations read');
+  pending.resolve(response(operationsFixture()));
+  await Promise.all([reading, extras]);
+  assert.equal(w.requests.filter(url => url.endsWith('/operations')).length, 1);
+  assert.equal(w.run('state.extrasError'), '');
+  assert.match(w.nodes.app.innerHTML, /Saved order ceiling/);
+  assert.match(w.nodes.app.innerHTML, /Active lease/);
+});
+
+test('fresh operations do not disguise old controls when the agents view is reopened', async () => {
+  const w = workspace();
+  w.live();
+  apiFixture(w, { '/api/dashboard/controls': { policies: [{ name: 'Old ceiling', value: '10' }] }, '/api/dashboard/operations': operationsFixture() });
+  await w.click({ view: 'agents' });
+  w.run('state.extrasLoadedAt=Date.now()-120000');
+  w.requests.length = 0;
+  apiFixture(w, { '/api/dashboard/controls': { policies: [{ name: 'Updated ceiling', value: '20' }] } });
+  await w.click({ view: 'agents' });
+  assert.deepEqual(w.requests.map(([url]) => new URL(url).pathname), ['/api/dashboard/controls']);
+  assert.match(w.nodes.app.innerHTML, /Updated ceiling/);
+  assert.doesNotMatch(w.nodes.app.innerHTML, /Old ceiling/);
 });

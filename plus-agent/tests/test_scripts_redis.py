@@ -1,4 +1,4 @@
-"""El compare-and-set del caché de `agenda`, contra un Redis de VERDAD.
+"""Los scripts Lua de `agenda` y `avisos`, contra un Redis de VERDAD.
 
 POR QUÉ ESTE ARCHIVO EXISTE APARTE
 `tests/fakes.py` no ejecuta Lua: reimplementa en Python la regla que el script
@@ -138,3 +138,85 @@ def test_una_foto_mas_nueva_si_entra_y_pone_la_fila_en_el_indice(redis_real) -> 
 
     assert _guardada(cliente, vieja)["estado"] == agenda.HECHO
     assert cliente.zscore(indice, agenda._miembro(vieja)) is None
+
+
+# ===========================================================================
+# `avisos`: los dos scripts que sostienen el exactamente-una-vez de la cola
+#
+# Mismo motivo que arriba y encontrado del mismo modo: `tests/fakes.py`
+# reimplementa estos dos en Python, así que ningún test podía discrepar con el
+# script. Son los que garantizan que un cliente reciba su confirmación UNA vez
+# y que dos workers no se lleven el mismo aviso; medidos contra el doble, esa
+# garantía es una afirmación sobre el doble.
+# ===========================================================================
+
+
+@pytest.fixture
+def avisos_en_redis(monkeypatch: pytest.MonkeyPatch):
+    """`avisos` apuntando a un Redis real, con claves propias de este archivo."""
+    import redis
+
+    from app import avisos, outbound_status
+
+    if not os.getenv("REDIS_URL", "").strip():
+        _sin_redis("no hay REDIS_URL configurada")
+    cliente = redis.Redis.from_url(os.environ["REDIS_URL"])
+    try:
+        cliente.ping()
+    except redis.exceptions.RedisError:
+        _sin_redis("Redis no responde")
+    cola = "plus-agent:test-avisos:cola"
+    monkeypatch.setattr(avisos, "COLA", cola)
+    monkeypatch.setattr(outbound_status, "_client", cliente)
+    claves = [cola]
+
+    def clave_encolado(evento, pedido):
+        nombre = f"plus-agent:test-avisos:enc:{evento}:{pedido}"
+        claves.append(nombre)
+        return nombre
+
+    monkeypatch.setattr(avisos, "_clave_encolado", clave_encolado)
+    monkeypatch.setattr(avisos, "has_accepted", lambda pedido, evento: False)
+    try:
+        yield avisos, cliente, cola
+    finally:
+        cliente.delete(*dict.fromkeys(claves))
+
+
+def test_el_script_encola_una_sola_vez_el_mismo_aviso(avisos_en_redis) -> None:
+    """La idempotencia de la cola, tal como Redis la ejecuta.
+
+    Las dos mitades: el PRIMER encolado entra —si el script nunca escribiera,
+    el cliente no recibiría nada y el test de abajo pasaría igual— y el segundo
+    NO agrega una segunda entrada. El booleano y el contenido de la cola se
+    afirman por separado porque son dos cosas distintas: `encolar` puede
+    devolver False habiendo escrito, que es el peor de los dos errores.
+    """
+    avisos, cliente, cola = avisos_en_redis
+
+    primero = avisos.encolar("ev", "SO-1", "5493510000001", "hola")
+    segundo = avisos.encolar("ev", "SO-1", "5493510000001", "hola")
+
+    assert primero is True
+    assert segundo is False
+    assert cliente.zcard(cola) == 1
+
+
+def test_el_script_no_le_da_el_mismo_aviso_a_dos_workers(avisos_en_redis) -> None:
+    """Reclamar es atómico: el segundo worker no se lleva lo mismo que el primero.
+
+    `_RECLAMAR_LUA` no borra la entrada, la re-puntúa al futuro (el lease), así
+    que sigue en la cola y lo que tiene que cambiar es a QUIÉN le toca ahora.
+    """
+    avisos, cliente, cola = avisos_en_redis
+    assert avisos.encolar("ev", "SO-1", "5493510000001", "uno") is True
+    assert avisos.encolar("ev", "SO-2", "5493510000002", "dos") is True
+
+    ahora = 10_000_000_000.0
+    lua = avisos._RECLAMAR_LUA
+    primero = cliente.eval(lua, 1, cola, f"{ahora:.3f}", f"{ahora + 90:.3f}")
+    segundo = cliente.eval(lua, 1, cola, f"{ahora:.3f}", f"{ahora + 90:.3f}")
+
+    assert primero is not None and segundo is not None
+    assert primero != segundo, "dos workers se llevaron el MISMO aviso"
+    assert cliente.zcard(cola) == 2, "reclamar no borra: re-puntúa con el lease"
