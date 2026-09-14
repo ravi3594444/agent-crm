@@ -2110,6 +2110,49 @@ def test_a_fallback_nobody_looked_at_still_has_to_pass_the_owners_limits(
     assert solicitudes.leer(SO).estado == solicitudes.REVISION_HUMANA
 
 
+def test_a_decision_that_lands_DURING_the_checks_stops_the_submit(
+    mundo, monkeypatch, lunes
+) -> None:
+    """Si alguien decide mientras se verifica, el que llegó segundo no emite.
+
+    El estado de la solicitud se mira al ENTRAR al lock. Desde ahí hasta el
+    submit pasan una relectura del pedido, `revalidar`, la escritura de los
+    términos y `policy.evaluar` entero —historial, deuda, stock por renglón,
+    precios— contra un ERPNext con `timeout=30`. Contra un ERPNext lento eso se
+    come el lease de 180 s, y un lease vencido es el pedido sin exclusión mutua
+    mientras esta llamada sigue caminando hacia el submit: otra decisión, un
+    rechazo o un vencimiento pueden tomar la misma llave y cambiar la solicitud
+    debajo.
+
+    No se puede preguntar «¿sigo teniendo el lock?» —`distributed_lock` no lo
+    expone, y eso es una pieza aparte— pero sí se puede mirar si la solicitud
+    cambió. Acá el cambio se simula desde adentro de la comprobación lenta, que
+    es exactamente cuándo ocurriría.
+
+    Hallazgo de Qodo sobre este PR, la mitad que sí entra en su alcance.
+
+    Mutación dirigida: borrar la relectura `de_nuevo = leer(pedido)` y su
+    guarda. Mata a este test y a ningún otro.
+    """
+    from app import policy
+
+    _, solicitud = _respaldo(mundo, monkeypatch)
+    original = mundo["decision"]
+
+    def decide_otro(sales_order, *, entrega_acordada=False):
+        # Mientras se verifica, otro camino resuelve la solicitud.
+        solicitudes.registrar(
+            solicitudes.leer(SO), "rechazada", estado=solicitudes.RECHAZADA
+        )
+        return original
+
+    monkeypatch.setattr(policy, "evaluar", decide_otro)
+
+    solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["submits"] == []
+
+
 def test_only_a_PHONE_counts_as_a_person_deciding(mundo, monkeypatch, lunes) -> None:
     """Quién decidió se mide con un teléfono, no con «no es la constante».
 

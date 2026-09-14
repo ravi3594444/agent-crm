@@ -2567,6 +2567,24 @@ def aceptar_cliente(
                 if fuera:
                     return _a_revision(solicitud, fuera, lengua)
 
+            # LA SOLICITUD, OTRA VEZ, JUSTO ANTES DE EMITIR. El estado se miró
+            # al entrar al lock, y desde entonces pasaron una relectura, una
+            # revalidación, la escritura de los términos y `policy.evaluar`
+            # entero: contra un ERPNext lento eso puede comerse el lease, y un
+            # lease vencido es el pedido sin exclusión mutua mientras esta
+            # llamada sigue caminando hacia el submit. `locks.distributed_lock`
+            # no expone el lock, así que NO se puede preguntar «¿lo sigo
+            # teniendo?» —eso es una pieza aparte—; lo que sí se puede es mirar
+            # si alguien decidió mientras tanto. Si la solicitud ya no es la
+            # misma o dejó de esperar al cliente, no se emite: el que decidió
+            # segundo no pisa al que decidió primero.
+            de_nuevo = leer(pedido)
+            if de_nuevo is None or de_nuevo.id != solicitud.id or (
+                de_nuevo.estado != ESPERANDO_CLIENTE
+            ):
+                print(f"[solicitudes] {pedido}: la solicitud cambió mientras se verificaba")
+                return _sin_oferta(pedido, de_nuevo, lengua)
+
             try:
                 erp.submit_doc("Sales Order", pedido)
             except Exception as exc:

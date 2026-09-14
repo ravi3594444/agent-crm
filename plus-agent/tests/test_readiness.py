@@ -575,6 +575,62 @@ def test_an_enabled_exception_missing_its_terms_is_called_out() -> None:
     assert "nada queda pre-autorizado" in texto
 
 
+def _excepcion_completa(**extra):
+    return _entrega(
+        ENTREGA_EXCEPCION_ACTIVA="true",
+        ENTREGA_EXCEPCION_DIAS="jueves",
+        ENTREGA_EXCEPCION_HORA="19:00",
+        ENTREGA_EXCEPCION_CARGO="1500",
+        **extra,
+    )
+
+
+def _con_tope(valor: str):
+    return [
+        {"nombre": "AUTO_CONFIRM_MAX", "alias": "tope", "unidad": "",
+         "valor": valor, "origen": "dueño", "problema": ""}
+    ]
+
+
+def test_an_exception_with_the_ceiling_at_zero_is_called_out() -> None:
+    """Los dos interruptores son válidos por separado y juntos no hacen nada.
+
+    Una excepción pre-autorizada EMITE el pedido sola: el cliente pide un día
+    de fuera, la regla del dueño lo autoriza, la oferta sale sin que nadie la
+    mire, el cliente contesta «acepto» y se emite. Con el tope en 0 —el dueño
+    diciendo «ningún pedido se emite sin mí»— esa emisión se rechaza al final
+    del camino, cuando al cliente ya se le prometieron condiciones y ya dijo
+    que sí. Lo que ve es que le ofrecen algo y después le dicen que espere.
+
+    Es un AVISO y no un error: ninguna de las dos configuraciones está rota.
+    Este es el único lugar donde se puede ver que no se llevan bien.
+    """
+    def mal_par():
+        return _excepcion_completa() + _con_tope("0")
+
+    texto = _correr(BASE, limites=mal_par).texto()
+
+    assert "tope de auto-confirmación está en 0" in texto
+    assert "termina esperando a una persona" in texto
+
+
+def test_the_same_exception_with_a_ceiling_set_is_not_called_out() -> None:
+    """La otra mitad: con un tope puesto, el par está bien y no se avisa nada.
+
+    Sin esto, «avisá cuando la excepción está en sí» lo cumpliría igual un
+    aviso que sale SIEMPRE, y el dueño aprendería a ignorarlo.
+
+    Mutación dirigida: sacarle el `and _es_cero(...)` a la condición. Mata a
+    este test y deja verde al de arriba.
+    """
+    def buen_par():
+        return _excepcion_completa() + _con_tope("30000")
+
+    texto = _correr(BASE, limites=buen_par).texto()
+
+    assert "tope de auto-confirmación está en 0" not in texto
+
+
 def test_a_fee_with_no_account_says_a_person_has_to_add_the_charge() -> None:
     def completa():
         return _entrega(

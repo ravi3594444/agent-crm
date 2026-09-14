@@ -1018,11 +1018,19 @@ def chequear_entrega(
         reporte.aviso("Entrega", "sin Redis: no se verificaron las reglas de entrega")
         return
     try:
+        todas = list(resumen_limites())
         filas = {
             str(f.get("nombre")): f
-            for f in resumen_limites()
+            for f in todas
             if str(f.get("nombre")) in limites.ENTREGA
         }
+        # El tope NO es una regla de entrega, y por eso no está en `filas`. Se
+        # lee aparte porque la excepción pre-autorizada EMITE el pedido sola, y
+        # eso depende del tope: los dos tienen que estar de acuerdo o el cliente
+        # recibe una oferta que después no se puede cumplir.
+        tope = next(
+            (f for f in todas if str(f.get("nombre")) == "AUTO_CONFIRM_MAX"), None
+        )
     except Exception as exc:
         reporte.error(
             "Entrega",
@@ -1152,6 +1160,30 @@ def chequear_entrega(
                 "ENTREGA_EXCEPCION_ACTIVA",
                 "en sí pero falta " + ", ".join(faltan) + ": nada queda "
                 "pre-autorizado y cada caso lo decide una persona",
+            )
+        elif tope is not None and not tope.get("problema") and _es_cero(
+            tope.get("valor")
+        ):
+            # LOS DOS INTERRUPTORES TIENEN QUE ESTAR DE ACUERDO, y este es el
+            # único lugar donde se puede ver que no lo están.
+            #
+            # Una excepción pre-autorizada termina EMITIENDO el pedido sola: el
+            # cliente pide un día de fuera, la regla del dueño lo autoriza, la
+            # oferta sale sin que nadie la mire, el cliente contesta «acepto» y
+            # `solicitudes` emite. Con el tope en 0 —que es el dueño diciendo
+            # «ningún pedido se emite sin mí»— esa emisión se rechaza al final
+            # del camino, y para entonces al cliente ya se le prometieron
+            # condiciones y ya contestó que sí. Lo que ve es que le ofrecen algo
+            # y después le dicen que espere a una persona.
+            #
+            # No es un error: las dos configuraciones son válidas por separado
+            # y ninguna está rota. Es que juntas no hacen lo que parecen.
+            reporte.aviso(
+                "ENTREGA_EXCEPCION_ACTIVA",
+                "en sí, pero el tope de auto-confirmación está en 0: la oferta "
+                "sale sola y después NO se puede emitir, así que al cliente se "
+                "le ofrece algo que termina esperando a una persona. Poné un "
+                "tope, o dejá la excepción en no",
             )
         else:
             reporte.ok("ENTREGA_EXCEPCION_ACTIVA", "sí, con días, hora y cargo configurados")
