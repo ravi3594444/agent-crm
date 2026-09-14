@@ -230,8 +230,11 @@ def _cantidad_en_stock_uom(item: dict) -> float:
     return qty
 
 
-def evaluar(sales_order: dict) -> Decision:
+def evaluar(sales_order: dict, *, entrega_acordada: bool = False) -> Decision:
     """Return auto=True only when every independently verified rule passes.
+
+    `entrega_acordada` es para un pedido cuya ENTREGA ya la fijó una oferta —el
+    dónde y el cuándo—, y lo único que apaga es ese bloque. Ver `_evaluar`.
 
     The owner's limits are read HERE, on every call. _after_create calls this
     again inside the submit lock, so the numbers that decide a confirmation are
@@ -250,7 +253,9 @@ def evaluar(sales_order: dict) -> Decision:
 
     # With ignorar_postura=False nothing is ever routed to the posture list:
     # every reason lands in `motivos`, at the same index it always did.
-    motivos, _postura = _evaluar(sales_order, cfg, ignorar_postura=False)
+    motivos, _postura = _evaluar(
+        sales_order, cfg, ignorar_postura=False, entrega_acordada=entrega_acordada
+    )
     return Decision(not motivos, motivos)
 
 
@@ -259,6 +264,7 @@ def _evaluar(
     cfg: limites.Configuracion,
     *,
     ignorar_postura: bool,
+    entrega_acordada: bool = False,
 ) -> tuple[list[str], list[str]]:
     """(motivos_reglas, motivos_postura). The rules, once, for both callers.
 
@@ -500,15 +506,26 @@ def _evaluar(
     # modelo (app/entrega.py): ningún mensaje de un cliente puede convencer al
     # sistema de que su dirección "está cerca". Se aplica a TODOS los pedidos,
     # así que también al cliente conocido que estrena dirección.
-    entrega_autorizada, motivo_entrega = entrega.autorizada(sales_order)
-    if not entrega_autorizada:
-        motivos.append(motivo_entrega)
+    # `entrega_acordada` SALTEA ESTE BLOQUE Y SÓLO ESTE, y es la única forma de
+    # preguntar «¿la plata está bien?» sobre un pedido cuya entrega ya se
+    # acordó. Lo usa la aceptación de una oferta: el DÓNDE y el CUÁNDO los fijó
+    # una oferta que salió de una regla del dueño, y volver a juzgarlos acá
+    # rechaza lo que el sistema mismo acaba de ofrecer. Dos casos reales:
+    # un RETIRO EN EL LOCAL —que `excepciones.evaluar_respaldo` ofrece
+    # justamente cuando la dirección NO está en zona— se caía siempre por la
+    # zona de una entrega que no existe; y la fecha vieja del pedido, que la
+    # oferta viene a reemplazar, se leía como "fecha de entrega vencida".
+    # NO afecta al camino normal: ahí es False y se comprueba todo.
+    if not entrega_acordada:
+        entrega_autorizada, motivo_entrega = entrega.autorizada(sales_order)
+        if not entrega_autorizada:
+            motivos.append(motivo_entrega)
 
     fecha_pedida = sales_order.get("delivery_date")
     try:
         today = _hoy_del_negocio()
         delivery_day = date.fromisoformat(str(fecha_pedida))
-        if delivery_day < today:
+        if delivery_day < today and not entrega_acordada:
             motivos.append("fecha de entrega vencida")
         elif delivery_day > today + timedelta(days=30):
             motivos.append("fecha de entrega muy lejana")

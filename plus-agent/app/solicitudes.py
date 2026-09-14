@@ -179,8 +179,20 @@ def lo_decidio_una_persona(solicitud: Solicitud) -> bool:
     tienen el mismo alcance: el encargado miró ESTE pedido; la regla del dueño
     autorizó una FORMA de entrega, sin mirar el monto, la deuda ni el cliente.
     """
+    from app import telefono as telefonos
+
     quien = str(solicitud.decidida_por or "").strip()
-    return bool(quien) and quien != DECIDE_EL_SISTEMA
+    if not quien or quien == DECIDE_EL_SISTEMA:
+        return False
+    # UN TELÉFONO, no «cualquier cosa que no sea la constante». `DECIDE_EL_SISTEMA`
+    # es una frase que además se IMPRIME —`texto_estado` la muestra y
+    # `_cerrar_confirmado` la escribe en el comentario del pedido—, y los
+    # registros son append-only y se releen durante meses. Si alguien mejora esa
+    # redacción, todos los registros viejos dejan de coincidir con la constante
+    # nueva, este predicado contesta «la decidió una persona» y los pedidos
+    # vuelven a emitirse salteándose los límites, sin un test en rojo. Un
+    # teléfono normaliza; una frase, no.
+    return bool(telefonos.normalizar(quien))
 
 CLAVE_INDICE = "wa:{inbound}:solicitudes"
 CACHE_TTL_SEGUNDOS = 30 * 24 * 60 * 60
@@ -2508,7 +2520,13 @@ def aceptar_cliente(
 
     lengua = _lengua_cliente(telefono_cliente, lengua)
     try:
-        with distributed_lock(f"solicitud:{pedido}", lease_seconds=90, wait_seconds=10):
+        # 180 y no 90: acá adentro entró `limites_del_dueno`, que relee el
+        # pedido y corre `policy.evaluar` —historial, deuda, stock por renglón,
+        # precios— contra un ERPNext con `timeout=30`. Es la misma aritmética
+        # que MAPA ya registra para `decisiones.confirmar`: un lease que vence
+        # a mitad de la sección deja el pedido sin exclusión mutua mientras el
+        # submit sigue en vuelo, y nadie lo renueva.
+        with distributed_lock(f"solicitud:{pedido}", lease_seconds=180, wait_seconds=10):
             solicitud = leer(pedido)
             if solicitud is None or solicitud.estado != ESPERANDO_CLIENTE:
                 return _sin_oferta(pedido, solicitud, lengua)
@@ -2541,6 +2559,13 @@ def aceptar_cliente(
             aplicado, detalle_aplicado = _aplicar_terminos(pedido, solicitud)
             if not aplicado:
                 return _a_revision(solicitud, [detalle_aplicado], lengua)
+
+            # Los límites del dueño, sobre el documento YA con los términos
+            # puestos — con el cargo adentro del total y con la fecha acordada.
+            if not lo_decidio_una_persona(solicitud):
+                fuera = limites_del_dueno(pedido, solicitud)
+                if fuera:
+                    return _a_revision(solicitud, fuera, lengua)
 
             try:
                 erp.submit_doc("Sales Order", pedido)
@@ -2719,6 +2744,58 @@ def _revision_sin_registro(
 # ---------------------------------------------------------------------------
 
 
+def limites_del_dueno(pedido: str, solicitud: Solicitud) -> list[str]:
+    """Los límites del dueño sobre el pedido FINAL. Vacío quiere decir que pasan.
+
+    LA PRE-AUTORIZACIÓN CUBRE LA ENTREGA, NUNCA LA PLATA. Hay dos caminos que
+    emiten sin que nadie mire —la excepción de entrega pre-autorizada y el
+    respaldo de una solicitud vencida— y los dos llegaban al `submit` sin haber
+    pasado nunca por `policy.evaluar`: sin tope, sin deuda vencida, sin cliente
+    nuevo, sin cantidad por producto. `app/excepciones.py` ni siquiera importa
+    `policy`, así que lo único que miraba era que la excepción estuviera activa
+    y el mínimo. Pasaba incluso con `AUTO_CONFIRM_MAX=0`, que es el dueño
+    diciendo «ningún pedido se emite sin mí».
+
+    CORRE DESPUÉS DE `_aplicar_terminos` Y RELEE, y las dos cosas importan. El
+    cargo de la excepción lo escribe `_aplicar_terminos` y SUBE el
+    `grand_total`: mirar el documento de antes deja pasar un pedido que con el
+    cargo se va por encima del tope. Y la fecha de la oferta también se escribe
+    ahí, así que el documento viejo todavía trae la fecha vencida que la oferta
+    viene a reemplazar.
+
+    `entrega_acordada=True` apaga SÓLO el bloque de entrega de `policy`: el
+    dónde y el cuándo los fijó una oferta que salió de una regla del dueño.
+    Sin eso, un RETIRO EN EL LOCAL —que `excepciones.evaluar_respaldo` ofrece
+    justamente cuando la dirección NO está en zona— se caería siempre por la
+    zona de una entrega que no existe.
+
+    Con una persona detrás no se llama: ella miró ESTE pedido.
+    """
+    from app import policy
+
+    try:
+        final = erpnext.policy_get_doc("Sales Order", pedido)
+    except Exception as exc:
+        print(f"[solicitudes] {pedido}: no pude releer para los límites ({type(exc).__name__})")
+        return ["no pude releer el pedido para verificar los límites del dueño"]
+
+    try:
+        decision = policy.evaluar(final, entrega_acordada=True)
+    except Exception as exc:
+        # Todo lo demás en este camino convierte una lectura fallida en un
+        # motivo, no en una excepción: `aceptar_cliente` sólo atrapa
+        # `CoordinationError`, así que una excepción acá dejaría al cliente sin
+        # respuesta y al borrador tomando stock sin revisión ni plazo nuevo.
+        print(f"[solicitudes] {pedido}: límites no verificables ({type(exc).__name__})")
+        return ["no pude verificar los límites del dueño"]
+
+    if decision.auto:
+        return []
+    # `or` y no `extend` a secas: un rechazo SIN motivos no puede volverse un
+    # «no hay problemas» y emitir el pedido que política acaba de rechazar.
+    return list(decision.motivos) or ["los límites del dueño no autorizan este pedido"]
+
+
 def revalidar(so: dict, solicitud: Solicitud) -> list[str]:
     """What is wrong with confirming this order NOW. Empty means nothing is.
 
@@ -2741,32 +2818,6 @@ def revalidar(so: dict, solicitud: Solicitud) -> list[str]:
         ]
     if policy.sin_reserva(so.get("status")):
         return [f"el pedido está {so.get('status')} y ya no reserva stock"]
-
-    # LA PRE-AUTORIZACIÓN CUBRE LA ENTREGA, NUNCA LA PLATA — y sin esto el
-    # camino automático emitía pedidos salteándose TODOS los límites del dueño.
-    #
-    # Cuando nadie miró el pedido, lo único que se autorizó fue una FORMA de
-    # entrega: `excepciones.evaluar_entrega` mira si la excepción está activa,
-    # los días, la hora, el cargo y el mínimo, y NADA más — `app/excepciones.py`
-    # ni siquiera importa `policy` ni `limites`. Así que el cliente pedía un
-    # sábado, la regla del dueño lo pre-autorizaba, la oferta salía sola, el
-    # cliente aceptaba, y acá se emitía el pedido sin haber comprobado el tope,
-    # la deuda vencida, el cliente nuevo ni la cantidad por producto. Pasaba
-    # incluso con `AUTO_CONFIRM_MAX=0`, que es justamente el dueño diciendo
-    # «ningún pedido se emite sin mí»: esta puerta no lo leía.
-    #
-    # Con una persona detrás NO se vuelve a correr: el encargado miró este
-    # pedido y él es la autoridad. Lo que cambió desde su visto bueno lo
-    # comprueba el resto de esta función, que para eso existe.
-    #
-    # No hace falta apagarle la regla de entrega a `policy`: el día de la
-    # semana no es suyo. `entrega.autorizada` mira la ZONA (la dirección), y
-    # `policy` no lee `ENTREGA_DIAS` en ninguna parte — así que un sábado
-    # ofrecido por la excepción no se cae acá por ser sábado.
-    if not lo_decidio_una_persona(solicitud):
-        decision = policy.evaluar(so)
-        if not decision.auto:
-            problemas.extend(decision.motivos)
 
     cantidades_ahora = _cantidades(so)
     if solicitud.cantidades and cantidades_ahora != solicitud.cantidades:

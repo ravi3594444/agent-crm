@@ -195,12 +195,21 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
         return dict(estado["so"])
 
     monkeypatch.setattr(erpnext, "policy_aplicar_terminos", policy_aplicar_terminos)
-    monkeypatch.setattr(
-        erpnext,
-        "policy_agregar_cargo",
-        lambda name, cuenta, desc, importe: estado["cargos"].append((cuenta, importe))
-        or dict(estado["so"]),
-    )
+    def agregar_cargo(name, cuenta, desc, importe):
+        """El cargo SUBE el `grand_total`, como lo hace ERPNext.
+
+        Devolvía el pedido sin tocar, así que el doble no podía discreparle al
+        código sobre el defecto real de este camino: los límites del dueño
+        mirando un total al que todavía no se le sumó el cargo de la excepción,
+        y dejando pasar un pedido que con el cargo se va por encima del tope.
+        """
+        estado["cargos"].append((cuenta, importe))
+        estado["so"]["grand_total"] = float(
+            estado["so"].get("grand_total") or 0
+        ) + float(importe or 0)
+        return dict(estado["so"])
+
+    monkeypatch.setattr(erpnext, "policy_agregar_cargo", agregar_cargo)
 
     def submit_doc(dt, name):
         estado["submits"].append(name)
@@ -227,8 +236,18 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
     # afirmar es QUE SE CONSULTÓ, y sobre cuál.
     estado["evaluados"] = []
 
-    def evaluar(sales_order):
-        estado["evaluados"].append(str(sales_order.get("name") or ""))
+    def evaluar(sales_order, *, entrega_acordada=False):
+        # ANOTA EL DOCUMENTO, no un booleano: los dos defectos que este camino
+        # tuvo eran sobre CUÁL documento llegaba acá —uno sin el cargo de la
+        # excepción sumado al total, y otro con la fecha vieja que la oferta
+        # venía a reemplazar—. Un doble que sólo guardara el nombre no puede
+        # discreparle al código sobre ninguno de los dos.
+        estado["evaluados"].append({
+            "pedido": str(sales_order.get("name") or ""),
+            "total": float(sales_order.get("grand_total") or 0),
+            "fecha": str(sales_order.get("delivery_date") or ""),
+            "entrega_acordada": entrega_acordada,
+        })
         return estado["decision"]
 
     estado["decision"] = _policy.Decision(True, [])
@@ -252,7 +271,13 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
 
     # The order is otherwise confirmable: the stock and price rules pass unless
     # a test says they do not.
-    monkeypatch.setattr("app.inventario.confiable", lambda code, wh: (True, ""))
+    # Acepta `ignorar_postura` porque la función de verdad lo tiene: con la
+    # firma vieja, el día que un test dejara correr `policy.evaluar` de verdad
+    # esto reventaba con TypeError en vez de medir algo.
+    monkeypatch.setattr(
+        "app.inventario.confiable",
+        lambda code, wh, *, ignorar_postura=False: (True, ""),
+    )
     monkeypatch.setattr(
         "app.policy.hay_stock_para", lambda *a, **k: bool(estado["stock"])
     )
@@ -1989,6 +2014,66 @@ def test_the_fallback_confirms_nothing_before_the_customer_answers(
     assert solicitudes.leer(SO).estado == solicitudes.ESPERANDO_CLIENTE
 
 
+def test_the_limits_judge_the_document_the_offer_LEFT_not_the_one_before(
+    mundo, monkeypatch, lunes
+) -> None:
+    """Los límites miran el pedido DESPUÉS de aplicar los términos, y releído.
+
+    `_aplicar_terminos` escribe la fecha acordada Y el cargo de la excepción, y
+    el cargo SUBE el `grand_total`. Comprobar los límites sobre el documento de
+    antes se equivoca en las dos puntas: deja pasar el pedido que entra en el
+    tope sin el cargo y se va por encima con él —el dueño puso un techo y el
+    sistema emitía por arriba—, y además lee la fecha VIEJA, la que la oferta
+    viene a reemplazar, que para cuando el cliente contesta ya suele estar
+    vencida: el sistema rechazaba su propia oferta por «fecha de entrega
+    vencida».
+
+    Acá se mide con la fecha, que es la que este camino cambia siempre (el
+    respaldo ofrece el próximo día de reparto normal, sin cargo). El pedido
+    nace el 2026-09-10 y la oferta es MARTES: si los límites vieran el
+    documento de antes, `fecha` sería la vieja.
+
+    Los dos hallazgos —el mío y el de Qodo— eran el mismo defecto de orden.
+
+    Mutación dirigida: mover la llamada a `limites_del_dueno` arriba de
+    `_aplicar_terminos`. Mata a este test y a ningún otro.
+    """
+    _, solicitud = _respaldo(mundo, monkeypatch)
+
+    solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["evaluados"], "los límites tienen que haberse consultado"
+    assert mundo["aplicados"] == [{"fecha": MARTES, "descuento": None}]
+    assert mundo["evaluados"][0]["fecha"] == MARTES
+    assert mundo["evaluados"][0]["fecha"] == solicitud.ofrecido["fecha"]
+
+
+def test_a_pickup_fallback_can_actually_be_accepted(
+    mundo, monkeypatch, lunes
+) -> None:
+    """Un RETIRO no puede caerse por la zona de una entrega que no existe.
+
+    `excepciones.evaluar_respaldo` ofrece retiro en el local justamente cuando
+    la dirección NO está en zona. Correrle `policy.evaluar` entero a esa
+    aceptación la rechaza SIEMPRE, porque `entrega.autorizada` mira la zona: el
+    sistema ofrece el retiro y después se niega a cumplirlo, y el cliente que
+    contestó «acepto» queda esperando a una persona.
+
+    `entrega_acordada=True` apaga ese bloque y sólo ese: el dónde y el cuándo
+    los fijó la oferta. Se afirma la BANDERA, que es lo único que distingue
+    este arreglo de «no comprobar nada».
+
+    Mutación dirigida: pasar `entrega_acordada=False` en `limites_del_dueno`.
+    Mata a este test y a ningún otro.
+    """
+    _respaldo(mundo, monkeypatch)
+
+    solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["evaluados"], "los límites tienen que haberse consultado"
+    assert mundo["evaluados"][0]["entrega_acordada"] is True
+
+
 def test_a_fallback_nobody_looked_at_still_has_to_pass_the_owners_limits(
     mundo, monkeypatch, lunes
 ) -> None:
@@ -2019,10 +2104,45 @@ def test_a_fallback_nobody_looked_at_still_has_to_pass_the_owners_limits(
 
     respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
 
-    assert mundo["evaluados"] == [SO]
+    assert [e["pedido"] for e in mundo["evaluados"]] == [SO]
     assert mundo["submits"] == []
     assert "necesito revisarlo con una persona" in respuesta
     assert solicitudes.leer(SO).estado == solicitudes.REVISION_HUMANA
+
+
+def test_only_a_PHONE_counts_as_a_person_deciding(mundo, monkeypatch, lunes) -> None:
+    """Quién decidió se mide con un teléfono, no con «no es la constante».
+
+    `DECIDE_EL_SISTEMA` es una frase, y además se IMPRIME: `texto_estado` la
+    muestra y el comentario de cierre la escribe en el pedido. Los registros son
+    append-only y se releen durante meses. Si alguien mejora esa redacción —una
+    tilde, una traducción, sacarle el paréntesis—, todos los registros viejos
+    dejan de coincidir con la constante nueva; un predicado que sólo compare
+    contra ella contesta «la decidió una persona» para todos ellos, y los
+    pedidos vuelven a emitirse salteándose los límites del dueño. Sin ningún
+    test en rojo, porque los tests construyen el registro con la misma
+    constante que el código (CLAUDE.md: una constante a los dos lados del
+    assert mueve las dos mitades juntas).
+
+    Por eso acá el registro se firma con una frase INVENTADA, no con la
+    constante: es lo único que distingue «es un teléfono» de «no es esa frase».
+
+    Mutación dirigida: volver el `return` a `bool(quien) and quien !=
+    DECIDE_EL_SISTEMA`. Mata a este test y a ningún otro.
+    """
+    from app import policy
+
+    _, solicitud = _respaldo(mundo, monkeypatch)
+    solicitudes.registrar(
+        solicitud, "respaldo", decidida_por="el sistema, segun una regla del dueno"
+    )
+    mundo["decision"] = policy.Decision(False, ["tiene $80.000 vencidos"])
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["evaluados"], "una frase no es una persona: los límites corren"
+    assert mundo["submits"] == []
+    assert "necesito revisarlo con una persona" in respuesta
 
 
 def test_what_a_person_approved_is_not_re_judged_by_the_limits(
