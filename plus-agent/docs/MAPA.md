@@ -79,6 +79,58 @@ no tenerlo, porque se le cree.
 
 ---
 
+## La superficie de herramientas: qué ve cada agente
+
+`app/graph.py` arma DOS registros, y cuál se monta en qué agente es un límite de
+privilegio, no un detalle de cableado. Hoy: **11 herramientas de clientes, 13
+sólo-de-gerencia** (eran 19 antes de colapsarlas, y 23 antes de eso).
+
+**La regla, escrita una sola vez y con un motivo medido:** detrás de un
+`Literal` van **LECTURAS de un mismo tema, nunca una escritura**. Consolidar por
+subdivisión natural de tareas es lo que recomienda la guía de Anthropic;
+`manage_x(action=…)` —todo detrás de un modo— lo desaconseja explícitamente,
+porque obliga al modelo a resolver el modo antes que la tarea.
+
+| herramienta | ramas | por qué se colapsó |
+|---|---|---|
+| `informe(que=…)` | pendientes, ventas, stock_bajo, cobranzas, autonomia | `cobranzas_vencidas` era `run_report("Accounts Receivable")` con un filtro, o sea una de las siete consultas que `ejecutar_reporte` ya corría: dos herramientas plausibles para «¿cuánto me deben?» |
+| `ver_ajustes(que=…)` | limites, entrega, historial | tres lecturas del mismo tema («qué tengo configurado») con la misma guarda y la misma negativa |
+
+**Lo que NO se colapsa, y no por gusto:**
+- `proponer_limite` y `proponer_accion` escriben (proponen). Además el router de
+  `app/main.py` distingue sus confirmaciones **por el largo del código** —cuatro
+  dígitos un ajuste, seis un pedido— así que fusionarlas es fusionar dos caminos
+  de confirmación.
+- `estado_del_sistema` y `ver_avisos_fallidos` siguen separadas: ahí el
+  solapamiento estaba en el TEXTO (la primera decía «usala si pregunta si los
+  avisos están saliendo», que es la otra), y se arregló el texto.
+
+**Lo que degrada la elección es el solapamiento, no la cantidad.** El tamaño del
+catálogo pesa recién mucho más lejos (RAG-MCP arXiv:2505.03275 mide sobre
+catálogos de cientos; LongFuncEval arXiv:2505.10570 escalando a 120K tokens de
+catálogo). Lo que sí toca a una lista corta: presentar cinco candidatos donde
+alcanzan dos cuesta ~6 puntos de acierto (arXiv:2605.24660).
+
+**La trampa que trajo el colapso.** Con enums, el modelo puede elegir bien la
+herramienta y escribir mal el valor —y es la falla probable: Gemini ignora
+`strict` en su capa compatible con OpenAI, así que el `Literal` es una
+SUGERENCIA y la única validación real es la de pydantic; y con herramientas en
+castellano la falla medida más común es que el modelo escriba el valor en el
+idioma del usuario (arXiv:2601.05366). Por eso `graph._error_de_herramienta`
+existe: un `literal_error` vuelve con los valores válidos y el modelo reintenta;
+cualquier otra excepción sigue yendo a `_ERROR_MSG`, que manda a
+`escalar_a_humano`. Antes, un guión bajo mal puesto mandaba al dueño a esperar
+a una persona.
+
+**El idioma, por módulo.** `app/tools/operaciones.py` traduce todo lo que
+devuelve (40 `idioma.t(...)`, con `idioma.gerencia()` como lengua).
+`app/tools/gerencia.py` NO traduce nada: sus nueve `return` son literales en
+castellano. Los dos devuelven bloques que el modelo relata casi textuales, así
+que la diferencia es una inconsistencia, no un criterio — **para un dueño que
+habla inglés, los informes vuelven con etiquetas en castellano.** Pendiente.
+
+---
+
 ## Las trampas que ya costaron tiempo
 
 1. **`erpnext.add_comment` se traga los errores; `registrar_comentario` los
