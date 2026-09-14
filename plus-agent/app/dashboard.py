@@ -130,18 +130,33 @@ def operations() -> dict:
     }
 
 
+def _pedido_de_la_empresa(order_id: str) -> dict:
+    """El pedido, o `RecordNotFound` si no es de ESTA empresa. Bajo `manager_scope`.
+
+    `Customer` y `Sales Order` son maestros globales en ERPNext, así que la
+    pertenencia no es un campo que se pueda filtrar en la ruta: hay que leer el
+    documento y comparar la empresa. Está acá y no copiado en cada ruta porque
+    el segundo llamador escribe —confirma un pedido— y dos comprobaciones de
+    pertenencia que nadie obliga a coincidir es como se cuela la que falta.
+    """
+    from app import erpnext
+
+    try:
+        doc = erpnext.get_doc("Sales Order", order_id, timeout=READ_TIMEOUT)
+    except erpnext.ERPNextError as exc:
+        if exc.status_code in {403, 404}:
+            raise RecordNotFound from exc
+        raise
+    if doc.get("company") != erpnext.default_company():
+        raise RecordNotFound
+    return doc
+
+
 def order_detail(order_id: str) -> dict:
     from app import erpnext
 
     with erpnext.manager_scope():
-        try:
-            doc = erpnext.get_doc("Sales Order", order_id, timeout=READ_TIMEOUT)
-        except erpnext.ERPNextError as exc:
-            if exc.status_code in {403, 404}:
-                raise RecordNotFound from exc
-            raise
-        if doc.get("company") != erpnext.default_company():
-            raise RecordNotFound
+        doc = _pedido_de_la_empresa(order_id)
         result = order_row(doc)
         result["items"] = [{
             "code": str(item.get("item_code") or ""),
@@ -285,6 +300,48 @@ def conversation(customer_id: str) -> dict:
     base["truncated"] = cortado or len(visibles) > CONVERSACION_MAX
     base["messages"] = visibles[-CONVERSACION_MAX:]
     return base
+
+
+def confirmar_pedido(order_id: str, quien_decide: str) -> dict:
+    """Confirmar UN pedido desde el panel, a nombre de una persona con nombre.
+
+    LO QUE ESTA FUNCIÓN NO HACE, y es la mitad del diseño: no decide nada. No
+    mira si hay una solicitud abierta, no cierra la revisión, no toma el lock y
+    no comprueba `es_equipo` por su cuenta — todo eso vive adentro de
+    `decisiones.confirmar`, que es la puerta, y si viviera también acá serían
+    dos copias de la misma política que nadie obliga a estar de acuerdo. Lo
+    único propio del panel es lo de arriba: que el pedido sea de ESTA empresa.
+
+    LA REGLA DURA 2 NO SE TOCA. El Submit lo sigue haciendo `erpnext.submit_doc`
+    con la credencial de política, que no es alcanzable desde ninguna
+    herramienta del modelo. Un endpoint no es una herramienta en ese sentido: lo
+    invoca una PERSONA autenticada, y ejecuta el mismo Python determinista que
+    corre cuando esa misma persona toca el botón de WhatsApp.
+
+    `detail` es el texto del agente tal cual, en el idioma del negocio: es
+    exactamente lo que se le habría dicho por WhatsApp a quien confirma. Se
+    devuelve sin traducir a propósito — dos canales que explican el mismo
+    resultado con palabras distintas terminan discrepando, y acá el motivo de un
+    rechazo («se rechazó antes y ya no reserva stock») es lo único que dice qué
+    hacer después.
+    """
+    from app import decisiones, erpnext
+
+    with erpnext.manager_scope():
+        # LA PERTENENCIA PRIMERO, y con la misma lectura que `order_detail`:
+        # levanta `RecordNotFound` para un pedido de otra empresa, así que un
+        # token válido no puede confirmar un pedido que ni siquiera puede ver.
+        _pedido_de_la_empresa(order_id)
+
+    resultado = decisiones.confirmar(
+        order_id, quien_decide, canal=decisiones.CANAL_PANEL
+    )
+    return {
+        "orderId": order_id,
+        "ok": bool(resultado.get("ok")),
+        "customerNotified": bool(resultado.get("aviso_cliente")),
+        "detail": str(resultado.get("detalle") or ""),
+    }
 
 
 def _dia_local(sello: str) -> str:
@@ -1057,7 +1114,7 @@ class DashboardAPI:
         if cors:
             response_headers.extend([
                 (b"access-control-allow-origin", origin.encode()),
-                (b"access-control-allow-methods", b"GET, OPTIONS"),
+                (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
                 (b"access-control-allow-headers", b"Authorization"),
             ])
 
@@ -1068,6 +1125,9 @@ class DashboardAPI:
         path = scope.get("path", "").removeprefix(scope.get("root_path", ""))
         detail_match = re.fullmatch(r"/orders/([^/]{1,140})", path)
         conversation_match = re.fullmatch(r"/customers/([^/]{1,140})/conversation", path)
+        # La ÚNICA ruta que escribe. `[^/]` la mantiene fuera de `detail_match`,
+        # que es `fullmatch` sobre un segmento sin barras.
+        confirm_match = re.fullmatch(r"/orders/([^/]{1,140})/confirm", path)
         readers = {
             "/snapshot": snapshot, "/controls": controls, "/operations": operations,
             "/today": today, "/queue": queue,
@@ -1077,13 +1137,20 @@ class DashboardAPI:
             await reply(200, {"service": "plus-agent", "apiVersion": 1,
                               "configured": hay_acceso_configurado()})
             return
-        if path not in readers and not detail_match and not conversation_match:
+        if (path not in readers and not detail_match and not conversation_match
+                and not confirm_match):
             await reply(404, {"error": "Not found"})
             return
         if scope["method"] == "OPTIONS":
             await reply(200 if cors else 403, {"ok": cors})
             return
-        if scope["method"] != "GET":
+        # El panel sigue siendo de sólo lectura salvo en UNA ruta, y se dice así:
+        # la excepción se nombra donde está la regla, en vez de aflojar la regla.
+        if confirm_match:
+            if scope["method"] != "POST":
+                await reply(405, {"error": "Confirming an order is a POST"})
+                return
+        elif scope["method"] != "GET":
             await reply(405, {"error": "This dashboard is read-only"})
             return
         if not hay_acceso_configurado():
@@ -1095,6 +1162,18 @@ class DashboardAPI:
             response_headers.append((b"www-authenticate", b"Bearer"))
             await reply(401, {"error": "A valid dashboard access token is required"})
             return
+        # ESCRIBIR PIDE UN NOMBRE. `quien` devuelve tres cosas y el token
+        # COMPARTIDO (`ANONIMO`, `""`) es una de ellas: está autenticado y no es
+        # nadie en particular, así que puede mirar y nunca decidir — una
+        # confirmación sin nombre no se puede auditar. `puede_decidir` además
+        # exige `router.es_equipo`, o sea las MISMAS guardas que valen sobre el
+        # webhook firmado de Meta; el token no inventa permisos nuevos, sólo es
+        # otra forma de probar «soy este teléfono».
+        if confirm_match and not puede_decidir(mirando):
+            await reply(403, {
+                "error": "This token can read the dashboard but cannot confirm orders"
+            })
+            return
         # Same-origin requests need no CORS. Cross-origin access is explicit.
         host = headers.get("host", "")
         same_origin = origin == f"{scope.get('scheme', 'http')}://{host}"
@@ -1102,7 +1181,12 @@ class DashboardAPI:
             await reply(403, {"error": "This dashboard origin is not allowed"})
             return
         try:
-            if detail_match:
+            if confirm_match:
+                order_id = unquote(confirm_match[1])
+                if "/" in order_id or "\\" in order_id or order_id in {".", ".."}:
+                    raise RecordNotFound
+                data = await _en_hilo(confirmar_pedido, order_id, mirando)
+            elif detail_match:
                 order_id = unquote(detail_match[1])
                 if "/" in order_id or "\\" in order_id or order_id in {".", ".."}:
                     raise RecordNotFound

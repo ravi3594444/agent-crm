@@ -14,7 +14,16 @@ from conftest import RelojDePrueba
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app import avisos, dashboard, erpnext, limites, locks, outbound_status, reloj
+from app import (
+    avisos,
+    dashboard,
+    erpnext,
+    limites,
+    locks,
+    outbound_status,
+    reloj,
+    router,
+)
 from demo import datos
 from demo.falso_erpnext import DEPOSITO, EMPRESA, Almacen, manejar
 
@@ -25,6 +34,11 @@ TODAY = date(2026, 9, 10)
 # la celda `BUSINESS_TIMEZONE=Asia/Kolkata` de CI probara otra cosa que el
 # código: ver `RelojDePrueba` en tests/conftest.py.
 RELOJ = RelojDePrueba(TODAY.isoformat())
+# Un token POR PERSONA y el teléfono al que pertenece. El largo no es
+# decorativo: `dashboard.TOKEN_MINIMO` descarta cualquier entrada más corta,
+# así que un token de juguete daría 401 y el test mediría eso y no el permiso.
+TOKEN_PERSONA = "t" * 44
+GERENTE = "5493511111111"
 
 
 @pytest.fixture
@@ -269,6 +283,161 @@ def test_setup_preserves_agent_configuration_and_does_not_rotate_token(tmp_path)
     assert module.configure(path) is None
 
 
+def _confirmable(monkeypatch, resultado=None, registro=None):
+    """`decisiones.confirmar` de mentira, que ANOTA cómo la llamaron.
+
+    Anota porque los tres argumentos son el contrato entero del endpoint: el
+    pedido, QUIÉN decide —el teléfono que sale del token, no el token— y el
+    canal que va a quedar firmado en ERPNext. Un doble que devolviera siempre lo
+    mismo sin mirar los argumentos no podría discreparle al código sobre ninguno
+    de los tres.
+    """
+    from app import decisiones
+
+    llamadas = registro if registro is not None else []
+
+    def falso(nombre, por, *, canal):
+        llamadas.append({"pedido": nombre, "por": por, "canal": canal})
+        return resultado or {"ok": True, "aviso_cliente": True, "detalle": f"✅ {nombre} confirmado."}
+
+    monkeypatch.setattr(decisiones, "confirmar", falso)
+    return llamadas
+
+
+def test_el_panel_confirma_a_nombre_del_telefono_del_token(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """El endpoint pasa el TELÉFONO, no el token, y dice que viene del panel.
+
+    Las tres mitades del contrato, y ninguna es decorativa: el pedido, la
+    persona a cuyo nombre queda la decisión firmada en el historial de ERPNext,
+    y el canal —sin el cual el rastro diría «mediante WhatsApp» sobre algo que
+    pasó por una pantalla.
+    """
+    from app import decisiones
+
+    client, registrar = almacen_con_cliente
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
+    # `router.STAFF` y no `TELEFONOS_EQUIPO` + `recargar()`: `recargar` escribe un
+    # global que `monkeypatch` no deshace, así que el equipo se le quedaría puesto
+    # al archivo siguiente. Es además lo único que leen las DOS puertas de
+    # `es_equipo`, así que acá corre la autorización de verdad.
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    llamadas = _confirmable(monkeypatch)
+
+    respuesta = client.post(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm",
+        headers={"Authorization": f"Bearer {TOKEN_PERSONA}"},
+    )
+
+    assert respuesta.status_code == 200
+    cuerpo = respuesta.json()
+    assert cuerpo["ok"] is True
+    assert cuerpo["orderId"] == registrar["pedido"]
+    assert cuerpo["customerNotified"] is True
+    assert llamadas == [{
+        "pedido": registrar["pedido"], "por": GERENTE, "canal": decisiones.CANAL_PANEL,
+    }]
+
+
+def test_el_token_compartido_puede_mirar_y_no_puede_confirmar(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """`ANONIMO` es `""`: falsy y VÁLIDO. Entra al panel y no decide.
+
+    Es la trampa que `quien()` documenta. Una guarda escrita `if not mirando`
+    trataría al token compartido como «no autenticado» y devolvería 401, que
+    parece seguro y esconde el caso; lo que hace falta es que entre —porque es
+    un token válido— y que se le diga que no en la línea de decidir. Y el
+    endpoint no puede haber llamado a `confirmar` ni una vez.
+    """
+    client, registrar = almacen_con_cliente
+    llamadas = _confirmable(monkeypatch)
+
+    respuesta = client.post(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+
+    assert respuesta.status_code == 403
+    assert "cannot confirm" in respuesta.json()["error"]
+    assert llamadas == []
+    # La otra mitad: el MISMO token sigue leyendo, así que el 403 es de decidir
+    # y no de estar mal autenticado.
+    assert client.get("/api/dashboard/snapshot").status_code == 200
+
+
+def test_un_token_de_alguien_que_no_es_del_equipo_tampoco_confirma(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """Tener nombre no alcanza: el nombre tiene que estar en el equipo.
+
+    `puede_decidir` son DOS condiciones —un token con nombre Y `es_equipo`— y
+    afirmar sólo la primera dejaría pasar a cualquiera con token propio.
+    """
+    client, registrar = almacen_con_cliente
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:5490000000000")
+    # El equipo NO está vacío: con la lista vacía este test pasaría porque no
+    # hay equipo, no porque este número quede afuera de uno que existe.
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    llamadas = _confirmable(monkeypatch)
+
+    respuesta = client.post(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm",
+        headers={"Authorization": f"Bearer {TOKEN_PERSONA}"},
+    )
+
+    assert respuesta.status_code == 403
+    assert llamadas == []
+
+
+def test_no_se_confirma_un_pedido_de_otra_empresa(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """404, y sin llamar a `confirmar`: un token válido no emite lo que no ve.
+
+    Es la misma comprobación de pertenencia que la lectura, y tiene que correr
+    ANTES de decidir nada: si corriera después, el pedido ya estaría emitido
+    cuando el panel contesta que no existe.
+
+    ESTE TEST NACIÓ ROTO Y LA MUTACIÓN LO CAZÓ. La primera versión usaba el
+    token COMPARTIDO, así que moría en el 403 de `puede_decidir` y no llegaba
+    nunca a la comprobación de empresa: borrar esa comprobación entera dejaba
+    las 2889 pruebas en verde. Va con un token que SÍ puede decidir, que es la
+    única forma de que lo único que quede entre él y el Submit sea la
+    pertenencia.
+    """
+    client, _ = almacen_con_cliente
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    llamadas = _confirmable(monkeypatch)
+
+    respuesta = client.post(
+        "/api/dashboard/orders/SAL-ORD-DE-OTRA-EMPRESA/confirm",
+        headers={"Authorization": f"Bearer {TOKEN_PERSONA}"},
+    )
+
+    assert respuesta.status_code == 404
+    assert llamadas == []
+
+
+def test_el_resto_del_panel_sigue_siendo_de_solo_lectura(
+    connected, almacen_con_cliente
+) -> None:
+    """Se abrió UNA ruta, no el método.
+
+    Un POST a cualquier otra cosa sigue siendo 405, y un GET a la ruta de
+    confirmar también: la excepción es (ruta, método), no una de las dos.
+    """
+    client, registrar = almacen_con_cliente
+
+    assert client.post("/api/dashboard/snapshot").status_code == 405
+    assert client.post(f"/api/dashboard/orders/{registrar['pedido']}").status_code == 405
+    assert client.get(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm"
+    ).status_code == 405
+
+
 def _herramienta():
     spec = importlib.util.spec_from_file_location(
         "dashboard_setup", Path(__file__).parents[1] / "deploy" / "configurar_dashboard.py"
@@ -377,11 +546,14 @@ def almacen_con_cliente(connected):
     así que sin uno este cliente no es nuestro y la ruta contesta 404.
     """
     client, almacen, _ = connected
-    create_order(almacen, docstatus=1)
+    # BORRADOR, no confirmado: los tests de lectura sólo necesitan que exista
+    # para probar pertenencia, y los de confirmar necesitan algo confirmable.
+    pedido = create_order(almacen, docstatus=0)
     return client, {
         "cliente": datos.CLIENTE_HABITUAL,
         "telefono": datos.TELEFONO_HABITUAL,
         "almacen": almacen,
+        "pedido": pedido if isinstance(pedido, str) else str(pedido.get("name")),
     }
 
 

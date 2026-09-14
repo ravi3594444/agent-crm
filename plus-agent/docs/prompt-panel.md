@@ -252,19 +252,57 @@ it ready — it has found something real on every PR in this repo, including two
 
 ---
 
+# Confirming an order — the one write that exists
+
+This was held back from the original brief and has now landed. It is the **only** endpoint on the
+panel that is not a GET; everything else still answers `405 {"error": "This dashboard is read-only"}`.
+
+```
+POST /api/dashboard/orders/{orderId}/confirm
+```
+```jsonc
+{
+  "orderId": "SAL-ORD-2026-00042",
+  "ok": true,
+  "customerNotified": true,      // the customer's confirmation notice was queued
+  "detail": "✅ SAL-ORD-2026-00042 confirmado. …"
+}
+```
+
+- **`detail` is the agent's own sentence, in the business language, not UI copy.** Show it verbatim
+  as a quoted result line. It is exactly what the manager would have been told over WhatsApp, and
+  the reason is deliberate: two channels that explain the same outcome in different words end up
+  disagreeing. On a refusal it is the only thing that says what to do next — *"está Closed — se
+  rechazó antes y ya no reserva stock"* is a different problem from *"no pude comprobar la
+  confirmación"*.
+- **`ok: false` with HTTP 200 is a real answer, not an error.** The order exists, the caller was
+  allowed, and the agent declined — a draft that was already rejected, a state that cannot be
+  confirmed. Render `detail`; do not retry.
+- **403** — the token can read but cannot confirm. Two separate causes, same status: the **shared**
+  `DASHBOARD_API_TOKEN` (authenticated but nobody in particular — a decision without a name cannot
+  be audited), or a per-person token whose phone is not on `TELEFONOS_EQUIPO`. Do not show a
+  sign-in prompt: the session is fine, the permission is not.
+- **404** — the order is not in this workspace. Same company check as the reads, and it runs
+  **before** anything is decided.
+- **405** on `GET .../confirm`. The exception is the *pair* (route, method), not the method.
+
+What the button must say, because the panel is now a place where money moves: confirming is a
+**Submit**, and a submit does not come back. The customer is told. Ask once, plainly, and name the
+order in the question.
+
+The write does **not** merge the three ERPNext identities. The Submit is still `erpnext.submit_doc`
+with the policy credential, which no model tool can reach; a dashboard endpoint is not a tool in
+that sense — a **person**, authenticated, invokes the same deterministic Python that
+`aprobacion.manejar_boton` invokes when that same person taps a WhatsApp button. All of it goes
+through `decisiones.confirmar`, which is now the single door: it checks `router.es_equipo`, takes
+its own lock, routes an order with an open counter-offer to the approval path instead of submitting
+it at the old price, and closes the human review.
+
+---
+
 # What is not in this brief, and why
 
-**Confirming an order from the panel**, and **"today we're closed"**. Both are writes, both were
-asked for, and both are deliberately held back to their own PR.
-
-Confirming an order means a Submit, and `CLAUDE.md` hard rule 2 says the policy identity is the only
-Submit and is "not reachable from any tool". The argument that a dashboard endpoint is *not* a tool
-in that sense — a tool is what the **model** calls; this is a **person**, authenticated, invoking
-the same deterministic Python that `aprobacion.manejar_boton` invokes when they tap a WhatsApp
-button — is written into `puede_decidir()` (`app/dashboard.py:213-227`) by whoever built the panel,
-along with the gate it would need. I believe that argument is right. I have not had it
-independently reviewed, and a mistake here merges two of the three identities, which is the thing
-the product is sold on. It gets its own PR and its own review.
+**"Today we're closed."** A write, asked for, and still held back.
 
 "Today we're closed" does not exist as a concept anywhere in the codebase, and inventing it is four
 decisions (does the agent stop answering, or answer differently? does the sweep pause? what happens
