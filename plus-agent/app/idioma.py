@@ -1354,6 +1354,54 @@ CATALOGO: dict[str, dict[str, str]] = {
         EN: "That number is not authorized for this. I checked nothing and "
             "changed nothing.",
     },
+    # ------------------------------------------------ la memoria del negocio
+    "memoria.no_pude_leer": {
+        ES: "No pude leer los datos del negocio: {error}.",
+        EN: "I could not read your business notes: {error}.",
+    },
+    "memoria.olvidado": {
+        ES: "Listo, me olvido de esto: «{texto}».",
+        EN: "Done, I am forgetting this: \u201c{texto}\u201d.",
+    },
+    "memoria.no_anote": {
+        ES: "No anoté nada: {error}.",
+        EN: "I wrote nothing down: {error}.",
+    },
+    "memoria.anotado": {
+        ES: "Anotado: «{texto}». Si está mal, decímelo y lo corrijo.",
+        EN: "Noted: \u201c{texto}\u201d. If it is wrong, tell me and I will fix it.",
+    },
+    "memoria.nada_falta": {
+        ES: "Por ahora no me falta nada importante. Si hay algo del negocio que "
+            "querés que tenga presente, decímelo y lo anoto.",
+        EN: "Nothing important is missing right now. If there is anything about "
+            "the business you want me to keep in mind, tell me and I will note it.",
+    },
+    "memoria.falta": {
+        ES: "Me falta esto: {pregunta}\n(cuando me conteste, lo anoto con "
+            "sobre=\"{clave}\")",
+        EN: "This is what I am missing: {pregunta}\n(when they answer, I note it "
+            "with sobre=\"{clave}\")",
+    },
+    "memoria.sin_datos": {
+        ES: "Todavía no tengo ningún dato tuyo anotado. Decime cualquier cosa que "
+            "quieras que tenga presente —cómo te paga un cliente, qué no puede "
+            "faltar, qué hacés con una devolución— y la anoto.",
+        EN: "I have nothing of yours noted yet. Tell me anything you want me to "
+            "keep in mind \u2014how a customer pays you, what must never run out, "
+            "what you do with a return\u2014 and I will note it.",
+    },
+    "memoria.linea": {ES: "· {texto}  ({clave})", EN: "· {texto}  ({clave})"},
+    "memoria.listado": {
+        ES: "Tengo {total} datos tuyos anotados:",
+        EN: "I have {total} of your notes:",
+    },
+    "memoria.listado_pie": {
+        ES: "Para cambiar uno, decime el nuevo con la misma palabra entre "
+            "paréntesis; para borrarlo, decime que me olvide de eso.",
+        EN: "To change one, tell me the new version using the same word in "
+            "parentheses; to delete it, tell me to forget it.",
+    },
     # ------------------------------------------------ los informes de gerencia
     # app/tools/operaciones.py traducía las 40 cosas que devuelve y
     # app/tools/gerencia.py ninguna de las suyas, y los dos devuelven bloques

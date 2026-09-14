@@ -48,6 +48,10 @@ from app.tools.gestion import (
     detalle_de_pedido,
     proponer_accion,
 )
+from app.tools.memoria import (
+    anotar_dato,
+    ver_memoria,
+)
 from app.tools.operaciones import (
     estado_del_sistema,
     ver_avisos_fallidos,
@@ -110,6 +114,13 @@ TOOLS_GERENCIA = [
     # its own tool — a read and a write behind one enum is one where the wrong
     # branch writes.
     ver_ajustes, proponer_limite,
+    # ...y las treinta cosas que repite todo el tiempo y no quiere volver a
+    # explicar (app/memoria.py). `ver_memoria` LEE detrás de un Literal;
+    # `anotar_dato` ESCRIBE, así que va suelta: misma línea que ver_ajustes y
+    # proponer_limite. Un dato no es un ajuste y NO lleva código de cuatro
+    # dígitos — hacerle tipear un código para anotar «la panadería paga los
+    # viernes» es exactamente la fricción de la que se queja.
+    ver_memoria, anotar_dato,
     # read-only operational status. No writes, no retries, no secrets, and
     # NEVER in TOOLS_CLIENTES: these count queues and name the provider.
     estado_del_sistema, ver_avisos_fallidos,

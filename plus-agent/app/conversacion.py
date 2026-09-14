@@ -202,6 +202,17 @@ def prompt_clientes(state, config: RunnableConfig) -> list[BaseMessage]:
     return [SystemMessage(content=system), *perfil, *_mensajes(state)]
 
 
+def _bloque_de_memoria() -> str:
+    """Los datos del negocio para el prompt. Nunca levanta."""
+    try:
+        from app import memoria
+
+        return memoria.bloque_de_prompt()
+    except Exception as exc:
+        print(f"[conversacion] memoria no disponible ({type(exc).__name__})")
+        return ""
+
+
 def prompt_gerencia(state, config: RunnableConfig) -> list[BaseMessage]:
     del config
     # El equipo NO espeja: contesta en el idioma que fijó el dueño, y mientras
@@ -211,6 +222,13 @@ def prompt_gerencia(state, config: RunnableConfig) -> list[BaseMessage]:
         USUARIO="miembro autorizado del equipo",
         HOY=business_today(),
         IDIOMA_REGLA=idioma.regla_prompt(idioma.gerencia()),
+        # Lo que el dueño ya le contó del negocio, acotado y ordenado por clave
+        # para que el prefijo del prompt no cambie en cada turno. `""` cuando no
+        # anotó nada todavía: la sección entera desaparece en vez de quedar un
+        # encabezado vacío que el modelo trata como una lista de la que ya
+        # habló. Nunca levanta — sin esto, un Redis caído dejaría al agente de
+        # gerencia sin contestar en vez de contestar sin memoria.
+        MEMORIA=_bloque_de_memoria(),
     )
     return [SystemMessage(content=system), *_mensajes(state)]
 

@@ -61,6 +61,8 @@ ARGUMENTOS: dict[str, dict] = {
     "contar_stock": {"item_code": "LECHE-ENT-1L", "cantidad_real": 12},
     "confirmar_entrega": {"numero_pedido": "SAL-ORD-2026-00001"},
     "avisar_al_cliente": {"cliente": "Don José", "mensaje": "Llegó el queso cremoso."},
+    "ver_memoria": {"que": "anotado"},
+    "anotar_dato": {"sobre": "pagos", "dato": "San José paga los viernes."},
     "ver_ajustes": {"que": "limites"},
     "proponer_limite": {"limite": "tope", "valor": "50000"},
     "estado_del_sistema": {},
@@ -229,7 +231,7 @@ def test_every_management_only_tool_is_covered_by_this_file() -> None:
         assert probadas == set(ramas), f"{nombre}: faltan ramas {set(ramas) - probadas}"
     # 15 hoy —eran 19, con cinco informes sueltos que ahora son uno. El número
     # está acá para que un cambio de superficie se note.
-    assert len(SOLO_GERENCIA) == 13
+    assert len(SOLO_GERENCIA) == 15
 
 
 def test_no_management_tool_accepts_a_phone_or_an_identity_argument() -> None:
