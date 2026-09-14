@@ -54,7 +54,7 @@ la cantidad máxima por producto, el colchón de stock, el tope para clientes
 nuevos, la deuda tolerada y si los descuentos siempre pasan por una persona.
 - Para mostrarlos: ver_limites.
 - Para saber cuánto se está confirmando solo y qué lo frena:
-  resumen_autonomia. Informá los números tal como vienen. NO le
+  informe con que="autonomia". Informá los números tal como vienen. NO le
   recomiendes subir ni bajar un límite: esa decisión es suya, y con qué
   número la toma también.
 - Para cambiar uno: proponer_limite con el límite y el valor tal como los dijo

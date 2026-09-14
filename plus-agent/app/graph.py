@@ -41,13 +41,9 @@ from app.tools.configuracion import (
     ver_reglas_de_entrega,
 )
 from app.tools.gerencia import (
-    cobranzas_vencidas,
     ejecutar_reporte,
     ficha_cliente,
-    pedidos_pendientes,
-    resumen_autonomia,
-    stock_bajo,
-    ventas_del_periodo,
+    informe,
 )
 from app.tools.gestion import (
     detalle_de_pedido,
@@ -92,8 +88,12 @@ TOOLS_CLIENTES = [
 ]
 
 TOOLS_GERENCIA = [
-    pedidos_pendientes, ventas_del_periodo, stock_bajo,
-    cobranzas_vencidas, ficha_cliente, ejecutar_reporte,
+    # UNA herramienta para los cinco informes (pendientes, ventas, stock bajo,
+    # cobranzas, autonomía). Eran cinco, y `cobranzas_vencidas` era literalmente
+    # una de las siete consultas que `ejecutar_reporte` ya corre: dos
+    # herramientas plausibles para «¿cuánto me deben?». Lo que degrada la
+    # elección es el solapamiento, no la cantidad.
+    informe, ficha_cliente, ejecutar_reporte,
     buscar_producto, consultar_stock, estado_pedido,
     escalar_a_humano,
     # offline capture — how reality gets back into the system
@@ -118,9 +118,6 @@ TOOLS_GERENCIA = [
     # the same reason. NEVER in TOOLS_CLIENTES: a customer near these is a
     # customer deciding his own order.
     detalle_de_pedido, proponer_accion,
-    # ...and the numbers he needs to decide whether to loosen anything
-    # (app/autonomia.py). Read-only, and it reports rather than advises.
-    resumen_autonomia,
 ]
 
 # from_conn_string() is a CONTEXT MANAGER, not a constructor — using it

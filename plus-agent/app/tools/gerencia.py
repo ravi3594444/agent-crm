@@ -17,7 +17,7 @@ entero. Cada una llama a ``require_management`` con el teléfono que firmó Meta
 (app/runtime_context.py), antes de tocar ERPNext.
 """
 from datetime import timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
@@ -26,6 +26,94 @@ from pydantic import Field
 from app import erpnext, policy
 from app.formato import pesos
 from app.runtime_context import SIN_PERMISO, RuntimeContextError, require_management
+
+# POR QUÉ ESTO ES UNA HERRAMIENTA Y NO CINCO
+# ------------------------------------------
+# El dueño lo pidió como «no me llenes el agente de herramientas, si le ponés
+# 100 capaz se confunde». Tenía razón en el diagnóstico y no en el remedio, así
+# que esto se quedó con la mitad de cada uno. Lo que está medido:
+#
+# - Lo que degrada de verdad la elección es el TAMAÑO DEL CATÁLOGO, y recién
+#   lejos de acá: RAG-MCP (arXiv:2505.03275) mide 13,6% de acierto con todo el
+#   catálogo en el prompt contra 43,1% con recuperación semántica, sobre
+#   catálogos de cientos. LongFuncEval (IBM, arXiv:2505.10570) mide caídas de
+#   7% a 85% escalando de 8K a 120K tokens de catálogo. Gerencia tenía 23
+#   herramientas y unos 4.700 tokens: estamos en la meseta, no en el borde.
+# - Y sin embargo hay una caída que SÍ nos toca: presentar de más cuesta aunque
+#   la lista sea corta (93,1% eligiendo entre ~2 candidatos contra 87,1% entre
+#   5 fijos, arXiv:2605.24660). Eso no es cantidad: es SOLAPAMIENTO. Y acá lo
+#   había de verdad — `cobranzas_vencidas` era `run_report("Accounts
+#   Receivable")` con un filtro, o sea una de las siete consultas que
+#   `ejecutar_reporte` ya corría. Un «¿cuánto me deben?» tenía dos herramientas
+#   plausibles y ninguna forma de elegir bien.
+#
+# LA LÍNEA QUE ESTO NO CRUZA. La guía de Anthropic para escribir herramientas
+# dice consolidar por SUBDIVISIÓN NATURAL DE TAREAS, y desaconseja
+# explícitamente el `manage_x(action=...)` que mete todo detrás de un modo,
+# porque obliga al modelo a resolver el modo antes que la tarea. Así que la
+# regla de esta casa es angosta y se escribe una sola vez:
+#
+#     detrás de un `Literal` van LECTURAS de un mismo tema, nunca una escritura.
+#
+# Los cinco informes son cinco lecturas de «los números del negocio»: una
+# subdivisión natural, no un modo. `proponer_limite` y `proponer_accion` NO se
+# tocan aunque se parezcan, y no sólo por esta regla: el router de
+# `app/main.py` distingue sus confirmaciones POR EL LARGO DEL CÓDIGO —cuatro
+# dígitos son un ajuste, seis son un pedido— así que fusionarlas es fusionar
+# dos caminos de confirmación distintos.
+#
+# `que` es un `Literal` CERRADO. Cada valor cae en exactamente una rama de
+# Python, con el mismo cuerpo y la misma guarda `require_management` que tenía
+# su herramienta suelta. Universal acá quiere decir UN CAMPO TIPADO, nunca una
+# cadena libre: un `query(sql)` cambia un esquema por un agujero.
+
+
+@tool
+def informe(
+    config: RunnableConfig,
+    que: Annotated[
+        Literal["pendientes", "ventas", "stock_bajo", "cobranzas", "autonomia"],
+        Field(
+            description=(
+                "Qué querés mirar. "
+                "pendientes = pedidos en borrador esperando confirmación (lo primero "
+                "de la mañana). "
+                "ventas = cuánto se vendió en los últimos días. "
+                "stock_bajo = productos por debajo del punto de reposición. "
+                "cobranzas = facturas vencidas y no cobradas. "
+                "autonomia = cuánto se confirma solo y qué lo frena."
+            )
+        ),
+    ],
+    dias: Annotated[
+        int,
+        Field(
+            description=(
+                "Cuántos días hacia atrás. Sólo lo usan «ventas» y «autonomia»; "
+                "los demás lo ignoran. Si el dueño dijo «esta semana» son 7; si no "
+                "dijo nada, 7."
+            )
+        ),
+    ] = 7,
+) -> str:
+    """Los números del negocio. Sólo lectura: salen de ERPNext y se informan como vienen.
+
+    Ejemplos de cómo se mapea lo que dice el dueño:
+    - «¿qué tengo para confirmar?» / «¿qué quedó colgado?» -> que=pendientes
+    - «¿cómo venimos este mes?» -> que=ventas, dias=30
+    - «¿qué me falta?» / «¿de qué estoy corto?» -> que=stock_bajo
+    - «¿quién me debe?» / «¿qué hay vencido?» -> que=cobranzas
+    - «¿cuánto está pasando solo?» -> que=autonomia
+    """
+    if que == "pendientes":
+        return _pedidos_pendientes(config)
+    if que == "ventas":
+        return _ventas_del_periodo(config, dias)
+    if que == "stock_bajo":
+        return _stock_bajo(config)
+    if que == "cobranzas":
+        return _cobranzas_vencidas(config)
+    return _resumen_autonomia(config, dias)
 
 
 @tool
@@ -64,8 +152,7 @@ def ejecutar_reporte(
     )
 
 
-@tool
-def resumen_autonomia(
+def _resumen_autonomia(
     config: RunnableConfig,
     dias: Annotated[int, Field(description="Cuántos días atrás mirar. 7 si no dijo otra cosa.")] = 7,
 ) -> str:
@@ -88,8 +175,7 @@ def resumen_autonomia(
         return f"No pude armar el resumen de autonomía: {type(exc).__name__}."
 
 
-@tool
-def pedidos_pendientes(config: RunnableConfig) -> str:
+def _pedidos_pendientes(config: RunnableConfig) -> str:
     """Pedidos en borrador esperando confirmación del equipo.
     Esto es lo primero que debería revisar el dueño cada mañana."""
     try:
@@ -130,8 +216,7 @@ def pedidos_pendientes(config: RunnableConfig) -> str:
     return f"{len(sos)} pedidos pendientes de confirmar:\n" + "\n".join(lineas)
 
 
-@tool
-def ventas_del_periodo(
+def _ventas_del_periodo(
     config: RunnableConfig,
     dias: Annotated[
         int,
@@ -160,8 +245,7 @@ def ventas_del_periodo(
     )
 
 
-@tool
-def stock_bajo(config: RunnableConfig) -> str:
+def _stock_bajo(config: RunnableConfig) -> str:
     """Productos por debajo del punto de reposición. Riesgo de quiebre de stock."""
     try:
         require_management(config)
@@ -188,8 +272,7 @@ def stock_bajo(config: RunnableConfig) -> str:
     return "Stock bajo:\n" + "\n".join(alertas) if alertas else "Sin alertas de stock."
 
 
-@tool
-def cobranzas_vencidas(config: RunnableConfig) -> str:
+def _cobranzas_vencidas(config: RunnableConfig) -> str:
     """Facturas vencidas y no cobradas. Usa el reporte oficial de ERPNext."""
     try:
         require_management(config)
