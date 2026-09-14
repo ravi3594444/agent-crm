@@ -8,14 +8,40 @@ from app.formato import pesos
 from app.router import es_equipo
 
 
-def _solicitud_abierta(nombre: str):
-    """The order's open decision request, or None. Never raises."""
+def solicitud_abierta_estricta(nombre: str):
+    """La solicitud ABIERTA del pedido, o None — y `None` SÓLO quiere decir que no hay.
+
+    Levanta `solicitudes.LecturaIncierta` si el estado no se pudo leer. Es el
+    mismo predicado que `solicitud_abierta` y la misma única definición de
+    «abierta»; lo único distinto es qué hace cuando ERPNext no contesta.
+
+    Lo usa `decisiones.confirmar`, que es la única decisión irreversible del
+    sistema: ahí «no pude leer» leído como «no hay solicitud» emite el pedido al
+    precio viejo mientras el cliente tiene la contraoferta abierta en el
+    teléfono, y el submit no se deshace. Ver `solicitudes.LecturaIncierta`.
+    """
+    solicitud = solicitudes.leer_estricto(nombre)
+    return solicitud if solicitud is not None and solicitud.abierta else None
+
+
+def solicitud_abierta(nombre: str):
+    """The order's open decision request, or None. Never raises.
+
+    Sin guión bajo porque tiene un segundo llamador: `decisiones.confirmar`,
+    que es donde vive ahora la bifurcación que este predicado decide. Una copia
+    más de esto —`acciones.py` ya tiene la suya— sería un concepto escrito tres
+    veces y ningún test podría notar que discrepan.
+
+    Colapsa la lectura fallida en `None`, que es lo que un llamador que sólo
+    ENRUTA puede permitirse (el «no» de `manejar_boton` deriva a rechazar la
+    solicitud o a rechazar el pedido: ninguna de las dos emite nada). El que
+    decide algo irreversible usa `solicitud_abierta_estricta`.
+    """
     try:
-        solicitud = solicitudes.leer(nombre)
+        return solicitud_abierta_estricta(nombre)
     except Exception as exc:
         print(f"[approval] {nombre}: solicitud no legible ({type(exc).__name__})")
         return None
-    return solicitud if solicitud is not None and solicitud.abierta else None
 
 
 def _texto_solicitud(nombre: str) -> str:
@@ -56,25 +82,19 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
     accion, nombre = reply_id.split(":", 1)
 
     if accion == "ok":
-        # An order with an OPEN decision request is not confirmed by "aprobar":
-        # that word means "approve what the customer asked for", and the terms
-        # still have to be put to the customer before anything is submitted.
-        # See app/solicitudes.py.
-        pendiente = _solicitud_abierta(nombre)
-        if pendiente is not None:
-            from app import decisiones
+        # UNA LÍNEA, y es el punto. La bifurcación por solicitud abierta, el
+        # cierre de la revisión humana y el lock por pedido vivían acá, en el
+        # camino de WhatsApp, mientras `decisiones.confirmar` —el nombre que
+        # cualquier otro llamador iba a usar— era un alias pelado de
+        # `confirmar_pedido`. Un segundo llamador que no copiara esta función
+        # entera confirmaba al precio original mientras el cliente mira una
+        # contraoferta que no aceptó. Ahora todo eso está adentro de
+        # `decisiones.confirmar` y este camino no es especial.
+        from app import decisiones
 
-            return decisiones.aprobar_solicitud(nombre, telefono)["detalle"]
-        resultado = confirmar_pedido(nombre, telefono)
-        # "confirmar" is also the documented way out of a human review, and it
-        # is why REVISION_HUMANA is deliberately NOT one of solicitudes.ABIERTOS
-        # — this word has to keep meaning "submit this draft". Closing the
-        # review here takes the draft out of the expiry index at once instead
-        # of waiting for the sweep to notice; it is a no-op when there is no
-        # review, so a manager typing it three times costs three reads.
-        if resultado.get("ok"):
-            _cerrar_revision(nombre, telefono, "una persona confirmó el pedido")
-        return resultado["detalle"]
+        return decisiones.confirmar(
+            nombre, telefono, canal=decisiones.CANAL_WHATSAPP
+        )["detalle"]
 
     if accion == "contraoferta":
         # "contraoferta:<pedido>:<fecha> <hora> <cargo>"
@@ -113,7 +133,7 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
         # asked for and frees the stock its draft was holding; the draft itself
         # stays for the manager to amend.
         pedido, _, motivo_libre = nombre.partition(":")
-        pendiente = _solicitud_abierta(pedido.strip())
+        pendiente = solicitud_abierta(pedido.strip())
         if pendiente is not None:
             return decisiones.rechazar_solicitud(
                 pedido.strip(), telefono, motivo_libre or "sin detalle"
@@ -188,17 +208,25 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
     return "Acción desconocida."
 
 
-def confirmar_pedido(nombre: str, por: str) -> dict:
-    """Confirm one order on behalf of an ALREADY AUTHENTICATED human manager.
+def confirmar_pedido(nombre: str, por: str, *, canal: str) -> dict:
+    """El MECANISMO de confirmar, con quien llama YA autenticado y autorizado.
 
-    Moved out of manejar_boton unchanged so app/decisiones.py can offer it as
-    the manual-path entry point without duplicating logic that is already
-    proven against duplicate taps and submit timeouts that commit after the
-    HTTP client gives up. Submission still uses the policy credential via
-    erpnext.submit_doc; nothing here is reachable from an LLM tool.
+    Acá está lo que está probado contra el toque repetido y contra un submit que
+    commitea DESPUÉS de que el cliente HTTP se dio por vencido. Quién puede
+    hacerlo, si hay una solicitud abierta y el lock son de `decisiones.confirmar`,
+    que es la puerta; esta función no comprueba nada de eso y no debe. El Submit
+    sigue siendo `erpnext.submit_doc`, la credencial de política, y nada de acá
+    es alcanzable desde una herramienta del modelo.
 
-    Returns {"ok", "aviso_cliente", "detalle"} — `detalle` is the text shown to
-    the manager.
+    `canal` NO TIENE DEFAULT, y ésa es la mitad que importa. El rastro que se
+    escribe en ERPNext decía «mediante WhatsApp» como literal, así que el primer
+    llamador que no fuera WhatsApp —el panel— iba a firmar en el historial del
+    pedido un canal por el que nadie pasó, y un rastro de auditoría que miente
+    es peor que no tenerlo. Un default habría hecho exactamente eso en silencio:
+    acá el que confirma tiene que DECIR por dónde entró.
+
+    Devuelve {"ok", "aviso_cliente", "detalle"} — `detalle` es lo que se le
+    muestra al encargado.
     """
     # La ventana de anulación por WhatsApp la abre la marca durable, y el
     # default NO puede ser «sí»: por la rama de `ya_confirmado` no se pasa por
@@ -243,7 +271,7 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
             erpnext.add_comment(
                 "Sales Order",
                 nombre,
-                f"Confirmado por un integrante autorizado mediante WhatsApp ({por}).",
+                f"Confirmado por un integrante autorizado mediante {canal} ({por}).",
             )
             # Durable record of WHEN, in ERPNext: it opens the manual
             # cancellation window and survives any Redis restart.
@@ -255,7 +283,7 @@ def confirmar_pedido(nombre: str, por: str) -> dict:
             # igual «para anularlo dentro de las 24 h: cancelar …». Se le
             # prometía algo que el sistema iba a rechazar.
             ventana = confirmacion.registrar(
-                nombre, f"manual (confirmación humana, {por})"
+                nombre, f"manual (confirmación humana por {canal}, {por})"
             )
     except erpnext.ERPNextError as error:
         print(f"[approval] {nombre}: {type(error).__name__}")

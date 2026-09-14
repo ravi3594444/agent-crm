@@ -1164,3 +1164,173 @@ def test_the_zone_is_compared_against_the_configured_one_not_a_hardcoded_default
     env = {**BASE, "BUSINESS_TIMEZONE": "America/New_York"}
     texto = _correr(env, http=http).texto()
     assert "OK     ERPNext zona: America/New_York, igual que BUSINESS_TIMEZONE" in texto
+
+
+# ---------------------------------------------------------------------------
+# El panel. Un token que no anda no tenía dónde explicarse: `_tokens_por_persona`
+# descartaba la entrada rota en silencio, sin log y sin error, así que el dueño
+# pegaba el token en el `.env`, no entraba, y no había nada que mirar.
+# ---------------------------------------------------------------------------
+
+TOKEN_PANEL = "p" * 40
+OTRO_TOKEN_PANEL = "q" * 40
+
+
+def _bloqueos_del_panel(reporte) -> list[tuple[str, str]]:
+    """Sólo las líneas del PANEL que bloquean.
+
+    `BASE` no es un despliegue listo por su cuenta —le faltan cosas que no
+    tienen nada que ver con esto—, así que afirmar `reporte.listo` mediría el
+    fixture entero y no el chequeo que se está probando. Esto mira las líneas
+    del panel y nada más.
+    """
+    return [
+        (clave, mensaje)
+        for nivel, clave, mensaje in reporte.lineas
+        if nivel in (readiness.FALTA, readiness.ERROR)
+        and (clave.startswith("DASHBOARD") or clave == "Panel")
+    ]
+
+
+def test_una_entrada_rota_del_panel_se_explica_en_vez_de_desaparecer() -> None:
+    """Y el token NO aparece en el texto, ni entero ni cortado.
+
+    Esta salida es lo que una persona pega en un chat cuando algo no anda —así
+    se filtraron las seis claves que este repo todavía tiene que rotar—, así que
+    el motivo dice qué entrada está mal y cuántos caracteres le faltan, nunca el
+    valor.
+    """
+    corto = "x" * 8
+    env = dict(BASE, DASHBOARD_TOKENS=f"{corto}:{STAFF}")
+
+    reporte = readiness.ejecutar(env, con_red=False)
+    texto = reporte.texto()
+
+    assert "DASHBOARD_TOKENS" in texto
+    assert "la entrada 1" in texto and "8 caracteres" in texto
+    assert corto not in texto
+    assert _bloqueos_del_panel(reporte)
+
+
+def test_el_token_compartido_igual_a_uno_por_persona_es_un_bloqueo() -> None:
+    """Un copy-paste que sube privilegios, y hasta ahora no lo decía nadie.
+
+    `quien()` recorre los tokens POR PERSONA antes que el compartido, así que si
+    el valor coincide, el token que tiene todo el equipo deja de ser anónimo y
+    pasa a resolver a ESA persona. `puede_decidir` mira el teléfono que
+    devuelve `quien`, así que con el choque el token compartido —el que se
+    reparte por chat y nadie rota— gana el derecho a confirmar pedidos.
+    """
+    env = dict(
+        BASE,
+        DASHBOARD_API_TOKEN=TOKEN_PANEL,
+        DASHBOARD_TOKENS=f"{TOKEN_PANEL}:{STAFF}",
+    )
+
+    reporte = readiness.ejecutar(env, con_red=False)
+    texto = reporte.texto()
+
+    assert "podría confirmar pedidos" in texto
+    assert TOKEN_PANEL not in texto
+    assert _bloqueos_del_panel(reporte)
+
+
+def test_dos_tokens_para_la_misma_persona_bloquean_el_despliegue() -> None:
+    """Sacar una línea del `.env` tiene que alcanzar para revocar a alguien.
+
+    Con dos tokens para el mismo teléfono no alcanza: el dueño saca uno, cree
+    que le cortó el acceso, y el otro sigue entrando y sigue pudiendo confirmar
+    pedidos. Lo que hace que esto exista de verdad es que los dos números se
+    escriban distinto —`+54 9 …` y `0054 9 …` son la misma persona y dos
+    strings—, así que el chequeo compara el teléfono NORMALIZADO, igual que el
+    panel y que `deploy/configurar_dashboard.py`.
+
+    La mutación que mata a este test: comparar el teléfono crudo en
+    `entradas_de_tokens` en vez del normalizado. Con los dos números escritos
+    igual el test pasaría igual, y por eso están escritos distinto.
+    """
+    uno = "primer-token-de-esta-persona-32-o-mas-chars"
+    dos = "segundo-token-de-esta-persona-32-o-mas-chars"
+    env = dict(BASE, DASHBOARD_TOKENS=f"{uno}:+54 9 351 111 1111,{dos}:005493511111111")
+
+    reporte = readiness.ejecutar(env, con_red=False)
+    texto = reporte.texto()
+
+    assert "la entrada 2" in texto
+    assert uno not in texto and dos not in texto
+    assert _bloqueos_del_panel(reporte)
+
+
+def test_el_choque_del_token_compartido_se_ve_aunque_venga_con_espacios() -> None:
+    """El preflight y el panel normalizan el compartido con la MISMA función.
+
+    `_valor` recortaba los espacios para validar y `quien()` comparaba el valor
+    crudo, así que las dos mitades podían discrepar sobre qué token es. Un
+    `DASHBOARD_API_TOKEN=" … "` entrecomillado pasaba el preflight y después no
+    autenticaba a nadie; acá se mira la otra cara del mismo desacuerdo, que es
+    peor: con espacios, el choque de privilegios que el chequeo de al lado
+    detecta dejaba de detectarse, y el token de todo el equipo se volvía una
+    persona sin que nada lo dijera.
+
+    La mutación que mata a este test: que `chequear_panel` vuelva a leer el
+    compartido con algo que no sea `dashboard.normalizar_token`.
+    """
+    personal = "token-de-una-persona-de-32-o-mas-caracteres"
+    env = dict(
+        BASE,
+        DASHBOARD_API_TOKEN=f"  {personal}  ",
+        DASHBOARD_TOKENS=f"{personal}:{STAFF}",
+    )
+
+    reporte = readiness.ejecutar(env, con_red=False)
+
+    bloqueos = _bloqueos_del_panel(reporte)
+    assert any(clave == "DASHBOARD_API_TOKEN" for clave, _ in bloqueos)
+    assert personal not in reporte.texto()
+
+
+def test_un_token_de_alguien_que_no_es_del_equipo_avisa_y_no_bloquea() -> None:
+    """Mira pero no decide: es una configuración legítima, no un error.
+
+    `puede_decidir` exige `router.es_equipo`, así que este token entra al panel
+    y no puede confirmar nada. Puede ser a propósito —alguien que sólo mira— o
+    un teléfono mal tipeado, y readiness no puede saber cuál; lo que sí puede es
+    decir en voz alta cuál de las dos cosas está configurada.
+    """
+    de_afuera = "5490000000000"
+    env = dict(BASE, DASHBOARD_TOKENS=f"{TOKEN_PANEL}:{de_afuera}")
+
+    reporte = readiness.ejecutar(env, con_red=False)
+    texto = reporte.texto()
+
+    assert "no pueden confirmar nada" in texto
+    assert de_afuera not in texto
+    assert _bloqueos_del_panel(reporte) == [], "un panel de sólo lectura no es un despliegue roto"
+
+
+def test_un_despliegue_sin_panel_no_es_un_despliegue_roto() -> None:
+    """El panel es opcional, así que su ausencia avisa y no bloquea.
+
+    La otra mitad importa igual: tiene que DECIR que contesta 503, porque
+    «configuré el panel y no carga» sale de acá y no de los logs de nginx.
+    """
+    reporte = readiness.ejecutar(BASE, con_red=False)
+
+    assert "503" in reporte.texto()
+    assert _bloqueos_del_panel(reporte) == []
+
+
+def test_los_tokens_por_persona_que_si_sirven_se_cuentan_sin_mostrarse() -> None:
+    """Dos personas del equipo, contadas, y ninguno de los dos valores impreso."""
+    env = dict(
+        BASE,
+        TELEFONOS_EQUIPO=f"{STAFF},5493512222222",
+        DASHBOARD_TOKENS=f"{TOKEN_PANEL}:{STAFF},{OTRO_TOKEN_PANEL}:5493512222222",
+    )
+
+    reporte = readiness.ejecutar(env, con_red=False)
+    texto = reporte.texto()
+
+    assert "2 token(s) por persona, 2 de ellos del equipo" in texto
+    assert TOKEN_PANEL not in texto and OTRO_TOKEN_PANEL not in texto
+    assert _bloqueos_del_panel(reporte) == []

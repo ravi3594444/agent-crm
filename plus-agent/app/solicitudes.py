@@ -490,8 +490,30 @@ def _cachear_sin_solicitud(pedido: str) -> None:
         print(f"[solicitudes] {pedido}: caché negativa no guardada ({type(exc).__name__})")
 
 
-def _desde_erpnext(pedido: str) -> Solicitud | None:
-    """The NEWEST event recorded on the order, or None.
+class LecturaIncierta(Exception):
+    """No se pudo establecer el estado de la solicitud del pedido.
+
+    NO es «no hay solicitud»: es «no sé si la hay». Las dos cosas viajaban
+    juntas dentro del mismo `None` —`marcas.filas` no atrapa nada, `_desde_erpnext`
+    atrapaba todo— y quien lo recibía no tenía forma de distinguirlas.
+
+    Para casi todo el módulo eso está bien: un barrido que no puede leer vuelve
+    en el tick siguiente y lo peor que pasa es que algo espera. Para UNA
+    decisión no está bien, y es la única irreversible que hay acá:
+    `decisiones.confirmar` lee este predicado para decidir si emite el borrador
+    o si deriva la contraoferta al encargado. Con ERPNext caído, «no pude leer»
+    se leía como «no hay solicitud abierta» y el pedido se EMITÍA al precio
+    viejo mientras el cliente mira términos nuevos en su teléfono. El submit no
+    se deshace.
+
+    Por eso `leer_estricto` la levanta y `leer` la sigue colapsando en `None`:
+    el que necesita distinguir pide la versión que distingue, y el que no,
+    sigue leyendo como antes.
+    """
+
+
+def _desde_erpnext_estricto(pedido: str) -> Solicitud | None:
+    """The NEWEST event recorded on the order, or None. PROPAGATES read failures.
 
     Ordered `creation desc` and taken from the front. It used to ask for the
     oldest ``MAX_EVENTOS`` and keep the last of those, which is the newest event
@@ -502,11 +524,7 @@ def _desde_erpnext(pedido: str) -> Solicitud | None:
     still open. Frappe's own ordering decides which event is last, not the size
     of the page it happened to fit in.
     """
-    try:
-        filas = marcas.filas("solicitud", pedido)
-    except Exception as exc:
-        print(f"[solicitudes] {pedido}: no pude leer los eventos ({type(exc).__name__})")
-        return None
+    filas = marcas.filas("solicitud", pedido)
     for fila in filas:
         if not isinstance(fila, dict):
             continue
@@ -524,12 +542,32 @@ def _desde_erpnext(pedido: str) -> Solicitud | None:
     return None
 
 
-def leer(pedido: str) -> Solicitud | None:
-    """The current state of the order's decision request, or None.
+def _desde_erpnext(pedido: str) -> Solicitud | None:
+    """`_desde_erpnext_estricto` con la lectura fallida leída como «no hay».
 
-    Cache first, ERPNext second. A cache miss is normal after a restart; a
-    cache hit is never allowed to outlive the durable record because every
-    write goes to ERPNext first.
+    Lo que este módulo hacía siempre, y lo que casi todos sus llamadores
+    quieren: un barrido que no puede leer no escala nada, vuelve en el tick
+    siguiente. El que NO lo quiere es `leer_estricto`. Ver `LecturaIncierta`.
+    """
+    try:
+        return _desde_erpnext_estricto(pedido)
+    except Exception as exc:
+        print(f"[solicitudes] {pedido}: no pude leer los eventos ({type(exc).__name__})")
+        return None
+
+
+def leer_estricto(pedido: str) -> Solicitud | None:
+    """El estado actual de la solicitud del pedido, o None — y `None` SÓLO
+    quiere decir que no hay.
+
+    Igual que `leer`, salvo en lo único que importa: si la lectura durable
+    falla, LEVANTA `LecturaIncierta` en vez de contestar `None`. Lo usa la
+    única decisión irreversible del sistema (`decisiones.confirmar`), que no
+    puede tratar «no pude leer» como «no hay contraoferta esperando».
+
+    La caché no hace falta que sea legible: un miss y un Redis caído son la
+    misma cosa acá —los dos siguen a ERPNext, que es la verdad— y recién si
+    ERPNext tampoco contesta la respuesta pasa a ser incierta.
     """
     pedido = str(pedido or "").strip()
     if not pedido:
@@ -537,10 +575,32 @@ def leer(pedido: str) -> Solicitud | None:
     desde_cache = _desde_cache(pedido)
     if desde_cache is not None:
         return desde_cache
-    durable = _desde_erpnext(pedido)
+    try:
+        durable = _desde_erpnext_estricto(pedido)
+    except Exception as exc:
+        raise LecturaIncierta(
+            f"{pedido}: no pude leer los eventos ({type(exc).__name__})"
+        ) from exc
     if durable is not None:
         _cachear(durable)
     return durable
+
+
+def leer(pedido: str) -> Solicitud | None:
+    """The current state of the order's decision request, or None.
+
+    Cache first, ERPNext second. A cache miss is normal after a restart; a
+    cache hit is never allowed to outlive the durable record because every
+    write goes to ERPNext first.
+
+    Una lectura fallida vuelve como `None`, o sea indistinguible de «no hay»:
+    el que no puede permitirse esa confusión usa `leer_estricto`.
+    """
+    try:
+        return leer_estricto(pedido)
+    except LecturaIncierta as exc:
+        print(f"[solicitudes] {exc}")
+        return None
 
 
 def _cantidades(so: dict) -> dict:
@@ -574,14 +634,83 @@ def crear(
     Idempotent per order: an order that already has an OPEN request keeps it,
     so a customer repeating themselves cannot produce two questions for the
     manager or two stock holds.
+
+    BAJO EL LOCK DEL PEDIDO, y eso no es por la idempotencia —que ya la daba
+    `leer` + `_escribir`— sino por el OTRO lado. `decisiones.confirmar` lee «no
+    hay solicitud abierta» y emite el borrador; si entre esas dos cosas un
+    cliente abre una solicitud, el pedido se emite a los términos viejos
+    mientras al cliente se le está preguntando por unos nuevos. Las dos mitades
+    tienen que estar en la misma sección crítica, y `solicitud:{pedido}` es el
+    lock que el resto del módulo ya usa para todo cambio de estado de una
+    solicitud: `_vencer`, `_decidir`, `rechazar_cliente`, `cerrar_revision_si_hay`.
+
+    El lock solo no alcanza: serializa, pero el segundo en entrar seguiría
+    haciendo lo que iba a hacer. Por eso adentro se RELEE el estado del pedido
+    (ver `_crear_bajo_lock`).
     """
-    from app import notificar
+    from app.locks import CoordinationError, distributed_lock
 
     pedido = str(so.get("name") or "").strip()
     if not pedido:
         return None
     if tipo not in TIPOS:
         print(f"[solicitudes] {pedido}: tipo desconocido {tipo!r}")
+        return None
+
+    try:
+        with distributed_lock(f"solicitud:{pedido}", lease_seconds=60, wait_seconds=10):
+            return _crear_bajo_lock(
+                so, pedido, tipo=tipo, solicitado=solicitado, nota_cliente=nota_cliente
+            )
+    except CoordinationError:
+        # Alguien está decidiendo este pedido ahora mismo. No abrir nada es la
+        # respuesta segura: el llamador le pide disculpas al cliente y escala.
+        print(f"[solicitudes] {pedido}: ocupado, no abro una solicitud encima")
+        return None
+
+
+def _sigue_en_borrador(pedido: str) -> bool:
+    """¿El pedido sigue siendo un borrador? Una lectura fallida dice que NO.
+
+    Se lee con la credencial del AGENTE —`erpnext.get_doc`— y no con la de
+    política: este camino sale de una herramienta del modelo, y la credencial de
+    política no se alcanza desde una herramienta (regla dura 2). El llamador ya
+    leyó el pedido con la misma credencial antes de llamar; esto es la RELECTURA
+    adentro del lock, que es lo único que cierra la ventana.
+
+    Falla cerrado: si no se puede leer, no se abre la solicitud. Abrir una
+    solicitud sobre un pedido ya emitido reserva stock de algo que ya se
+    comprometió y le hace una pregunta al encargado sobre términos que ya no
+    puede cambiar.
+    """
+    try:
+        so = erpnext.get_doc("Sales Order", pedido)
+    except Exception as exc:
+        print(f"[solicitudes] {pedido}: relectura de borrador falló ({type(exc).__name__})")
+        return False
+    if not isinstance(so, dict):
+        return False
+    try:
+        return int(so.get("docstatus") or 0) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _crear_bajo_lock(
+    so: dict,
+    pedido: str,
+    *,
+    tipo: str,
+    solicitado: dict,
+    nota_cliente: str,
+) -> Solicitud | None:
+    """Lo que hace `crear` con el lock del pedido ya tomado. Ver `crear`."""
+    from app import notificar
+
+    if not _sigue_en_borrador(pedido):
+        # Se emitió (o se canceló) mientras esperábamos el lock. La solicitud
+        # que íbamos a abrir es sobre términos que ya no se pueden cambiar.
+        print(f"[solicitudes] {pedido}: ya no es un borrador, no abro solicitud")
         return None
 
     existente = leer(pedido)

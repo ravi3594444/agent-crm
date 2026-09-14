@@ -31,6 +31,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import aprobacion, decisiones
 from app.graph import TOOLS_CLIENTES, TOOLS_GERENCIA
 
+
+@pytest.fixture(autouse=True)
+def _el_equipo_de_verdad(monkeypatch: pytest.MonkeyPatch):
+    """Los teléfonos que estos tests usan de encargado, en la lista DE VERDAD.
+
+    `es_equipo` se comprueba en DOS puertas —`aprobacion.manejar_boton` y
+    `decisiones.confirmar`— y cada módulo tiene su propia referencia a la
+    función, así que `monkeypatch.setattr(aprobacion, "es_equipo", ...)` tapa
+    una sola. Tampoco debería alcanzar: un test que DESACTIVA la autorización
+    en una puerta no puede discreparle al código sobre la otra, que es la forma
+    exacta del parche inerte que este repo ya se sacó de encima una vez
+    (tests/test_frontera_decisiones.py).
+
+    Se parchea `router.STAFF`, que es lo único que las dos puertas leen, y con
+    eso corre el `es_equipo` real en las dos. Los tests que afirman un RECHAZO
+    siguen parcheando lo suyo y siguen rechazando: un número que no está en
+    esta lista no confirma nada.
+    """
+    from app import router
+
+    monkeypatch.setattr(router, "STAFF", ["5493511111111"])
+
+
 MANUAL = ("confirmar", "rechazar", "confirmar_pedido", "confirmar_conteo", "preparar", "despachar", "cancelar")
 
 
@@ -138,14 +161,20 @@ def test_manual_confirmation_uses_the_policy_credential_not_the_agent_one(
 ) -> None:
     """Submitting is only ever erpnext.submit_doc, which is the policy client.
 
-    LO QUE ESTE TEST NO PRUEBA, dicho acá porque parecía que sí: `decisiones.
-    confirmar` **no verifica a nadie**. Acá había un `monkeypatch` de
-    `aprobacion.es_equipo` a True que este camino NUNCA consulta — el test
-    pasaba idéntico con la función devolviendo False—, así que se leía como
-    cobertura de autorización y no lo era. Se sacó. `es_equipo` se comprueba en
-    `aprobacion.manejar_boton`, que es hoy el único llamador; el día que haya un
-    segundo (un endpoint del panel), la autorización tiene que bajar acá adentro
-    y ESE test va a ser otro.
+    LO QUE ESTE TEST NO PRUEBA, dicho acá porque parecía que sí: la
+    autorización. Acá hubo un `monkeypatch` de `aprobacion.es_equipo` a True que
+    este camino NUNCA consultaba —el test pasaba idéntico con la función
+    devolviendo False—, así que se leía como cobertura y no lo era. Se sacó.
+
+    Lo que esa nota anunciaba ya pasó: `decisiones.confirmar` SÍ verifica quién
+    llama, porque dejó de ser un alias de `confirmar_pedido` y pasó a ser la
+    puerta —autorización, bifurcación por solicitud abierta, cierre de la
+    revisión y lock, todo adentro—. Quién prueba eso es
+    `test_confirmar_le_dice_que_no_a_un_telefono_que_no_es_del_equipo` en
+    tests/test_solicitudes.py, con un número que no está en `router.STAFF` en
+    vez de una función parcheada. Acá el teléfono ES del equipo (ver
+    `_el_equipo_de_verdad`), y lo único que se afirma es la credencial del
+    Submit.
     """
     monkeypatch.setattr(
         aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 0}
@@ -155,11 +184,204 @@ def test_manual_confirmation_uses_the_policy_credential_not_the_agent_one(
     monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
     monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
     monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
+    # La puerta lee el estado de la solicitud ANTES de emitir, y con el lector
+    # estricto una lectura que no contesta ya no se lee como «no hay». Sin esta
+    # línea el test pasaba a no emitir nada — y el Submit, que es lo único que
+    # afirma, no llegaba a ocurrir.
+    monkeypatch.setattr(aprobacion.solicitudes, "leer_estricto", lambda nombre: None)
 
-    resultado = decisiones.confirmar("SAL-ORD-0001", "5493511111111")
+    resultado = decisiones.confirmar(
+        "SAL-ORD-0001", "5493511111111", canal=decisiones.CANAL_WHATSAPP
+    )
 
     assert resultado["ok"] is True
     submit.assert_called_once_with("Sales Order", "SAL-ORD-0001")
+
+
+def test_confirmar_adentro_del_lock_de_acciones_no_se_bloquea_contra_si_mismo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El anidamiento, contra el Redis de VERDAD y no contra los nombres.
+
+    `acciones.py` envuelve TODO `manejar_boton` en `accion:{pedido}` para el
+    camino autorizado por código de seis dígitos, y `decisiones.confirmar` toma
+    ahora un lock propio adentro. `locks.distributed_lock` arma el lock de redis
+    con `thread_local=False`: **no es reentrante**. Si los dos se llamaran
+    igual, confirmar con código esperaría 10 s por un lock que ya tiene el mismo
+    hilo, levantaría `CoordinationError`, y al encargado que acaba de tipear su
+    código le contestaría «no pude coordinar» — o sea que la vía autorizada por
+    código dejaría de confirmar, entera.
+
+    Ese peligro no lo ve una afirmación sobre NOMBRES: el doble de locks de
+    `test_solicitudes.py` registra nombres y nunca se bloquea, así que ahí los
+    dos se pueden llamar igual y el test pasa igual. Acá el lock de afuera se
+    toma de verdad, sobre el `REDIS_URL` que la suite ya exige, y lo que se
+    afirma es que la confirmación de adentro SALE.
+    """
+    from app import locks
+
+    pedido = "SAL-ORD-ANIDADO-1"
+    monkeypatch.setattr(
+        aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 0}
+    )
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", Mock())
+    monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
+    monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
+    monkeypatch.setattr(decisiones, "cerrar_revision_si_hay", lambda *a, **k: True)
+    # `leer_estricto` y no `leer`: la puerta lee ahora con el que DISTINGUE «no
+    # hay solicitud» de «no pude leer», porque confundirlos emite el borrador
+    # con ERPNext caído (hallazgo 1 de la review de #45). La premisa de este
+    # test es la primera: este pedido no tiene solicitud abierta.
+    monkeypatch.setattr(aprobacion.solicitudes, "leer_estricto", lambda nombre: None)
+
+    try:
+        with locks.distributed_lock(pedido_lock := f"accion:{pedido}", lease_seconds=30, wait_seconds=2):
+            assert pedido_lock  # el de afuera está tomado mientras corre lo de adentro
+            resultado = decisiones.confirmar(
+                pedido, "5493511111111", canal=decisiones.CANAL_WHATSAPP
+            )
+    except locks.CoordinationError:
+        pytest.fail("no se pudo tomar el lock de afuera; ¿hay un Redis en REDIS_URL?")
+
+    assert resultado["ok"] is True, resultado["detalle"]
+    assert "coordinar" not in resultado["detalle"]
+
+
+def test_confirmar_con_solicitud_abierta_no_se_traba_contra_su_propio_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La rama de solicitud abierta corre FUERA del lock del pedido.
+
+    `decisiones.confirmar` mete ahora la lectura y el submit adentro de
+    `solicitud:{pedido}`, que es lo que cierra la ventana del hallazgo 2. Pero
+    los dos que se llaman DESPUÉS de decidir —`aprobar_solicitud`, que deriva la
+    contraoferta, y `cerrar_revision_si_hay`— vuelven a tomar ese mismo lock, y
+    `locks.distributed_lock` lo arma con `thread_local=False`: no es reentrante.
+    Llamarlos desde adentro del `with` los cuelga 10 s contra un lock que tiene
+    este mismo hilo y termina en `CoordinationError`: la rama de solicitud
+    abierta —la que evita cobrarle al cliente términos que no aceptó— dejaría de
+    funcionar entera, y el arreglo del hallazgo 2 habría roto el hallazgo 2.
+
+    El doble de `aprobar_solicitud` toma el lock DE VERDAD y no finge nada más:
+    lo único que tiene que representar es «el que sigue vuelve a pedir este
+    lock». Si la puerta todavía lo tuviera tomado, este test espera los 10 s
+    reales y se pone en rojo; el doble de locks de test_solicitudes.py no puede
+    verlo, porque anota nombres y no bloquea nunca.
+    """
+    from app import locks, solicitudes
+
+    pedido = "SAL-ORD-DERIVA-1"
+    abierta = Mock(abierta=True)
+    monkeypatch.setattr(solicitudes, "leer_estricto", lambda nombre: abierta)
+
+    def aprobar(nombre, por):
+        with locks.distributed_lock(
+            f"solicitud:{nombre}", lease_seconds=30, wait_seconds=10
+        ):
+            return {"ok": True, "aviso_cliente": False, "detalle": "derivada"}
+
+    monkeypatch.setattr(decisiones, "aprobar_solicitud", aprobar)
+
+    resultado = decisiones.confirmar(
+        pedido, "5493511111111", canal=decisiones.CANAL_WHATSAPP
+    )
+
+    assert resultado["detalle"] == "derivada"
+    assert "coordinar" not in resultado["detalle"]
+
+
+def test_con_el_lock_del_pedido_tomado_afuera_no_se_emite_nada(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La comprobación y el submit están DENTRO de `solicitud:{pedido}`.
+
+    Es la afirmación del hallazgo 2 hecha desde afuera: si alguien más tiene el
+    lock del pedido —`solicitudes.crear` abriendo una excepción del cliente, el
+    barrido venciéndola, `_decidir` registrando una contraoferta—, confirmar no
+    puede pasar por el medio. Con el lock tomado, `decisiones.confirmar` no
+    emite NADA y lo dice.
+
+    Las dos mitades, y la segunda es la que importa: que conteste «no pude
+    coordinar» lo cumpliría igual un código que contesta eso DESPUÉS de emitir.
+    Que `submit_doc` no se haya llamado es lo que prueba que el lock está antes
+    del submit y no al lado.
+
+    La mutación que mata a este test y no a otro: sacar el `with
+    distributed_lock(f"solicitud:{nombre}")` de `_confirmar_autorizado` dejando
+    todo lo demás igual. El de los nombres en test_solicitudes.py sigue verde
+    salvo por el orden; éste se pone rojo porque el submit ocurre.
+    """
+    from app import locks, solicitudes
+
+    pedido = "SAL-ORD-TOMADO-1"
+    submit = Mock()
+    monkeypatch.setattr(
+        aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 0}
+    )
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
+    monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
+    monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
+    monkeypatch.setattr(solicitudes, "leer_estricto", lambda nombre: None)
+
+    with locks.distributed_lock(
+        f"solicitud:{pedido}", lease_seconds=30, wait_seconds=2
+    ):
+        resultado = decisiones.confirmar(
+            pedido, "5493511111111", canal=decisiones.CANAL_WHATSAPP
+        )
+
+    assert resultado["ok"] is False
+    submit.assert_not_called()
+
+
+def test_el_rastro_en_erpnext_nombra_el_canal_por_el_que_se_confirmo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lo que queda firmado en el pedido dice por dónde entró la persona.
+
+    El historial del pedido y la marca durable decían «mediante WhatsApp» como
+    literal, de cuando WhatsApp era el único camino. El panel es el segundo, y
+    un rastro de auditoría que nombra un canal por el que nadie pasó es peor que
+    no tenerlo: alguien que audite una confirmación discutida va a buscar el
+    mensaje de WhatsApp que la respalda y no existe.
+
+    Las DOS mitades. Que aparezca «el panel» lo cumpliría igual un texto que
+    dijera las dos cosas —«mediante WhatsApp … el panel»— que es exactamente lo
+    que deja un literal al que se le agregó una interpolación al lado. Que no
+    aparezca «WhatsApp» es la mitad que mata al literal.
+    """
+    pedido = "SAL-ORD-CANAL-1"
+    comentarios: list[str] = []
+    marcas: list[str] = []
+    monkeypatch.setattr(
+        aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 0}
+    )
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", Mock())
+    monkeypatch.setattr(
+        aprobacion.erpnext, "add_comment",
+        lambda dt, name, texto: comentarios.append(texto),
+    )
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
+    monkeypatch.setattr(
+        aprobacion.confirmacion, "registrar",
+        lambda nombre, fuente: marcas.append(fuente) or True,
+    )
+    monkeypatch.setattr(decisiones, "cerrar_revision_si_hay", lambda *a, **k: True)
+    # `leer_estricto` y no `leer`: la puerta lee ahora con el que DISTINGUE «no
+    # hay solicitud» de «no pude leer», porque confundirlos emite el borrador
+    # con ERPNext caído (hallazgo 1 de la review de #45). La premisa de este
+    # test es la primera: este pedido no tiene solicitud abierta.
+    monkeypatch.setattr(aprobacion.solicitudes, "leer_estricto", lambda nombre: None)
+
+    decisiones.confirmar(pedido, "5493511111111", canal=decisiones.CANAL_PANEL)
+
+    assert comentarios and marcas
+    assert "el panel" in comentarios[0]
+    assert "WhatsApp" not in comentarios[0]
+    assert "por el panel" in marcas[0]
+    assert "WhatsApp" not in marcas[0]
 
 
 # ---------------------------- el registro de herramientas no se lee en voz alta
