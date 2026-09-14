@@ -118,6 +118,14 @@ jobs:
       # REDIS_OBLIGATORIO turns "no Redis" into a failure instead of a skip.
       REDIS_URL: redis://localhost:6379/0
       REDIS_OBLIGATORIO: "1"
+      # Lo mismo para el relay de voz, y por la misma razón. 19 tests del canal
+      # piden `calling_agent`; sin el paquete se SALTEAN, y un skip no pone
+      # ningún check en rojo — este job daba verde sobre la mitad del canal sin
+      # haberla corrido, y `-rs` lo decía en el log que nadie lee. Ahora
+      # `requirements-dev.txt` lo instala y esta variable hace que faltar sea
+      # una falla. Va sólo acá: el job de la imagen no lo instala y no tiene
+      # por qué ponerse rojo por una variable que puso otro.
+      VOZ_OBLIGATORIO: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -126,7 +134,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: plus-agent/requirements-dev.txt
+          # Los dos archivos: requirements-dev.txt ahora incluye
+          # requirements-voz.txt, y el pin del relay vive en ése. Con una sola
+          # ruta, cambiar el sha no cambiaba la clave del caché.
+          cache-dependency-path: |
+            plus-agent/requirements-dev.txt
+            plus-agent/requirements-voz.txt
 
       - name: Instalar dependencias
         run: pip install -r requirements-dev.txt

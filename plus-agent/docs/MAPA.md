@@ -71,6 +71,14 @@ no tenerlo, porque se le cree.
 - Un módulo que agrega variables de entorno las agrega al `delenv` de
   `limites_sin_redis`, o el `.env` de una máquina de desarrollo configura los
   tests.
+- `tests/voz_relay.py::relay()` es lo que usan los 21 tests que necesitan el
+  relay instalado, y **no** es un `importorskip`: con `VOZ_OBLIGATORIO=1` —que
+  pone el job de tests, al lado de `REDIS_OBLIGATORIO`— faltar el paquete es una
+  FALLA. Saltearlos era verde sobre la mitad del canal de voz sin haberla
+  corrido: el skip sale en el log por el `-rs`, pero ningún check se pone rojo
+  por un skip. En una máquina que sólo toca WhatsApp sigue salteando, que es lo
+  correcto ahí. El paquete entra por `requirements-dev.txt`, que incluye
+  `requirements-voz.txt`.
 
 ---
 

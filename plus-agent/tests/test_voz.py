@@ -19,6 +19,7 @@ from app.tools.registro import (
 )
 from app.voz import agente, herramientas, identidad
 from app.voz import prompt as prompt_voz
+from tests.voz_relay import relay
 
 CLIENTE = "+5493511234567"
 EQUIPO = "+5493519999999"
@@ -270,7 +271,7 @@ def test_sin_cuenta_el_prompt_manda_dar_de_alta_y_no_derivar():
 def test_cada_llamada_lleva_su_propia_identidad(monkeypatch):
     """El error que en una demo de una llamada no se ve: un agente construido
     una vez sirve el contexto del primer cliente del día a todos los demás."""
-    pytest.importorskip("calling_agent")
+    relay()
     recibidos = []
     monkeypatch.setattr(
         herramientas,
@@ -285,7 +286,7 @@ def test_cada_llamada_lleva_su_propia_identidad(monkeypatch):
 
 
 def test_el_agente_de_voz_declara_las_herramientas_del_cliente():
-    pytest.importorskip("calling_agent")
+    relay()
     definicion = agente.para_llamada(identidad.de_navegador(id_llamada="c1"))
     assert [t["name"] for t in definicion.tools] == [t.name for t in TOOLS_CLIENTES]
     assert "REGLAS QUE NO PODÉS ROMPER" in definicion.build_prompt()
@@ -343,14 +344,14 @@ def test_un_numero_del_equipo_por_parametro_tampoco_entra(monkeypatch):
 
 
 def test_el_factory_sin_parametros_atiende_anonimo():
-    pytest.importorskip("calling_agent")
+    relay()
     definicion = agente.desde_navegador({})
     assert "no tiene cuenta de cliente registrada" in definicion.build_prompt()
 
 
 def test_el_factory_ignora_un_telefono_si_la_demo_esta_apagada(monkeypatch):
     """Un parámetro que llega con la demo apagada no es un error: es anónimo."""
-    pytest.importorskip("calling_agent")
+    relay()
     monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "")
     definicion = agente.desde_navegador({"telefono": CLIENTE})
     assert "no tiene cuenta de cliente registrada" in definicion.build_prompt()
@@ -359,7 +360,7 @@ def test_el_factory_ignora_un_telefono_si_la_demo_esta_apagada(monkeypatch):
 def test_el_factory_nunca_levanta_con_un_numero_del_equipo(monkeypatch):
     """Si levantara, el relay serviría el agente de restaurante de fábrica —
     peor que atender sin cuenta."""
-    pytest.importorskip("calling_agent")
+    relay()
     monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "1")
     monkeypatch.setattr(router, "es_equipo", lambda numero: True)
     definicion = agente.desde_navegador({"telefono": EQUIPO})
@@ -391,7 +392,7 @@ def test_el_factory_con_la_demo_encendida_le_da_el_telefono_al_agente(monkeypatc
     Acá se comprueba que el teléfono llega a la herramienta, que es lo único
     que hace que `crear_cliente` pueda dar de alta al que llama.
     """
-    pytest.importorskip("calling_agent")
+    relay()
     monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "1")
     monkeypatch.setattr(router, "es_equipo", lambda numero: False)
     monkeypatch.setattr(clientes, "buscar_por_telefono", lambda n, get_list=None: None)
@@ -413,7 +414,7 @@ def test_el_factory_con_la_demo_encendida_le_da_el_telefono_al_agente(monkeypatc
 
 def test_dos_conexiones_con_numeros_distintos_no_se_mezclan(monkeypatch):
     """Dos pestañas abiertas a la vez son dos clientes, no uno."""
-    pytest.importorskip("calling_agent")
+    relay()
     monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "1")
     monkeypatch.setattr(router, "es_equipo", lambda numero: False)
     monkeypatch.setattr(clientes, "buscar_por_telefono", lambda n, get_list=None: None)
@@ -455,7 +456,7 @@ def test_erpnext_caido_no_le_da_el_agente_de_restaurante_al_que_llama(monkeypatc
     """Lo encontró un arranque de verdad, no un test: los tests mockeaban el
     lookup, así que ninguno veía la excepción subir hasta el relay — que la
     trata como «este factory no sirve» y sirve el suyo, el de restaurante."""
-    pytest.importorskip("calling_agent")
+    relay()
     monkeypatch.setenv("VOZ_NUMERO_POR_PARAMETRO", "1")
     monkeypatch.setattr(router, "es_equipo", lambda numero: False)
     _erpnext_caido(monkeypatch)
@@ -499,7 +500,7 @@ def test_el_factory_aguanta_cualquier_fallo_al_resolver_el_numero(monkeypatch):
 
     Sin este test, sacar el `except Exception` del factory deja los 34 verdes.
     """
-    pytest.importorskip("calling_agent")
+    relay()
 
     def explota(*args, **kwargs):
         raise RuntimeError("un fallo que todavía no sabemos nombrar")
@@ -521,7 +522,7 @@ def _entorno_de_voz(monkeypatch):
 
 
 def test_el_verificador_pasa_con_todo_en_su_lugar(monkeypatch):
-    pytest.importorskip("calling_agent")
+    relay()
     from app.voz import verificar as verificador
 
     _entorno_de_voz(monkeypatch)
@@ -532,7 +533,7 @@ def test_el_verificador_pasa_con_todo_en_su_lugar(monkeypatch):
 def test_el_verificador_ve_lo_que_healthz_no_puede_ver(monkeypatch):
     """`/healthz` contesta 200 con el agente de restaurante servido. Eso es lo
     que este módulo existe para atrapar, así que es lo que se prueba."""
-    pytest.importorskip("calling_agent")
+    relay()
     from app.voz import verificar as verificador
 
     _entorno_de_voz(monkeypatch)
@@ -543,7 +544,7 @@ def test_el_verificador_ve_lo_que_healthz_no_puede_ver(monkeypatch):
 
 def test_el_verificador_avisa_si_la_demo_quedo_encendida(monkeypatch):
     """Encendido no es un error, pero que no lo descubra un cliente."""
-    pytest.importorskip("calling_agent")
+    relay()
     from app.voz import verificar as verificador
 
     _entorno_de_voz(monkeypatch)
@@ -554,7 +555,7 @@ def test_el_verificador_avisa_si_la_demo_quedo_encendida(monkeypatch):
 
 
 def test_el_verificador_avisa_si_falta_la_clave(monkeypatch):
-    pytest.importorskip("calling_agent")
+    relay()
     from app.voz import verificar as verificador
 
     _entorno_de_voz(monkeypatch)
@@ -566,7 +567,7 @@ def test_el_verificador_avisa_si_falta_la_clave(monkeypatch):
 def test_el_verificador_mira_los_bloques_del_prompt(monkeypatch):
     """Si el bloque de voz desaparece del prompt, el agente sigue atendiendo
     y contesta con formato de chat. Nada más lo nota."""
-    pytest.importorskip("calling_agent")
+    relay()
     from app.voz import prompt as prompt_modulo
     from app.voz import verificar as verificador
 
@@ -586,13 +587,13 @@ def test_el_verificador_atrapa_un_factory_que_falla_con_el_nombre_bien(monkeypat
     bien y lo que va a fallar es el factory, por un import roto o un módulo que
     no levanta. Ahí, el relay sirve el de restaurante y `/healthz` dice 200.
     """
-    pytest.importorskip("calling_agent")
-    import calling_agent.main as relay
+    relay()
+    import calling_agent.main as relay_main
 
     from app.voz import verificar as verificador
 
     _entorno_de_voz(monkeypatch)  # AGENT_FACTORY correcto
-    monkeypatch.setattr(relay, "_build_agent", lambda *args, **kwargs: None)
+    monkeypatch.setattr(relay_main, "_build_agent", lambda *args, **kwargs: None)
     problemas = verificador.verificar()
     assert len(problemas) == 1
     assert "restaurante" in problemas[0]
@@ -731,7 +732,7 @@ def test_un_reconecte_conserva_la_identidad_de_la_llamada(monkeypatch):
     reintento del mismo pedido en un pedido NUEVO: el cliente pide una vez y le
     entran dos. `resume` es el id de la sesión que se reanuda, o sea «la misma
     llamada»."""
-    pytest.importorskip("calling_agent")
+    relay()
     recibidos = []
     monkeypatch.setattr(
         herramientas,
@@ -754,7 +755,7 @@ def test_un_reconecte_conserva_la_identidad_de_la_llamada(monkeypatch):
 
 def test_dos_llamadas_distintas_siguen_siendo_distintas(monkeypatch):
     """La otra mitad: sin `resume`, cada conexión es una llamada nueva."""
-    pytest.importorskip("calling_agent")
+    relay()
     recibidos = []
     monkeypatch.setattr(
         herramientas,
@@ -772,6 +773,6 @@ def test_dos_llamadas_distintas_siguen_siendo_distintas(monkeypatch):
 def test_el_agente_le_dice_a_la_pagina_el_nombre_del_negocio(monkeypatch):
     """Sin esto el relay contesta el suyo —el del restaurante— sobre el
     producto de otro."""
-    pytest.importorskip("calling_agent")
+    relay()
     monkeypatch.setenv("NOMBRE_NEGOCIO", "Lácteos Plus")
     assert agente.desde_navegador({}).display_name == "Lácteos Plus"

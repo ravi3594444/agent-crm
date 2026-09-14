@@ -26,6 +26,8 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.voz_relay import relay
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import clientes, erpnext, router
@@ -327,7 +329,7 @@ def test_una_llamada_anonima_no_puede_dar_de_alta_a_nadie(erp, locks):
 
 
 def _agente_de_la_llamada(contexto: dict):
-    pytest.importorskip("calling_agent")
+    relay()
     from app.voz import agente
 
     return agente.para_llamada(contexto)
