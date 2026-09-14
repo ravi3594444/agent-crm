@@ -8,8 +8,14 @@ from app.formato import pesos
 from app.router import es_equipo
 
 
-def _solicitud_abierta(nombre: str):
-    """The order's open decision request, or None. Never raises."""
+def solicitud_abierta(nombre: str):
+    """The order's open decision request, or None. Never raises.
+
+    Sin guión bajo porque tiene un segundo llamador: `decisiones.confirmar`,
+    que es donde vive ahora la bifurcación que este predicado decide. Una copia
+    más de esto —`acciones.py` ya tiene la suya— sería un concepto escrito tres
+    veces y ningún test podría notar que discrepan.
+    """
     try:
         solicitud = solicitudes.leer(nombre)
     except Exception as exc:
@@ -56,25 +62,17 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
     accion, nombre = reply_id.split(":", 1)
 
     if accion == "ok":
-        # An order with an OPEN decision request is not confirmed by "aprobar":
-        # that word means "approve what the customer asked for", and the terms
-        # still have to be put to the customer before anything is submitted.
-        # See app/solicitudes.py.
-        pendiente = _solicitud_abierta(nombre)
-        if pendiente is not None:
-            from app import decisiones
+        # UNA LÍNEA, y es el punto. La bifurcación por solicitud abierta, el
+        # cierre de la revisión humana y el lock por pedido vivían acá, en el
+        # camino de WhatsApp, mientras `decisiones.confirmar` —el nombre que
+        # cualquier otro llamador iba a usar— era un alias pelado de
+        # `confirmar_pedido`. Un segundo llamador que no copiara esta función
+        # entera confirmaba al precio original mientras el cliente mira una
+        # contraoferta que no aceptó. Ahora todo eso está adentro de
+        # `decisiones.confirmar` y este camino no es especial.
+        from app import decisiones
 
-            return decisiones.aprobar_solicitud(nombre, telefono)["detalle"]
-        resultado = confirmar_pedido(nombre, telefono)
-        # "confirmar" is also the documented way out of a human review, and it
-        # is why REVISION_HUMANA is deliberately NOT one of solicitudes.ABIERTOS
-        # — this word has to keep meaning "submit this draft". Closing the
-        # review here takes the draft out of the expiry index at once instead
-        # of waiting for the sweep to notice; it is a no-op when there is no
-        # review, so a manager typing it three times costs three reads.
-        if resultado.get("ok"):
-            _cerrar_revision(nombre, telefono, "una persona confirmó el pedido")
-        return resultado["detalle"]
+        return decisiones.confirmar(nombre, telefono)["detalle"]
 
     if accion == "contraoferta":
         # "contraoferta:<pedido>:<fecha> <hora> <cargo>"
@@ -113,7 +111,7 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
         # asked for and frees the stock its draft was holding; the draft itself
         # stays for the manager to amend.
         pedido, _, motivo_libre = nombre.partition(":")
-        pendiente = _solicitud_abierta(pedido.strip())
+        pendiente = solicitud_abierta(pedido.strip())
         if pendiente is not None:
             return decisiones.rechazar_solicitud(
                 pedido.strip(), telefono, motivo_libre or "sin detalle"

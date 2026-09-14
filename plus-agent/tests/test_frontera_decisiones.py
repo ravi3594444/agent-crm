@@ -31,6 +31,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import aprobacion, decisiones
 from app.graph import TOOLS_CLIENTES, TOOLS_GERENCIA
 
+
+@pytest.fixture(autouse=True)
+def _el_equipo_de_verdad(monkeypatch: pytest.MonkeyPatch):
+    """Los teléfonos que estos tests usan de encargado, en la lista DE VERDAD.
+
+    `es_equipo` se comprueba en DOS puertas —`aprobacion.manejar_boton` y
+    `decisiones.confirmar`— y cada módulo tiene su propia referencia a la
+    función, así que `monkeypatch.setattr(aprobacion, "es_equipo", ...)` tapa
+    una sola. Tampoco debería alcanzar: un test que DESACTIVA la autorización
+    en una puerta no puede discreparle al código sobre la otra, que es la forma
+    exacta del parche inerte que este repo ya se sacó de encima una vez
+    (tests/test_frontera_decisiones.py).
+
+    Se parchea `router.STAFF`, que es lo único que las dos puertas leen, y con
+    eso corre el `es_equipo` real en las dos. Los tests que afirman un RECHAZO
+    siguen parcheando lo suyo y siguen rechazando: un número que no está en
+    esta lista no confirma nada.
+    """
+    from app import router
+
+    monkeypatch.setattr(router, "STAFF", ["5493511111111"])
+
+
 MANUAL = ("confirmar", "rechazar", "confirmar_pedido", "confirmar_conteo", "preparar", "despachar", "cancelar")
 
 
@@ -138,14 +161,20 @@ def test_manual_confirmation_uses_the_policy_credential_not_the_agent_one(
 ) -> None:
     """Submitting is only ever erpnext.submit_doc, which is the policy client.
 
-    LO QUE ESTE TEST NO PRUEBA, dicho acá porque parecía que sí: `decisiones.
-    confirmar` **no verifica a nadie**. Acá había un `monkeypatch` de
-    `aprobacion.es_equipo` a True que este camino NUNCA consulta — el test
-    pasaba idéntico con la función devolviendo False—, así que se leía como
-    cobertura de autorización y no lo era. Se sacó. `es_equipo` se comprueba en
-    `aprobacion.manejar_boton`, que es hoy el único llamador; el día que haya un
-    segundo (un endpoint del panel), la autorización tiene que bajar acá adentro
-    y ESE test va a ser otro.
+    LO QUE ESTE TEST NO PRUEBA, dicho acá porque parecía que sí: la
+    autorización. Acá hubo un `monkeypatch` de `aprobacion.es_equipo` a True que
+    este camino NUNCA consultaba —el test pasaba idéntico con la función
+    devolviendo False—, así que se leía como cobertura y no lo era. Se sacó.
+
+    Lo que esa nota anunciaba ya pasó: `decisiones.confirmar` SÍ verifica quién
+    llama, porque dejó de ser un alias de `confirmar_pedido` y pasó a ser la
+    puerta —autorización, bifurcación por solicitud abierta, cierre de la
+    revisión y lock, todo adentro—. Quién prueba eso es
+    `test_confirmar_le_dice_que_no_a_un_telefono_que_no_es_del_equipo` en
+    tests/test_solicitudes.py, con un número que no está en `router.STAFF` en
+    vez de una función parcheada. Acá el teléfono ES del equipo (ver
+    `_el_equipo_de_verdad`), y lo único que se afirma es la credencial del
+    Submit.
     """
     monkeypatch.setattr(
         aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 0}
@@ -160,6 +189,50 @@ def test_manual_confirmation_uses_the_policy_credential_not_the_agent_one(
 
     assert resultado["ok"] is True
     submit.assert_called_once_with("Sales Order", "SAL-ORD-0001")
+
+
+def test_confirmar_adentro_del_lock_de_acciones_no_se_bloquea_contra_si_mismo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El anidamiento, contra el Redis de VERDAD y no contra los nombres.
+
+    `acciones.py` envuelve TODO `manejar_boton` en `accion:{pedido}` para el
+    camino autorizado por código de seis dígitos, y `decisiones.confirmar` toma
+    ahora un lock propio adentro. `locks.distributed_lock` arma el lock de redis
+    con `thread_local=False`: **no es reentrante**. Si los dos se llamaran
+    igual, confirmar con código esperaría 10 s por un lock que ya tiene el mismo
+    hilo, levantaría `CoordinationError`, y al encargado que acaba de tipear su
+    código le contestaría «no pude coordinar» — o sea que la vía autorizada por
+    código dejaría de confirmar, entera.
+
+    Ese peligro no lo ve una afirmación sobre NOMBRES: el doble de locks de
+    `test_solicitudes.py` registra nombres y nunca se bloquea, así que ahí los
+    dos se pueden llamar igual y el test pasa igual. Acá el lock de afuera se
+    toma de verdad, sobre el `REDIS_URL` que la suite ya exige, y lo que se
+    afirma es que la confirmación de adentro SALE.
+    """
+    from app import locks
+
+    pedido = "SAL-ORD-ANIDADO-1"
+    monkeypatch.setattr(
+        aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 0}
+    )
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", Mock())
+    monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
+    monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
+    monkeypatch.setattr(decisiones, "cerrar_revision_si_hay", lambda *a, **k: True)
+    monkeypatch.setattr(aprobacion.solicitudes, "leer", lambda nombre: None)
+
+    try:
+        with locks.distributed_lock(pedido_lock := f"accion:{pedido}", lease_seconds=30, wait_seconds=2):
+            assert pedido_lock  # el de afuera está tomado mientras corre lo de adentro
+            resultado = decisiones.confirmar(pedido, "5493511111111")
+    except locks.CoordinationError:
+        pytest.fail("no se pudo tomar el lock de afuera; ¿hay un Redis en REDIS_URL?")
+
+    assert resultado["ok"] is True, resultado["detalle"]
+    assert "coordinar" not in resultado["detalle"]
 
 
 # ---------------------------- el registro de herramientas no se lee en voz alta

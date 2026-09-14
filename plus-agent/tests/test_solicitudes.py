@@ -1322,13 +1322,83 @@ def test_the_sweep_never_raises_out_of_its_thread(mundo, monkeypatch) -> None:
     main._solicitudes_scheduler(stop)
 
 
-def test_a_decision_holds_the_lock_only_for_its_own_write(mundo) -> None:
+def test_una_solicitud_abierta_no_se_confirma_al_precio_viejo(mundo) -> None:
+    """LA RAZÓN POR LA QUE ESTE PR EXISTE, dicha como un test.
+
+    Un pedido con una solicitud abierta tiene términos nuevos —otra fecha, otro
+    cargo, otro método— que el cliente todavía NO aceptó. Emitirlo ahí no es
+    «confirmar rápido»: es cobrarle al cliente el pedido viejo mientras en su
+    teléfono está leyendo la contraoferta, y el submit no se deshace.
+
+    La bifurcación que lo impide vivía en `aprobacion.manejar_boton`, o sea en
+    el camino de WhatsApp y en ninguna otra parte, mientras `decisiones.
+    confirmar` —el nombre que cualquier segundo llamador iba a usar, y el que
+    un endpoint del panel va a usar— era un alias pelado de `confirmar_pedido`
+    y emitía igual. Por eso se entra por `decisiones.confirmar` y no por
+    `manejar_boton`: el test prueba la puerta, no el pasillo.
+    """
+    _abrir(mundo, solicitado=COMPLETO)
+    mundo["submits"].clear()
+
+    resultado = decisiones.confirmar(SO, STAFF)
+
+    assert mundo["submits"] == []
+    # Y no es que no haya pasado nada: la solicitud quedó decidida y esperando
+    # al cliente, que es lo que «aprobar» quiere decir con una solicitud
+    # abierta. Afirmar sólo la lista vacía lo cumpliría también un `confirmar`
+    # que se cayera antes de hacer nada.
+    assert resultado["ok"] is True
+    assert solicitudes.leer(SO).estado == solicitudes.ESPERANDO_CLIENTE
+
+
+def test_confirmar_le_dice_que_no_a_un_telefono_que_no_es_del_equipo(mundo) -> None:
+    """La autorización ES de `confirmar`, y hasta este cambio era del llamador.
+
+    `aprobacion.manejar_boton` comprueba `es_equipo` sobre el webhook FIRMADO de
+    Meta, y mientras fue el único llamador alcanzaba. `decisiones.confirmar` no
+    comprobaba nada: bastaba un segundo llamador que se olvidara —el endpoint
+    del panel es exactamente eso— para que un token cualquiera emitiera un
+    pedido. Se entra por la puerta, con un número que no está en `router.STAFF`.
+    """
+    _abrir(mundo, solicitado=COMPLETO)
+    mundo["submits"].clear()
+    mundo["locks"].clear()
+
+    resultado = decisiones.confirmar(SO, "5490000000000")
+
+    assert resultado["ok"] is False
+    assert "permiso" in resultado["detalle"]
+    assert mundo["submits"] == []
+    # Ni siquiera se toma el lock: a quien no puede decidir no se le reserva
+    # nada, y así un token que prueba mil veces no le hace cola a nadie.
+    assert mundo["locks"] == []
+
+
+def test_los_dos_locks_de_una_decision_se_anidan_y_no_se_llaman_igual(mundo) -> None:
+    """Dos locks, en ese orden, y con NOMBRES DISTINTOS.
+
+    `decisiones.confirmar` toma `confirmar:{pedido}` antes de mirar si hay una
+    solicitud abierta, porque la bifurcación es un leer-y-después-actuar: entre
+    la lectura y el submit el cliente puede abrir una excepción, y confirmar
+    ahí emite el pedido al precio viejo mientras el cliente mira términos que
+    todavía no aceptó. El de adentro, `solicitud:{pedido}`, sigue siendo el que
+    guarda la escritura.
+
+    QUE NO SE LLAMEN IGUAL NO ES ESTILO. `acciones.py` envuelve todo
+    `manejar_boton` en `accion:{pedido}` para el camino autorizado por código, y
+    `locks.distributed_lock` arma el lock de redis con `thread_local=False`: no
+    es reentrante. Dos locks con el mismo nombre en el mismo hilo esperan 10 s
+    uno por el otro y levantan `CoordinationError`. El orden es siempre
+    `accion:` ⊃ `confirmar:` ⊃ `solicitud:`, uno solo y sin ciclos, que es lo
+    que hace que anidar sea seguro.
+    """
     _abrir(mundo, solicitado=COMPLETO)
     mundo["locks"].clear()
 
     aprobacion.manejar_boton(f"ok:{SO}", STAFF)
 
-    assert mundo["locks"] == [f"solicitud:{SO}"]
+    assert mundo["locks"] == [f"confirmar:{SO}", f"solicitud:{SO}"]
+    assert len(set(mundo["locks"])) == len(mundo["locks"])
 
 
 # ---------------------------------------------------------------------------

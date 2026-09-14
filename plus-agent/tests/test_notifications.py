@@ -16,6 +16,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app import aprobacion, notificar, whatsapp
 
+
+@pytest.fixture(autouse=True)
+def _el_equipo_de_verdad(monkeypatch: pytest.MonkeyPatch):
+    """Los teléfonos que estos tests usan de encargado, en la lista DE VERDAD.
+
+    `es_equipo` se comprueba en DOS puertas —`aprobacion.manejar_boton` y
+    `decisiones.confirmar`— y cada módulo tiene su propia referencia a la
+    función, así que `monkeypatch.setattr(aprobacion, "es_equipo", ...)` tapa
+    una sola. Tampoco debería alcanzar: un test que DESACTIVA la autorización
+    en una puerta no puede discreparle al código sobre la otra, que es la forma
+    exacta del parche inerte que este repo ya se sacó de encima una vez
+    (tests/test_frontera_decisiones.py).
+
+    Se parchea `router.STAFF`, que es lo único que las dos puertas leen, y con
+    eso corre el `es_equipo` real en las dos. Los tests que afirman un RECHAZO
+    siguen parcheando lo suyo y siguen rechazando: un número que no está en
+    esta lista no confirma nada.
+    """
+    from app import router
+
+    monkeypatch.setattr(router, "STAFF", ["5491100000000", "5493511111111"])
+
+
 # Este archivo afirma texto en español, así que lo declara en vez de heredarlo
 # del entorno. Ver `_idioma_declarado` en tests/conftest.py.
 pytestmark = pytest.mark.idioma("es")

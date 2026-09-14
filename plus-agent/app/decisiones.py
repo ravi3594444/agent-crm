@@ -85,19 +85,74 @@ def telefono_del_cliente(nombre_so: str) -> str:
 
 
 def confirmar(nombre: str, por: str) -> dict:
-    """Confirm an exception order by hand. HUMAN MANAGER ONLY.
+    """Confirmar un pedido a mano. SÓLO UNA PERSONA DEL EQUIPO.
 
-    The implementation lives in app/aprobacion.py, where it is already proven
-    against duplicate taps and submit timeouts that commit after the client
-    gives up. This is the stable entry point for the manual path; the import is
-    late so the two modules do not depend on each other at import time.
+    LA PUERTA, y hasta este cambio no lo era. Esta función era un alias pelado
+    de `aprobacion.confirmar_pedido`, y las tres cosas que hacen que confirmar
+    sea seguro vivían en `aprobacion.manejar_boton`, o sea en el camino de
+    WhatsApp y en ninguna otra parte:
 
-    The caller is responsible for having authenticated the manager
-    (aprobacion.manejar_boton checks router.es_equipo on the signed webhook).
+      * **la autorización** — `es_equipo`, que acá no se comprobaba;
+      * **la bifurcación por solicitud abierta** — sin ella, un pedido con una
+        contraoferta esperando respuesta se confirmaba AL PRECIO ORIGINAL
+        mientras el cliente mira los términos nuevos que todavía no aceptó;
+      * **el cierre de la revisión humana** — sin él el borrador sigue en el
+        índice de vencimientos y el barrido lo cierra más tarde por su cuenta.
+
+    Las tres se movieron acá adentro, que es la forma que ya tienen `cancelar`,
+    `despreparar` y `_decidir` en este mismo archivo: comprueban quién llama,
+    toman su lock, y recién ahí hacen algo. `confirmar` era la única decisión
+    del módulo que no hacía ninguna de las dos.
+
+    `aprobacion.confirmar_pedido` sigue siendo el MECANISMO —es lo que está
+    probado contra el toque repetido y contra un submit que commitea después de
+    que el cliente HTTP se dio por vencido— y esta función es la POLÍTICA. El
+    Submit lo sigue haciendo `erpnext.submit_doc` con la credencial de
+    política, acá no cambia nada de eso.
+
+    Devuelve {"ok", "aviso_cliente", "detalle"}.
     """
-    from app.aprobacion import confirmar_pedido
+    if not es_equipo(por):
+        return _resultado(False, False, "No tenés permiso para confirmar pedidos.")
 
-    return confirmar_pedido(nombre, por)
+    # EL LOCK NO SE LLAMA `accion:` A PROPÓSITO, y no es cosmético.
+    # `acciones.py` envuelve TODO `manejar_boton` en `accion:{pedido}` para el
+    # camino autorizado por código, y `locks.distributed_lock` arma el lock de
+    # redis con `thread_local=False`: no es reentrante. Un lock con el mismo
+    # nombre acá adentro esperaría 10 s por sí mismo y levantaría
+    # `CoordinationError`, o sea que confirmar con código dejaría de funcionar.
+    # `cancelar:{...}` y `despreparar:{...}` ya anidan así dentro de `accion:`.
+    try:
+        with distributed_lock(f"confirmar:{nombre}", lease_seconds=60, wait_seconds=10):
+            return _confirmar_autorizado(nombre, por)
+    except CoordinationError:
+        return _resultado(
+            False,
+            False,
+            f"No pude coordinar la confirmación de {nombre}; probá de nuevo en un momento.",
+        )
+
+
+def _confirmar_autorizado(nombre: str, por: str) -> dict:
+    """Lo que hace «confirmar» con quien llama ya comprobado y el lock tomado."""
+    from app.aprobacion import confirmar_pedido, solicitud_abierta
+
+    # «Aprobar» no quiere decir «confirmar» cuando hay una solicitud abierta:
+    # quiere decir «aprobá lo que pidió el cliente», y los términos todavía
+    # tienen que ir al cliente antes de que se emita nada (app/solicitudes.py).
+    if solicitud_abierta(nombre) is not None:
+        return aprobar_solicitud(nombre, por)
+
+    resultado = confirmar_pedido(nombre, por)
+    # «Confirmar» es también la salida documentada de una revisión humana, y
+    # por eso REVISION_HUMANA NO es uno de `solicitudes.ABIERTOS`: esta palabra
+    # tiene que seguir queriendo decir «emití este borrador». Cerrar la
+    # revisión acá lo saca del índice de vencimientos en el acto en vez de
+    # esperar al barrido; es un no-op cuando no hay revisión, así que un
+    # encargado que la escribe tres veces paga tres lecturas.
+    if resultado.get("ok"):
+        cerrar_revision_si_hay(nombre, por, "una persona confirmó el pedido")
+    return resultado
 
 
 def confirmar_conteo(nombre: str, por: str) -> dict:
