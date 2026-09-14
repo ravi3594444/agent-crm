@@ -1326,6 +1326,87 @@ CATALOGO: dict[str, dict[str, str]] = {
         EN: "That number is not authorized for this. I checked nothing and "
             "changed nothing.",
     },
+    # ------------------------------------------------ los informes de gerencia
+    # app/tools/operaciones.py traducía las 40 cosas que devuelve y
+    # app/tools/gerencia.py ninguna de las suyas, y los dos devuelven bloques
+    # que el modelo relata casi textuales. Para un dueño que habla inglés, «¿de
+    # qué estoy corto?» volvía con las etiquetas en castellano. No era un
+    # criterio distinto: era que a este archivo nadie lo había traducido.
+    "gerencia.reporte_vacio": {
+        ES: "El reporte «{reporte}» no devolvió filas.",
+        EN: "Report \u201c{reporte}\u201d returned no rows.",
+    },
+    "gerencia.reporte_encabezado": {
+        ES: "Reporte «{reporte}» ({total} filas, muestro {muestro}):",
+        EN: "Report \u201c{reporte}\u201d ({total} rows, showing {muestro}):",
+    },
+    "gerencia.autonomia_fallo": {
+        ES: "No pude armar el resumen de autonomía: {error}.",
+        EN: "I could not build the autonomy summary: {error}.",
+    },
+    "gerencia.sin_pendientes": {
+        ES: "No hay pedidos pendientes de confirmación.",
+        EN: "No orders are waiting to be confirmed.",
+    },
+    "gerencia.pendientes_encabezado": {
+        ES: "{total} pedidos pendientes de confirmar:",
+        EN: "{total} orders waiting to be confirmed:",
+    },
+    # La antigüedad es con lo que decide a cuál atender primero.
+    "gerencia.antiguedad": {ES: " · hace {horas} h", EN: " · {horas} h ago"},
+    "gerencia.linea_pendiente": {
+        ES: "- {pedido} · {quien} · {monto} · entrega {fecha}{antiguedad}",
+        EN: "- {pedido} · {quien} · {monto} · delivery {fecha}{antiguedad}",
+    },
+    "gerencia.ventas_resumen": {
+        ES: "Últimos {dias} días: {total} pedidos confirmados, total {monto}. "
+            "Promedio {promedio} por pedido.",
+        EN: "Last {dias} days: {total} confirmed orders, {monto} in total. "
+            "Average {promedio} per order.",
+    },
+    "gerencia.ventas_vacio": {
+        ES: "Sin pedidos confirmados en los últimos {dias} días.",
+        EN: "No confirmed orders in the last {dias} days.",
+    },
+    "gerencia.stock_bajo_titulo": {ES: "Stock bajo:", EN: "Low stock:"},
+    "gerencia.stock_sin_alertas": {
+        ES: "Sin alertas de stock.",
+        EN: "No stock alerts.",
+    },
+    "gerencia.linea_stock": {
+        ES: "- {item}: {cantidad} (mínimo {minimo})",
+        EN: "- {item}: {cantidad} (minimum {minimo})",
+    },
+    "gerencia.sin_cobranzas": {
+        ES: "No hay saldos pendientes de cobro.",
+        EN: "There are no outstanding balances.",
+    },
+    "gerencia.cobranzas_encabezado": {
+        ES: "Total a cobrar {monto} en {total} facturas:",
+        EN: "{monto} outstanding across {total} invoices:",
+    },
+    "gerencia.linea_cobranza": {
+        ES: "- {cliente}: {monto}",
+        EN: "- {cliente}: {monto}",
+    },
+    "gerencia.cliente_no_encontrado": {
+        ES: "No encontré un cliente que coincida con «{quien}».",
+        EN: "I found no customer matching \u201c{quien}\u201d.",
+    },
+    "gerencia.ficha_encabezado": {
+        ES: "{nombre} ({codigo}) · {grupo} · {telefono}\nÚltimos pedidos:",
+        EN: "{nombre} ({codigo}) · {grupo} · {telefono}\nLatest orders:",
+    },
+    "gerencia.linea_pedido_cliente": {
+        ES: "  · {fecha} {pedido} {monto} ({estado})",
+        EN: "  · {fecha} {pedido} {monto} ({estado})",
+    },
+    "gerencia.ficha_sin_pedidos": {
+        ES: "  · sin pedidos confirmados",
+        EN: "  · no confirmed orders",
+    },
+    # Va adentro del encabezado de la ficha, donde iría el teléfono.
+    "gerencia.sin_telefono_corto": {ES: "s/tel", EN: "no phone"},
     # ------------------------------------------------ mensajes a un cliente
     # Lo que el dueño ve antes de aprobar. El texto va ENTRE COMILLAS y
     # completo: lo que aprueba es exactamente lo que va a salir, y si se

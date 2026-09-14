@@ -23,9 +23,9 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import Field
 
-from app import erpnext, policy
+from app import erpnext, idioma, policy
 from app.formato import pesos
-from app.runtime_context import SIN_PERMISO, RuntimeContextError, require_management
+from app.runtime_context import RuntimeContextError, require_management
 
 # POR QUÉ ESTO ES UNA HERRAMIENTA Y NO CINCO
 # ------------------------------------------
@@ -66,6 +66,17 @@ from app.runtime_context import SIN_PERMISO, RuntimeContextError, require_manage
 # Python, con el mismo cuerpo y la misma guarda `require_management` que tenía
 # su herramienta suelta. Universal acá quiere decir UN CAMPO TIPADO, nunca una
 # cadena libre: un `query(sql)` cambia un esquema por un agujero.
+
+
+def _sin_permiso() -> str:
+    """La negativa, en el idioma del equipo.
+
+    Era la constante `runtime_context.SIN_PERMISO`, en castellano y sin gemelo
+    en inglés: siete herramientas le contestaban al dueño que habla inglés en
+    el idioma equivocado. La constante sigue existiendo para los otros
+    llamadores; el ES de la clave es igual a ella y hay un test que lo afirma.
+    """
+    return idioma.t("permiso.sin_autorizacion", idioma.gerencia())
 
 
 @tool
@@ -142,14 +153,17 @@ def ejecutar_reporte(
     try:
         require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
+        return _sin_permiso()
+    lengua = idioma.gerencia()
     data = erpnext.run_report(nombre_reporte, filtros or {})
     if not data:
-        return f"El reporte '{nombre_reporte}' no devolvió filas."
+        return idioma.t("gerencia.reporte_vacio", lengua, reporte=nombre_reporte)
     filas = data[:40]
-    return f"Reporte '{nombre_reporte}' ({len(data)} filas, muestro {len(filas)}):\n" + "\n".join(
-        str(f) for f in filas
+    encabezado = idioma.t(
+        "gerencia.reporte_encabezado", lengua,
+        reporte=nombre_reporte, total=len(data), muestro=len(filas),
     )
+    return encabezado + "\n" + "\n".join(str(f) for f in filas)
 
 
 def _resumen_autonomia(
@@ -165,14 +179,16 @@ def _resumen_autonomia(
     try:
         require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
-    from app import autonomia, idioma
+        return _sin_permiso()
+    from app import autonomia
 
     try:
         datos = autonomia.resumen(int(dias or autonomia.DIAS_DEFAULT))
         return autonomia.texto(datos, idioma.gerencia())
     except Exception as exc:
-        return f"No pude armar el resumen de autonomía: {type(exc).__name__}."
+        return idioma.t(
+            "gerencia.autonomia_fallo", idioma.gerencia(), error=type(exc).__name__
+        )
 
 
 def _pedidos_pendientes(config: RunnableConfig) -> str:
@@ -181,7 +197,7 @@ def _pedidos_pendientes(config: RunnableConfig) -> str:
     try:
         require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
+        return _sin_permiso()
     sos = erpnext.get_list(
         "Sales Order",
         filters=[["docstatus", "=", 0]],
@@ -195,8 +211,9 @@ def _pedidos_pendientes(config: RunnableConfig) -> str:
         ],
         limit=50,
     )
+    lengua = idioma.gerencia()
     if not sos:
-        return "No hay pedidos pendientes de confirmación."
+        return idioma.t("gerencia.sin_pendientes", lengua)
     # customer_name, no customer: `customer` es el CÓDIGO de ERPNext
     # («CUST-0009»), y el dueño dice «el de la panadería». Con el código en
     # pantalla sus propias palabras no coinciden con nada. Y la antigüedad, que
@@ -207,13 +224,23 @@ def _pedidos_pendientes(config: RunnableConfig) -> str:
     lineas = []
     for s in sos:
         edad = pendientes.edad_horas(s)
-        antiguedad = f" · hace {edad:.0f} h" if edad is not None else ""
-        quien = s.get("customer_name") or s.get("customer")
-        lineas.append(
-            f"- {s['name']} · {quien} · {pesos(s['grand_total'])} "
-            f"· entrega {s['delivery_date']}{antiguedad}"
+        antiguedad = (
+            idioma.t("gerencia.antiguedad", lengua, horas=f"{edad:.0f}")
+            if edad is not None
+            else ""
         )
-    return f"{len(sos)} pedidos pendientes de confirmar:\n" + "\n".join(lineas)
+        lineas.append(idioma.t(
+            "gerencia.linea_pendiente", lengua,
+            pedido=s["name"],
+            quien=s.get("customer_name") or s.get("customer"),
+            monto=pesos(s["grand_total"]),
+            fecha=s["delivery_date"],
+            antiguedad=antiguedad,
+        ))
+    return (
+        idioma.t("gerencia.pendientes_encabezado", lengua, total=len(sos))
+        + "\n" + "\n".join(lineas)
+    )
 
 
 def _ventas_del_periodo(
@@ -228,7 +255,7 @@ def _ventas_del_periodo(
     try:
         require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
+        return _sin_permiso()
     desde = (policy._hoy_del_negocio() - timedelta(days=dias)).isoformat()
     sos = erpnext.get_list(
         "Sales Order",
@@ -236,12 +263,14 @@ def _ventas_del_periodo(
         fields=["name", "customer", "grand_total", "transaction_date"],
         limit=500,
     )
+    lengua = idioma.gerencia()
+    if not sos:
+        return idioma.t("gerencia.ventas_vacio", lengua, dias=dias)
     total = sum(s["grand_total"] for s in sos)
-    return (
-        f"Últimos {dias} días: {len(sos)} pedidos confirmados, "
-        f"total {pesos(total)}. Promedio {pesos(total / len(sos))} por pedido."
-        if sos
-        else f"Sin pedidos confirmados en los últimos {dias} días."
+    return idioma.t(
+        "gerencia.ventas_resumen", lengua,
+        dias=dias, total=len(sos), monto=pesos(total),
+        promedio=pesos(total / len(sos)),
     )
 
 
@@ -250,7 +279,8 @@ def _stock_bajo(config: RunnableConfig) -> str:
     try:
         require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
+        return _sin_permiso()
+    lengua = idioma.gerencia()
     items = erpnext.get_list(
         "Item Reorder",
         fields=["parent", "warehouse", "warehouse_reorder_level"],
@@ -274,10 +304,13 @@ def _stock_bajo(config: RunnableConfig) -> str:
         )
         qty = bins[0]["actual_qty"] if bins else 0
         if qty <= it["warehouse_reorder_level"]:
-            alertas.append(
-                f"- {it['parent']}: {qty:g} (mínimo {it['warehouse_reorder_level']:g})"
-            )
-    return "Stock bajo:\n" + "\n".join(alertas) if alertas else "Sin alertas de stock."
+            alertas.append(idioma.t(
+                "gerencia.linea_stock", lengua, item=it["parent"],
+                cantidad=f"{qty:g}", minimo=f"{it['warehouse_reorder_level']:g}",
+            ))
+    if not alertas:
+        return idioma.t("gerencia.stock_sin_alertas", lengua)
+    return idioma.t("gerencia.stock_bajo_titulo", lengua) + "\n" + "\n".join(alertas)
 
 
 def _cobranzas_vencidas(config: RunnableConfig) -> str:
@@ -285,18 +318,29 @@ def _cobranzas_vencidas(config: RunnableConfig) -> str:
     try:
         require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
+        return _sin_permiso()
     data = erpnext.run_report("Accounts Receivable", {"company": erpnext.default_company()})
     vencidas = [r for r in data if isinstance(r, dict) and (r.get("outstanding_amount") or 0) > 0]
+    lengua = idioma.gerencia()
     if not vencidas:
-        return "No hay saldos pendientes de cobro."
+        return idioma.t("gerencia.sin_cobranzas", lengua)
     total = sum(r["outstanding_amount"] for r in vencidas)
     top = sorted(vencidas, key=lambda r: -r["outstanding_amount"])[:10]
     lineas = [
-        f"- {r.get('customer_name') or r.get('party')}: {pesos(r['outstanding_amount'])}"
+        idioma.t(
+            "gerencia.linea_cobranza", lengua,
+            cliente=r.get("customer_name") or r.get("party"),
+            monto=pesos(r["outstanding_amount"]),
+        )
         for r in top
     ]
-    return f"Total a cobrar {pesos(total)} en {len(vencidas)} facturas.\n" + "\n".join(lineas)
+    return (
+        idioma.t(
+            "gerencia.cobranzas_encabezado", lengua,
+            monto=pesos(total), total=len(vencidas),
+        )
+        + "\n" + "\n".join(lineas)
+    )
 
 
 @tool
@@ -312,7 +356,7 @@ def ficha_cliente(
     try:
         require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
+        return _sin_permiso()
     # El parámetro promete las dos formas —«el nombre …, o su código de
     # ERPNext»— y esto buscaba sólo por `customer_name`, así que un código no
     # encontraba nada. Andaba de casualidad mientras cada cliente del banco de
@@ -323,6 +367,7 @@ def ficha_cliente(
     # puede coincidir con dos; después el nombre, con el mismo `like` de antes.
     # No se amplía nada más: los mismos campos, el mismo limit=1 y el mismo
     # portón de gerencia de acá arriba.
+    lengua = idioma.gerencia()
     campos = ["name", "customer_name", "customer_group", "mobile_no"]
     clientes = erpnext.get_list(
         "Customer",
@@ -336,7 +381,9 @@ def ficha_cliente(
         limit=1,
     )
     if not clientes:
-        return f"No encontré un cliente que coincida con '{nombre_o_codigo}'."
+        return idioma.t(
+            "gerencia.cliente_no_encontrado", lengua, quien=nombre_o_codigo
+        )
     c = clientes[0]
     sos = erpnext.get_list(
         "Sales Order",
@@ -351,10 +398,19 @@ def ficha_cliente(
         order_by="transaction_date desc, creation desc",
     )
     hist = "\n".join(
-        f"  · {s['transaction_date']} {s['name']} {pesos(s['grand_total'])} ({s['status']})"
+        idioma.t(
+            "gerencia.linea_pedido_cliente", lengua,
+            fecha=s["transaction_date"], pedido=s["name"],
+            monto=pesos(s["grand_total"]), estado=s["status"],
+        )
         for s in sos
-    ) or "  · sin pedidos confirmados"
+    ) or idioma.t("gerencia.ficha_sin_pedidos", lengua)
     return (
-        f"{c['customer_name']} ({c['name']}) · {c.get('customer_group', '')} · "
-        f"{c.get('mobile_no', 's/tel')}\nÚltimos pedidos:\n{hist}"
+        idioma.t(
+            "gerencia.ficha_encabezado", lengua,
+            nombre=c["customer_name"], codigo=c["name"],
+            grupo=c.get("customer_group", ""),
+            telefono=c.get("mobile_no") or idioma.t("gerencia.sin_telefono_corto", lengua),
+        )
+        + "\n" + hist
     )
