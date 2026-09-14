@@ -269,6 +269,105 @@ def test_setup_preserves_agent_configuration_and_does_not_rotate_token(tmp_path)
     assert module.configure(path) is None
 
 
+def _herramienta():
+    spec = importlib.util.spec_from_file_location(
+        "dashboard_setup", Path(__file__).parents[1] / "deploy" / "configurar_dashboard.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_el_token_que_escribe_la_herramienta_es_el_que_el_panel_acepta(
+    tmp_path, monkeypatch
+) -> None:
+    """De punta a punta: lo que el script deja en el `.env` lo LEE `quien()`.
+
+    Es la mitad que ningún test de la herramienta sola puede dar. El script
+    escribe `<token>:<teléfono>` y el panel lo parsea con
+    `dashboard.entradas_de_tokens`; si el formato se separara —una coma de más,
+    el teléfono escrito de otra forma, un largo mínimo distinto— el token
+    quedaría prolijo en el archivo y no entraría, sin que nada avise. Acá se
+    escribe con uno y se entra con el otro.
+    """
+    modulo = _herramienta()
+    numero = "+54 9 351 111 1111"
+    ruta = tmp_path / ".env"
+    ruta.write_text(f"TELEFONOS_EQUIPO={datos.TELEFONO_HABITUAL},5493511111111\n")
+
+    token, normalizado = modulo.agregar_persona(ruta, numero)
+
+    assert normalizado == "5493511111111", "lo guarda como lo busca el webhook"
+    escrito = ruta.read_text()
+    assert f"{token}:{normalizado}" in escrito
+    assert ruta.stat().st_mode & 0o777 == 0o600
+
+    # Y ahora el panel, leyendo lo mismo.
+    monkeypatch.setenv(
+        "DASHBOARD_TOKENS",
+        escrito.split("DASHBOARD_TOKENS=", 1)[1].strip(),
+    )
+    assert dashboard.quien(f"Bearer {token}") == normalizado
+
+
+def test_la_herramienta_no_mina_un_token_para_alguien_que_no_es_del_equipo(
+    tmp_path,
+) -> None:
+    """Un dígito mal tipeado da un token que entra y no puede confirmar nada.
+
+    `puede_decidir` exige `router.es_equipo`, así que un número que no está en
+    `TELEFONOS_EQUIPO` produce un panel que «no anda» sin que nada lo explique.
+    Se puede hacer a propósito —alguien que sólo mira— y para eso está la
+    bandera; lo que no se puede es hacerlo sin querer.
+    """
+    modulo = _herramienta()
+    ruta = tmp_path / ".env"
+    ruta.write_text("TELEFONOS_EQUIPO=5493511111111\n")
+
+    with pytest.raises(ValueError, match="no está en TELEFONOS_EQUIPO"):
+        modulo.agregar_persona(ruta, "5493512222222")
+    assert "DASHBOARD_TOKENS" not in ruta.read_text()
+
+    token, numero = modulo.agregar_persona(ruta, "5493512222222", solo_lectura=True)
+    assert f"{token}:{numero}" in ruta.read_text()
+
+
+def test_la_herramienta_no_le_da_un_segundo_token_a_la_misma_persona(tmp_path) -> None:
+    """Dos tokens vivos para una persona es uno que nadie sabe que existe.
+
+    Y se comprueba contra el teléfono NORMALIZADO: pedirlo la segunda vez
+    escrito distinto —con `+`, con espacios— es la misma persona, así que
+    comparar los textos crudos dejaría pasar exactamente el caso que más se da.
+    """
+    modulo = _herramienta()
+    ruta = tmp_path / ".env"
+    ruta.write_text("TELEFONOS_EQUIPO=5493511111111\n")
+    modulo.agregar_persona(ruta, "5493511111111")
+    antes = ruta.read_text()
+
+    with pytest.raises(ValueError, match="ya tiene un token"):
+        modulo.agregar_persona(ruta, "+54 9 351 111-1111")
+
+    assert ruta.read_text() == antes
+
+
+def test_la_herramienta_agrega_sin_pisar_a_los_que_ya_estaban(tmp_path) -> None:
+    """El segundo token no borra al primero: se agrega a la lista."""
+    modulo = _herramienta()
+    ruta = tmp_path / ".env"
+    ruta.write_text(
+        "TELEFONOS_EQUIPO=5493511111111,5493512222222\nWHATSAPP_TOKEN=intacto\n"
+    )
+
+    primero, _ = modulo.agregar_persona(ruta, "5493511111111")
+    segundo, _ = modulo.agregar_persona(ruta, "5493512222222")
+
+    escrito = ruta.read_text()
+    assert primero in escrito and segundo in escrito
+    assert escrito.count("DASHBOARD_TOKENS=") == 1
+    assert "WHATSAPP_TOKEN=intacto\n" in escrito
+
+
 @pytest.fixture
 def almacen_con_cliente(connected):
     """El cliente habitual, con un pedido de ESTA empresa y su WhatsApp.
