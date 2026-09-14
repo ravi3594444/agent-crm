@@ -262,6 +262,41 @@ PROSA = {"metodo": "entrega"}
 COMPLETO = {"metodo": "entrega", "fecha": "2026-09-05", "hora": "18:00", "cargo": 0}
 
 
+def test_una_solicitud_que_no_se_pudo_abrir_loguea_la_CAUSA_y_no_una_suposicion(
+    monkeypatch, capsys
+) -> None:
+    """No abrir nada está bien para las dos causas; decir cuál fue es otra cosa.
+
+    `crear` falla cerrado ante `CoordinationError` y así tiene que quedarse: con
+    alguien decidiendo el pedido su estado está en vuelo, y con Redis caído no
+    hay nada durable que escribir. Pero `CoordinationError` cubre TRES casos
+    distintos —`REDIS_URL` sin configurar, el lock ocupado después de esperar, y
+    redis inalcanzable (`app/locks.py`)—, y el log decía «ocupado» para los
+    tres. O sea que afirmaba una causa que no había comprobado: un Redis caído
+    quedaba anotado en el log como contención, que es el diagnóstico que hace
+    que nadie vaya a mirar la conexión.
+
+    Las DOS mitades: que aparezca la causa, y que ya NO aparezca la suposición.
+    Con sólo la primera, un log que dijera «ocupado (falló la coordinación…)»
+    pasaría el test siendo igual de engañoso de un vistazo.
+    """
+    from app import locks
+
+    def caido(*args, **kwargs):
+        raise locks.CoordinationError("falló la coordinación distribuida")
+
+    monkeypatch.setattr(locks, "distributed_lock", caido)
+
+    assert solicitudes.crear(
+        {**PEDIDO, "name": "SAL-ORD-SIN-REDIS"}, solicitado=dict(COMPLETO)
+    ) is None
+
+    salida = capsys.readouterr().out
+    assert "falló la coordinación distribuida" in salida
+    assert "ocupado" not in salida
+
+
+
 def _abrir(
     mundo,
     nota: str = "hoy no hay reparto, ¿me lo traen igual?",

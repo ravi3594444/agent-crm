@@ -93,6 +93,39 @@ def telefono_del_cliente(nombre_so: str) -> str:
 CANAL_WHATSAPP = "WhatsApp"
 CANAL_PANEL = "el panel"
 
+# Cuánto puede tardar la sección crítica de emitir, y de dónde sale el número.
+# Adentro de `solicitud:{pedido}` quedan CUATRO llamadas a ERPNext y ninguna a
+# una persona: leer la solicitud, leer el pedido, el Submit, y —sólo si el
+# Submit expira— la relectura que dice si commiteó igual. El cliente de política
+# tiene `timeout=30.0` (app/erpnext.py) y no reintenta, así que el techo son
+# 120 s. Eran 60 para una sección que llegaba a 315: once llamadas a ERPNext más
+# un POST a Meta de 15 s, con un lease que nadie renueva.
+LEASE_EMISION = 180
+
+# El de afuera se queda en 60 A PROPÓSITO, y no es un olvido. Lo único que
+# serializa es confirmar contra confirmar —`confirmar:` no lo toma nadie más en
+# todo el repo—, y lo que cubre más allá de `solicitud:` es el anuncio, que es
+# idempotente por diseño (ver `aprobacion.Emision`). Si vence, dos
+# confirmaciones se pisan y la segunda cae en la rama «ya estaba confirmado»,
+# que es exactamente para lo que existe. Un lease más largo acá no compra nada
+# y alarga a varios minutos el pedido bloqueado cuando un proceso se muere.
+LEASE_PUERTA = 60
+
+
+def _con_emitido(resultado: dict, emitido: bool) -> dict:
+    """Marca si el pedido quedó EMITIDO, que no es lo mismo que si salió bien.
+
+    `ok` dice que la acción que el encargado pidió se hizo. Con una solicitud
+    abierta esa acción NO es emitir: es aprobar la contraoferta. Sale bien, `ok`
+    es True, y el pedido sigue siendo un BORRADOR reservando stock — lo que pasó
+    es que se le mandaron los términos nuevos al cliente y se espera su
+    respuesta. El panel leía `ok` y marcaba la fila como confirmada, o sea que
+    mostraba una venta cerrada que no existe, sobre un pedido que todavía puede
+    rechazarse. Son dos hechos distintos y ahora viajan separados: `emitido` es
+    True sólo si el Sales Order está en `docstatus=1`.
+    """
+    return {**resultado, "emitido": emitido}
+
 
 def confirmar(nombre: str, por: str, *, canal: str) -> dict:
     """Confirmar un pedido a mano. SÓLO UNA PERSONA DEL EQUIPO.
@@ -126,7 +159,9 @@ def confirmar(nombre: str, por: str, *, canal: str) -> dict:
     Devuelve {"ok", "aviso_cliente", "detalle"}.
     """
     if not es_equipo(por):
-        return _resultado(False, False, "No tenés permiso para confirmar pedidos.")
+        return _con_emitido(
+            _resultado(False, False, "No tenés permiso para confirmar pedidos."), False
+        )
 
     # EL LOCK NO SE LLAMA `accion:` A PROPÓSITO, y no es cosmético.
     # `acciones.py` envuelve TODO `manejar_boton` en `accion:{pedido}` para el
@@ -136,13 +171,16 @@ def confirmar(nombre: str, por: str, *, canal: str) -> dict:
     # `CoordinationError`, o sea que confirmar con código dejaría de funcionar.
     # `cancelar:{...}` y `despreparar:{...}` ya anidan así dentro de `accion:`.
     try:
-        with distributed_lock(f"confirmar:{nombre}", lease_seconds=60, wait_seconds=10):
+        with distributed_lock(f"confirmar:{nombre}", lease_seconds=LEASE_PUERTA, wait_seconds=10):
             return _confirmar_autorizado(nombre, por, canal)
     except CoordinationError:
-        return _resultado(
+        return _con_emitido(
+            _resultado(
+                False,
+                False,
+                f"No pude coordinar la confirmación de {nombre}; probá de nuevo en un momento.",
+            ),
             False,
-            False,
-            f"No pude coordinar la confirmación de {nombre}; probá de nuevo en un momento.",
         )
 
 
@@ -159,18 +197,29 @@ def _confirmar_autorizado(nombre: str, por: str, canal: str) -> dict:
     relee el borrador adentro, que es la otra mitad: sin ella el lock serializa
     y el segundo igual hace lo que iba a hacer.
 
+    ADENTRO DEL LOCK VA `emitir` Y NADA MÁS. `anunciar` —el comentario, la marca
+    durable, el aviso al equipo y el aviso al cliente— corre afuera, y no es una
+    optimización: el lease son 180 s y el anuncio solo llega a 200 largos, con un
+    POST a Meta de 15 s en el medio. Con la función entera adentro el lease
+    vencía en mitad de la sección, `solicitudes.crear` tomaba la llave libre y le
+    abría una solicitud a un pedido que estaba por emitirse — la misma carrera,
+    reabierta por el reloj. Soltar antes no abre ninguna ventana: cuando
+    `anunciar` empieza, el Submit ya commiteó y `_sigue_en_borrador` lee
+    `docstatus=1` y se niega solo. Es la regla que el repo ya escribió tres
+    veces: **el teléfono de nadie va adentro de un lock.**
+
     El orden es `accion:` ⊃ `confirmar:` ⊃ `solicitud:`, siempre en ese sentido
     y sin ciclos. `aprobar_solicitud` y `cerrar_revision_si_hay` se llaman
     FUERA del `with` a propósito: las dos vuelven a tomar `solicitud:{pedido}` y
     `locks.distributed_lock` no es reentrante (`thread_local=False`), así que
     desde adentro esperarían 10 s por un lock que ya tiene este mismo hilo.
     """
-    from app.aprobacion import confirmar_pedido, solicitud_abierta_estricta
+    from app.aprobacion import Emision, anunciar, emitir, solicitud_abierta_estricta
     from app.solicitudes import LecturaIncierta
 
-    resultado: dict | None = None
+    emision: Emision | None = None
     # CoordinationError sube hasta `confirmar`, que ya la contesta.
-    with distributed_lock(f"solicitud:{nombre}", lease_seconds=60, wait_seconds=10):
+    with distributed_lock(f"solicitud:{nombre}", lease_seconds=LEASE_EMISION, wait_seconds=10):
         try:
             abierta = solicitud_abierta_estricta(nombre)
         except LecturaIncierta as exc:
@@ -178,21 +227,29 @@ def _confirmar_autorizado(nombre: str, por: str, canal: str) -> dict:
             # contraoferta esperando», y confundirlos con ERPNext caído emite
             # el borrador sin poder probar que nadie está esperando otra cosa.
             print(f"[decisiones] {nombre}: no confirmo, estado incierto ({exc})")
-            return _resultado(
+            return _con_emitido(
+                _resultado(
+                    False,
+                    False,
+                    f"No pude verificar el estado de {nombre} y no lo confirmé. "
+                    "Probá de nuevo en un momento.",
+                ),
                 False,
-                False,
-                f"No pude verificar el estado de {nombre} y no lo confirmé. "
-                "Probá de nuevo en un momento.",
             )
         # «Aprobar» no quiere decir «confirmar» cuando hay una solicitud
         # abierta: quiere decir «aprobá lo que pidió el cliente», y los términos
         # todavía tienen que ir al cliente antes de que se emita nada
         # (app/solicitudes.py).
         if abierta is None:
-            resultado = confirmar_pedido(nombre, por, canal=canal)
+            emision = emitir(nombre)
 
-    if resultado is None:
-        return aprobar_solicitud(nombre, por)
+    if emision is None:
+        # No se emitió nada: salió una contraoferta y el pedido sigue borrador.
+        return _con_emitido(aprobar_solicitud(nombre, por), False)
+    if emision.rechazo is not None:
+        return _con_emitido(emision.rechazo, False)
+
+    resultado = _con_emitido(anunciar(emision, por, canal=canal), True)
     # «Confirmar» es también la salida documentada de una revisión humana, y
     # por eso REVISION_HUMANA NO es uno de `solicitudes.ABIERTOS`: esta palabra
     # tiene que seguir queriendo decir «emití este borrador». Cerrar la

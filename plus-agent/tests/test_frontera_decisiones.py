@@ -336,6 +336,218 @@ def test_con_el_lock_del_pedido_tomado_afuera_no_se_emite_nada(
     submit.assert_not_called()
 
 
+def test_el_submit_corre_con_el_lock_del_pedido_TOMADO(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El submit pasa con `solicitud:{pedido}` en la mano, y se mide desde adentro.
+
+    ESTE TEST EXISTE PORQUE EL DE ARRIBA NO ALCANZABA.
+    `test_con_el_lock_del_pedido_tomado_afuera_no_se_emite_nada` toma el lock
+    desde afuera y comprueba que no se emite nada, y eso lo cumple igual un
+    código que tiene ADENTRO del `with` solamente la lectura de la solicitud:
+    la puerta choca contra el lock ajeno al entrar, contesta «no pude coordinar»
+    y nunca llega al submit, así que el test queda verde tenga el submit adentro
+    o afuera. Medido: sacar `emitir(...)` del `with` dejaba los 2909 tests en
+    verde. Es el mismo defecto que CLAUDE.md describe —un test estructuralmente
+    incapaz de fallar sobre lo que dice cubrir— y es la mitad de la sección
+    crítica que más caro sale, porque es la irreversible.
+
+    La única forma de afirmarlo es preguntando DESDE ADENTRO: en el momento del
+    submit, pedir el mismo lock tiene que fallar. `locks.distributed_lock` lo
+    arma con `thread_local=False` y no es reentrante, así que si este hilo ya lo
+    tiene, un segundo intento sin espera levanta `CoordinationError`. Si el lock
+    estuviera suelto, el intento tendría éxito — que es exactamente el estado
+    que le deja la puerta abierta a `solicitudes.crear`.
+
+    La mutación que lo mata y no mata a otro: sacar `emitir(nombre)` afuera del
+    `with distributed_lock(f"solicitud:{nombre}")` de `_confirmar_autorizado`.
+    """
+    from app import locks, solicitudes
+
+    pedido = "SAL-ORD-ADENTRO-1"
+    tomado: dict[str, bool] = {}
+
+    def submit(doctype, name):
+        try:
+            with locks.distributed_lock(
+                f"solicitud:{name}", lease_seconds=5, wait_seconds=0
+            ):
+                tomado["pedido"] = False
+        except locks.CoordinationError:
+            tomado["pedido"] = True
+
+    monkeypatch.setattr(
+        aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 0}
+    )
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
+    monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
+    monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
+    monkeypatch.setattr(aprobacion, "_notificar_confirmada", lambda *a, **k: None)
+    monkeypatch.setattr(solicitudes, "leer_estricto", lambda nombre: None)
+    monkeypatch.setattr(decisiones, "cerrar_revision_si_hay", lambda *a, **k: None)
+
+    resultado = decisiones.confirmar(
+        pedido, "5493511111111", canal=decisiones.CANAL_WHATSAPP
+    )
+
+    assert resultado["ok"] is True
+    assert tomado["pedido"] is True
+
+
+def test_el_aviso_a_la_persona_sale_con_el_lock_del_pedido_ya_suelto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El anuncio corre AFUERA de `solicitud:{pedido}`, y es la otra mitad.
+
+    El test de acá arriba prueba que el submit está ADENTRO del lock. Éste
+    prueba lo contrario sobre la otra mitad de la misma función, y hacen falta
+    los dos: son dos consumidores de la misma decisión —dónde corta la sección
+    crítica— y una sola mutación no puede matarlos a los dos.
+
+    Por qué importa que esté afuera: el lease son 180 s y adentro del `with`
+    había once llamadas a ERPNext (20 y 30 s de timeout) más un POST a Meta de
+    15 s, que suman 315. Al vencer el lease, `solicitudes.crear` toma la llave
+    libre, relee el borrador todavía en `docstatus=0` y le abre una solicitud a
+    un pedido que está por emitirse: la carrera que esta puerta existe para
+    cerrar, reabierta por el reloj. Es además la regla que el repo ya escribió
+    tres veces —`solicitudes._vencer`, `agenda._despachar` y la baja de
+    `agenda`—: el teléfono de nadie va adentro de un lock.
+
+    El doble toma el lock DE VERDAD y no finge nada más, igual que el de la
+    rama de solicitud abierta: lo único que tiene que representar es «esto le
+    habla a una persona, y mientras tanto el pedido tiene que estar libre». Un
+    doble que sólo anotara que lo llamaron no podría discrepar con el código
+    sobre lo único que este test afirma.
+
+    La mutación que lo mata y no mata a otro: mover `anunciar(...)` adentro del
+    `with distributed_lock(f"solicitud:{nombre}")` de `_confirmar_autorizado`.
+    El de arriba sigue verde porque el submit sigue adentro.
+    """
+    from app import locks, solicitudes
+
+    pedido = "SAL-ORD-SUELTO-1"
+    libre: dict[str, bool] = {}
+
+    def avisar(nombre, conocido, *, ventana=True):
+        try:
+            with locks.distributed_lock(
+                f"solicitud:{nombre}", lease_seconds=5, wait_seconds=0
+            ):
+                libre["pedido"] = True
+        except locks.CoordinationError:
+            libre["pedido"] = False
+
+    monkeypatch.setattr(
+        aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 0}
+    )
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", Mock())
+    monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
+    monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
+    monkeypatch.setattr(aprobacion, "_notificar_confirmada", avisar)
+    monkeypatch.setattr(solicitudes, "leer_estricto", lambda nombre: None)
+    monkeypatch.setattr(decisiones, "cerrar_revision_si_hay", lambda *a, **k: None)
+
+    resultado = decisiones.confirmar(
+        pedido, "5493511111111", canal=decisiones.CANAL_WHATSAPP
+    )
+
+    assert resultado["ok"] is True
+    assert libre["pedido"] is True
+
+
+def test_aprobar_una_contraoferta_no_dice_que_el_pedido_quedo_emitido(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ok` y `emitido` son dos hechos, y con una solicitud abierta no coinciden.
+
+    Con una contraoferta esperando, la puerta NO emite: aprueba la solicitud y
+    le manda los términos nuevos al cliente. Eso sale bien, así que `ok` es
+    True —la acción que el encargado pidió se hizo— y el Sales Order sigue
+    siendo un BORRADOR reservando stock, que el cliente todavía puede rechazar.
+    El panel leía `ok` y pintaba la fila como confirmada: una venta cerrada que
+    no existe, sobre el único endpoint del sistema que mueve plata.
+
+    Las DOS mitades, y la segunda es la que atrapa el bug: que `emitido` sea
+    False acá lo cumpliría igual un código que lo devuelve False SIEMPRE, y
+    entonces el panel no podría pintar ninguna confirmación. Por eso se afirma
+    también el caso en que sí se emite.
+
+    Mutación dirigida: cambiar `_con_emitido(aprobar_solicitud(...), False)` por
+    `True` en `_confirmar_autorizado`. Mata a este test y a ningún otro.
+    """
+    from app import locks, solicitudes
+
+    pedido = "SAL-ORD-OFERTA-1"
+    abierta = Mock(abierta=True)
+    monkeypatch.setattr(solicitudes, "leer_estricto", lambda nombre: abierta)
+
+    def aprobar(nombre, por):
+        with locks.distributed_lock(
+            f"solicitud:{nombre}", lease_seconds=30, wait_seconds=10
+        ):
+            return {"ok": True, "aviso_cliente": True, "detalle": "derivada"}
+
+    monkeypatch.setattr(decisiones, "aprobar_solicitud", aprobar)
+
+    derivado = decisiones.confirmar(
+        pedido, "5493511111111", canal=decisiones.CANAL_WHATSAPP
+    )
+
+    assert derivado["ok"] is True
+    assert derivado["emitido"] is False
+
+    # Y la otra mitad: sin solicitud abierta, el mismo camino SÍ emite.
+    monkeypatch.setattr(solicitudes, "leer_estricto", lambda nombre: None)
+    monkeypatch.setattr(
+        aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 0}
+    )
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", Mock())
+    monkeypatch.setattr(aprobacion.erpnext, "add_comment", Mock())
+    monkeypatch.setattr(aprobacion.avisos, "confirmacion_cliente", lambda so: True)
+    monkeypatch.setattr(aprobacion.confirmacion, "registrar", lambda *a, **k: True)
+    monkeypatch.setattr(aprobacion, "_notificar_confirmada", lambda *a, **k: None)
+    monkeypatch.setattr(decisiones, "cerrar_revision_si_hay", lambda *a, **k: None)
+
+    emitido = decisiones.confirmar(
+        pedido, "5493511111111", canal=decisiones.CANAL_WHATSAPP
+    )
+
+    assert emitido["ok"] is True
+    assert emitido["emitido"] is True
+
+
+def test_un_estado_que_no_se_puede_confirmar_tampoco_dice_emitido(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El rechazo del mecanismo viaja con `emitido` False, no sin la clave.
+
+    `confirmar` tiene cinco salidas —sin permiso, sin coordinación, estado
+    incierto, la contraoferta, el rechazo del mecanismo— y el panel lee la misma
+    clave en todas. Una salida que se olvidara de ponerla haría que `.get()`
+    contestara None, que es falsy y por eso pasa desapercibido hasta que alguna
+    vez signifique otra cosa. Se afirma que la clave ESTÁ y que es False.
+    """
+    from app import solicitudes
+
+    pedido = "SAL-ORD-CANCELADO-1"
+    monkeypatch.setattr(solicitudes, "leer_estricto", lambda nombre: None)
+    monkeypatch.setattr(
+        aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 2}
+    )
+    submit = Mock()
+    monkeypatch.setattr(aprobacion.erpnext, "submit_doc", submit)
+
+    resultado = decisiones.confirmar(
+        pedido, "5493511111111", canal=decisiones.CANAL_WHATSAPP
+    )
+
+    assert resultado["ok"] is False
+    assert resultado["emitido"] is False
+    submit.assert_not_called()
+
+
 def test_el_rastro_en_erpnext_nombra_el_canal_por_el_que_se_confirmo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

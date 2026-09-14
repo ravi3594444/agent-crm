@@ -31,6 +31,25 @@ READ_TIMEOUT = 3.0
 # Con un pool propio y acotado, la peor lectura del panel sólo hace esperar a
 # otra lectura del panel.
 _HILOS = ThreadPoolExecutor(max_workers=4, thread_name_prefix="dashboard")
+
+# Y LA ESCRITURA TIENE EL SUYO, por la misma razón un nivel más abajo.
+#
+# Una lectura son unos segundos; confirmar es otra cosa entera: hasta 10 s
+# esperando `confirmar:`, otros 10 esperando `solicitud:`, y después la cadena
+# del submit contra timeouts de 20 y 30 s. Medido, un confirm contra un ERPNext
+# colgado ocupa su hilo varios MINUTOS. Con los cuatro hilos compartidos eso se
+# come el pool y `/snapshot`, `/today` y `/queue` se quedan en la cola:
+# `run_in_executor` encola sin límite y el cliente que se cansa no cancela nada,
+# así que el panel se veía muerto para todo el mundo mientras el trabajo seguía
+# ahí adentro. Con un pool aparte, el peor confirm sólo hace esperar a otro
+# confirm.
+#
+# NO LLEVA DEADLINE, y es deliberado. Cortar la espera no cancela el hilo ni el
+# submit —`run_in_executor` no se interrumpe—, así que un tope sólo cambiaría
+# «la respuesta tarda» por «se le informa un fallo a alguien cuyo pedido SÍ se
+# emitió». Un encargado que lee eso vuelve a tocar el botón. La confirmación es
+# idempotente y aguanta el segundo toque, pero el informe sería mentira.
+_HILOS_ESCRITURA = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dashboard-write")
 ORDER_FIELDS = [
     "name", "customer", "customer_name", "transaction_date", "delivery_date",
     "grand_total", "currency", "status", "docstatus",
@@ -336,14 +355,36 @@ def confirmar_desde_el_panel(order_id: str, quien_decide: str) -> dict:
         # LA PERTENENCIA PRIMERO, y con la misma lectura que `order_detail`:
         # levanta `RecordNotFound` para un pedido de otra empresa, así que un
         # token válido no puede confirmar un pedido que ni siquiera puede ver.
-        _pedido_de_la_empresa(order_id)
+        pedido = _pedido_de_la_empresa(order_id)
+
+    # EL NOMBRE CANÓNICO, EL DEL DOCUMENTO, no el texto que vino en la URL — y
+    # la diferencia entre los dos es un lock. Esta lectura ya se hacía y su
+    # resultado se tiraba. ERPNext resuelve el nombre sin mirar mayúsculas
+    # (MariaDB colaciona así por defecto), así que un
+    # `POST /orders/so-ord-0001/confirm` encuentra el pedido igual — y después
+    # `decisiones.confirmar` arma con ese texto `solicitud:so-ord-0001`, que en
+    # Redis NO es la misma llave que el `solicitud:SO-ORD-0001` que toma
+    # `solicitudes.crear` (de `so["name"]`, siempre canónico) y que toma el
+    # botón de WhatsApp (`acciones.pedido_valido` termina en `.upper()`).
+    # Dos llaves distintas para el mismo pedido es no tener exclusión mutua
+    # entre los dos canales: exactamente la carrera que ese lock cierra.
+    # El panel era el único camino que no canonizaba.
+    nombre = str(pedido.get("name") or order_id)
 
     resultado = decisiones.confirmar(
-        order_id, quien_decide, canal=decisiones.CANAL_PANEL
+        nombre, quien_decide, canal=decisiones.CANAL_PANEL
     )
     return {
-        "orderId": order_id,
+        "orderId": nombre,
         "ok": bool(resultado.get("ok")),
+        # `ok` NO ES «se confirmó», y confundirlos mostraba una venta que no
+        # existe. Con una contraoferta abierta la puerta aprueba la solicitud y
+        # le manda los términos nuevos al cliente: sale bien, `ok` es True, y no
+        # hubo ningún Submit — el pedido sigue siendo un borrador reservando
+        # stock, y el cliente todavía puede rechazarlo. `submitted` es el hecho
+        # que el panel necesita para pintar la fila, y es el único que dice
+        # `docstatus=1`.
+        "submitted": bool(resultado.get("emitido")),
         "customerNotified": bool(resultado.get("aviso_cliente")),
         "detail": str(resultado.get("detalle") or ""),
     }
@@ -850,13 +891,30 @@ def entradas_de_tokens(crudo: str) -> tuple[dict[str, str], list[str]]:
     solo parser, además, el chequeo no puede discrepar con el panel sobre qué
     entrada es válida.
 
+    NINGUNA AMBIGÜEDAD SE ACEPTA A MEDIAS: si dos entradas comparten el token,
+    o dos entradas apuntan al mismo teléfono, se caen LAS DOS. Antes ganaba la
+    primera y las otras se descartaban calladas, y eso rompía lo único para lo
+    que sirve tener un token por persona: revocar. Revocar es sacar una línea
+    del `.env`, y con dos líneas para la misma persona el dueño saca una, cree
+    que le cortó el acceso, y la otra sigue entrando y sigue pudiendo confirmar
+    pedidos; si saca la otra, ASCIENDE un token que hasta ese momento no hacía
+    nada. En los dos casos el `.env` no dice lo que pasa.
+
+    El token repetido es peor todavía y es el que se veía menos: dos entradas
+    con el mismo token y teléfonos DISTINTOS resolvían al primero, así que la
+    persona a la que se le dio ese token entraba con la identidad de la otra —y
+    con sus permisos, si la otra está en TELEFONOS_EQUIPO—. Rechazar las dos es
+    la forma que falla cerrada, y cuesta poco: el panel no es la única puerta
+    para confirmar, el botón de WhatsApp no depende de esto, y
+    `deploy/configurar_dashboard.py` ya se niega a emitir un segundo token, así
+    que para llegar acá hay que haber editado el archivo a mano.
+
     EL TOKEN NUNCA SALE EN UN MOTIVO: los motivos se leen en la salida de
     `readiness`, que es lo que la gente pega en un chat cuando algo no anda.
     """
     from app import telefono as telefonos
 
-    pares: dict[str, str] = {}
-    personas: set[str] = set()
+    candidatas: list[tuple[int, str, str]] = []
     problemas: list[str] = []
     for posicion, entrada in enumerate(crudo.split(","), start=1):
         entrada = entrada.strip()
@@ -876,33 +934,60 @@ def entradas_de_tokens(crudo: str) -> tuple[dict[str, str], list[str]]:
             problemas.append(
                 f"el teléfono de la entrada {posicion} no se puede interpretar"
             )
-        elif token in pares:
-            problemas.append(f"la entrada {posicion} repite un token que ya estaba")
-        elif numero in personas:
-            # DOS tokens distintos para la MISMA persona. El duplicado de token
-            # de arriba no lo ve —son textos distintos— y el teléfono tampoco
-            # si se comparan crudos: `+54 9 11 …` y `5491…` son la misma persona
-            # y dos strings. Se compara el NORMALIZADO, que es lo que quedó en
-            # `numero`, igual que en `deploy/configurar_dashboard.py`.
-            #
-            # Importa porque revocar es «sacá la línea del .env»: con dos, el
-            # dueño saca una, cree que le cortó el acceso a esa persona, y la
-            # otra sigue entrando y sigue pudiendo confirmar pedidos. La
-            # herramienta que emite tokens ya lo rechaza; una configuración
-            # editada a mano o vieja entraba igual, y era la que nadie miraba.
+        else:
+            candidatas.append((posicion, token, numero))
+
+    # DOS PASADAS, y hace falta que sean dos: en una sola, «repetida» sólo se
+    # puede decir de la segunda, y es la primera la que se queda con el acceso.
+    # El teléfono se compara NORMALIZADO —`+54 9 11 …` y `5491…` son la misma
+    # persona y dos strings—, igual que en `deploy/configurar_dashboard.py`.
+    veces_token: dict[str, int] = {}
+    veces_numero: dict[str, int] = {}
+    for _, token, numero in candidatas:
+        veces_token[token] = veces_token.get(token, 0) + 1
+        veces_numero[numero] = veces_numero.get(numero, 0) + 1
+
+    pares: dict[str, str] = {}
+    for posicion, token, numero in candidatas:
+        if veces_token[token] > 1:
             problemas.append(
-                f"la entrada {posicion} es un segundo token para un teléfono que "
-                "ya tenía uno: sacar una sola línea no le corta el acceso"
+                f"la entrada {posicion} repite un token que está en otra entrada: "
+                "no entra ninguna de las dos"
+            )
+        elif veces_numero[numero] > 1:
+            problemas.append(
+                f"la entrada {posicion} es uno de varios tokens para el mismo "
+                "teléfono: no entra ninguno, porque sacar una sola línea no le "
+                "cortaría el acceso"
             )
         else:
             pares[token] = numero
-            personas.add(numero)
     return pares, problemas
 
 
+# Lo último que se avisó, para no repetir el aviso en cada petición.
+_TOKENS_AVISADOS: str | None = None
+
+
 def _tokens_por_persona() -> dict[str, str]:
-    """Las entradas válidas de `DASHBOARD_TOKENS`. Ver `entradas_de_tokens`."""
-    return entradas_de_tokens(os.getenv("DASHBOARD_TOKENS", ""))[0]
+    """Las entradas válidas de `DASHBOARD_TOKENS`. Ver `entradas_de_tokens`.
+
+    Y LOS MOTIVOS SE LOGUEAN. Tirarlos acá era lo que hacía invisible todo lo
+    de arriba: una entrada rota no existía y punto, sin una línea en ningún
+    lado. `readiness` los informa, pero es un comando que hay que acordarse de
+    correr; el proceso que está sirviendo el panel es el que sabe qué entradas
+    está usando de verdad. Se avisa una vez por valor de `DASHBOARD_TOKENS`,
+    porque esto corre en cada petición. Ningún token se imprime.
+    """
+    global _TOKENS_AVISADOS
+
+    crudo = os.getenv("DASHBOARD_TOKENS", "")
+    pares, problemas = entradas_de_tokens(crudo)
+    if problemas and crudo != _TOKENS_AVISADOS:
+        _TOKENS_AVISADOS = crudo
+        for motivo in problemas:
+            print(f"[dashboard] DASHBOARD_TOKENS: {motivo}")
+    return pares
 
 
 def quien(header: str) -> str | None:
@@ -1133,10 +1218,14 @@ def snapshot() -> dict:
     }
 
 
-async def _en_hilo(funcion, *args):
-    """Corre una lectura en el pool DEL PANEL, no en el del proceso."""
+async def _en_hilo(funcion, *args, pool=None):
+    """Corre una lectura en el pool DEL PANEL, no en el del proceso.
+
+    `pool` es para la escritura, que va a `_HILOS_ESCRITURA`: si comparte los
+    hilos de lectura, un confirm lento deja al resto del panel en la cola.
+    """
     return await asyncio.get_running_loop().run_in_executor(
-        _HILOS, funcion, *args
+        pool or _HILOS, funcion, *args
     )
 
 
@@ -1158,7 +1247,19 @@ class DashboardAPI:
             response_headers.extend([
                 (b"access-control-allow-origin", origin.encode()),
                 (b"access-control-allow-methods", b"GET, POST, OPTIONS"),
-                (b"access-control-allow-headers", b"Authorization"),
+                # `Content-Type` ESTÁ PERMITIDO aunque el endpoint no lea el
+                # cuerpo. Era `Authorization` sola, y el POST natural de un
+                # `fetch` manda `Content-Type: application/json`, que no está en
+                # la lista segura de CORS: el navegador rechaza el preflight y
+                # la petición no sale nunca. No hay log, no hay error, no llega
+                # nada al servidor — se ve como «el botón Confirmar no hace
+                # nada», que es lo más caro de diagnosticar que hay.
+                (b"access-control-allow-headers", b"Authorization, Content-Type"),
+                # Sin esto CADA lectura del panel paga dos viajes: `Authorization`
+                # no está en la lista segura, así que todo pedido cross-origin va
+                # con preflight, y sin `max-age` Chrome lo cachea 5 s contra un
+                # refresco de 60.
+                (b"access-control-max-age", b"600"),
             ])
 
         async def reply(code, payload):
@@ -1218,8 +1319,19 @@ class DashboardAPI:
             })
             return
         # Same-origin requests need no CORS. Cross-origin access is explicit.
+        #
+        # EL ESQUEMA NO SE COMPARA, y hasta ahora sí. El navegador omite
+        # `Origin` en un GET del mismo origen pero SIEMPRE lo manda en un POST,
+        # así que el botón Confirmar del propio panel pasa por acá — y pasaba
+        # sólo si `scope["scheme"]` decía `https`, que depende de que el proxy
+        # de adelante mande `X-Forwarded-Proto` (el Dockerfile arranca uvicorn
+        # con `--proxy-headers` justamente por eso). En un despliegue cuyo proxy
+        # no lo mande, el confirm da 403 y TODAS las lecturas siguen andando:
+        # otra vez «el botón no hace nada», y sin necesidad de
+        # DASHBOARD_ALLOWED_ORIGINS. El host es lo que decide que es el mismo
+        # origen; un atacante no puede falsificar `Origin` desde otro host.
         host = headers.get("host", "")
-        same_origin = origin == f"{scope.get('scheme', 'http')}://{host}"
+        same_origin = origin in (f"http://{host}", f"https://{host}")
         if origin and not same_origin and not cors:
             await reply(403, {"error": "This dashboard origin is not allowed"})
             return
@@ -1228,7 +1340,9 @@ class DashboardAPI:
                 order_id = unquote(confirm_match[1])
                 if "/" in order_id or "\\" in order_id or order_id in {".", ".."}:
                     raise RecordNotFound
-                data = await _en_hilo(confirmar_desde_el_panel, order_id, mirando)
+                data = await _en_hilo(
+                    confirmar_desde_el_panel, order_id, mirando, pool=_HILOS_ESCRITURA
+                )
             elif detail_match:
                 order_id = unquote(detail_match[1])
                 if "/" in order_id or "\\" in order_id or order_id in {".", ".."}:

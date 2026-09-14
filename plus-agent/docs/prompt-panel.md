@@ -260,14 +260,37 @@ panel that is not a GET; everything else still answers `405 {"error": "This dash
 ```
 POST /api/dashboard/orders/{orderId}/confirm
 ```
+**Send no request body.** The endpoint reads nothing but the path and the `Authorization` header —
+the order id is in the URL — so `fetch(url, {method: 'POST', headers: {Authorization: 'Bearer ' + token}})`
+is the whole call. Sending `Content-Type: application/json` is allowed too (it is on
+`access-control-allow-headers`, along with `Authorization`), but there is nothing to put in the body.
+
+That block below is the **response**:
+
 ```jsonc
 {
-  "orderId": "SAL-ORD-2026-00042",
-  "ok": true,
-  "customerNotified": true,      // the customer's confirmation notice was queued
+  "orderId": "SAL-ORD-2026-00042",   // canonical — may differ in case from what you sent
+  "ok": true,                        // the action the manager asked for succeeded
+  "submitted": true,                 // the order is now a CONFIRMED Sales Order (docstatus 1)
+  "customerNotified": true,          // a message to the customer was queued (see below)
   "detail": "✅ SAL-ORD-2026-00042 confirmado. …"
 }
 ```
+
+- **`ok` is not "it was confirmed" — read `submitted` for that.** They differ in a case that happens
+  in normal business: when the customer has an **open counter-offer**, confirming does not submit
+  anything. It approves the customer's request and sends them the new terms, which succeeds, so
+  `ok` is `true` and `submitted` is `false`. The order is still a draft holding stock and the
+  customer can still refuse it. **Only flip the row to Confirmed on `submitted: true`**; on
+  `ok: true, submitted: false` show `detail` and leave the order where it is — it is now waiting on
+  the customer, not on you.
+- **`customerNotified` means "a message to the customer was queued", and which message depends on
+  the branch**: with `submitted: true` it is their confirmation; with `submitted: false` it is the
+  counter-offer awaiting their reply. Do not label it "confirmation sent" without checking
+  `submitted`.
+- **`orderId` comes back canonical.** ERPNext resolves order names case-insensitively, so the id you
+  send may differ in case from the real one; the response echoes the document's own name. Use the
+  returned value, not the one you sent.
 
 - **`detail` is the agent's own sentence, in the business language, not UI copy.** Show it verbatim
   as a quoted result line. It is exactly what the manager would have been told over WhatsApp, and
@@ -277,7 +300,9 @@ POST /api/dashboard/orders/{orderId}/confirm
   confirmación"*.
 - **`ok: false` with HTTP 200 is a real answer, not an error.** The order exists, the caller was
   allowed, and the agent declined — a draft that was already rejected, a state that cannot be
-  confirmed. Render `detail`; do not retry.
+  confirmed. `submitted` is `false` here too. Render `detail`; do not retry. So the three outcomes
+  you must render differently are `ok:false` (declined), `ok:true, submitted:false` (the customer
+  now has a counter-offer to answer) and `ok:true, submitted:true` (confirmed).
 - **403** — the token can read but cannot confirm. Two separate causes, same status: the **shared**
   `DASHBOARD_API_TOKEN` (authenticated but nobody in particular — a decision without a name cannot
   be audited), or a per-person token whose phone is not on `TELEFONOS_EQUIPO`. Do not show a

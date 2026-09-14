@@ -3,6 +3,8 @@
 Only phones on the staff list can approve. A stranger who somehow guesses a
 button payload gets nothing.
 """
+from dataclasses import dataclass, field
+
 from app import avisos, confirmacion, erpnext, notificar, policy, solicitudes
 from app.formato import pesos
 from app.router import es_equipo
@@ -208,6 +210,157 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
     return "Acción desconocida."
 
 
+@dataclass(frozen=True)
+class Emision:
+    """Lo que la sección crítica dejó establecido, para el anuncio de afuera.
+
+    Confirmar son DOS mitades con dueños distintos, y una no puede vivir donde
+    vive la otra. **Emitir** es irreversible y tiene que pasar entera bajo el
+    lock: entre «no hay contraoferta abierta» y el Submit no se puede meter
+    nadie. **Anunciar** —el comentario, la marca durable y los dos avisos— es
+    idempotente por diseño, porque el botón de WhatsApp se toca dos veces y
+    `_encolar_confirmacion` deduplica por `(evento, pedido)`; por eso no
+    necesita el lock, y por eso no puede tenerlo: adentro hay un POST a Meta.
+
+    `rechazo` no es None cuando la primera mitad terminó SIN emitir nada. Ahí no
+    hay nada que anunciar y el resultado ya está escrito.
+    """
+
+    nombre: str
+    doc: dict = field(default_factory=dict)
+    ya_estaba: bool = False
+    rechazo: dict | None = None
+
+
+def emitir(nombre: str) -> Emision:
+    """LA SECCIÓN CRÍTICA Y NADA MÁS: leer el pedido, comprobar su estado, emitirlo.
+
+    Esto es lo único que va adentro de `solicitud:{pedido}`. Antes iba la
+    función entera, y no entraba: el lease son 60 s y adentro había ONCE
+    llamadas a ERPNext más un POST a Meta. El cliente de política tiene
+    `timeout=30.0`, el activo 20.0 y Meta 15.0 (`app/erpnext.py`,
+    `app/whatsapp.py`), y no hay un solo reintento que los multiplique — 315 s
+    de techo contra un lease que NADIE renueva (no hay `extend()` en el repo) y
+    cuyo vencimiento no se veía en ningún lado.
+
+    Lo que pasaba al vencer no era que la confirmación fallara: era que el
+    pedido se quedaba sin exclusión mutua mientras el Submit seguía en vuelo.
+    `solicitudes.crear` tomaba la llave libre, releía el borrador todavía en
+    `docstatus=0`, le abría una solicitud, y después commiteaba el Submit — la
+    carrera exacta que `decisiones.confirmar` existe para cerrar, reabierta por
+    el reloj en vez de por un lock que falta.
+
+    Acá adentro quedan CUATRO llamadas a ERPNext y NINGUNA a una persona, que es
+    la regla que este repo ya escribió tres veces —`solicitudes._vencer`,
+    `agenda._despachar` y la baja de `agenda`—: **el teléfono de nadie va
+    adentro de un lock.**
+
+    No levanta `ERPNextError`: la convierte en `rechazo`. El llamador tiene el
+    lock tomado y no puede permitirse un `except` propio, que sería la misma
+    política escrita dos veces y en el peor lugar para que discrepen.
+    """
+    try:
+        actual = _leer_doc("Sales Order", nombre)
+        ya_estaba = actual.get("docstatus") == 1
+        if not ya_estaba and actual.get("docstatus") != 0:
+            return Emision(nombre, actual, rechazo={
+                "ok": False,
+                "aviso_cliente": False,
+                "detalle": f"No se puede confirmar {nombre} en su estado actual.",
+            })
+        if not ya_estaba and policy.sin_reserva(actual.get("status")):
+            # A rejected draft is left Closed so it stops holding stock.
+            # ERPNext does not count a Closed order in reserved_qty even after
+            # a submit, so submitting this one would promise units that no
+            # reservation system can see, and it would never reach the
+            # delivery queue either. Reopening it is a deliberate act.
+            return Emision(nombre, actual, rechazo={
+                "ok": False,
+                "aviso_cliente": False,
+                "detalle": (
+                    f"{nombre} está {actual.get('status')} — se rechazó antes y ya "
+                    "no reserva stock. Si lo querés confirmar, reabrilo en ERPNext "
+                    "(estado Draft) y volvé a tocar Confirmar."
+                ),
+            })
+        if not ya_estaba:
+            try:
+                erpnext.submit_doc("Sales Order", nombre)
+            except erpnext.ERPNextError:
+                # A timeout can happen after ERPNext committed. Re-read the
+                # source of truth before reporting a failed confirmation.
+                actual = _leer_doc("Sales Order", nombre)
+                if actual.get("docstatus") != 1:
+                    raise
+    except erpnext.ERPNextError as error:
+        print(f"[approval] {nombre}: {type(error).__name__}")
+        return Emision(nombre, rechazo={
+            "ok": False,
+            "aviso_cliente": False,
+            "detalle": (
+                f"No pude comprobar la confirmación de {nombre}. Revisalo en ERPNext."
+            ),
+        })
+    return Emision(nombre, actual, ya_estaba)
+
+
+def anunciar(emision: Emision, por: str, *, canal: str) -> dict:
+    """Lo que viene DESPUÉS de emitir, y por eso corre FUERA del lock.
+
+    El comentario de auditoría, la marca durable que abre la ventana de
+    anulación, el aviso al equipo y el aviso al cliente. Nada de esto cambia el
+    estado del pedido: cuando esta función empieza, el Submit ya commiteó y
+    `solicitudes.crear` ya relee `docstatus=1` y se niega sola. O sea que soltar
+    el lock antes no abre ninguna ventana — y tenerlo tomado mientras se le
+    habla a una persona sí la abría.
+
+    Se puede llamar dos veces sobre el mismo pedido sin hacer daño, que es lo
+    que la hace segura acá afuera: la cola deduplica por `(evento, pedido)`, la
+    marca de `confirmacion` se reclama una sola vez, y el aviso al equipo sale
+    uno por pedido sin importar qué camino confirmó ni cuántas veces se tocó el
+    botón. Ya tenía que ser así antes de este cambio, porque el botón de
+    WhatsApp se toca dos veces.
+    """
+    nombre, actual = emision.nombre, emision.doc
+    if emision.ya_estaba:
+        # No lo escribió esta llamada, así que hay que ir a mirarlo.
+        ventana = confirmacion.momento(nombre) is not None
+    else:
+        erpnext.add_comment(
+            "Sales Order",
+            nombre,
+            f"Confirmado por un integrante autorizado mediante {canal} ({por}).",
+        )
+        # Durable record of WHEN, in ERPNext: it opens the manual
+        # cancellation window and survives any Redis restart.
+        #
+        # EL BOOLEANO SE MIRA. `registrar` atrapa su propia excepción,
+        # imprime y devuelve False (app/confirmacion.py), así que un fallo
+        # NO llega a ningún `except`: el pedido quedaba confirmado, la
+        # ventana de cancelación no existía, y al encargado se le mandaba
+        # igual «para anularlo dentro de las 24 h: cancelar …». Se le
+        # prometía algo que el sistema iba a rechazar.
+        ventana = confirmacion.registrar(
+            nombre, f"manual (confirmación humana por {canal}, {por})"
+        )
+
+    # Stage 2e: the manager team gets ONE confirmed-order notice per order, no
+    # matter which path confirmed it or how many times the button is tapped.
+    _notificar_confirmada(nombre, actual, ventana=ventana)
+
+    prefix = "ℹ️ Ya estaba confirmado." if emision.ya_estaba else f"✅ {nombre} confirmado."
+    estado_aviso = _encolar_confirmacion(nombre, actual)
+    detalle = f"{prefix} {estado_aviso[1]}"
+    if not ventana:
+        # Lo que el encargado tiene delante en el acto, no sólo el aviso
+        # durable: si toca «cancelar» creyendo que puede, pierde el tiempo.
+        detalle += (
+            " No pude dejar el registro de la confirmación: la anulación por "
+            "WhatsApp no está disponible, hacelo en ERPNext si hace falta."
+        )
+    return {"ok": True, "aviso_cliente": estado_aviso[0], "detalle": detalle}
+
+
 def confirmar_pedido(nombre: str, por: str, *, canal: str) -> dict:
     """El MECANISMO de confirmar, con quien llama YA autenticado y autorizado.
 
@@ -225,94 +378,17 @@ def confirmar_pedido(nombre: str, por: str, *, canal: str) -> dict:
     es peor que no tenerlo. Un default habría hecho exactamente eso en silencio:
     acá el que confirma tiene que DECIR por dónde entró.
 
+    Es la composición de las dos mitades para el que NO tiene el lock tomado.
+    `decisiones.confirmar`, que sí lo tiene, llama a `emitir` y a `anunciar` por
+    separado y deja SÓLO la primera adentro — ver `Emision`.
+
     Devuelve {"ok", "aviso_cliente", "detalle"} — `detalle` es lo que se le
     muestra al encargado.
     """
-    # La ventana de anulación por WhatsApp la abre la marca durable, y el
-    # default NO puede ser «sí»: por la rama de `ya_confirmado` no se pasa por
-    # `registrar`, así que un segundo toque después de que la marca falló —o un
-    # pedido confirmado a mano en ERPNext— informaba una anulación disponible
-    # que el camino de cancelación después rechaza. Se comprueba, y `momento`
-    # devuelve None para «no se puede probar»: eso es fallar cerrado.
-    ventana = False
-    try:
-        actual = _leer_doc("Sales Order", nombre)
-        ya_confirmado = actual.get("docstatus") == 1
-        if not ya_confirmado and actual.get("docstatus") != 0:
-            return {
-                "ok": False,
-                "aviso_cliente": False,
-                "detalle": f"No se puede confirmar {nombre} en su estado actual.",
-            }
-        if not ya_confirmado and policy.sin_reserva(actual.get("status")):
-            # A rejected draft is left Closed so it stops holding stock.
-            # ERPNext does not count a Closed order in reserved_qty even after
-            # a submit, so submitting this one would promise units that no
-            # reservation system can see, and it would never reach the
-            # delivery queue either. Reopening it is a deliberate act.
-            return {
-                "ok": False,
-                "aviso_cliente": False,
-                "detalle": (
-                    f"{nombre} está {actual.get('status')} — se rechazó antes y ya "
-                    "no reserva stock. Si lo querés confirmar, reabrilo en ERPNext "
-                    "(estado Draft) y volvé a tocar Confirmar."
-                ),
-            }
-        if not ya_confirmado:
-            try:
-                erpnext.submit_doc("Sales Order", nombre)
-            except erpnext.ERPNextError:
-                # A timeout can happen after ERPNext committed. Re-read the
-                # source of truth before reporting a failed confirmation.
-                actual = _leer_doc("Sales Order", nombre)
-                if actual.get("docstatus") != 1:
-                    raise
-            erpnext.add_comment(
-                "Sales Order",
-                nombre,
-                f"Confirmado por un integrante autorizado mediante {canal} ({por}).",
-            )
-            # Durable record of WHEN, in ERPNext: it opens the manual
-            # cancellation window and survives any Redis restart.
-            #
-            # EL BOOLEANO SE MIRA. `registrar` atrapa su propia excepción,
-            # imprime y devuelve False (app/confirmacion.py), así que un fallo
-            # NO llega al `except` de abajo: el pedido quedaba confirmado, la
-            # ventana de cancelación no existía, y al encargado se le mandaba
-            # igual «para anularlo dentro de las 24 h: cancelar …». Se le
-            # prometía algo que el sistema iba a rechazar.
-            ventana = confirmacion.registrar(
-                nombre, f"manual (confirmación humana por {canal}, {por})"
-            )
-    except erpnext.ERPNextError as error:
-        print(f"[approval] {nombre}: {type(error).__name__}")
-        return {
-            "ok": False,
-            "aviso_cliente": False,
-            "detalle": (
-                f"No pude comprobar la confirmación de {nombre}. Revisalo en ERPNext."
-            ),
-        }
-
-    # Stage 2e: the manager team gets ONE confirmed-order notice per order, no
-    # matter which path confirmed it or how many times the button is tapped.
-    if ya_confirmado:
-        # No lo escribió esta llamada, así que hay que ir a mirarlo.
-        ventana = confirmacion.momento(nombre) is not None
-    _notificar_confirmada(nombre, actual, ventana=ventana)
-
-    prefix = "ℹ️ Ya estaba confirmado." if ya_confirmado else f"✅ {nombre} confirmado."
-    estado_aviso = _encolar_confirmacion(nombre, actual)
-    detalle = f"{prefix} {estado_aviso[1]}"
-    if not ventana:
-        # Lo que el encargado tiene delante en el acto, no sólo el aviso
-        # durable: si toca «cancelar» creyendo que puede, pierde el tiempo.
-        detalle += (
-            " No pude dejar el registro de la confirmación: la anulación por "
-            "WhatsApp no está disponible, hacelo en ERPNext si hace falta."
-        )
-    return {"ok": True, "aviso_cliente": estado_aviso[0], "detalle": detalle}
+    emision = emitir(nombre)
+    if emision.rechazo is not None:
+        return emision.rechazo
+    return anunciar(emision, por, canal=canal)
 
 
 def _encolar_confirmacion(nombre: str, conocido: dict) -> tuple[bool, str]:
