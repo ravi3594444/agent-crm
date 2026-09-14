@@ -532,22 +532,22 @@ def test_el_preflight_de_un_post_cross_origin_permite_el_content_type(
     assert "POST" in respuesta.headers["access-control-allow-methods"]
 
 
-def test_un_confirm_del_mismo_host_no_depende_del_esquema_que_vea_el_proceso(
+def test_un_confirm_del_mismo_host_pasa_con_el_proxy_terminando_TLS(
     connected, almacen_con_cliente, monkeypatch
 ) -> None:
-    """El mismo origen se decide por HOST, no por esquema.
+    """El ASCENSO se acepta: el proceso en http, el navegador en https.
 
     El navegador omite `Origin` en un GET del mismo origen pero SIEMPRE lo manda
     en un POST, así que el botón Confirmar del propio panel pasa por esta
-    comparación — y pasaba sólo si el proceso veía el mismo esquema que el
-    navegador, que depende de que el proxy de adelante mande
+    comparación. Comparando el esquema a secas, pasaba sólo si el proceso veía
+    el mismo que el navegador — y eso depende de que el proxy mande
     `X-Forwarded-Proto`. Donde no lo mande, el confirm da 403 y todas las
-    lecturas siguen andando: otra vez «el botón no hace nada», y sin necesidad
-    de configurar DASHBOARD_ALLOWED_ORIGINS.
+    lecturas siguen andando: «el botón no hace nada», sin configurar
+    DASHBOARD_ALLOWED_ORIGINS.
 
-    Se manda un `Origin` con el esquema CAMBIADO y el mismo host, que es la
-    forma de afirmar que el esquema ya no decide. Un origen de otro host tiene
-    que seguir dando 403, y eso lo afirma el test de orígenes que ya existe.
+    La URL absoluta en http es lo que hace que `scope["scheme"]` sea `http`, que
+    es el despliegue que se está representando; el `Origin` en https es lo que
+    ve el navegador del otro lado del proxy.
     """
     client, registrar = almacen_con_cliente
     monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
@@ -555,14 +555,100 @@ def test_un_confirm_del_mismo_host_no_depende_del_esquema_que_vea_el_proceso(
     _confirmable(monkeypatch)
 
     respuesta = client.post(
-        f"/api/dashboard/orders/{registrar['pedido']}/confirm",
+        f"http://agent.example/api/dashboard/orders/{registrar['pedido']}/confirm",
+        headers={
+            "Authorization": f"Bearer {TOKEN_PERSONA}",
+            "origin": "https://agent.example",
+        },
+    )
+
+    assert respuesta.status_code == 200
+
+
+def test_una_pagina_http_no_entra_al_panel_https_por_tener_el_mismo_host(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """La BAJADA no: `http://` y `https://` son dos orígenes, no uno.
+
+    La otra mitad, y sin ella el arreglo de arriba se escribe como «el esquema
+    no importa» — que es aceptar los dos sentidos y dejar que una página servida
+    en http sobre este mismo host le hable al servicio https salteándose la
+    lista exacta de `allowed_origin`. El panel lleva bearer y tiene una ruta que
+    escribe, así que la lista existe por algo.
+
+    El ascenso tiene un caso legítimo (el proxy termina TLS y el proceso se ve
+    en http); la bajada no tiene ninguno. Hallazgo 3 de la review de Qodo.
+
+    Mutación dirigida: sacar la condición `esquema == "http"` del `or`. Mata a
+    este test y deja verde al de arriba.
+    """
+    client, registrar = almacen_con_cliente
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    llamadas = _confirmable(monkeypatch)
+
+    respuesta = client.post(
+        f"https://agent.example/api/dashboard/orders/{registrar['pedido']}/confirm",
         headers={
             "Authorization": f"Bearer {TOKEN_PERSONA}",
             "origin": "http://agent.example",
         },
     )
 
-    assert respuesta.status_code == 200
+    assert respuesta.status_code == 403
+    assert llamadas == []
+
+
+def test_un_submit_que_no_se_pudo_verificar_no_se_informa_como_no_emitido(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """`submitted` viaja como `null` cuando el estado quedó sin comprobar.
+
+    Un Submit puede commitear DESPUÉS de que el cliente HTTP se dio por vencido
+    —el mecanismo tiene un `except` escrito para justamente eso— y si la
+    relectura que lo verificaría tampoco contesta, nadie sabe en qué estado
+    quedó el pedido. El texto para el encargado siempre dijo «no pude
+    comprobar»; lo que no podía era viajar como un booleano, porque
+    `bool(None)` es False y el panel dibuja un pedido posiblemente confirmado
+    como borrador. `null` es la única respuesta que no afirma nada.
+
+    Las DOS mitades: que lo incierto sea `null` Y que lo conocido siga siendo
+    `false`, porque devolver `null` siempre cumpliría la primera y dejaría al
+    panel sin poder distinguir nunca un rechazo de verdad.
+
+    Hallazgo 2 de la review de Qodo — introducido por este mismo PR, que le
+    agregó a un resultado honesto un booleano que no lo era.
+    """
+    client, registrar = almacen_con_cliente
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    cabecera = {"Authorization": f"Bearer {TOKEN_PERSONA}"}
+
+    _confirmable(monkeypatch, resultado={
+        "ok": False,
+        "emitido": None,
+        "aviso_cliente": False,
+        "detalle": "No pude comprobar la confirmación. Revisalo en ERPNext.",
+    })
+    incierto = client.post(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm", headers=cabecera
+    ).json()
+
+    assert incierto["ok"] is False
+    assert incierto["submitted"] is None
+
+    _confirmable(monkeypatch, resultado={
+        "ok": False,
+        "emitido": False,
+        "aviso_cliente": False,
+        "detalle": "Está Closed — se rechazó antes y ya no reserva stock.",
+    })
+    rechazado = client.post(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm", headers=cabecera
+    ).json()
+
+    assert rechazado["ok"] is False
+    assert rechazado["submitted"] is False
 
 
 def test_el_token_compartido_puede_mirar_y_no_puede_confirmar(

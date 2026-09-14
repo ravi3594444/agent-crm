@@ -112,8 +112,15 @@ LEASE_EMISION = 180
 LEASE_PUERTA = 60
 
 
-def _con_emitido(resultado: dict, emitido: bool) -> dict:
+def _con_emitido(resultado: dict, emitido: bool | None) -> dict:
     """Marca si el pedido quedó EMITIDO, que no es lo mismo que si salió bien.
+
+    TRES respuestas, no dos, por la misma razón que `dashboard.quien()` tiene
+    tres: `None` es «no se pudo comprobar» y no se puede colapsar en False. Un
+    Submit que expira puede haber commiteado —y si la relectura que lo
+    verificaría tampoco contesta, nadie sabe en qué estado quedó el pedido—.
+    Decir False ahí es afirmar algo que no se leyó, y el encargado deja un
+    pedido ya confirmado dibujado como borrador.
 
     `ok` dice que la acción que el encargado pidió se hizo. Con una solicitud
     abierta esa acción NO es emitir: es aprobar la contraoferta. Sale bien, `ok`
@@ -247,7 +254,9 @@ def _confirmar_autorizado(nombre: str, por: str, canal: str) -> dict:
         # No se emitió nada: salió una contraoferta y el pedido sigue borrador.
         return _con_emitido(aprobar_solicitud(nombre, por), False)
     if emision.rechazo is not None:
-        return _con_emitido(emision.rechazo, False)
+        # `incierto` sube tal cual: el mecanismo es el único que sabe si el
+        # rechazo es un estado LEÍDO o una lectura que no contestó.
+        return _con_emitido(emision.rechazo, None if emision.incierto else False)
 
     resultado = _con_emitido(anunciar(emision, por, canal=canal), True)
     # «Confirmar» es también la salida documentada de una revisión humana, y

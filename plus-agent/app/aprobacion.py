@@ -224,12 +224,21 @@ class Emision:
 
     `rechazo` no es None cuando la primera mitad terminó SIN emitir nada. Ahí no
     hay nada que anunciar y el resultado ya está escrito.
+
+    `incierto` distingue las DOS clases de rechazo, y confundirlas es afirmar
+    algo que no se comprobó. «El pedido está cancelado» es un hecho leído: el
+    pedido NO quedó emitido. «ERPNext no contestó» no es un hecho sobre el
+    pedido: el Submit pudo haber commiteado igual —el propio código de abajo
+    dice que un timeout puede llegar después del commit— y nadie lo pudo
+    verificar. Las dos salían como «no emitido», y el panel dibujaba
+    `submitted: false` sobre un pedido que podía estar confirmado.
     """
 
     nombre: str
     doc: dict = field(default_factory=dict)
     ya_estaba: bool = False
     rechazo: dict | None = None
+    incierto: bool = False
 
 
 def emitir(nombre: str) -> Emision:
@@ -293,8 +302,14 @@ def emitir(nombre: str) -> Emision:
                 if actual.get("docstatus") != 1:
                     raise
     except erpnext.ERPNextError as error:
+        # INCIERTO, no «no emitido». Acá no se sabe en qué estado quedó el
+        # pedido, y son cosas distintas: si falló la primera lectura nunca se
+        # supo el `docstatus`, y si falló la RELECTURA de después de un Submit
+        # que expiró, ERPNext pudo haber commiteado igual —es el caso que el
+        # `except` de arriba existe para atrapar—. El texto siempre dijo «no
+        # pude comprobar»; lo que no podía era viajar como un booleano.
         print(f"[approval] {nombre}: {type(error).__name__}")
-        return Emision(nombre, rechazo={
+        return Emision(nombre, incierto=True, rechazo={
             "ok": False,
             "aviso_cliente": False,
             "detalle": (

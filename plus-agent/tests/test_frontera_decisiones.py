@@ -548,6 +548,60 @@ def test_un_estado_que_no_se_puede_confirmar_tampoco_dice_emitido(
     submit.assert_not_called()
 
 
+def test_un_erpnext_que_no_contesta_deja_el_pedido_en_ESTADO_INCIERTO(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """«No pude leer» no es «no se emitió», y son dos respuestas distintas.
+
+    `emitir` atrapa `ERPNextError` y contesta un rechazo cuyo texto siempre dijo
+    «no pude comprobar la confirmación». Lo que este PR le agregó fue un
+    booleano —`emitido`— que sí afirmaba: False. Y el caso en que más duele es
+    el que el propio mecanismo documenta, que un Submit puede commitear después
+    de que el cliente HTTP se dio por vencido: ahí se emite un `submit_doc`, se
+    intenta releer para verificarlo, la relectura tampoco contesta, y el pedido
+    puede quedar confirmado en ERPNext mientras el panel dibuja `submitted:
+    false`. Un encargado que mira eso confirma de nuevo, o peor, lo da por
+    perdido.
+
+    Las DOS mitades, y son dos consumidores del mismo rechazo: el estado LEÍDO
+    («está cancelado») sigue siendo un False firme, y sólo la lectura que no
+    contestó es `None`. Devolver `None` para todos los rechazos cumpliría la
+    primera mitad y dejaría al panel sin poder pintar nunca un rechazo real.
+
+    Mutación dirigida: `incierto=True` -> `incierto=False` en el `except
+    ERPNextError` de `emitir`. Mata a este test y a ninguno otro.
+    """
+    from app import solicitudes
+
+    pedido = "SAL-ORD-INCIERTO-1"
+    monkeypatch.setattr(solicitudes, "leer_estricto", lambda nombre: None)
+
+    def no_contesta(doctype, name):
+        raise aprobacion.erpnext.ERPNextError("ERPNext no contesta")
+
+    monkeypatch.setattr(aprobacion, "_leer_doc", no_contesta)
+
+    incierto = decisiones.confirmar(
+        pedido, "5493511111111", canal=decisiones.CANAL_WHATSAPP
+    )
+
+    assert incierto["ok"] is False
+    assert incierto["emitido"] is None
+    assert "no pude comprobar" in incierto["detalle"].lower()
+
+    # La otra mitad: un estado que SÍ se leyó sigue siendo un False firme.
+    monkeypatch.setattr(
+        aprobacion, "_leer_doc", lambda dt, name: {"name": name, "docstatus": 2}
+    )
+
+    cancelado = decisiones.confirmar(
+        pedido, "5493511111111", canal=decisiones.CANAL_WHATSAPP
+    )
+
+    assert cancelado["ok"] is False
+    assert cancelado["emitido"] is False
+
+
 def test_el_rastro_en_erpnext_nombra_el_canal_por_el_que_se_confirmo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

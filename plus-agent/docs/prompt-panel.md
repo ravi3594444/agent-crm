@@ -271,7 +271,7 @@ That block below is the **response**:
 {
   "orderId": "SAL-ORD-2026-00042",   // canonical — may differ in case from what you sent
   "ok": true,                        // the action the manager asked for succeeded
-  "submitted": true,                 // the order is now a CONFIRMED Sales Order (docstatus 1)
+  "submitted": true,                 // true / false / null — see below. null means UNKNOWN.
   "customerNotified": true,          // a message to the customer was queued (see below)
   "detail": "✅ SAL-ORD-2026-00042 confirmado. …"
 }
@@ -300,9 +300,17 @@ That block below is the **response**:
   confirmación"*.
 - **`ok: false` with HTTP 200 is a real answer, not an error.** The order exists, the caller was
   allowed, and the agent declined — a draft that was already rejected, a state that cannot be
-  confirmed. `submitted` is `false` here too. Render `detail`; do not retry. So the three outcomes
-  you must render differently are `ok:false` (declined), `ok:true, submitted:false` (the customer
-  now has a counter-offer to answer) and `ok:true, submitted:true` (confirmed).
+  confirmed. `submitted` is `false` here too. Render `detail`; do not retry.
+- **`submitted: null` means the agent could not find out, and you must not guess.** ERPNext can
+  commit a Submit and still time out answering, and if the re-read that would confirm it also fails,
+  nobody knows whether the order went through. `detail` says so. **Do not render this as either
+  confirmed or draft** — show that the state is unknown and refresh the order (or send the manager to
+  ERPNext) before displaying anything. Treating it as `false` is the dangerous reading: it paints an
+  order that may well be confirmed as an open draft, and the manager confirms it twice or writes it off.
+
+  So the four outcomes you must render differently are `ok:false, submitted:false` (declined),
+  `ok:false, submitted:null` (unknown — refresh), `ok:true, submitted:false` (the customer now has a
+  counter-offer to answer) and `ok:true, submitted:true` (confirmed).
 - **403** — the token can read but cannot confirm. Two separate causes, same status: the **shared**
   `DASHBOARD_API_TOKEN` (authenticated but nobody in particular — a decision without a name cannot
   be audited), or a per-person token whose phone is not on `TELEFONOS_EQUIPO`. Do not show a

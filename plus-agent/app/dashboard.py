@@ -384,7 +384,14 @@ def confirmar_desde_el_panel(order_id: str, quien_decide: str) -> dict:
         # stock, y el cliente todavía puede rechazarlo. `submitted` es el hecho
         # que el panel necesita para pintar la fila, y es el único que dice
         # `docstatus=1`.
-        "submitted": bool(resultado.get("emitido")),
+        #
+        # VIAJA SIN `bool()`, y eso es lo que lo hace honesto: `null` es «no se
+        # pudo comprobar» y no es lo mismo que `false`. Un Submit que expira
+        # puede haber commiteado, y si la relectura tampoco contesta nadie sabe
+        # cómo quedó el pedido; `bool(None)` lo convertía en un «no se emitió»
+        # que nadie leyó, y el encargado deja como borrador un pedido
+        # confirmado. Con `null` el panel refresca en vez de afirmar.
+        "submitted": resultado.get("emitido"),
         "customerNotified": bool(resultado.get("aviso_cliente")),
         "detail": str(resultado.get("detalle") or ""),
     }
@@ -1320,18 +1327,30 @@ class DashboardAPI:
             return
         # Same-origin requests need no CORS. Cross-origin access is explicit.
         #
-        # EL ESQUEMA NO SE COMPARA, y hasta ahora sí. El navegador omite
-        # `Origin` en un GET del mismo origen pero SIEMPRE lo manda en un POST,
-        # así que el botón Confirmar del propio panel pasa por acá — y pasaba
-        # sólo si `scope["scheme"]` decía `https`, que depende de que el proxy
-        # de adelante mande `X-Forwarded-Proto` (el Dockerfile arranca uvicorn
-        # con `--proxy-headers` justamente por eso). En un despliegue cuyo proxy
-        # no lo mande, el confirm da 403 y TODAS las lecturas siguen andando:
-        # otra vez «el botón no hace nada», y sin necesidad de
-        # DASHBOARD_ALLOWED_ORIGINS. El host es lo que decide que es el mismo
-        # origen; un atacante no puede falsificar `Origin` desde otro host.
+        # EL ESQUEMA SE COMPARA, PERO EN UNA SOLA DIRECCIÓN, y las dos mitades
+        # arreglan cosas distintas.
+        #
+        # Por qué se afloja: el navegador omite `Origin` en un GET del mismo
+        # origen pero SIEMPRE lo manda en un POST, así que el botón Confirmar
+        # del propio panel pasa por acá — y pasaba sólo si `scope["scheme"]`
+        # decía `https`, que depende de que el proxy de adelante mande
+        # `X-Forwarded-Proto` (el Dockerfile arranca uvicorn con
+        # `--proxy-headers` justamente por eso). Donde no lo mande, el proceso
+        # se ve a sí mismo en http, el navegador dice https, y el confirm da 403
+        # con TODAS las lecturas andando: «el botón no hace nada» otra vez, sin
+        # necesidad de DASHBOARD_ALLOWED_ORIGINS.
+        #
+        # Por qué NO más que eso: `http://` y `https://` son dos orígenes
+        # distintos para el navegador, y aceptar los dos sin mirar deja que una
+        # página servida en http sobre este mismo host le hable al servicio
+        # https salteándose la lista exacta de `allowed_origin`. Se acepta sólo
+        # el ASCENSO —el proceso en http y el navegador en https, que es el
+        # proxy terminando TLS—; la bajada no tiene ningún caso legítimo.
         host = headers.get("host", "")
-        same_origin = origin in (f"http://{host}", f"https://{host}")
+        esquema = scope.get("scheme", "http")
+        same_origin = origin == f"{esquema}://{host}" or (
+            esquema == "http" and origin == f"https://{host}"
+        )
         if origin and not same_origin and not cors:
             await reply(403, {"error": "This dashboard origin is not allowed"})
             return
