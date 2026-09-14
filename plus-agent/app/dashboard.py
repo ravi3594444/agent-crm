@@ -751,27 +751,58 @@ TOKEN_MINIMO = 32
 ANONIMO = ""
 
 
-def _tokens_por_persona() -> dict[str, str]:
-    """`DASHBOARD_TOKENS` -> {token: teléfono}. Entradas rotas se ignoran.
+def entradas_de_tokens(crudo: str) -> tuple[dict[str, str], list[str]]:
+    """`DASHBOARD_TOKENS` -> ({token: teléfono}, motivos de lo que NO entró).
 
     Formato: ``<token>:<teléfono>,<token>:<teléfono>``. El teléfono se
     normaliza acá una vez, con el mismo `telefono.normalizar` que usa el
     webhook, así que `+54 9 11 …` y `5491…` son la misma persona en los dos
     lados. Un token más corto que TOKEN_MINIMO no entra: adivinable no es
     autenticación.
+
+    DEVUELVE LAS DOS MITADES porque las dos hacen falta, y en lugares distintos:
+    el panel usa las válidas y `readiness` necesita saber qué se descartó. El
+    descarte era MUDO —una entrada rota simplemente no existía—, así que un
+    token que el dueño pegó en el `.env` y no funciona no tenía dónde
+    explicarse: ni un log, ni un error, ni una línea en el preflight. Con un
+    solo parser, además, el chequeo no puede discrepar con el panel sobre qué
+    entrada es válida.
+
+    EL TOKEN NUNCA SALE EN UN MOTIVO: los motivos se leen en la salida de
+    `readiness`, que es lo que la gente pega en un chat cuando algo no anda.
     """
     from app import telefono as telefonos
 
     pares: dict[str, str] = {}
-    for entrada in os.getenv("DASHBOARD_TOKENS", "").split(","):
+    problemas: list[str] = []
+    for posicion, entrada in enumerate(crudo.split(","), start=1):
         entrada = entrada.strip()
+        if not entrada:
+            continue
         if ":" not in entrada:
+            problemas.append(f"la entrada {posicion} no tiene «token:teléfono»")
             continue
         token, _, numero = entrada.partition(":")
         token, numero = token.strip(), telefonos.normalizar(numero)
-        if len(token) >= TOKEN_MINIMO and numero:
+        if len(token) < TOKEN_MINIMO:
+            problemas.append(
+                f"el token de la entrada {posicion} tiene {len(token)} caracteres "
+                f"y el mínimo es {TOKEN_MINIMO}"
+            )
+        elif not numero:
+            problemas.append(
+                f"el teléfono de la entrada {posicion} no se puede interpretar"
+            )
+        elif token in pares:
+            problemas.append(f"la entrada {posicion} repite un token que ya estaba")
+        else:
             pares[token] = numero
-    return pares
+    return pares, problemas
+
+
+def _tokens_por_persona() -> dict[str, str]:
+    """Las entradas válidas de `DASHBOARD_TOKENS`. Ver `entradas_de_tokens`."""
+    return entradas_de_tokens(os.getenv("DASHBOARD_TOKENS", ""))[0]
 
 
 def quien(header: str) -> str | None:
