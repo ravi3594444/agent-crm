@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import threading
 from datetime import UTC, date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -338,6 +339,316 @@ def test_el_panel_confirma_a_nombre_del_telefono_del_token(
     assert llamadas == [{
         "pedido": registrar["pedido"], "por": GERENTE, "canal": decisiones.CANAL_PANEL,
     }]
+
+
+def test_el_pedido_se_confirma_con_el_nombre_del_documento_y_no_con_el_de_la_url(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """El nombre que sale del DOCUMENTO, no el texto que vino en la URL.
+
+    ERPNext resuelve el nombre sin mirar mayúsculas —MariaDB colaciona así por
+    defecto—, así que `POST /orders/so-ord-0001/confirm` encuentra el pedido y
+    sigue de largo. Redis no colaciona: con ese texto crudo, la puerta arma
+    `solicitud:so-ord-0001`, que NO es la misma llave que el
+    `solicitud:SO-ORD-0001` que toma `solicitudes.crear` (lo saca de
+    `so["name"]`) ni la que toma el botón de WhatsApp (`acciones.pedido_valido`
+    termina en `.upper()`). Dos llaves para el mismo pedido es no tener
+    exclusión mutua entre los dos canales, que es exactamente la carrera que ese
+    lock cierra. El panel era el único camino que no canonizaba, y la lectura
+    que trae el nombre bueno ya se hacía: se tiraba el resultado.
+
+    El doble DERIVA DE LO QUE RECIBE y se afirma que lo recibió: si ignorara el
+    `order_id` no podría discreparle al código sobre lo único que este test
+    mide. Y se comprueba que la URL y el canónico difieren de verdad, porque con
+    un pedido cuyo nombre ya está en mayúsculas el test pasaría solo.
+
+    Mutación dirigida: volver a pasarle `order_id` a `decisiones.confirmar` en
+    `confirmar_desde_el_panel`. Mata a éste y a ningún otro.
+    """
+    client, registrar = almacen_con_cliente
+    canonico = registrar["pedido"]
+    en_minuscula = canonico.lower()
+    assert en_minuscula != canonico
+
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+
+    buscados: list[str] = []
+
+    def buscar(order_id):
+        buscados.append(order_id)
+        return {"name": canonico, "company": EMPRESA}
+
+    monkeypatch.setattr(dashboard, "_pedido_de_la_empresa", buscar)
+    llamadas = _confirmable(monkeypatch)
+
+    respuesta = client.post(
+        f"/api/dashboard/orders/{en_minuscula}/confirm",
+        headers={"Authorization": f"Bearer {TOKEN_PERSONA}"},
+    )
+
+    assert respuesta.status_code == 200
+    assert buscados == [en_minuscula]
+    assert llamadas[0]["pedido"] == canonico
+    assert respuesta.json()["orderId"] == canonico
+
+
+def test_una_contraoferta_aprobada_no_se_informa_como_confirmada(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """`ok` no es «se confirmó», y el panel necesita los dos hechos separados.
+
+    Con una contraoferta abierta la puerta aprueba la solicitud y le manda los
+    términos al cliente: no hay Submit, el pedido sigue siendo un borrador
+    reservando stock y el cliente todavía puede rechazarlo. Eso sale bien, así
+    que `ok` es True. El panel leía esa clave y pintaba la fila como confirmada
+    —`docs/prompt-panel.md` dice que `ok:false` es el caso de rechazo, o sea que
+    no dejaba lugar para un tercer estado—, y mostraba una venta cerrada que no
+    existe sobre el único endpoint que mueve plata.
+
+    Las DOS mitades en el mismo test: que `submitted` sea False acá lo cumpliría
+    igual un código que lo devuelve False siempre, y entonces ninguna
+    confirmación real se podría pintar nunca.
+
+    Mutación dirigida: `"submitted": bool(resultado.get("ok"))` en
+    `confirmar_desde_el_panel`. Mata la primera mitad y deja la segunda verde.
+    """
+    client, registrar = almacen_con_cliente
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+
+    _confirmable(monkeypatch, resultado={
+        "ok": True,
+        "emitido": False,
+        "aviso_cliente": True,
+        "detalle": "✅ registré «aprobada». Le mandé la oferta al cliente.",
+    })
+    derivada = client.post(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm",
+        headers={"Authorization": f"Bearer {TOKEN_PERSONA}"},
+    ).json()
+
+    assert derivada["ok"] is True
+    assert derivada["submitted"] is False
+
+    _confirmable(monkeypatch, resultado={
+        "ok": True,
+        "emitido": True,
+        "aviso_cliente": True,
+        "detalle": "✅ confirmado.",
+    })
+    emitida = client.post(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm",
+        headers={"Authorization": f"Bearer {TOKEN_PERSONA}"},
+    ).json()
+
+    assert emitida["ok"] is True
+    assert emitida["submitted"] is True
+
+
+def test_confirmar_no_ocupa_los_hilos_con_los_que_se_lee_el_panel(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """La escritura tiene su propio pool, y por eso una lectura no espera detrás.
+
+    Una lectura son unos segundos; confirmar espera hasta 10 s por `confirmar:`,
+    otros 10 por `solicitud:`, y después la cadena del submit contra timeouts de
+    20 y 30 s — minutos, medido. Con los cuatro hilos del panel compartidos, dos
+    confirmaciones lentas dejan a `/snapshot`, `/today` y `/queue` en la cola:
+    `run_in_executor` encola sin límite y el cliente que se cansa no cancela
+    nada, así que el panel se ve muerto para todo el mundo mientras el trabajo
+    sigue ahí adentro.
+
+    Se afirman los DOS lados, porque el nombre del pool de escritura solo no
+    dice nada: la lectura tiene que seguir estando en el de lectura. Un cambio
+    que mandara todo al pool nuevo cumple la primera mitad y rompe la razón de
+    ser del pool de lectura, que es no compartirlo con el webhook de WhatsApp.
+
+    Mutación dirigida: sacar `pool=_HILOS_ESCRITURA` de la llamada del confirm.
+    Mata a este test y a ningún otro.
+    """
+    from app import decisiones
+
+    client, registrar = almacen_con_cliente
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+
+    hilos: dict[str, str] = {}
+
+    def falso(nombre, por, *, canal):
+        hilos["escritura"] = threading.current_thread().name
+        return {"ok": True, "emitido": True, "aviso_cliente": True, "detalle": "ok"}
+
+    monkeypatch.setattr(decisiones, "confirmar", falso)
+
+    def leer():
+        hilos["lectura"] = threading.current_thread().name
+        return {"policies": []}
+
+    monkeypatch.setattr(dashboard, "controls", leer)
+
+    cabecera = {"Authorization": f"Bearer {TOKEN_PERSONA}"}
+    assert client.post(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm", headers=cabecera
+    ).status_code == 200
+    assert client.get("/api/dashboard/controls", headers=cabecera).status_code == 200
+
+    assert hilos["escritura"].startswith("dashboard-write")
+    assert hilos["lectura"].startswith("dashboard")
+    assert not hilos["lectura"].startswith("dashboard-write")
+
+
+def test_el_preflight_de_un_post_cross_origin_permite_el_content_type(
+    connected, monkeypatch
+) -> None:
+    """Un `fetch` que manda JSON tiene que poder pasar el preflight.
+
+    `Content-Type: application/json` no está en la lista segura de CORS, así
+    que un POST escrito de la forma natural dispara un OPTIONS y el navegador
+    lo rechaza si el header no está permitido. Lo que se ve entonces es que el
+    botón Confirmar no hace nada: la petición no sale, no llega nada al
+    servidor, no hay log en ninguna parte. La lista decía `Authorization` sola.
+
+    Se afirma también `Authorization`, porque una lista que lo perdiera dejaría
+    sin panel a todos los despliegues cross-origin y este test seguiría verde
+    mirando sólo el header nuevo.
+    """
+    client, _, _ = connected
+    monkeypatch.setenv("DASHBOARD_ALLOWED_ORIGINS", "https://panel.example")
+
+    respuesta = client.options(
+        "/api/dashboard/orders/SAL-ORD-0001/confirm",
+        headers={
+            "origin": "https://panel.example",
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "authorization,content-type",
+        },
+    )
+
+    assert respuesta.status_code == 200
+    permitidos = respuesta.headers["access-control-allow-headers"].lower()
+    assert "content-type" in permitidos
+    assert "authorization" in permitidos
+    assert "POST" in respuesta.headers["access-control-allow-methods"]
+
+
+def test_un_confirm_del_mismo_host_pasa_con_el_proxy_terminando_TLS(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """El ASCENSO se acepta: el proceso en http, el navegador en https.
+
+    El navegador omite `Origin` en un GET del mismo origen pero SIEMPRE lo manda
+    en un POST, así que el botón Confirmar del propio panel pasa por esta
+    comparación. Comparando el esquema a secas, pasaba sólo si el proceso veía
+    el mismo que el navegador — y eso depende de que el proxy mande
+    `X-Forwarded-Proto`. Donde no lo mande, el confirm da 403 y todas las
+    lecturas siguen andando: «el botón no hace nada», sin configurar
+    DASHBOARD_ALLOWED_ORIGINS.
+
+    La URL absoluta en http es lo que hace que `scope["scheme"]` sea `http`, que
+    es el despliegue que se está representando; el `Origin` en https es lo que
+    ve el navegador del otro lado del proxy.
+    """
+    client, registrar = almacen_con_cliente
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    _confirmable(monkeypatch)
+
+    respuesta = client.post(
+        f"http://agent.example/api/dashboard/orders/{registrar['pedido']}/confirm",
+        headers={
+            "Authorization": f"Bearer {TOKEN_PERSONA}",
+            "origin": "https://agent.example",
+        },
+    )
+
+    assert respuesta.status_code == 200
+
+
+def test_una_pagina_http_no_entra_al_panel_https_por_tener_el_mismo_host(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """La BAJADA no: `http://` y `https://` son dos orígenes, no uno.
+
+    La otra mitad, y sin ella el arreglo de arriba se escribe como «el esquema
+    no importa» — que es aceptar los dos sentidos y dejar que una página servida
+    en http sobre este mismo host le hable al servicio https salteándose la
+    lista exacta de `allowed_origin`. El panel lleva bearer y tiene una ruta que
+    escribe, así que la lista existe por algo.
+
+    El ascenso tiene un caso legítimo (el proxy termina TLS y el proceso se ve
+    en http); la bajada no tiene ninguno. Hallazgo 3 de la review de Qodo.
+
+    Mutación dirigida: sacar la condición `esquema == "http"` del `or`. Mata a
+    este test y deja verde al de arriba.
+    """
+    client, registrar = almacen_con_cliente
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    llamadas = _confirmable(monkeypatch)
+
+    respuesta = client.post(
+        f"https://agent.example/api/dashboard/orders/{registrar['pedido']}/confirm",
+        headers={
+            "Authorization": f"Bearer {TOKEN_PERSONA}",
+            "origin": "http://agent.example",
+        },
+    )
+
+    assert respuesta.status_code == 403
+    assert llamadas == []
+
+
+def test_un_submit_que_no_se_pudo_verificar_no_se_informa_como_no_emitido(
+    connected, almacen_con_cliente, monkeypatch
+) -> None:
+    """`submitted` viaja como `null` cuando el estado quedó sin comprobar.
+
+    Un Submit puede commitear DESPUÉS de que el cliente HTTP se dio por vencido
+    —el mecanismo tiene un `except` escrito para justamente eso— y si la
+    relectura que lo verificaría tampoco contesta, nadie sabe en qué estado
+    quedó el pedido. El texto para el encargado siempre dijo «no pude
+    comprobar»; lo que no podía era viajar como un booleano, porque
+    `bool(None)` es False y el panel dibuja un pedido posiblemente confirmado
+    como borrador. `null` es la única respuesta que no afirma nada.
+
+    Las DOS mitades: que lo incierto sea `null` Y que lo conocido siga siendo
+    `false`, porque devolver `null` siempre cumpliría la primera y dejaría al
+    panel sin poder distinguir nunca un rechazo de verdad.
+
+    Hallazgo 2 de la review de Qodo — introducido por este mismo PR, que le
+    agregó a un resultado honesto un booleano que no lo era.
+    """
+    client, registrar = almacen_con_cliente
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    cabecera = {"Authorization": f"Bearer {TOKEN_PERSONA}"}
+
+    _confirmable(monkeypatch, resultado={
+        "ok": False,
+        "emitido": None,
+        "aviso_cliente": False,
+        "detalle": "No pude comprobar la confirmación. Revisalo en ERPNext.",
+    })
+    incierto = client.post(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm", headers=cabecera
+    ).json()
+
+    assert incierto["ok"] is False
+    assert incierto["submitted"] is None
+
+    _confirmable(monkeypatch, resultado={
+        "ok": False,
+        "emitido": False,
+        "aviso_cliente": False,
+        "detalle": "Está Closed — se rechazó antes y ya no reserva stock.",
+    })
+    rechazado = client.post(
+        f"/api/dashboard/orders/{registrar['pedido']}/confirm", headers=cabecera
+    ).json()
+
+    assert rechazado["ok"] is False
+    assert rechazado["submitted"] is False
 
 
 def test_el_token_compartido_puede_mirar_y_no_puede_confirmar(

@@ -662,10 +662,15 @@ def crear(
             return _crear_bajo_lock(
                 so, pedido, tipo=tipo, solicitado=solicitado, nota_cliente=nota_cliente
             )
-    except CoordinationError:
-        # Alguien está decidiendo este pedido ahora mismo. No abrir nada es la
-        # respuesta segura: el llamador le pide disculpas al cliente y escala.
-        print(f"[solicitudes] {pedido}: ocupado, no abro una solicitud encima")
+    except CoordinationError as exc:
+        # No abrir nada es la respuesta segura para las DOS causas que llegan
+        # acá, y por eso el `except` es uno solo: con alguien decidiendo el
+        # pedido, su estado está en vuelo; con Redis caído no hay nada durable
+        # que escribir. Lo que NO puede ser uno solo es el log — decía
+        # «ocupado» siempre, afirmando una causa que no había comprobado, y un
+        # Redis inalcanzable quedaba anotado como un lock ocupado. `locks.py`
+        # distingue las tres en el texto de la excepción; se imprime.
+        print(f"[solicitudes] {pedido}: no abro una solicitud encima ({exc})")
         return None
 
 
