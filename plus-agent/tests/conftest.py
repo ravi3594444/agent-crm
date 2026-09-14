@@ -497,6 +497,14 @@ def limites_sin_redis(monkeypatch):
         # con un .env que lo encienda, `crear_pedido` escribiría filas de agenda
         # en tests que no hablan de eso, y el barrido las despacharía.
         "AVISO_ANTES_DE_ENTREGA_HORAS",
+        # Los consejos al dueño (app/consejos.py). Misma fuga que las de
+        # arriba, y una peor: con `CONSEJOS_ACTIVO` encendido en un `.env` de
+        # desarrollo, un test que no habla de consejos haría que el barrido
+        # saliera a leer ERPNext y reclamara claves en Redis.
+        "CONSEJOS_ACTIVO",
+        "CONSEJOS_LISTA_COSTO",
+        "CONSEJOS_DEUDA_DIAS",
+        "CONSEJOS_DEUDA_MINIMA",
         # Los tokens del dashboard. Un `.env` de desarrollo que los tenga
         # haría pasar un test de «sin acceso configurado» por la razón
         # equivocada — y peor: uno que afirma que un token NO sirve podría

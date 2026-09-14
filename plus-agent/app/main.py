@@ -1571,7 +1571,7 @@ def _solicitudes_scheduler(stop: threading.Event) -> None:
     writing in, and the sweep must not sit in front of the inbound FIFO. A
     failure only skips one round.
     """
-    from app import agenda, pendientes, solicitudes
+    from app import agenda, consejos, notificar, pendientes, solicitudes
 
     while not stop.wait(_SOLICITUDES_TICK_SECONDS):
         try:
@@ -1594,6 +1594,23 @@ def _solicitudes_scheduler(stop: threading.Event) -> None:
             agenda.tick()
         except Exception as error:
             print(f"[agenda] tick type={_error_name(error)}")
+        # Y los consejos al dueño (app/consejos.py), con su propio try/except
+        # por el mismo motivo que los tres de arriba. No-op mientras
+        # CONSEJOS_ACTIVO no esté encendido, que es como arranca.
+        #
+        # `devolver` NO es opcional: es la otra mitad del reclamo. `tick` toma
+        # cada consejo con un SET NX para no decirlo dos veces; si el aviso no
+        # sale, hay que soltarlo o el dueño nunca se entera de eso — la falla
+        # del envío se habría comido el hecho.
+        try:
+            for consejo in consejos.tick():
+                if not notificar.avisar_dueno(
+                    consejo.titulo, consejo.cuerpo,
+                    plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE",
+                ):
+                    consejos.devolver(consejo)
+        except Exception as error:
+            print(f"[consejos] tick type={_error_name(error)}")
 
 
 def _digest_scheduler(stop: threading.Event) -> None:
