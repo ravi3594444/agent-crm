@@ -1,4 +1,4 @@
-"""El techo de pasos de UN turno, y qué se contesta cuando se llega a él.
+"""El presupuesto de UN turno, y qué se contesta cuando el turno no llega al final.
 
 POR QUÉ EXISTE ESTE ARCHIVO
 ---------------------------
@@ -23,6 +23,8 @@ nadie le puso presupuesto.
 
 LAS DOS SALIDAS DE LANGGRAPH, Y POR QUÉ HAY QUE ATAJAR LAS DOS
 --------------------------------------------------------------
+(Son dos de los TRES cortes que este archivo atiende; el tercero está más
+abajo y es el del proveedor.)
 Medido, límite por límite, contra el grafo real de este repo:
 
     recursion_limit = 3n  -> n llamadas al modelo y un AIMessage cuyo texto es
@@ -41,8 +43,30 @@ gasta TRES superpasos, así que el contador salta por arriba de la ventana y sal
 por la excepción. Por eso el número no se elige para caer en la salida linda: se
 atajan las dos y listo.)
 
-QUÉ SE CONTESTA CUANDO SE ACABA EL PRESUPUESTO
-----------------------------------------------
+EL TERCER CORTE, QUE ES EL QUE DE VERDAD PASA
+---------------------------------------------
+Los dos de arriba son de LangGraph. El tercero es del proveedor: un 429 a mitad
+del turno, que con la clave de Gemini en free tier no es un caso raro sino el
+martes. Medido: tres herramientas devolvían stock, precio y pedidos, el 429
+llegaba en la cuarta llamada al modelo, y el cliente recibía «tuve un problema
+técnico» — el MISMO defecto que el del techo, con el disparador frecuente.
+
+Los tres cortes salen por `cerrar()`, que es el punto: lo que hay que decidir no
+es «¿por qué se cortó?» sino «¿hay algo averiguado que contar?».
+
+Y justo ahí el cierre es la llamada con MÁS chance de pasar, que es un argumento
+y no una esperanza: va SIN herramientas, y un turno de gerencia manda ~29.100
+tokens sólo de esquemas de herramienta en cada llamada normal (`docs/MCP.md` lo
+mide). Contra un tope de tokens por minuto, ésa es toda la diferencia.
+
+Con una condición, y es la que hace que esto sea una recuperación y no un
+reintento disfrazado: **sólo si hay un resultado de herramienta que contar**.
+Sin hallazgos se relanza y queda exactamente el comportamiento anterior, porque
+una llamada más contra un proveedor que acaba de fallar es latencia que el
+cliente paga para escuchar la misma disculpa.
+
+QUÉ SE CONTESTA CUANDO EL TURNO SE CORTA
+-----------------------------------------
 No una disculpa. Lo que ya se averiguó.
 
 Sin esto, `_generate_response` atrapa la excepción y manda «tuve un problema
