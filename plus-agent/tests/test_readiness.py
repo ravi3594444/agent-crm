@@ -2001,3 +2001,73 @@ def test_un_techo_de_pasos_invalido_es_un_ERROR_y_no_un_aviso() -> None:
         nivel, _, mensaje = _linea_de_pasos(reporte, "PASOS_MAX_CLIENTES")
         assert nivel == readiness.ERROR, f"{malo!r} pasó como {nivel}"
         assert "no arranca" in mensaje
+# --------------------------------------------------------------------------
+# Lo que el reporte NO puede afirmar cuando no pudo mirar.
+#
+# EL DEFECTO QUE ESTO FIJA
+# ------------------------
+# `puede_submit = bool(roles & roles_submit) or "System Manager" in roles` da
+# False con los dos conjuntos vacíos. Vacío por 403 y vacío por no tener el rol
+# se leen igual, así que una credencial sin lectura de DocPerm imprimía
+# `OK  ERPNext <rol>: 0 rol(es); Submit: no` en las TRES identidades. La regla
+# de las tres identidades es lo único que impide que el LLM emita, y su único
+# chequeo automático decía OK por no haber podido medir.
+#
+# Peor en política, que es la que SÍ tiene que poder emitir: «Submit: no» ahí
+# significaría que nada se confirma nunca, y salía como OK. El `elif` que existe
+# para cazar ese caso está guardado por `roles_submit`, así que con la lectura
+# rota tampoco corría.
+#
+# Encontrado en vivo (agentcrm4, 2026-09-15): la credencial de política tiene un
+# solo rol y no lee DocPerm ni System Settings. La separación estaba BIEN —se
+# verificó a mano con `bench`— y el reporte habría dicho exactamente lo mismo si
+# hubiera estado mal. Eso es lo que lo hace un defecto y no un detalle.
+def test_sin_leer_DocPerm_no_se_afirma_Submit_en_ninguna_identidad() -> None:
+    """Las dos lecturas de permisos dan 403: nadie puede decir «Submit: no»."""
+
+    def http(url, headers=None, params=None):
+        if "/api/resource/DocPerm" in url or "Custom DocPerm" in url or "Custom%20DocPerm" in url:
+            return 403, {"exc": "PermissionError"}
+        return _http_sano(url, headers, params)
+
+    reporte = _correr(BASE, http=http)
+    texto = reporte.texto()
+
+    # Ninguna de las tres afirma nada sobre Submit.
+    assert "Submit: no" not in texto, texto
+    assert "Submit: sí" not in texto, texto
+    for rol in ("agente", "gerencia", "politica"):
+        assert f"AVISO  ERPNext {rol}: no pude comprobar si tiene Submit" in texto, texto
+    # La mitad que importa: el aviso dice QUÉ permiso falta, o no es accionable
+    # y el que lo lee vuelve a donde estaba.
+    assert "dar lectura de DocPerm y Custom DocPerm a la credencial de política" in texto
+
+    # Y no bloquea: es el criterio que `ERPNext zona` deja escrito doce líneas
+    # más abajo —lo que no se pudo mirar no deja el check en rojo para siempre—.
+    assert reporte.listo, texto
+
+
+def test_un_User_sin_tabla_de_roles_tampoco_afirma_Submit() -> None:
+    """La otra lectura: DocPerm se lee, el User se lee, su tabla de roles no.
+
+    Es el 403 parcial de Frappe: el doc vuelve 200 y la tabla hija viene vacía.
+    Sin este guardia `roles` es vacío y el reporte volvía a decir «Submit: no»
+    con la misma confianza, ahora por la otra mitad.
+    """
+
+    def http(url, headers=None, params=None):
+        if "/api/resource/User/agente@x" in url:
+            return 200, {"data": {"roles": []}}
+        return _http_sano(url, headers, params)
+
+    reporte = _correr(BASE, http=http)
+    texto = reporte.texto()
+
+    assert "AVISO  ERPNext agente: el User se lee pero sin su tabla de roles" in texto, texto
+    assert "dar lectura de User a la credencial de política" in texto
+    assert "ERPNext agente: 0 rol(es)" not in texto, texto
+    # Las otras dos se leyeron bien y siguen midiendo: el guardia es por
+    # identidad, no un apagón del chequeo entero.
+    assert "ERPNext politica: 1 rol(es); Submit: sí" in texto, texto
+    assert "ERPNext gerencia: 1 rol(es); Submit: no" in texto, texto
+    assert reporte.listo, texto
