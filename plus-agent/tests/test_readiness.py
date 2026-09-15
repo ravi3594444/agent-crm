@@ -1656,12 +1656,27 @@ def test_sin_servidores_externos_se_dice_que_no_hay_y_no_avisa_nada() -> None:
     tiene que cortar ANTES de preguntarle a `mcp_cliente`.
 
     MUTACIÓN: sacar el `return` de esa rama. Cae éste y sólo éste.
-    """
-    texto = readiness.ejecutar(BASE, con_red=False).texto()
 
-    assert "MCP externos: ninguno" in texto
-    assert "MCP_EXTERNOS_BLOQUEAR" not in texto
-    assert "usuario de ERPNext" not in texto
+    La versión anterior de este test decía matar esa mutación y NO la mataba.
+    Miraba tres subcadenas del texto: que estuviera «ninguno», que no
+    estuviera `MCP_EXTERNOS_BLOQUEAR` y que no estuviera «usuario de
+    ERPNext». Sin el `return`, el chequeo sigue de largo, `servidores()` no
+    saca ningún servidor de un `MCP_EXTERNOS` vacío y corta en la rama del
+    parser — que está ANTES de la lista de bloqueo y ANTES de la credencial.
+    Las tres subcadenas seguían como el test las quería, con el reporte
+    diciendo al mismo tiempo «ninguno» y «MCP_EXTERNOS tiene un valor del que
+    no sale ningún servidor». Lo que la mutación cambia no es ninguna de esas
+    tres cosas: es CUÁNTAS líneas de MCP hay. Eso es lo que se mide acá.
+    """
+    reporte = readiness.ejecutar(BASE, con_red=False)
+
+    lineas = [linea for linea in reporte.lineas if linea[1].startswith("MCP")]
+    assert len(lineas) == 1, (
+        "con MCP_EXTERNOS vacío el reporte dice UNA sola cosa sobre MCP; "
+        f"acá dice {len(lineas)}: {lineas}"
+    )
+    assert lineas[0][:2] == (readiness.OK, "MCP externos")
+    assert lineas[0][2].startswith("ninguno")
 
 
 def test_con_servidores_externos_se_nombra_la_credencial_que_no_se_puede_ver(
