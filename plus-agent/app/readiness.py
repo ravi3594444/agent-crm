@@ -816,6 +816,42 @@ def chequear_erpnext(env: Mapping[str, str], reporte: Reporte, http: Http | None
             reporte.aviso(f"ERPNext {rol}", "no pude leer sus roles")
             continue
         roles = {str(r.get("role")) for r in datos.get("roles") or [] if r.get("role")}
+        # DOS LECTURAS TIENEN QUE HABER SALIDO BIEN PARA PODER DECIR «Submit: no».
+        #
+        # Sin ellas `roles & roles_submit` es vacío ∩ vacío, así que `puede_submit`
+        # sale False por no haber medido nada —no por no tener el permiso—, y las
+        # tres identidades se imprimían como `OK ... 0 rol(es); Submit: no`.
+        # Incluida política, para la que «Submit: no» sería la PEOR configuración
+        # posible del sistema: nada se confirmaría nunca. El `elif` de abajo existe
+        # para cazar exactamente eso y está guardado por `roles_submit`, así que
+        # cuando la lectura falla tampoco corre: el único chequeo de la regla de
+        # las tres identidades quedaba en verde por no haber podido mirar.
+        #
+        # Medido en vivo el 2026-09-15 contra agentcrm4: la credencial de política
+        # tiene un solo rol («Politica IA») y ese rol no lee DocPerm ni System
+        # Settings, así que las dos lecturas daban 403 y el reporte decía OK tres
+        # veces. La separación estaba bien —se verificó a mano con `bench`—, pero
+        # el reporte habría dicho lo mismo si hubiera estado mal.
+        #
+        # Mismo criterio que «ERPNext zona» más abajo: lo que no se pudo mirar es
+        # AVISO con el permiso que falta, nunca FALTA (rojo para siempre) ni un OK
+        # afirmando lo que no se vio.
+        if not roles_submit:
+            reporte.aviso(
+                f"ERPNext {rol}",
+                "no pude comprobar si tiene Submit en Sales Order porque no pude leer "
+                "qué roles lo permiten: dar lectura de DocPerm y Custom DocPerm a la "
+                "credencial de política",
+            )
+            continue
+        if not roles:
+            reporte.aviso(
+                f"ERPNext {rol}",
+                "el User se lee pero sin su tabla de roles, así que no puedo comprobar "
+                "si tiene Submit en Sales Order: dar lectura de User a la credencial "
+                "de política",
+            )
+            continue
         puede_submit = bool(roles & roles_submit) or "System Manager" in roles
         if rol in ROLES_SUBMIT_PROHIBIDOS and puede_submit:
             reporte.error(f"ERPNext {rol}", f"{len(roles)} rol(es), y alguno permite Submit en Sales Order")
