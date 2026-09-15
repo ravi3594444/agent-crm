@@ -174,7 +174,7 @@ pytest -q -rs             # needs Redis Stack
 6. **Administrator password and the six API keys were exposed in a chat** — rotate before handover.
 7. **CI/CD not wired** — `deploy.yml` exists but isn't installed.
 8. **No email configured** — no password resets, no notifications.
-9. **The lease around `aceptar_cliente` has no ownership check.** The 180 s Redis lease can expire mid-decision and nothing re-asserts it. The *consequence* is fixed — the last read before `submit_doc` goes to the durable record, not the cache — so what is left is the window between that read and the submit, one ERPNext call wide, the same as `decisiones.confirmar`. Closing it needs `app/locks.py` to expose the lock or its token; `distributed_lock` currently `yield`s `None`.
+9. ~~The lease around `aceptar_cliente` has no ownership check.~~ **Closed.** `distributed_lock` now yields a `Lease`, and `sigue_mio()` is asked immediately before both of the system's submits (`aprobacion.emitir` and `solicitudes.aceptar_cliente`). It fails closed: if Redis cannot confirm ownership the answer is no, and nothing is emitted. `emitir`'s `lease` is a required keyword argument, so a future caller cannot lose the check by forgetting it.
 
 ---
 

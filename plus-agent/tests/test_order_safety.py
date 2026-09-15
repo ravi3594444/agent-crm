@@ -22,6 +22,7 @@ os.environ.setdefault("WHATSAPP_TOKEN", "test-token")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from conftest import RelojDePrueba, entrega_autorizada, inventario_confiable
+from fakes import LeaseDoble
 
 from app import erpnext, inventario, policy, router
 from app.tools import catalogo, pedidos
@@ -832,7 +833,7 @@ def test_competing_drafts_are_re_read_inside_the_submit_lock(
     def lock():
         rastro.append("lock-in")
         try:
-            yield
+            yield LeaseDoble()
         finally:
             rastro.append("lock-out")
 
@@ -926,7 +927,7 @@ def test_the_locked_revalidation_uses_the_limits_in_force_at_that_moment(
     def lock():
         dentro_del_lock.append(True)
         try:
-            yield
+            yield LeaseDoble()
         finally:
             pass
 
@@ -1017,7 +1018,7 @@ def test_the_locked_revalidation_also_re_reads_the_discount_cap(
     @contextmanager
     def lock():
         dentro_del_lock.append(True)
-        yield
+        yield LeaseDoble()
 
     monkeypatch.setattr(policy, "auto_submit_lock", lock)
     # 10% off the line: fine under a 20% cap, not under a 1% one.

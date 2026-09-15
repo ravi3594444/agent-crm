@@ -29,6 +29,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from fakes import LeaseDoble
+
 from app import (
     aprobacion,
     avisos,
@@ -224,10 +226,17 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
         or {"name": f"TD-{len(estado['todos'])}"},
     )
 
+    # EL LEASE VIVE EN `estado`, y no se arma uno nuevo por llamada: así un
+    # test puede vencerlo (`mundo["lease"].vigente = False`) y ver qué hace el
+    # camino de aceptación cuando el lock dejó de ser suyo a mitad de camino.
+    # Con un `LeaseDoble()` anónimo adentro del `yield` ese caso no era
+    # alcanzable desde ningún test.
+    estado["lease"] = LeaseDoble()
+
     @contextmanager
     def lock(nombre, **kwargs):
         estado["locks"].append(nombre)
-        yield
+        yield estado["lease"]
 
     # Los límites del dueño, anotados. `revalidar` los consulta cuando NADIE
     # miró el pedido, así que sin un doble acá todo test de aceptación se caería
@@ -4517,3 +4526,40 @@ def test_una_zona_invalida_deja_el_vencimiento_en_el_timeout_configurado(
     ahora = 1_757_000_000.0
     tope = ahora + max(0.5, solicitudes.timeout_horas()) * 3600.0
     assert solicitudes._vence_respaldo(ahora, "2026-09-10", "18:00") == tope
+
+
+def test_un_lease_vencido_a_mitad_de_camino_no_emite_nada(mundo) -> None:
+    """El lease se venció mientras se revalidaba: NO se emite.
+
+    Adentro de esta sección crítica entran una relectura, `revalidar`, la
+    escritura de los términos, `policy.evaluar` entero y la relectura durable
+    de la solicitud, todo contra un ERPNext con `timeout=30`. Eso se puede
+    comer los 180 s del lease, y nadie lo renueva. Un lease vencido no hace
+    fallar la llamada: la deja caminando hacia el submit sin exclusión mutua
+    mientras otro worker toma la llave libre y decide otra cosa sobre el mismo
+    pedido.
+
+    La solicitud queda como estaba —en el índice, con su plazo— así que el
+    barrido vuelve, y el cliente escucha lo mismo que cuando no se pudo
+    coordinar, porque es lo mismo que pasó.
+    """
+    _aprobar_y_esperar(mundo)
+    mundo["lease"].vigente = False
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["submits"] == [], "emitió sin tener el lock"
+    assert respuesta == idioma.t("oferta.procesando", "es")
+    # Y la comprobación se hizo: un llamador que nunca pregunta y uno que
+    # pregunta y le dan que sí dan el mismo resultado visto desde afuera.
+    assert mundo["lease"].preguntas >= 1
+
+
+def test_con_el_lease_entero_la_aceptacion_emite_igual_que_siempre(mundo) -> None:
+    """La otra mitad: la comprobación no puede frenar el camino normal."""
+    _aprobar_y_esperar(mundo)
+
+    solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["submits"] == [SO]
+    assert mundo["lease"].preguntas >= 1

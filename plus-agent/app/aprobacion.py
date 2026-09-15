@@ -286,7 +286,7 @@ class Emision:
     incierto: bool = False
 
 
-def emitir(nombre: str) -> Emision:
+def emitir(nombre: str, *, lease) -> Emision:
     """LA SECCIÓN CRÍTICA Y NADA MÁS: leer el pedido, comprobar su estado, emitirlo.
 
     Esto es lo único que va adentro de `solicitud:{pedido}`. Antes iba la
@@ -312,6 +312,16 @@ def emitir(nombre: str) -> Emision:
     No levanta `ERPNextError`: la convierte en `rechazo`. El llamador tiene el
     lock tomado y no puede permitirse un `except` propio, que sería la misma
     política escrita dos veces y en el peor lugar para que discrepen.
+
+    `lease` ES OBLIGATORIO, y es el lease de ese lock (`app/locks.py`). Las
+    cuatro llamadas a ERPNext de acá abajo tienen `timeout` de 20 y 30 s contra
+    un lease de 60 que nadie renueva: puede vencerse a mitad de camino, y lo que
+    pasa entonces no es que la confirmación falle, es que el pedido se queda sin
+    exclusión mutua mientras el Submit sigue en vuelo. Por eso se pregunta
+    `sigue_mio()` JUSTO ANTES de emitir, y no al entrar: al entrar siempre es
+    que sí. Y por eso es obligatorio y no un parámetro con default — un default
+    convierte «se olvidaron de pasarlo» en «corrió sin la comprobación», en
+    silencio y sobre el único Submit del sistema.
     """
     try:
         actual = _leer_doc("Sales Order", nombre)
@@ -338,6 +348,24 @@ def emitir(nombre: str) -> Emision:
                 ),
             })
         if not ya_estaba:
+            # ¿SIGO TENIENDO EL LOCK? Entre la lectura de arriba y esta línea
+            # pasaron hasta tres llamadas a ERPNext. Si el lease se venció,
+            # `solicitudes.crear` ya pudo tomar la llave libre y abrirle una
+            # solicitud a este borrador: emitir igual es exactamente la carrera
+            # que `decisiones.confirmar` existe para cerrar, reabierta por el
+            # reloj. No se emite, y el pedido queda como estaba —borrador— así
+            # que el encargado vuelve a tocar Confirmar y esta vez entra con el
+            # lease entero.
+            if not lease.sigue_mio():
+                print(f"[approval] {nombre}: perdí el lease antes de emitir, no emito")
+                return Emision(nombre, actual, rechazo={
+                    "ok": False,
+                    "aviso_cliente": False,
+                    "detalle": (
+                        f"No pude confirmar {nombre} ahora mismo y no cambié "
+                        "nada. Probá de nuevo en un momento."
+                    ),
+                })
             try:
                 erpnext.submit_doc("Sales Order", nombre)
             except erpnext.ERPNextError:
@@ -481,7 +509,20 @@ def confirmar_pedido(nombre: str, por: str, *, canal: str) -> dict:
     Devuelve {"ok", "aviso_cliente", "detalle"} — `detalle` es lo que se le
     muestra al encargado.
     """
-    emision = emitir(nombre)
+    # El lock lo toma ACÁ, y no lo tomaba nadie: esta función compone las dos
+    # mitades "para el que NO tiene el lock tomado", y emitía sin ninguno.
+    # `anunciar` queda AFUERA —le habla a una persona, y el teléfono de nadie va
+    # adentro de un lock, que es la regla que este repo ya escribió tres veces—.
+    # El lease sale de `decisiones` y no de un número escrito acá: es el MISMO
+    # lock y la misma sección crítica, y dos duraciones para lo mismo son dos
+    # que se pueden separar.
+    from app.decisiones import LEASE_EMISION
+    from app.locks import distributed_lock
+
+    with distributed_lock(
+        f"solicitud:{nombre}", lease_seconds=LEASE_EMISION, wait_seconds=10
+    ) as lease:
+        emision = emitir(nombre, lease=lease)
     if emision.rechazo is not None:
         return emision.rechazo
     return anunciar(emision, por, canal=canal)

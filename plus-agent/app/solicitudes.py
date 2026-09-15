@@ -2554,7 +2554,7 @@ def aceptar_cliente(
         # que MAPA ya registra para `decisiones.confirmar`: un lease que vence
         # a mitad de la sección deja el pedido sin exclusión mutua mientras el
         # submit sigue en vuelo, y nadie lo renueva.
-        with distributed_lock(f"solicitud:{pedido}", lease_seconds=180, wait_seconds=10):
+        with distributed_lock(f"solicitud:{pedido}", lease_seconds=180, wait_seconds=10) as lease:
             solicitud = leer(pedido)
             if solicitud is None or solicitud.estado != ESPERANDO_CLIENTE:
                 return _sin_oferta(pedido, solicitud, lengua)
@@ -2600,12 +2600,13 @@ def aceptar_cliente(
             # revalidación, la escritura de los términos y `policy.evaluar`
             # entero: contra un ERPNext lento eso puede comerse el lease, y un
             # lease vencido es el pedido sin exclusión mutua mientras esta
-            # llamada sigue caminando hacia el submit. `locks.distributed_lock`
-            # no expone el lock, así que NO se puede preguntar «¿lo sigo
-            # teniendo?» —eso es una pieza aparte—; lo que sí se puede es mirar
-            # si alguien decidió mientras tanto. Si la solicitud ya no es la
-            # misma o dejó de esperar al cliente, no se emite: el que decidió
-            # segundo no pisa al que decidió primero.
+            # llamada sigue caminando hacia el submit. Son DOS preguntas y las
+            # dos se hacen: «¿alguien decidió mientras tanto?», que es esto de
+            # acá abajo y que impide que el que decidió segundo pise al que
+            # decidió primero; y «¿sigo teniendo el lock?», que es `sigue_mio()`
+            # justo antes del submit. La primera achica la ventana; la que la
+            # cierra es la segunda, y hasta que `locks.Lease` existió no se
+            # podía hacer.
             #
             # Y se pregunta con `leer_durable`, NO con `leer`: el otro worker
             # escribe en ERPNext y recién después cachea, y `_cachear` se traga
@@ -2629,6 +2630,19 @@ def aceptar_cliente(
             ):
                 print(f"[solicitudes] {pedido}: la solicitud cambió mientras se verificaba")
                 return _sin_oferta(pedido, de_nuevo, lengua)
+
+            # ¿SIGO TENIENDO EL LOCK? Desde que se tomó pasaron una
+            # relectura, `revalidar`, la escritura de los términos, `policy`
+            # entero y la relectura durable de la solicitud: contra un ERPNext
+            # con `timeout=30` eso se puede comer los 180 s. Con el lease
+            # vencido, otro worker ya pudo tomar la llave y decidir otra cosa
+            # sobre este mismo pedido, así que el submit no sale. La solicitud
+            # queda como estaba —en el índice, con su plazo— y el barrido
+            # vuelve; el cliente escucha lo mismo que cuando no se pudo
+            # coordinar, porque es lo mismo que pasó.
+            if not lease.sigue_mio():
+                print(f"[solicitudes] {pedido}: perdí el lease antes del submit, no emito")
+                return idioma.t("oferta.procesando", lengua)
 
             try:
                 erp.submit_doc("Sales Order", pedido)
