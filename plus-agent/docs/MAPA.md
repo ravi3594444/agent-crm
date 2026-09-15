@@ -139,10 +139,13 @@ es lo que impide que el octavo se escriba a mano. Lo que SÍ queda: un motivo
 que viaja como PARÁMETRO no se traduce al interpolarse. `LimiteError` ya lo
 resolvió (lleva `clave` y `datos`, y `limites.motivo(exc, lengua)` los usa;
 `resumen(lengua)` es lo que lo conecta con `ver_ajustes`). `AccionError`
-—`app/acciones.py`, 28 `raise`— todavía no, así que una respuesta en inglés de
-`ver_pedido` o `proponer_accion` puede traer el motivo en castellano adentro.
-Ésa es la mitad que falta, y la forma de arreglarla ya está escrita en
-`limites.py`.
+—`app/acciones.py`, 28 `raise`— ahora también: lleva `clave` y `datos`, y el
+motivo se arma cuando se LEE. El primitivo es `idioma.motivo_de(exc, lengua)`,
+uno solo para los dos (`limites.motivo` delega en él). **Un dato puede ser un
+`lambda lengua:`**, y eso es lo que `limites.motivo` no tenía: casi todos los
+datos valen igual en los dos idiomas —un número de pedido, un monto—, pero
+«falta el día y la hora» es prosa, y quien levanta la excepción no sabe quién la
+va a leer. El `str(exc)` en castellano sigue intacto: es lo que va al log.
 
 ---
 

@@ -110,12 +110,9 @@ def motivo(exc: Exception, lengua: str | None = None) -> str:
     Sin clave cae al texto en español, que es exactamente lo que hacía antes:
     una excepción de otro módulo o una vieja sigue saliendo, nunca vacía.
     """
-    clave = str(getattr(exc, "clave", "") or "")
-    if not clave:
-        return str(exc)
     from app import idioma as idioma_mod
 
-    return idioma_mod.t(clave, lengua, **getattr(exc, "datos", {}))
+    return idioma_mod.motivo_de(exc, lengua)
 
 
 # What KIND of value a setting holds. Each kind has exactly one validator and

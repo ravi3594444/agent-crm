@@ -593,10 +593,15 @@ def _codigo_de_accion(text: str, telefono: str) -> str | None:
     try:
         resultado = acciones.aplicar(match.group(1), telefono)
     except acciones.AccionError as exc:
-        return f"No hice nada: {exc}."
+        # Igual que el camino del código de cuatro dígitos, tres funciones más
+        # arriba: el motivo sale por su clave, no interpolando la excepción.
+        lengua = idioma.gerencia()
+        return idioma.t(
+            "codigo.accion_no_aplicada", lengua, motivo=idioma.motivo_de(exc, lengua)
+        )
     except Exception as error:
         print(f"[acciones] confirmación falló type={_error_name(error)}")
-        return "No pude hacer esa acción en este momento. No cambié nada."
+        return idioma.t("codigo.accion_error", idioma.gerencia())
     return str(resultado["detalle"])
 
 

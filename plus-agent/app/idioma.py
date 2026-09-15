@@ -494,7 +494,8 @@ CATALOGO: dict[str, dict[str, str]] = {
         EN: (
             "🔒 {pedido}: {horas} h went by with no decision, so I closed it to "
             "stop it reserving stock and told the customer it was not "
-            "confirmed. If it is still doable, it has to be redone with today's."
+            "confirmed. If it is still doable, it has to be redone with today's "
+            "stock and prices."
         ),
     },
     # El resumen de autonomía (app/autonomia.py). Cada número puede ser «no
@@ -850,6 +851,18 @@ CATALOGO: dict[str, dict[str, str]] = {
             "It applies from the next order on, with no restart. "
             "It's on record under your name ({ts})."
         ),
+    },
+    # El gemelo de `codigo.ajuste_no_aplicado` para el código de SEIS dígitos
+    # (una acción sobre un pedido). Estas dos estaban escritas a mano en
+    # `app/main.py`, así que el dueño con el sistema en inglés recibía la
+    # negativa en castellano justo en el camino del código de confirmación.
+    "codigo.accion_no_aplicada": {
+        ES: "No hice nada: {motivo}.",
+        EN: "I did nothing: {motivo}.",
+    },
+    "codigo.accion_error": {
+        ES: "No pude hacer esa acción en este momento. No cambié nada.",
+        EN: "I could not carry out that action right now. I changed nothing.",
     },
     "codigo.ajuste_no_aplicado": {
         ES: "No apliqué nada: {motivo}.",
@@ -2225,6 +2238,127 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: 'Preparé la acción ({accion} {pedido}) pero NO pude mandarte el código de confirmación, así que la descarté. No cambié nada. Probá de nuevo.',
         EN: 'I prepared the action ({accion} {pedido}) but could NOT send you the confirmation code, so I discarded it. Nothing was changed. Try again.',
     },
+    # ------------------------------------------------------------------
+    # Los motivos de `AccionError` (app/acciones.py). Viajaban como texto
+    # en castellano adentro de un mensaje ya traducido: media frase en
+    # cada idioma. Ahora la excepción lleva la clave y el motivo se arma
+    # cuando se lee — ver `idioma.motivo_de`.
+    "accion.cambia_algo": {
+        ES: '«{accion}» cambia algo, así que no se hace de una: hay que prepararla y confirmarla con el código',
+        EN: '«{accion}» changes something, so it is not done in one step: it has to be prepared and confirmed with the code',
+    },
+    "accion.cargo_como_numero": {
+        ES: ' y el cargo como un número (0 es sin cargo)',
+        EN: ' and the charge as a number (0 means no charge)',
+    },
+    "accion.codigo_de_otro_numero": {
+        ES: 'ese código no es de este número',
+        EN: 'that code does not belong to this number',
+    },
+    "accion.codigo_mal_formado": {
+        ES: 'eso no tiene forma de código de confirmación',
+        EN: 'that is not shaped like a confirmation code',
+    },
+    "accion.codigo_vencido": {
+        ES: 'ese código ya venció. No cambié nada: pedime la acción de nuevo',
+        EN: 'that code has expired. I changed nothing: ask me for the action again',
+    },
+    "accion.falta_dato": {
+        ES: 'falta {que}. «{accion}» se lo dice al cliente, así que no lo invento: preguntale y volvé a pedírmelo',
+        EN: '{que} is missing. «{accion}» tells the customer, so I do not invent it: ask them and come back to me',
+    },
+    "accion.falta_pedido": {
+        ES: 'falta el número de pedido',
+        EN: 'the order number is missing',
+    },
+    "accion.necesito_con_cargo": {
+        ES: 'qué día, a qué hora y cuánto se cobra',
+        EN: 'what day, what time and how much is charged',
+    },
+    "accion.necesito_sin_cargo": {
+        ES: 'qué día y a qué hora',
+        EN: 'what day and what time',
+    },
+    "accion.no_pude_coordinar": {
+        ES: 'no pude coordinar la acción sobre {pedido}; pedímela de nuevo en un momento',
+        EN: 'I could not coordinate the action on {pedido}; ask me for it again in a moment',
+    },
+    "accion.no_pude_leer_historial": {
+        ES: 'no pude leer el historial de acciones',
+        EN: 'I could not read the action history',
+    },
+    "accion.no_pude_leer_pedido": {
+        ES: 'no pude leer {pedido} en ERPNext, así que no preparé nada',
+        EN: 'I could not read {pedido} in ERPNext, so I prepared nothing',
+    },
+    "accion.no_pude_leer_pendiente": {
+        ES: 'no pude leer la acción pendiente',
+        EN: 'I could not read the pending action',
+    },
+    "accion.no_registre": {
+        ES: 'no pude registrar la acción para confirmarla',
+        EN: 'I could not record the action so you could confirm it',
+    },
+    "accion.no_registre_autorizacion": {
+        ES: 'no pude registrar la autorización en ERPNext, así que no la ejecuté',
+        EN: 'I could not record the authorization in ERPNext, so I did not carry it out',
+    },
+    "accion.numero_no_autorizado": {
+        ES: 'ese número ya no está autorizado para esto',
+        EN: 'that number is no longer authorized for this',
+    },
+    "accion.parametros_ilegibles": {
+        ES: 'los parámetros de la acción pendiente quedaron ilegibles',
+        EN: "the pending action's parameters came back unreadable",
+    },
+    "accion.pedido_mal_formado": {
+        ES: '«{texto}» no tiene forma de número de pedido (SAL-ORD-2026-00008). No adivino cuál es',
+        EN: '«{texto}» is not shaped like an order number (SAL-ORD-2026-00008). I am not going to guess which one it is',
+    },
+    "accion.pendiente_ilegible": {
+        ES: 'la acción pendiente quedó ilegible',
+        EN: 'the pending action came back unreadable',
+    },
+    "accion.pendiente_no_confirmable": {
+        ES: 'la acción pendiente no es de las que se confirman',
+        EN: 'the pending action is not one of the ones that get confirmed',
+    },
+    "accion.sin_quien_confirma": {
+        ES: 'no sé quién confirma la acción',
+        EN: 'I do not know who is confirming the action',
+    },
+    "accion.sin_quien_pide": {
+        ES: 'no sé quién pide la acción',
+        EN: 'I do not know who is asking for the action',
+    },
+    "accion.sin_quien_pregunta": {
+        ES: 'no sé quién pregunta',
+        EN: 'I do not know who is asking',
+    },
+    "accion.sin_solicitud_abierta": {
+        ES: '{pedido} no tiene ninguna solicitud abierta, así que no hay nada que ofrecerle al cliente. No preparé nada',
+        EN: '{pedido} has no open request, so there is nothing to offer the customer. I prepared nothing',
+    },
+    "accion.sin_verbo": {
+        ES: 'no me dijiste qué hacer; las acciones que puedo preparar son: {acciones}',
+        EN: 'you did not tell me what to do; the actions I can prepare are: {acciones}',
+    },
+    "accion.solicitud_abierta_faltan_terminos": {
+        ES: '{pedido} tiene una solicitud abierta y aprobarla es aprobar lo que pidió el cliente, y de eso falta {faltan}. No cambié nada. Decime los términos completos y preparo una contraoferta (qué día, a qué hora y cuánto se cobra) o un retiro (qué día y a qué hora)',
+        EN: '{pedido} has an open request, and approving it means approving what the customer asked for — and {faltan} is missing from that. I changed nothing. Give me the full terms and I prepare a counter-offer (what day, what time and how much is charged) or a pickup (what day and what time)',
+    },
+    "accion.solo_lectura": {
+        ES: '«{accion}» es de sólo lectura: se hace en el momento, no se propone',
+        EN: '«{accion}» is read-only: it happens right away, it is not proposed',
+    },
+    "accion.terminos_no_entendidos": {
+        ES: 'no entendí los términos, y no los invento: son una fecha y un precio que después hay que cumplir. Necesito {necesito}. El día va como «mañana», «jueves», «4/9» o «2026-09-07»; la hora como 18:00{extra}. Ejemplo: {ejemplo}',
+        EN: 'I did not understand the terms, and I do not invent them: they are a date and a price that have to be honoured afterwards. I need {necesito}. The day goes like «tomorrow», «Thursday», «4/9» or «2026-09-07»; the time like 18:00{extra}. Example: {ejemplo}',
+    },
+    "accion.verbo_desconocido": {
+        ES: '«{palabra}» no es una acción que exista. Las que puedo preparar son: {acciones}',
+        EN: '«{palabra}» is not an action that exists. The ones I can prepare are: {acciones}',
+    },
 }
 
 
@@ -2241,6 +2375,33 @@ def claves_incompletas() -> list[str]:
             if not str(textos.get(idioma, "")).strip():
                 faltan.append(f"{clave}:{idioma}")
     return faltan
+
+
+def motivo_de(exc: Exception, lengua: str | None = None) -> str:
+    """El texto de una excepción que lleva `clave`, en el idioma del que lee.
+
+    Vive acá y no en cada módulo que tiene su propia excepción porque ya había
+    DOS copias —`limites.motivo` y la que iba a necesitar `acciones`— y dos
+    copias de una regla son dos reglas: la segunda se olvida el día que la
+    primera aprende algo. `limites.motivo` ahora llama a ésta y conserva su
+    nombre para los cinco lugares que ya lo usaban.
+
+    Sin clave cae a `str(exc)`, que es lo que hacía antes: una excepción de otro
+    módulo, o una vieja, sigue saliendo y nunca vacía.
+
+    UN DATO PUEDE SER LLAMABLE, y ésa es la parte que no tenía `limites.motivo`.
+    Casi todos los datos valen igual en los dos idiomas —un número de pedido, un
+    monto, un código—, pero algunos NO: «falta el día y la hora» es una lista de
+    nombres que hay que traducir, y quien levanta la excepción no sabe quién la
+    va a leer. Un `lambda lengua: ...` difiere esa parte hasta acá, que es el
+    único lugar donde el idioma ya se conoce.
+    """
+    clave = str(getattr(exc, "clave", "") or "")
+    if not clave:
+        return str(exc)
+    crudos = getattr(exc, "datos", None) or {}
+    datos = {k: (v(lengua) if callable(v) else v) for k, v in crudos.items()}
+    return t(clave, lengua, **datos)
 
 
 def t(clave: str, idioma: str | None = None, /, **params: object) -> str:

@@ -68,7 +68,13 @@ def detalle_de_pedido(
     try:
         return acciones.ejecutar_lectura("ver", pedido, actor.actor_phone)
     except acciones.AccionError as exc:
-        return idioma.t("gestion.no_pude_mostrar", idioma.gerencia(), exc=exc)
+        # `motivo_de` y no `exc`: el motivo viaja con su clave, así que se arma
+        # en el idioma del dueño. Interpolar la excepción metía castellano
+        # adentro de una frase ya traducida.
+        lengua = idioma.gerencia()
+        return idioma.t(
+            "gestion.no_pude_mostrar", lengua, exc=idioma.motivo_de(exc, lengua)
+        )
 
 
 @tool
@@ -133,7 +139,9 @@ def proponer_accion(
     try:
         propuesta = acciones.proponer(accion, pedido, detalle, actor.actor_phone)
     except acciones.AccionError as exc:
-        return idioma.t("gestion.no_prepare_nada", lengua, exc=exc)
+        return idioma.t(
+            "gestion.no_prepare_nada", lengua, exc=idioma.motivo_de(exc, lengua)
+        )
 
     if propuesta.get("repetida"):
         # Misma acción, mismo pedido, mismos datos y todavía sin confirmar: ya
