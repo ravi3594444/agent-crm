@@ -6,6 +6,6 @@
   "scripts": {
     "build": "node scripts/build-dashboard.mjs",
     "check": "node --check plus-agent/app/dashboard_ui/app.js",
-    "test": "node --test scripts/test-dashboard.mjs"
+    "test": "node --test scripts/test-dashboard.mjs scripts/test-voz-ui.mjs"
   }
 }

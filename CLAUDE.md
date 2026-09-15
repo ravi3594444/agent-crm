@@ -162,7 +162,7 @@ pytest -q -rs             # needs Redis Stack
 
 ## Status
 
-**Working:** ERPNext + agent live on HTTPS. Three identities with real permission separation. WhatsApp webhook verified, token permanent (SYSTEM_USER). Gemini configured. 13 demo products, 7 demo customers seeded. Customer and management agents both answering. Two staff numbers, two customer numbers registered in Meta. The customer agent can now answer the delivery questions the owner configures by WhatsApp (`condiciones_de_entrega`, 12 customer tools) and the eight counter-answers he gave the management agent (`MEMORIA_PARA_CLIENTES`). The owner can also promote ONE note at a time with `anotar_dato(para_clientes=true)` — a second door on the same frontier, floored by the four private keys and checked on both sides.
+**Working:** ERPNext + agent live on HTTPS. **Canal de voz** (`plus-agent/app/voz/`, `docs/VOZ.md`): el mismo agente de clientes atendiendo el teléfono, con las mismas herramientas y las mismas reglas — navegador hoy, telefonía cuando se conecte un transporte. Three identities with real permission separation. WhatsApp webhook verified, token permanent (SYSTEM_USER). Gemini configured. 13 demo products, 7 demo customers seeded. Customer and management agents both answering. Two staff numbers, two customer numbers registered in Meta. The customer agent can now answer the delivery questions the owner configures by WhatsApp (`condiciones_de_entrega`, 12 customer tools) and the eight counter-answers he gave the management agent (`MEMORIA_PARA_CLIENTES`). The owner can also promote ONE note at a time with `anotar_dato(para_clientes=true)` — a second door on the same frontier, floored by the four private keys and checked on both sides.
 
 **Open:**
 1. **Gemini key on free tier** — the cause of rate limits and slowness. Highest priority.
@@ -175,6 +175,7 @@ pytest -q -rs             # needs Redis Stack
 7. **CI/CD not wired** — `deploy.yml` exists but isn't installed.
 8. **No email configured** — no password resets, no notifications.
 9. ~~The lease around `aceptar_cliente` has no ownership check.~~ **Closed.** `distributed_lock` now yields a `Lease`, and `sigue_mio()` is asked immediately before both of the system's submits (`aprobacion.emitir` and `solicitudes.aceptar_cliente`). It fails closed: if Redis cannot confirm ownership the answer is no, and nothing is emitted. `emitir`'s `lease` is a required keyword argument, so a future caller cannot lose the check by forgetting it.
+10. **Voz: sólo navegador** — falta el transporte de telefonía (Telnyx/Twilio). `agente.desde_telefono` ya decide qué significa el `caller_id`; falta quien lo llame. Y `VOZ_CONFIA_EN_CALLER_ID` va apagado hasta que el dueño decida que el número de su operador alcanza: un `caller_id` se falsifica, y entregar el número entrega la cuenta.
 
 ---
 
