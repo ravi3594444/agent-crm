@@ -79,10 +79,17 @@ mientras la llamada anda perfecto—.
 
 ## Qué puede hacer y qué no
 
-Las once herramientas de `TOOLS_CLIENTES`: catálogo, stock, estado de un pedido,
+Las doce herramientas de `TOOLS_CLIENTES`: catálogo, stock, estado de un pedido,
 pedido habitual, alta de cliente, alta de lead, crear pedido, escalar a una
-persona, pedir una excepción de entrega, anotar un seguimiento y darse de baja un
-borrador propio.
+persona, las condiciones de entrega que configuró el dueño, pedir una excepción
+de entrega, anotar un seguimiento y darse de baja un borrador propio.
+
+El número sale del registro y no de acá, así que esta lista se desactualiza sola
+en cuanto alguien agregue una herramienta —`condiciones_de_entrega` llegó con
+#48 y esta línea todavía decía once—. Lo que NO se desactualiza es el canal:
+`test_la_voz_expone_exactamente_el_registro_de_clientes` compara la lista
+declarada contra `TOOLS_CLIENTES`, y `app/voz/verificar.py` la vuelve a comparar
+adentro de la imagen.
 
 **Gerencia no entra por voz, y no es una decisión de producto.** Un ajuste del
 dueño se confirma con un código de cuatro dígitos que —regla dura 3— no puede

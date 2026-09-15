@@ -4,6 +4,7 @@ Lo que estos tests protegen no es que la voz ande. Es que la voz no sea un
 segundo sistema: que no tenga su propia lista de herramientas, su propia copia
 de las reglas, ni una identidad más floja de la que dice tener.
 """
+import dataclasses
 import inspect
 import json
 
@@ -806,3 +807,72 @@ def test_la_memoria_del_dueno_respeta_su_interruptor_tambien_por_telefono(monkey
 
     monkeypatch.setenv("MEMORIA_PARA_CLIENTES", "false")
     assert "PAGA SIEMPRE TARDE" not in prompt_voz.construir()
+
+
+def test_un_fallo_de_validacion_no_deja_lo_que_dicto_el_cliente_en_el_log(capsys):
+    """Lo que el cliente dictó no puede terminar en el log del servidor.
+
+    Por teléfono los argumentos salen de una transcripción, así que el modelo
+    arma mal los argumentos seguido y lo que levanta `invoke` es una
+    `ValidationError` de pydantic — que trae el valor ADENTRO del mensaje:
+    `Field required [type=missing, input_value={'texto': 'timbre 4B'}]`. Ahí va
+    la dirección que acaba de decir, al log, en texto plano.
+
+    `traceback.print_exc()` no lo evita: su última línea ES el mensaje. Por eso
+    se loguean los MARCOS —archivo y línea, que es lo que localiza el fallo— y
+    el tipo, y el mensaje sólo cuando la excepción es `ERPNextError`, que el
+    repo garantiza sanitizada («safe to pass through internal tool logic»: sus
+    mensajes nombran la operación y el estado, nunca lo que se mandó).
+
+    Mutaciones, una por mitad, porque protegen errores opuestos:
+
+    | mutación | resultado |
+    |---|---|
+    | volver a `: {exc}` para toda excepción | 1 failed, 50 passed |
+    | `format_tb` → `format_exception` (el traceback entero) | 1 failed, 50 passed |
+
+    La segunda es la que importa: con sólo la primera, sacar el mensaje del
+    `print` y dejar el traceback entero se ve arreglado y filtra igual.
+    """
+    dictado = "timbre 4B de la calle Falsa"
+    herramientas.ejecutar(
+        "buscar_producto",
+        {"texto": dictado},  # falta `consulta`: pydantic levanta y cita el valor
+        configurable={"actor_scope": "customer", "thread_id": "voz:c1"},
+    )
+
+    log = capsys.readouterr().out
+    assert dictado not in log
+    assert "timbre 4B" not in log
+    # Y lo que SÍ tiene que quedar, o el fallo no se puede localizar.
+    assert "ValidationError" in log
+    assert "voz:c1" in log
+    assert "herramientas.py" in log
+
+
+def test_el_verificador_dice_que_pasa_cuando_solo_cambio_el_orden(monkeypatch):
+    """Un mensaje que termina en «[]» pone el job en rojo sin decir qué.
+
+    `declaradas != esperadas` compara LISTAS, así que también falla si el
+    conjunto es el mismo y cambió el orden — y justo ahí la diferencia
+    simétrica es vacía. Lo cazó una review de CodeRabbit.
+
+    Mutación: volver al `f"...{sorted(set(esperadas) ^ set(declaradas))}"` de
+    antes — 1 failed, 50 passed.
+    """
+    relay()
+    from app.voz import verificar as verificador
+
+    _entorno_de_voz(monkeypatch)
+    real = agente.desde_navegador
+
+    def al_reves(parametros=None):
+        definicion = real(parametros)
+        return dataclasses.replace(definicion, tools=list(reversed(definicion.tools)))
+
+    monkeypatch.setattr(agente, "desde_navegador", al_reves)
+    problemas = [p for p in verificador.verificar() if "registro de clientes" in p]
+
+    assert problemas, "un orden distinto tiene que ser un problema"
+    assert "otro orden" in problemas[0]
+    assert not problemas[0].rstrip().endswith("[]")

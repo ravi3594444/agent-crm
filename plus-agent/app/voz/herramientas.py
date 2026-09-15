@@ -36,6 +36,7 @@ import sys
 import traceback
 from typing import Any
 
+from app.erpnext import ERPNextError
 from app.tools.registro import (
     ERROR_DE_HERRAMIENTA,
     HERRAMIENTA_INEXISTENTE,
@@ -122,14 +123,39 @@ def ejecutar(
             dict(argumentos or {}), config={"configurable": dict(configurable)}
         )
     except Exception as exc:
-        # El mensaje Y el traceback: acá la excepción se muere, así que esto es
-        # lo único que va a quedar de ella. Los ARGUMENTOS no se loguean —son
-        # las palabras del cliente— y el hilo se identifica por el id de
-        # llamada, que no es un teléfono.
+        # NO LOGUEAR NI EL MENSAJE NI EL TRACEBACK ENTERO, y no es paranoia:
+        # está MEDIDO. Una `ValidationError` de pydantic —lo que levanta
+        # `invoke` cuando el modelo arma mal los argumentos, que por teléfono
+        # pasa seguido porque los argumentos salen de una transcripción— trae
+        # el valor adentro del mensaje:
+        #
+        #   Field required [type=missing, input_value={'texto': 'timbre 4B'}]
+        #
+        # o sea la dirección que el cliente acaba de dictar, en el log. Y
+        # `traceback.print_exc()` NO evita nada: su última línea ES el mensaje.
+        # Medido sobre este mismo camino: str(exc) filtra, el traceback entero
+        # filtra, los MARCOS solos no.
+        #
+        # Así que van los marcos —archivo y línea, que es lo que localiza el
+        # fallo— y el tipo. El mensaje sólo si la excepción es de las que el
+        # repo garantiza sanitizadas: `ERPNextError` lo dice en su docstring
+        # («safe to pass through internal tool logic») y sus mensajes nombran
+        # la operación y el estado, nunca el cuerpo ni lo que se mandó.
+        #
+        # Los ARGUMENTOS siguen sin loguearse y el hilo se identifica por el id
+        # de llamada, que no es un teléfono. Lo pidió una review de CodeRabbit;
+        # el pedido opuesto de Qodo —«que el fallo sea localizable»— lo cumplen
+        # los marcos, que es la parte que localiza.
+        detalle = f": {exc}" if isinstance(exc, ERPNextError) else ""
         print(
             f"[voz] herramienta {nombre} falló en "
-            f"{configurable.get('thread_id', '?')}: {type(exc).__name__}: {exc}"
+            f"{configurable.get('thread_id', '?')}: {type(exc).__name__}{detalle}"
         )
-        traceback.print_exc(file=sys.stdout)
+        # El encabezado va a mano: `format_tb` da sólo los marcos y quien lee un
+        # log busca esta palabra. No lleva dato del cliente, a diferencia de la
+        # ÚLTIMA línea de `format_exception`, que es el mensaje.
+        print("Traceback (most recent call last):", file=sys.stdout)
+        for marco in traceback.format_tb(exc.__traceback__):
+            print(marco, end="", file=sys.stdout)
         return ERROR_DE_HERRAMIENTA, True
     return str(resultado), False

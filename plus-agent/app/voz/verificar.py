@@ -70,9 +70,18 @@ def verificar() -> list[str]:
     declaradas = [herramienta["name"] for herramienta in agente.tools]
     esperadas = [herramienta.name for herramienta in TOOLS_CLIENTES]
     if declaradas != esperadas:
+        # La comparación es de LISTAS, así que también falla si el conjunto es
+        # el mismo y cambió el orden — y ahí la diferencia simétrica es vacía y
+        # el mensaje terminaba en «[]»: el job se ponía rojo sin decir qué. Lo
+        # cazó una review de CodeRabbit.
+        faltan_o_sobran = sorted(set(esperadas) ^ set(declaradas))
+        detalle = (
+            f"{faltan_o_sobran}"
+            if faltan_o_sobran
+            else f"mismas herramientas, otro orden: {declaradas} vs {esperadas}"
+        )
         problemas.append(
-            f"las herramientas declaradas no son el registro de clientes: "
-            f"{sorted(set(esperadas) ^ set(declaradas))}"
+            f"las herramientas declaradas no son el registro de clientes: {detalle}"
         )
 
     from app.voz import identidad
