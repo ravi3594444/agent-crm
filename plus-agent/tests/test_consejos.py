@@ -1398,6 +1398,89 @@ def test_la_demanda_se_mide_en_unidad_de_stock(erp, reparto_semanal, monkeypatch
     assert salida[0].datos["demanda_diaria"] == pytest.approx(1.2)
 
 
+# ------------------------------------------- el techo de la página de ventas
+#
+# EL PRIMER TECHO de `_demanda_diaria`, que no tenía ningún test. Los dos de
+# más abajo miran el segundo (los renglones de cada lote) y los dos de
+# `dormidos` miran el suyo; éste se pedía con la fila de más, se logueaba y se
+# recortaba, y nada lo medía. Van dos porque son dos consumidores de la misma
+# condición: el log y el recorte se mutan por separado.
+#
+# La dirección del error es la peligrosa, igual que con la venta futura pero al
+# revés: una página recortada BAJA la demanda diaria, SUBE lo proyectado y el
+# quiebre no se avisa. El silencio se ve igual que «no hay nada que decir».
+
+
+def _tres_ventas_del_mismo_producto(erp, code: str) -> None:
+    """Tres ventas de 30 unidades cada una, de lo más nuevo a lo más viejo.
+
+        SO-V-<code>-1   HOY-1    30
+        SO-V-<code>-3   HOY-3    30
+        SO-V-<code>-5   HOY-5    30
+
+    Con las tres, 90/30 = 3 por día. Con las dos más nuevas —que es lo que deja
+    el recorte con el techo en 2—, 60/30 = 2. Los dos números salen de dos
+    corridas sobre ESTA misma historia, no de la constante.
+    """
+    for atras in (1, 3, 5):
+        poner_venta(erp, code, qty=30.0, stock_qty=30.0, atras=atras)
+
+
+def test_una_pagina_de_ventas_llena_se_recorta_al_techo_y_no_al_techo_mas_uno(
+    erp, reparto_semanal, monkeypatch
+):
+    """MUTACIÓN: en `_demanda_diaria`, borrar el `[:MAX_PEDIDOS_HISTORIA]`.
+
+    Cae ésta y sólo ésta. El `limit` es techo+1 —hay que pedir una de más para
+    saber que faltan—, así que sin el recorte la demanda se calcula con una
+    venta que la función decidió no tener. Acá eso la sube de 2 a 3 por día.
+
+    Y la mutación de al lado (`limit=MAX_PEDIDOS_HISTORIA + 1` -> `limit=
+    MAX_PEDIDOS_HISTORIA`) NO mata a ésta, por lo mismo que en el techo de
+    renglones: con el techo justo se suman `techo` ventas y con techo+1 también,
+    porque el recorte saca la fila sonda. Esa mutación la mata el test del log.
+    """
+    inventario_confiable(monkeypatch, maestra=True)
+    poner_stock(erp, "MANTECA-200", hay=6.0, minimo=5.0)
+    _tres_ventas_del_mismo_producto(erp, "MANTECA-200")
+
+    # Techo 3: las tres entran. 90/30 = 3 por día.
+    monkeypatch.setattr(consejos, "MAX_PEDIDOS_HISTORIA", 3)
+    entera = consejos.quiebres(HOY)
+    assert [c.sobre for c in entera] == ["MANTECA-200"]
+    assert entera[0].datos["demanda_diaria"] == pytest.approx(3.0)
+
+    # Techo 2: se piden 3, vuelven 3, se recorta a las DOS MÁS NUEVAS —la
+    # consulta pide `transaction_date desc`— y la demanda sale de 60/30 = 2.
+    monkeypatch.setattr(consejos, "MAX_PEDIDOS_HISTORIA", 2)
+    recortada = consejos.quiebres(HOY)
+    assert [c.sobre for c in recortada] == ["MANTECA-200"]
+    assert recortada[0].datos["demanda_diaria"] == pytest.approx(2.0)
+
+
+def test_una_pagina_de_ventas_recortada_se_dice_en_el_log(
+    erp, reparto_semanal, monkeypatch, capsys
+):
+    """MUTACIÓN: borrar el `print` de adentro de ese `if`.
+
+    Cae éste y sólo éste. La proyección sale igual, con menos ventas de las que
+    hubo, y sin el log no queda de dónde enterarse de que salió recortada. La
+    corrida con el techo alto está para que el assert no se pueda cumplir por
+    la vía de no imprimir nunca.
+    """
+    inventario_confiable(monkeypatch, maestra=True)
+    poner_stock(erp, "MANTECA-200", hay=6.0, minimo=5.0)
+    _tres_ventas_del_mismo_producto(erp, "MANTECA-200")
+
+    monkeypatch.setattr(consejos, "MAX_PEDIDOS_HISTORIA", 2)
+    consejos.quiebres(HOY)
+    assert "más de 2 ventas en la ventana de demanda" in capsys.readouterr().out
+
+    monkeypatch.setattr(consejos, "MAX_PEDIDOS_HISTORIA", 3)
+    consejos.quiebres(HOY)
+    assert "ventana de demanda" not in capsys.readouterr().out
+
+
 # ------------------------------------------- el techo de renglones por lote
 #
 # `_demanda_diaria` tiene DOS techos —la página de pedidos y los renglones de
