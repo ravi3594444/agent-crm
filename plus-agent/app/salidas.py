@@ -107,12 +107,49 @@ def proponer(cliente: str, telefono: str, texto: str, pedida_por: str) -> Salida
         pedida_por=pedida_por,
         creada=time.time(),
     )
-    cuerpo = json.dumps(salida.como_dict(), ensure_ascii=False, separators=(",", ":"))
     try:
-        locks.conexion().set(_clave(salida.id), cuerpo, ex=TTL_SEGUNDOS)
+        locks.conexion().set(_clave(salida.id), _cuerpo(salida), ex=TTL_SEGUNDOS)
     except Exception as exc:
         raise SalidaError(f"no pude guardar el mensaje ({type(exc).__name__})") from exc
     return salida
+
+
+def _cuerpo(salida: Salida) -> str:
+    return json.dumps(salida.como_dict(), ensure_ascii=False, separators=(",", ":"))
+
+
+def devolver(salida: Salida) -> bool:
+    """Vuelve a guardar una salida que se consumió y NO salió. True si volvió.
+
+    `consumir` es un GETDEL, así que si lo de después falla —encolar, por
+    ejemplo— la propuesta ya no está: el dueño lee «no salió», toca el mismo
+    botón y recibe «ya no está». Puede pedir otra, pero no puede REINTENTAR la
+    que ya miró y aprobó, que es lo único que quería hacer.
+
+    VUELVE CON SU VENCIMIENTO ORIGINAL, no con uno nuevo. Un TTL fresco
+    convertiría cada fallo de encolado en una hora más de vida para una promesa
+    que el cliente todavía no recibió, y una propuesta aprobada hace 59 minutos
+    que revive por otra hora es un mensaje que sale cuando ya no viene a cuento.
+    Lo que queda se calcula desde `creada` y NO se lee de Redis: leerlo habría
+    que hacerlo antes del GETDEL, y ahí `consumir` deja de ser una sola
+    operación, que es todo su punto.
+
+    Si ya venció, no se restaura y devuelve False: el que llama sabe que esa
+    propuesta no vuelve, y el dueño tiene que pedirla de nuevo.
+
+    El `id` NO cambia, y eso es lo que hace segura la reintentada: es la clave de
+    idempotencia de la cola, así que un encolado que falló de forma incierta
+    —falló al contestar, no al encolar— no manda el mensaje dos veces.
+    """
+    restante = int(TTL_SEGUNDOS - (time.time() - salida.creada))
+    if restante <= 0:
+        return False
+    try:
+        locks.conexion().set(_clave(salida.id), _cuerpo(salida), ex=restante)
+        return True
+    except Exception as exc:
+        print(f"[salidas] no pude devolver {salida.id} ({type(exc).__name__})")
+        return False
 
 
 def _desde_json(crudo: object) -> Salida | None:

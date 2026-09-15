@@ -124,6 +124,12 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
             )
         except Exception as exc:
             print(f"[aprobacion] mensaje a cliente no encolado ({type(exc).__name__})")
+            # `consumir` ya la borró, así que sin esto el mismo botón contesta
+            # «ya no está» y el dueño no puede reintentar lo que acaba de
+            # aprobar. Vuelve con su vencimiento original y con el MISMO id, que
+            # es la clave de idempotencia de la cola: si el encolado falló
+            # después de haber encolado, el reintento no manda dos veces.
+            salidas.devolver(salida)
             return idioma.t("salida.no_salio", lengua)
         return idioma.t("salida.mandado", lengua, cliente=salida.cliente)
 

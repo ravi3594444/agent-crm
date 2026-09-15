@@ -362,8 +362,22 @@ def reclamar(consejo: Consejo, dia: date) -> str:
         ttl = TTL_RECLAMO.get(consejo.clase, 24 * 3600)
         if not cliente.set(_clave_consejo(consejo.clave), testigo, nx=True, ex=ttl):
             return REPETIDO
-        usados = int(cliente.incr(_clave_presupuesto(dia)))
-        cliente.expire(_clave_presupuesto(dia), TTL_PRESUPUESTO_SEGUNDOS)
+        try:
+            usados = int(cliente.incr(_clave_presupuesto(dia)))
+            cliente.expire(_clave_presupuesto(dia), TTL_PRESUPUESTO_SEGUNDOS)
+        except Exception:
+            # El `SET NX` de arriba YA GANÓ: el consejo está reclamado. Si el
+            # presupuesto falla acá y se vuelve con SIN_REDIS, `tick` no lo
+            # devuelve —no es uno de los estados que mira— y el reclamo se queda
+            # puesto hasta su TTL: el consejo figura como dicho sin que nadie lo
+            # haya oído, y no vuelve a intentarse en 24 horas.
+            #
+            # Se suelta SÓLO el reclamo. El contador NO se baja: `INCR` puede
+            # haber pasado y ser `expire` el que falló, y en ese caso un
+            # decremento le regalaría presupuesto a un consejo que sí lo gastó.
+            # De más en el contador se corrige solo con su TTL; de menos, no.
+            devolver(consejo)
+            raise
     except Exception as exc:
         print(f"[consejos] no pude reclamar {consejo.clave} ({type(exc).__name__})")
         return SIN_REDIS

@@ -35,6 +35,7 @@ import ast
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -232,6 +233,33 @@ def test_sin_redis_el_presupuesto_no_es_cero_es_desconocido(limites_sin_redis):
     assert consejos.restante(HOY) == consejos.MAX_CONSEJOS_POR_DIA
     limites_sin_redis.caido = True
     assert consejos.restante(HOY) == -1
+
+
+def test_si_el_presupuesto_falla_el_consejo_no_queda_dicho_sin_decirse(
+    limites_sin_redis, monkeypatch
+):
+    """El `SET NX` YA GANÓ cuando el contador falla, y eso deja un rastro.
+
+    `reclamar` marca el consejo y recién después toca el presupuesto. Si el
+    `INCR` o el `EXPIRE` levantan, se vuelve con `SIN_REDIS` — y `tick` no
+    devuelve ese estado, porque no es uno de los que mira. Así que la clave del
+    reclamo se queda puesta sus 24 horas: el consejo figura como dicho sin que
+    nadie lo haya oído, y no se reintenta en todo el día.
+
+    El contador NO se baja, a propósito: puede haber sido el `EXPIRE` el que
+    falló y el `INCR` haber pasado, y ahí un decremento le regalaría presupuesto
+    a un consejo que sí lo gastó. De más se corrige con el TTL; de menos, no.
+
+    MUTACIÓN: sacar el `devolver(consejo)` del `except` interno de `reclamar`.
+    Cae este test y sólo éste.
+    """
+    consejo = un_consejo("perdida:SO-9")
+    monkeypatch.setattr(
+        limites_sin_redis, "incr", Mock(side_effect=ConnectionError("redis"))
+    )
+
+    assert consejos.reclamar(consejo, HOY) == consejos.SIN_REDIS
+    assert limites_sin_redis.get(consejos._clave_consejo(consejo.clave)) is None
 
 
 def test_un_reclamo_sin_redis_no_se_confunde_con_uno_repetido(limites_sin_redis):

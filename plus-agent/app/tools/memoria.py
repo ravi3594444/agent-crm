@@ -152,10 +152,7 @@ def anotar_dato(
         if olvidar:
             apagado = memoria.olvidar(sobre, actor.actor_phone)
             if apagado is None:
-                return (
-                    f"No tenía ningún dato guardado sobre «{sobre}», así que no "
-                    "borré nada."
-                )
+                return idioma.t("memoria.no_habia", idioma.gerencia(), sobre=sobre)
             return idioma.t(
                 "memoria.olvidado", idioma.gerencia(), texto=apagado.texto
             )
@@ -164,8 +161,8 @@ def anotar_dato(
     except memoria.MemoriaError as exc:
         return idioma.t("memoria.no_anote", idioma.gerencia(), error=exc)
     if anterior is not None and anterior.activo and anterior.texto != guardado.texto:
-        return (
-            f"Cambiado. Antes tenía: «{anterior.texto}».\n"
-            f"Ahora: «{guardado.texto}»."
+        return idioma.t(
+            "memoria.cambiado", idioma.gerencia(),
+            antes=anterior.texto, ahora=guardado.texto,
         )
     return idioma.t("memoria.anotado", idioma.gerencia(), texto=guardado.texto)

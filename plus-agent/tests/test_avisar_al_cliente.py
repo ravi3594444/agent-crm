@@ -287,3 +287,53 @@ def test_un_mensaje_largo_se_MUESTRA_igual_que_como_se_guarda(mundo) -> None:
     guardado = salidas.leer(id_salida).texto
     assert len(guardado) == salidas.LARGO_MAXIMO, "el recorte no llegó a pasar"
     assert mostrado == guardado
+
+
+def test_una_cola_que_falla_deja_reintentar_el_MISMO_boton(mundo, monkeypatch) -> None:
+    """Lo que el dueño tiene en la mano es UN botón, y tiene que servir dos veces.
+
+    `consumir` es un GETDEL: sin devolver la salida, el fallo de la cola la
+    borra, el dueño lee «NO salió», toca otra vez y recibe «ya no está». Puede
+    pedir el mensaje de nuevo —y volver a leerlo, y volver a aprobarlo— pero no
+    puede reintentar el que ya miró, que es lo único que quería.
+
+    Se reintenta con el MISMO id porque ése es la clave de idempotencia de la
+    cola: un encolado que falló DESPUÉS de haber encolado no manda dos veces.
+    """
+    from app import avisos
+
+    id_salida = _una_salida()
+    monkeypatch.setattr(avisos, "encolar", Mock(side_effect=ConnectionError("redis")))
+    primera = aprobacion.manejar_boton(f"mandar:{id_salida}", GERENTE)
+    assert "NO salió" in primera
+
+    recuperada = Mock(return_value=True)
+    monkeypatch.setattr(avisos, "encolar", recuperada)
+    segunda = aprobacion.manejar_boton(f"mandar:{id_salida}", GERENTE)
+
+    assert "NO salió" not in segunda
+    recuperada.assert_called_once()
+    assert recuperada.call_args.args[1] == id_salida
+
+
+def test_devolverla_no_la_convierte_en_un_boton_reusable(mundo, monkeypatch) -> None:
+    """Se devuelve para REINTENTAR, no para poder mandar dos veces.
+
+    Es la mitad que el arreglo podía romper: si devolver la salida dejara el
+    botón vivo después de un envío exitoso, un dedo impaciente le manda al
+    cliente la misma promesa dos veces — que es justo lo que `consumir` existía
+    para impedir.
+    """
+    from app import avisos
+
+    id_salida = _una_salida()
+    monkeypatch.setattr(avisos, "encolar", Mock(side_effect=ConnectionError("redis")))
+    aprobacion.manejar_boton(f"mandar:{id_salida}", GERENTE)
+
+    encolar = Mock(return_value=True)
+    monkeypatch.setattr(avisos, "encolar", encolar)
+    aprobacion.manejar_boton(f"mandar:{id_salida}", GERENTE)
+    tercera = aprobacion.manejar_boton(f"mandar:{id_salida}", GERENTE)
+
+    encolar.assert_called_once()
+    assert "ya no" in tercera.lower() or "no está" in tercera.lower()

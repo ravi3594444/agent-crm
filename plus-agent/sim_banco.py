@@ -414,11 +414,24 @@ class Banco:
         # apague la verificación de TLS.
         env["SSL_CERT_FILE"] = str(cert)
         os.environ.update(env)
-        self._levantar_redis()
-        self._levantar_dobles(cert, clave)
-        if self._sembrar:
-            self._sembrar(self.almacen)
-        self._levantar_agente()
+        # `__enter__` llama a `levantar()` DIRECTO, así que si algo de acá
+        # adentro levanta, `__exit__` no corre y nadie baja lo que ya subió:
+        # Redis y los dobles que alcanzaron a arrancar se quedan con sus puertos
+        # tomados, y el `_verificar_puertos()` del próximo `levantar()` falla
+        # contra procesos huérfanos del intento anterior. Se ve como «el banco no
+        # arranca» cuando lo que pasó es que el anterior no terminó de morirse.
+        #
+        # `BaseException` y no `Exception`: un Ctrl-C en mitad del arranque deja
+        # exactamente el mismo desorden.
+        try:
+            self._levantar_redis()
+            self._levantar_dobles(cert, clave)
+            if self._sembrar:
+                self._sembrar(self.almacen)
+            self._levantar_agente()
+        except BaseException:
+            self.bajar()
+            raise
         return self
 
     def bajar(self) -> None:
@@ -426,7 +439,13 @@ class Banco:
             self._uvicorn.should_exit = True
             time.sleep(1.0)
         for srv in self._servidores:
+            # `shutdown()` frena `serve_forever()` y NO cierra el socket que
+            # escucha. Sin `server_close()` el puerto sigue tomado por este
+            # mismo proceso, así que un segundo `levantar()` en la misma corrida
+            # —dos escenarios seguidos en un test— muere en `_verificar_puertos`
+            # acusando a un ocupante que somos nosotros.
             srv.shutdown()
+            srv.server_close()
         if self._redis is not None:
             self._redis.terminate()
             try:
