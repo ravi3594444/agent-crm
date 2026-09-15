@@ -30,9 +30,12 @@ pero vacío es vacío y no hay filtro escondido.
 SIN SDK, Y NO POR AHORRAR UNA DEPENDENCIA
 ------------------------------------------
 Esto habla el protocolo directo, con `httpx`. El intento anterior usaba
-`langchain-mcp-adapters` sobre el SDK `mcp` de Python y **no conectaba**: el
+`langchain-mcp-adapters` sobre el SDK `mcp` **1.30.0** y **no conectaba**: el
 modo HTTP de Casys 3.0.4 exige el protocolo `2026-07-28` y le contesta 400 a un
-cliente que manda `2025-06-18`, que es lo que habla el SDK. Medido, no leído.
+cliente que manda `2025-06-18`, que es lo que habla esa versión del SDK.
+Medido, no leído — y medido con ESA versión: el `httpx` directo es el único
+camino que probamos contra Casys 3.0.4, no el único que podría andar. La v2 del
+SDK soporta `2026-07-28` y no se evaluó.
 
 El contrato nuevo, aprendido preguntándole al servidor:
   · `MCP-Protocol-Version: <version>`
@@ -52,13 +55,16 @@ de fondo: `httpx` es síncrono y todo nuestro runtime también.
 from __future__ import annotations
 
 import fnmatch
+import ipaddress
 import json
 import os
 import selectors
 import subprocess
 import threading
 import time
+from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from langchain_core.tools import StructuredTool
@@ -91,7 +97,7 @@ class MCPExternoError(RuntimeError):
 
 # ------------------------------------------------------------ configuración
 
-def servidores() -> dict[str, dict]:
+def servidores(env: Mapping[str, str] | None = None) -> dict[str, dict]:
     """`MCP_EXTERNOS` -> {nombre: {transporte, destino, token}}.
 
     Formato, una entrada por servidor separadas por coma:
@@ -101,8 +107,20 @@ def servidores() -> dict[str, dict]:
 
     Se eligió por cómo se escribe en un `.env` de una línea. Un JSON acá sería
     más expresivo y se rompe al primer paste con comillas.
+
+    `env` ES EL MAPA QUE HAY QUE LEER, y no una comodidad para los tests.
+    `readiness.ejecutar(env)` recibe un `.env` CANDIDATO —el que todavía no
+    está puesto— y baja ese mismo mapa a cada chequeo; si acá se leyera
+    `os.environ`, readiness aprobaría los servidores del proceso que lo corre en
+    vez de los del archivo que le pidieron revisar, y los avisos de token
+    faltante irían con ellos. Por eso lo lee TODO de `fuente` —la lista, el
+    token de cada servidor y las redes declaradas internas—: un parámetro que se
+    consulta en la primera línea y se abandona en la tercera es el mismo error
+    una línea más abajo. `os.environ` sigue siendo el default, así que `cargar()`
+    y los demás no cambian.
     """
-    crudo = os.getenv("MCP_EXTERNOS", "").strip()
+    fuente = os.environ if env is None else env
+    crudo = str(fuente.get("MCP_EXTERNOS", "") or "").strip()
     if not crudo:
         return {}
     salida: dict[str, dict] = {}
@@ -117,19 +135,94 @@ def servidores() -> dict[str, dict]:
                 f"la entrada {posicion} de MCP_EXTERNOS no tiene «nombre=destino»"
             )
         if destino.startswith(("http://", "https://")):
+            # SE CORTA ACÁ Y NO SE MANDA CALLADO SIN TOKEN: un bearer que salió
+            # una vez ya salió, y un servidor que contesta 401 se diagnostica
+            # como «no conecta» durante media hora. Sin token configurado no se
+            # rechaza nada: no hay nada que filtrar, y ese caso ya lo avisa
+            # `readiness.chequear_mcp_externos`.
+            if token_de(nombre, fuente) and bearer_en_claro(nombre, destino, fuente):
+                raise MCPExternoError(
+                    f"«{nombre}» tiene token y un destino http:// que sale a la "
+                    "red: el bearer viajaría en claro. Poné https://, o si esa "
+                    f"red es tuya declarala con MCP_EXTERNOS_HTTP_INTERNOS={nombre}"
+                )
             salida[nombre] = {"transporte": "http", "destino": destino}
         else:
             salida[nombre] = {"transporte": "stdio", "destino": destino}
     return salida
 
 
-def token_de(nombre: str) -> str:
+def token_de(nombre: str, env: Mapping[str, str] | None = None) -> str:
     """`MCP_EXTERNO_TOKEN_<NOMBRE>`: el bearer de ESE servidor, si lo pide.
 
     Casys autentica al cliente con `MCP_AUTH_TOKEN`. Es del servidor externo y
     no nuestro, así que va por servidor y no en una variable sola.
+
+    `env` por el mismo motivo que en `servidores()`: cuando se está revisando un
+    `.env` candidato, el token que importa es el de ESE archivo.
     """
-    return os.getenv(f"MCP_EXTERNO_TOKEN_{nombre.upper()}", "").strip()
+    fuente = os.environ if env is None else env
+    return str(fuente.get(f"MCP_EXTERNO_TOKEN_{nombre.upper()}", "") or "").strip()
+
+
+def http_internos(env: Mapping[str, str] | None = None) -> set[str]:
+    """`MCP_EXTERNOS_HTTP_INTERNOS`: los servidores cuyo `http://` es de casa.
+
+    La salida de emergencia de la regla de abajo, para una red propia que la
+    heurística no puede reconocer: una VPN, un Kubernetes con dominio, un
+    `http://mcp.interno.laempresa.ar`. Son nombres de servidor —los mismos de
+    `MCP_EXTERNOS`—, no destinos, así que declarar uno no declara al de al lado.
+    """
+    fuente = os.environ if env is None else env
+    crudo = str(fuente.get("MCP_EXTERNOS_HTTP_INTERNOS", "") or "")
+    return {p.strip().lower() for p in crudo.split(",") if p.strip()}
+
+
+def _destino_sin_red(destino: str) -> bool:
+    """¿Este destino se resuelve sin salir a ninguna red?
+
+    Los tres casos que existen en la práctica: esta misma máquina, una IP
+    privada, y —el de la compose de este repo— un nombre de UNA sola etiqueta,
+    que es un servicio de la red de Docker (`mcp-erpnext`) y no algo que el DNS
+    público pueda resolver. Es una heurística y se la trata como tal: lo que no
+    entra acá se declara a mano en `MCP_EXTERNOS_HTTP_INTERNOS`.
+    """
+    anfitrion = (urlsplit(destino).hostname or "").strip().rstrip(".")
+    if not anfitrion:
+        return False
+    try:
+        direccion = ipaddress.ip_address(anfitrion)
+    except ValueError:
+        pass
+    else:
+        return (direccion.is_loopback or direccion.is_private
+                or direccion.is_link_local)
+    if anfitrion == "localhost" or anfitrion.endswith(".localhost"):
+        return True
+    # `.local` es mDNS y `.internal` es el dominio interno de las nubes; ninguno
+    # de los dos sale a internet.
+    if anfitrion.endswith((".local", ".internal")):
+        return True
+    return "." not in anfitrion
+
+
+def bearer_en_claro(nombre: str, destino: str,
+                    env: Mapping[str, str] | None = None) -> bool:
+    """¿Mandarle el token a este destino lo pondría en una red, sin cifrar?
+
+    `MCP_EXTERNO_TOKEN_<NOMBRE>` es la credencial del OTRO sistema, y `http://`
+    la manda en texto plano. Con el despliegue que documenta este repo eso no
+    es un problema —el contenedor de al lado, en la red de Docker, sin publicar
+    al host— y por eso no se exige TLS a secas: se exige que el destino no
+    salga a ninguna red. Lo que no se puede seguir haciendo es lo que sí era un
+    problema y no avisaba nada: un `http://un-host-publico/mcp` con un token al
+    lado manda el bearer en claro por internet.
+    """
+    if not destino.lower().startswith("http://"):
+        return False        # https va cifrado; stdio no es siquiera una red
+    if _destino_sin_red(destino):
+        return False
+    return nombre.strip().lower() not in http_internos(env)
 
 
 def patrones_bloqueados() -> list[str]:
@@ -198,6 +291,12 @@ class ClienteMCP:
         self._candado = threading.Lock()
         self._http: httpx.Client | None = None
         self._proceso: subprocess.Popen | None = None
+        # Los bytes que llegaron pegados DESPUÉS del mensaje que estábamos
+        # esperando. Sobreviven a la llamada a propósito: el servidor escribe
+        # cuando quiere y nada le impide mandar un aviso y la respuesta en una
+        # sola escritura, así que lo que sobra después del `\n` es el principio
+        # del mensaje siguiente y tirarlo sería perderlo.
+        self._pendiente = b""
 
     # -- transporte -------------------------------------------------------
 
@@ -214,7 +313,10 @@ class ClienteMCP:
         if nombre_herramienta:
             cabeceras["Mcp-Name"] = nombre_herramienta
         token = token_de(self.nombre)
-        if token:
+        # La segunda mitad de la misma regla, en el lugar donde el token se
+        # pondría de verdad en el cable: `servidores()` es la puerta, pero un
+        # `ClienteMCP` se puede armar sin pasar por ahí.
+        if token and not bearer_en_claro(self.nombre, self.destino):
             cabeceras["Authorization"] = f"Bearer {token}"
         return cabeceras
 
@@ -260,6 +362,9 @@ class ClienteMCP:
     def _matar(self) -> None:
         """Deja el proceso muerto y olvidado, para que el próximo lo rearranque."""
         proceso, self._proceso = self._proceso, None
+        # Y con él lo que hubiera quedado a medio leer: son bytes de un proceso
+        # que ya no existe, y el que arranque después empieza su propio mensaje.
+        self._pendiente = b""
         if proceso is None:
             return
         try:
@@ -269,19 +374,34 @@ class ClienteMCP:
             # Ya lo estamos tirando: lo que falle acá no cambia nada.
             pass
 
+    def _mensaje_entero(self) -> bytes | None:
+        """El primer mensaje COMPLETO que haya en `_pendiente`, o `None`.
+
+        Un mensaje termina en `\n` y no antes: mientras no aparezca, lo que hay
+        es medio mensaje y no se puede interpretar. Lo que venga después del
+        `\n` se guarda —no se tira— porque ya es del mensaje siguiente.
+        """
+        corte = self._pendiente.find(b"\n")
+        if corte < 0:
+            return None
+        linea, self._pendiente = self._pendiente[:corte], self._pendiente[corte + 1:]
+        return linea
+
     def _por_stdio(self, cuerpo: dict) -> dict:
         if self._proceso is None:
             partes = self.destino.split()
+            # EN BINARIO Y NO EN `text=True`: acá abajo se lee del descriptor a
+            # mano, y un `TextIOWrapper` en el medio se quedaría con bytes en su
+            # buffer que `select()` ya no vuelve a anunciar.
             self._proceso = subprocess.Popen(
                 partes, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, text=True, bufsize=1,
-                env=entorno_para(self.nombre),
+                stderr=subprocess.DEVNULL, env=entorno_para(self.nombre),
             )
         proceso = self._proceso
         if proceso.stdin is None or proceso.stdout is None:
             raise MCPExternoError(f"{self.nombre} no tiene stdin/stdout")
         try:
-            proceso.stdin.write(json.dumps(cuerpo) + "\n")
+            proceso.stdin.write(json.dumps(cuerpo).encode() + b"\n")
             proceso.stdin.flush()
         except (BrokenPipeError, OSError, ValueError) as exc:
             # El hijo se murió. Sin esto el `Popen` muerto quedaba cacheado
@@ -292,30 +412,51 @@ class ClienteMCP:
         # El servidor puede escribir notificaciones antes de la respuesta; se
         # lee hasta encontrar la que lleva NUESTRO id.
         #
-        # CON FECHA LÍMITE, y no sólo con un tope de mensajes. `readline()` no
-        # tiene timeout: un proceso VIVO que deja de contestar —no uno que se
-        # cerró, que devuelve ""— colgaba esta llamada para siempre, y con ella
-        # todas las que esperan `self._candado`. El tope de 200 no ayudaba: se
-        # trababa en el primero.
+        # SE LEEN BYTES Y SE ARMAN LAS LÍNEAS ACÁ, en vez de pedirle una a
+        # `readline()`. `select()` sólo prueba que hay UN byte para leer, no una
+        # línea entera: un hijo que escribe `{"jsonrpc"` y se calla deja el
+        # `readline()` esperando el `\n` para siempre —esperando adentro del
+        # `self._candado`, así que con él quedan colgadas también todas las
+        # llamadas que vengan después a este servidor—. Leyendo de a pedazos, la
+        # media línea entra al buffer y la fecha límite sigue corriendo: se
+        # cumple igual que si no hubiera llegado nada.
+        #
+        # La fecha límite se calcula UNA VEZ y vale para todos los pedazos. Si
+        # se recalculara en cada vuelta, un hijo que gotea un byte cada tanto la
+        # correría indefinidamente sin llegar nunca a contestar, que es el mismo
+        # cuelgue con más pasos.
         limite = time.monotonic() + self.timeout
+        descriptor = proceso.stdout.fileno()
         selector = selectors.DefaultSelector()
-        selector.register(proceso.stdout, selectors.EVENT_READ)
+        selector.register(descriptor, selectors.EVENT_READ)
         try:
             for _ in range(200):
-                queda = limite - time.monotonic()
-                if queda <= 0 or not selector.select(queda):
-                    self._matar()
-                    raise MCPExternoError(
-                        f"{self.nombre} no contestó a {cuerpo['method']} en "
-                        f"{self.timeout:g}s"
-                    )
-                linea = proceso.stdout.readline()
-                if not linea:
-                    self._matar()
-                    raise MCPExternoError(f"{self.nombre} cerró la salida")
+                linea = self._mensaje_entero()
+                while linea is None:
+                    queda = limite - time.monotonic()
+                    if queda <= 0 or not selector.select(queda):
+                        self._matar()
+                        raise MCPExternoError(
+                            f"{self.nombre} no contestó a {cuerpo['method']} en "
+                            f"{self.timeout:g}s"
+                        )
+                    # Después de un `select()` que dijo que hay algo, esto
+                    # devuelve lo que haya sin esperar a que sea una línea —y
+                    # `b""` sólo cuando el otro lado cerró—.
+                    try:
+                        trozo = os.read(descriptor, 65536)
+                    except OSError as exc:
+                        self._matar()
+                        raise MCPExternoError(
+                            f"{self.nombre} cerró la salida") from exc
+                    if not trozo:
+                        self._matar()
+                        raise MCPExternoError(f"{self.nombre} cerró la salida")
+                    self._pendiente += trozo
+                    linea = self._mensaje_entero()
                 try:
                     mensaje = json.loads(linea)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
                 if mensaje.get("id") == cuerpo["id"]:
                     return mensaje

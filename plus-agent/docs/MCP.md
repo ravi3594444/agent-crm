@@ -57,8 +57,8 @@ herramienta. La pregunta operativa no es «¿qué herramientas cargué?» sino
 **«¿con qué usuario de ERPNext arrancó ese contenedor?»** — y esa decisión vive
 fuera del alcance de `app/readiness.py`.
 
-**4. Su HTTP pide un protocolo que el SDK de Python no habla — resuelto.** El
-modo HTTP de Casys 3.0.4 exige `MCP-Protocol-Version: 2026-07-28` y devuelve
+**4. Su HTTP pide un protocolo que el SDK `mcp` 1.30.0 no habla — resuelto.**
+El modo HTTP de Casys 3.0.4 exige `MCP-Protocol-Version: 2026-07-28` y devuelve
 **400** a un cliente que manda `2025-06-18`, que es lo que habla el SDK `mcp`
 1.30.0. Así que `app/mcp_cliente.py` **no usa el SDK**: habla el protocolo
 directo con el `httpx` que ya estaba. El contrato completo, aprendido
@@ -77,7 +77,22 @@ eso— y uno nuevo los exige. Después del `initialize` se usa la versión que e
 servidor devolvió. De paso desaparecen 12 paquetes de la imagen y el bucle de
 eventos en un hilo de fondo.
 
-**5. Los visores no sirven por WhatsApp.** Los nueve visores interactivos
+El alcance exacto de lo medido, que no es «no hay otra forma»: el `httpx`
+directo es lo único que PROBAMOS contra Casys 3.0.4, y anda; el 400 salió del
+SDK `mcp` **1.30.0**. La v2 del SDK sí soporta `2026-07-28` y no la evaluamos —
+volver a ella es volver a los 12 paquetes, así que para hacerlo hace falta una
+razón y no sólo que sea posible—.
+
+**5. Por stdio, `select()` no alcanza.** Un `select()` que dice «hay algo para
+leer» prueba que hay UN byte, no una línea: un servidor que escribe `{"jsonrpc"`
+y se queda callado dejaba a `readline()` esperando el `\n` para siempre, y
+esperando con el candado del cliente tomado, así que se colgaba también todo lo
+que viniera después para ese servidor. `app/mcp_cliente.py` lee bytes del
+descriptor y arma las líneas de su lado, con una fecha límite que se calcula una
+sola vez y vale para todos los pedazos —si se recalculara por pedazo, un
+servidor que gotea la correría para siempre—.
+
+**6. Los visores no sirven por WhatsApp.** Los nueve visores interactivos
 (kanban, P&L, funnel, KPI) son MCP Apps y se renderizan en un *host* que los
 soporte: Claude Desktop, Claude Code, VS Code. Por WhatsApp llega texto. Son una
 herramienta de escritorio para el dueño, no una función del producto.
@@ -90,6 +105,10 @@ herramienta de escritorio para el dueño, no una función del producto.
 # Un servidor por entrada. Un comando = stdio; una URL = http.
 MCP_EXTERNOS=erpnext=http://mcp-erpnext:3012/mcp
 MCP_EXTERNO_TOKEN_ERPNEXT=<el MCP_AUTH_TOKEN de ese contenedor>
+
+# Sólo si el `http://` de arriba apunta a una red tuya que no se reconoce sola
+# (una VPN, un Kubernetes con dominio). Ver «El token del otro sistema» abajo.
+MCP_EXTERNOS_HTTP_INTERNOS=
 
 # NO saca poderes: saca MÓDULOS que este negocio no usa (RRHH, nómina, activos,
 # manufactura, proyectos). 149 -> 108 herramientas, ~38.200 -> ~29.100 tokens
@@ -105,6 +124,25 @@ Y el contenedor, en `deploy/mcp-erpnext.compose.yml`:
 cd /srv/agent-crm/plus-agent
 docker compose -f docker-compose.yml -f ../deploy/mcp-erpnext.compose.yml up -d
 ```
+
+### El token del otro sistema, y por qué `http://` no es gratis
+
+`MCP_EXTERNO_TOKEN_<NOMBRE>` es la credencial de OTRO sistema y `http://` la
+manda en texto plano. Con el despliegue de arriba eso no es un problema —el
+contenedor de al lado, en la red de Docker, sin publicar al host— y por eso no
+se exige TLS a secas: se exige que el destino **no salga a ninguna red**. Lo que
+cuenta como eso, sin configurar nada: `localhost`, una IP privada o de loopback,
+un nombre de una sola etiqueta (`mcp-erpnext`, que el DNS público no resuelve) y
+los sufijos `.local` e `.internal`.
+
+Cualquier otro `http://` **con token configurado** se rechaza al leer la
+configuración, y el error dice cómo seguir: poner `https://`, o declarar esa red
+como propia en `MCP_EXTERNOS_HTTP_INTERNOS=<nombre del servidor>` —nombres de
+servidor, así que declarar uno no declara al de al lado—. Sin token no se
+rechaza nada: no hay nada que filtrar, y ese caso ya lo avisa
+`readiness.chequear_mcp_externos`. La regla corre en los dos lugares que
+importan: al parsear `MCP_EXTERNOS` y otra vez al armar el header, porque un
+`ClienteMCP` se puede construir sin pasar por el parser.
 
 **La pregunta que importa no es qué herramientas carga, es con qué usuario.**
 Ese servidor actúa con UNA credencial de ERPNext y no tiene permisos por
