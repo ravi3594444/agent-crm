@@ -430,3 +430,31 @@ def test_sin_token_valido_es_401_y_lo_dice_con_el_header_del_protocolo(con_token
 
     assert respuesta["codigo"] == 401
     assert respuesta["headers"]["www-authenticate"].startswith("Bearer")
+
+
+def test_el_titulo_que_ve_el_harness_es_el_negocio_del_dueno(con_token, monkeypatch):
+    """Lo que el dueño lee en la lista de servidores de su harness.
+
+    Estaba escrito «Plus Agent — Lácteos Plus»: el nombre de UN cliente, en un
+    archivo, en el único campo de todo el protocolo que una persona ve con los
+    ojos. Instalado en otro negocio, el dueño conectaba su CRM y le aparecía el
+    nombre de otra empresa.
+
+    Se prueba por `despachar` y no llamando a `server_title()`: lo que importa
+    no es que la función arme la cadena, es que `initialize` la mande. Y el
+    valor esperado se escribe acá, no se lee de `mcp_server` — un assert contra
+    la constante del módulo pasa igual con la constante equivocada.
+
+    MUTACIÓN: devolver la cadena fija de antes. Cae éste y sólo éste.
+    """
+    monkeypatch.setenv("NOMBRE_NEGOCIO", "Ferretería Rivadavia")
+
+    respuesta = mcp_server.despachar(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": mcp_server.PROTOCOL_VERSION}},
+        DUENO,
+    )
+
+    titulo = respuesta["result"]["serverInfo"]["title"]
+    assert "Ferretería Rivadavia" in titulo
+    assert "Lácteos" not in titulo

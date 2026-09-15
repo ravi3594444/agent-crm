@@ -1940,6 +1940,291 @@ CATALOGO: dict[str, dict[str, str]] = {
             "{motivo}. It keeps holding stock until you close it by hand."
         ),
     },
+    # ------------------------------------------------------------------
+    # Las cadenas fijas de las herramientas de gerencia. El prompt ya
+    # respetaba el idioma del dueño; estas lo esquivaban, así que un dueño
+    # con el sistema en inglés recibía castellano en cuanto una herramienta
+    # contestaba algo que no fuera un número.
+    "ajustes.cliente_nuevo_sin_efecto": {
+        ES: 'ℹ️ todavía sin efecto: hasta que el sistema verifique la dirección y la zona de entrega, un cliente nuevo siempre espera a una persona',
+        EN: 'ℹ️ no effect yet: until the system checks the address and the delivery zone, a new customer always waits for a person',
+    },
+    "ajustes.cliente_nuevo_zona": {
+        ES: 'ℹ️ sólo cuando la dirección del pedido cae en una zona de reparto configurada (o ya se le entregó ahí antes); si no, el pedido queda en borrador igual',
+        EN: "ℹ️ only when the order's address falls inside a configured delivery zone (or you have delivered there before); otherwise the order stays a draft anyway",
+    },
+    "ajustes.cuenta_cargo": {
+        ES: 'Cuenta contable del cargo: {cuenta} (se configura en el servidor).',
+        EN: 'Accounting head for the fee: {cuenta} (it is set on the server).',
+    },
+    "ajustes.entrega_ilegible": {
+        ES: 'No pude leer las reglas de entrega ({motivo}). Mientras no se puedan leer, no se ofrece ninguna entrega fuera de día ni retiro.',
+        EN: "I couldn't read the delivery rules ({motivo}). While they can't be read, nothing is offered off-schedule and nothing for pickup.",
+    },
+    "ajustes.entrega_perdida": {
+        ES: '⚠️ Se perdieron tus reglas de entrega: el almacén está vacío y ERPNext tiene cambios tuyos registrados. Los valores del servidor NO rigen. Hasta que las vuelvas a fijar no se ofrece reparto, entrega fuera de día ni retiro: decime cada regla con su valor y te pido confirmación.',
+        EN: "⚠️ Your delivery rules were lost: the store is empty and ERPNext has changes of yours on record. The server values are NOT in force. Until you set them again there is no round, nothing off-schedule and no pickup: tell me each rule with its value and I'll ask you to confirm.",
+    },
+    "ajustes.entrega_pie": {
+        ES: 'Para cambiar una, decime cuál y el valor nuevo. Te pido confirmación antes de aplicarla.',
+        EN: "To change one, tell me which and the new value. I'll ask you to confirm before applying it.",
+    },
+    "ajustes.entrega_titulo": {
+        ES: 'Reglas de entrega:',
+        EN: 'Delivery rules:',
+    },
+    "ajustes.historial_ilegible": {
+        ES: 'No pude leer el historial ({motivo}).',
+        EN: "I couldn't read the history ({motivo}).",
+    },
+    "ajustes.historial_titulo": {
+        ES: 'Últimos cambios de límites:',
+        EN: 'Latest changes to your limits:',
+    },
+    "ajustes.historial_vacio": {
+        ES: 'Todavía nadie cambió un límite; están todos en su valor inicial.',
+        EN: 'Nobody has changed a limit yet; they are all at their initial value.',
+    },
+    "ajustes.limites_ilegibles": {
+        ES: 'No pude leer los límites ({motivo}). Mientras no se puedan leer, ningún pedido se auto-confirma: todos quedan pendientes.',
+        EN: "I couldn't read the limits ({motivo}). While they can't be read, nothing confirms on its own: every order waits for you.",
+    },
+    "ajustes.limites_pie": {
+        ES: 'Para cambiar uno, decime cuál y el valor nuevo. Te pido confirmación antes de aplicarlo.',
+        EN: "To change one, tell me which and the new value. I'll ask you to confirm before applying it.",
+    },
+    "ajustes.limites_titulo": {
+        ES: 'Límites de auto-confirmación:',
+        EN: 'Auto-confirm limits:',
+    },
+    "ajustes.linea_historial": {
+        ES: '· {ts} — {ajuste}: {anterior} → {nuevo} (desde {telefono})',
+        EN: '· {ts} — {ajuste}: {anterior} → {nuevo} (from {telefono})',
+    },
+    "ajustes.mal_configurado": {
+        ES: '⚠️ mal configurado: {problema}',
+        EN: '⚠️ misconfigured: {problema}',
+    },
+    "ajustes.no": {
+        ES: 'no',
+        EN: 'no',
+    },
+    "ajustes.origen_arranque": {
+        ES: 'valor de arranque',
+        EN: 'start-up value',
+    },
+    "ajustes.origen_default": {
+        ES: 'default del sistema',
+        EN: 'system default',
+    },
+    "ajustes.origen_dueno": {
+        ES: 'lo fijaste vos',
+        EN: 'you set it',
+    },
+    "ajustes.origen_perdido": {
+        ES: 'se perdió del almacén',
+        EN: 'lost from the store',
+    },
+    "ajustes.si": {
+        ES: 'sí',
+        EN: 'yes',
+    },
+    "ajustes.sin_configurar": {
+        ES: 'sin configurar',
+        EN: 'not set',
+    },
+    "ajustes.sin_cuenta_cargo": {
+        ES: '⚠️ Sin cuenta contable configurada: un cargo de envío no se escribe en el pedido y queda para que lo agregue una persona.',
+        EN: '⚠️ No accounting head set: a delivery fee is not written into the order and a person has to add it.',
+    },
+    "ajustes.sin_permiso": {
+        ES: 'Ese número no está autorizado para ver ni cambiar los límites. No cambié nada.',
+        EN: 'That number is not authorized to see or change the limits. I changed nothing.',
+    },
+    "ajustes.sin_valor_vigente": {
+        ES: 'sin valor vigente',
+        EN: 'no value in effect',
+    },
+    "captura.conteo_sin_autenticar": {
+        ES: 'No pude autenticar quién cuenta; no cargué el conteo.',
+        EN: 'I could not verify who is doing the count, so I did not record it.',
+    },
+    "captura.conteo_sin_diferencia": {
+        ES: 'El sistema ya tiene {sistema} de {item_code} en {dep}; no hace falta ningún ajuste.',
+        EN: 'The system already has {sistema} of {item_code} in {dep}; no adjustment is needed.',
+    },
+    "captura.pedido_en_borrador": {
+        ES: 'El pedido {numero_pedido} todavía está en borrador. Hay que confirmarlo antes de marcarlo entregado.',
+        EN: 'Order {numero_pedido} is still a draft. It has to be confirmed before it can be marked as delivered.',
+    },
+    "captura.pedido_no_encontrado": {
+        ES: 'No encontré el pedido {numero_pedido}.',
+        EN: 'I could not find order {numero_pedido}.',
+    },
+    "captura.remito_creado": {
+        ES: 'Remito {remito} creado en borrador para {cliente}. Confirmalo y baja el stock.',
+        EN: 'Delivery note {remito} created in draft for {cliente}. Confirm it and the stock comes off.',
+    },
+    "captura.venta_cargada": {
+        ES: 'Cargado como {factura} en borrador ({detalle}) para {cliente}. Confirmalo en el sistema y se descuenta del stock.',
+        EN: 'Saved as {factura} in draft ({detalle}) for {cliente}. Confirm it in the system and it comes off stock.',
+    },
+    "captura.venta_sin_lineas": {
+        ES: 'Necesito saber qué productos se vendieron.',
+        EN: 'I need to know which products were sold.',
+    },
+    "crm.borrador_sin_cambios": {
+        ES: 'No me dijiste qué cambiarle: los renglones o la fecha.',
+        EN: 'You did not tell me what to change: the lines or the date.',
+    },
+    "crm.cambio_entrega": {
+        ES: 'entrega {fecha_entrega}',
+        EN: 'delivery {fecha_entrega}',
+    },
+    "crm.cambio_renglones": {
+        ES: '{renglones} renglón/es',
+        EN: '{renglones} line(s)',
+    },
+    "crm.cliente_ambiguo": {
+        ES: '«{nombre_o_codigo}» le queda a más de un cliente: {cuales} y puede que más. Pasame el código exacto — no quiero escribirle al equivocado.',
+        EN: '“{nombre_o_codigo}” fits more than one customer: {cuales}, and there may be more. Send me the exact code — I do not want to write to the wrong one.',
+    },
+    "crm.cliente_error": {
+        ES: 'No pude cambiar la ficha de {cliente}: {exc}',
+        EN: 'I could not update the record for {cliente}: {exc}',
+    },
+    "crm.cliente_listo": {
+        ES: 'Listo. {cliente}: {detalle}.',
+        EN: 'Done. {cliente}: {detalle}.',
+    },
+    "crm.cliente_no_encontrado": {
+        ES: 'No encontré ningún cliente que se llame o se codifique «{nombre_o_codigo}».',
+        EN: 'I could not find any customer named or coded “{nombre_o_codigo}”.',
+    },
+    "crm.cliente_sin_cambios": {
+        ES: 'No me dijiste qué cambiarle. Decime el grupo o la condición de pago.',
+        EN: 'You did not tell me what to change. Give me the group or the payment terms.',
+    },
+    "crm.estado_cancelado": {
+        ES: 'cancelado',
+        EN: 'cancelled',
+    },
+    "crm.estado_confirmado": {
+        ES: 'confirmado',
+        EN: 'confirmed',
+    },
+    "crm.hecho_descripcion": {
+        ES: 'descripción',
+        EN: 'description',
+    },
+    "crm.hecho_reposicion": {
+        ES: 'punto de reposición en {deposito} = {punto_de_reposicion}',
+        EN: 'reorder level in {deposito} = {punto_de_reposicion}',
+    },
+    "crm.lo_hecho": {
+        ES: 'Quedó cambiado: {hecho}. Pero:',
+        EN: 'This much did change: {hecho}. But:',
+    },
+    "crm.nota_error": {
+        ES: 'No pude dejar la nota en {cual}: {exc}',
+        EN: 'I could not leave the note on {cual}: {exc}',
+    },
+    "crm.nota_hecha": {
+        ES: 'Anotado en {cual}.',
+        EN: 'Noted on {cual}.',
+    },
+    "crm.nota_vacia": {
+        ES: 'No me dijiste qué anotar.',
+        EN: 'You did not tell me what to write down.',
+    },
+    "crm.nota_y_tarea": {
+        ES: 'Anotado en {cual}, y le queda la tarea a {recordarle_a}.',
+        EN: 'Noted on {cual}, and the task is now with {recordarle_a}.',
+    },
+    "crm.pedido_actualizado": {
+        ES: 'Pedido {pedido} actualizado ({dicho}). Sigue en BORRADOR: hay que confirmarlo para que salga.',
+        EN: 'Order {pedido} updated ({dicho}). Still a DRAFT: it has to be confirmed before it goes out.',
+    },
+    "crm.pedido_error": {
+        ES: 'No pude cambiar el pedido {pedido}: {exc}',
+        EN: 'I could not change order {pedido}: {exc}',
+    },
+    "crm.pedido_no_borrador": {
+        ES: 'El pedido {pedido} ya está {cual}, así que no lo toco. Un pedido confirmado se cambia por el camino de siempre, con tu código.',
+        EN: 'Order {pedido} is already {cual}, so I am not touching it. A confirmed order gets changed the usual way, with your code.',
+    },
+    "crm.pedido_no_leido": {
+        ES: 'No pude leer el pedido {pedido}: {exc}',
+        EN: 'I could not read order {pedido}: {exc}',
+    },
+    "crm.presupuesto_error": {
+        ES: 'No pude armar el presupuesto: {exc}',
+        EN: 'I could not put the quote together: {exc}',
+    },
+    "crm.presupuesto_listo": {
+        ES: 'Presupuesto {presupuesto} en borrador para {cliente}, con {renglones} renglón/es. Queda sin emitir: miralo antes de mandarlo.',
+        EN: 'Quote {presupuesto} drafted for {cliente}, with {renglones} line(s). It stays unsubmitted: have a look before you send it.',
+    },
+    "crm.presupuesto_vacio": {
+        ES: 'Un presupuesto vacío no sirve. Decime al menos un producto.',
+        EN: 'An empty quote is no use. Give me at least one product.',
+    },
+    "crm.producto_descripcion_error": {
+        ES: 'No pude cambiar la descripción de {item_code}: {exc}',
+        EN: 'I could not change the description of {item_code}: {exc}',
+    },
+    "crm.producto_listo": {
+        ES: '{item_code}: {hecho}.',
+        EN: '{item_code}: {hecho}.',
+    },
+    "crm.producto_sin_cambios": {
+        ES: 'No me dijiste qué cambiarle: la descripción o el punto de reposición.',
+        EN: 'You did not tell me what to change: the description or the reorder level.',
+    },
+    "crm.reposicion_error": {
+        ES: 'No pude cambiar el punto de reposición de {item_code}: {exc}',
+        EN: 'I could not change the reorder level for {item_code}: {exc}',
+    },
+    "crm.reposicion_no_leida": {
+        ES: 'No pude leer el punto de reposición de {item_code}: {exc}',
+        EN: 'I could not read the reorder level for {item_code}: {exc}',
+    },
+    "crm.reposicion_sin_deposito": {
+        ES: 'Para el punto de reposición necesito el depósito: el mismo producto puede tener uno distinto en cada uno.',
+        EN: 'For the reorder level I need the warehouse: the same product can have a different one in each.',
+    },
+    "crm.reposicion_sin_regla": {
+        ES: '{item_code} no tiene una regla de reposición en {deposito} todavía. Esa se crea en ERPNext una vez, y después la puedo ajustar.',
+        EN: '{item_code} does not have a reorder rule in {deposito} yet. That one is set up in ERPNext once, and after that I can adjust it.',
+    },
+    "crm.tarea_error": {
+        ES: 'La nota quedó en {cual}, pero no pude crearle la tarea a {recordarle_a}: {exc}',
+        EN: 'The note is on {cual}, but I could not create the task for {recordarle_a}: {exc}',
+    },
+    "gestion.no_prepare_nada": {
+        ES: 'No preparé nada y no cambié nada: {exc}.',
+        EN: 'I prepared nothing and changed nothing: {exc}.',
+    },
+    "gestion.no_pude_mostrar": {
+        ES: 'No pude mostrarte el pedido: {exc}.',
+        EN: "I couldn't show you that order: {exc}.",
+    },
+    "gestion.preparada": {
+        ES: '{reemplazo}Preparada, todavía sin hacer:\n{consecuencia}\n\nTe mandé el código de confirmación por separado: contestá con esos seis dígitos y la hago. Yo no lo veo y no la puedo aplicar por vos. Si no contestás, se descarta sola.',
+        EN: "{reemplazo}Prepared, not done yet:\n{consecuencia}\n\nI sent you the confirmation code separately: reply with those six digits and I'll do it. I don't see it and I can't apply it for you. If you don't reply, it's discarded on its own.",
+    },
+    "gestion.reemplazo": {
+        ES: 'Reemplacé lo que tenías esperando sobre {pedido}: ese código anterior ya no sirve. Lo que hayas preparado sobre otro pedido sigue esperando igual.',
+        EN: 'I replaced what you had waiting on {pedido}: that earlier code no longer works. Whatever you prepared on another order keeps waiting just the same.',
+    },
+    "gestion.repetida": {
+        ES: 'Esto ya estaba preparado y sigue esperando tu confirmación:\n{consecuencia}\n\nEl código ya te lo mandé; contestá esos seis dígitos. No preparé nada nuevo ni cambié nada.',
+        EN: 'This was already prepared and is still waiting for your confirmation:\n{consecuencia}\n\nI already sent you the code; reply with those six digits. I prepared nothing new and changed nothing.',
+    },
+    "gestion.sin_codigo": {
+        ES: 'Preparé la acción ({accion} {pedido}) pero NO pude mandarte el código de confirmación, así que la descarté. No cambié nada. Probá de nuevo.',
+        EN: 'I prepared the action ({accion} {pedido}) but could NOT send you the confirmation code, so I discarded it. Nothing was changed. Try again.',
+    },
 }
 
 

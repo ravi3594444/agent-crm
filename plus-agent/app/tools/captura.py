@@ -29,7 +29,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from app import erpnext, idioma, notificar, outbound_status, policy, salidas
-from app.runtime_context import SIN_PERMISO, RuntimeContextError, require_management
+from app.runtime_context import RuntimeContextError, require_management
 
 
 def _hoy() -> str:
@@ -79,9 +79,11 @@ def registrar_venta_offline(
     try:
         require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
+        return idioma.t("permiso.sin_autorizacion", idioma.gerencia())
+
+    lengua = idioma.gerencia()
     if not lineas:
-        return "Necesito saber qué productos se vendieron."
+        return idioma.t("captura.venta_sin_lineas", lengua)
 
     # Explicit company and warehouse: with update_stock ERPNext rejects any
     # stock item without a warehouse, and a multi-company site must never
@@ -114,9 +116,12 @@ def registrar_venta_offline(
         "Venta offline cargada por Agente IA vía WhatsApp. Requiere confirmación.",
     )
     detalle = ", ".join(f"{linea.cantidad:g} x {linea.item_code}" for linea in lineas)
-    return (
-        f"Cargado como {doc['name']} en borrador ({detalle}) para {cliente}. "
-        f"Confirmalo en el sistema y se descuenta del stock."
+    return idioma.t(
+        "captura.venta_cargada",
+        lengua,
+        factura=doc["name"],
+        detalle=detalle,
+        cliente=cliente,
     )
 
 
@@ -150,7 +155,7 @@ def contar_stock(
     try:
         actor = require_management(config)
     except RuntimeContextError:
-        return "No pude autenticar quién cuenta; no cargué el conteo."
+        return idioma.t("captura.conteo_sin_autenticar", idioma.gerencia())
     company, default_warehouse = erpnext.default_context()
     dep = deposito or default_warehouse
     bins = erpnext.get_list(
@@ -162,9 +167,12 @@ def contar_stock(
     if abs(cantidad_real - sistema) < 0.000001:
         # ERPNext refuses a reconciliation with no change; say so instead of
         # surfacing a technical error.
-        return (
-            f"El sistema ya tiene {sistema:g} de {item_code} en {dep}; "
-            "no hace falta ningún ajuste."
+        return idioma.t(
+            "captura.conteo_sin_diferencia",
+            idioma.gerencia(),
+            sistema=f"{sistema:g}",
+            item_code=item_code,
+            dep=dep,
         )
 
     doc = erpnext.create_doc(
@@ -237,15 +245,18 @@ def confirmar_entrega(
     try:
         require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
+        return idioma.t("permiso.sin_autorizacion", idioma.gerencia())
+
+    lengua = idioma.gerencia()
     try:
         so = erpnext.get_doc("Sales Order", numero_pedido)
     except erpnext.ERPNextError:
-        return f"No encontré el pedido {numero_pedido}."
+        return idioma.t(
+            "captura.pedido_no_encontrado", lengua, numero_pedido=numero_pedido
+        )
     if so["docstatus"] != 1:
-        return (
-            f"El pedido {numero_pedido} todavía está en borrador. "
-            f"Hay que confirmarlo antes de marcarlo entregado."
+        return idioma.t(
+            "captura.pedido_en_borrador", lengua, numero_pedido=numero_pedido
         )
     company, warehouse = erpnext.default_context()
     doc = erpnext.create_doc(
@@ -268,7 +279,12 @@ def confirmar_entrega(
             "remarks": f"Entrega reportada por WhatsApp. {nota}".strip(),
         },
     )
-    return f"Remito {doc['name']} creado en borrador para {so['customer']}. Confirmalo y baja el stock."
+    return idioma.t(
+        "captura.remito_creado",
+        lengua,
+        remito=doc["name"],
+        cliente=so["customer"],
+    )
 
 
 # DE UN BORRADOR QUE HABÍA QUE COPIAR A MANO, A UN MENSAJE QUE SALE

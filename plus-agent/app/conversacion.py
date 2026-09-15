@@ -63,9 +63,27 @@ def identidad(nombre_negocio: str | None = None) -> str:
     empresa = (nombre_negocio or negocio()).strip() or "la empresa"
     crudo = str(os.getenv("NOMBRE_AGENTE", "") or "")
     nombre = " ".join(crudo.split())[:40].strip()
-    if nombre:
-        return f"Sos {nombre}, y atendés el WhatsApp de {empresa}, una empresa láctea argentina."
-    return f"Atendés el WhatsApp de {empresa}, una empresa láctea argentina."
+    quien = f"Sos {nombre}, y atendés" if nombre else "Atendés"
+    return f"{quien} el WhatsApp de {empresa}{rubro()}."
+
+
+def rubro() -> str:
+    """El rubro del negocio, como una coma y una frase. "" si nadie lo dijo.
+
+    ESTO ESTABA ESCRITO A MANO: la primera línea del prompt decía «una empresa
+    láctea argentina», así que el agente se presentaba como una lechería
+    aunque lo instalara una ferretería. Todo lo demás del prompt ya sale de
+    variables —el nombre del negocio, el del agente, el idioma, la zona—, y el
+    rubro era lo único que ataba el producto a UN cliente.
+
+    Se limpia como `identidad`: una sola línea y acotado, porque viene del
+    entorno y un valor mal cargado no puede empujar texto adentro del prompt.
+    Vacío es un caso normal y no un error — el agente se presenta por lo que
+    hace, que es lo mismo que hacía sin nombre.
+    """
+    crudo = str(os.getenv("RUBRO_NEGOCIO", "") or "")
+    limpio = " ".join(crudo.split())[:60].strip()
+    return f", {limpio}" if limpio else ""
 
 
 def _mensajes(state) -> list[BaseMessage]:

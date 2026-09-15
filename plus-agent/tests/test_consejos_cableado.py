@@ -118,13 +118,75 @@ def test_si_los_consejos_explotan_el_barrido_sobrevive(barrido, monkeypatch) -> 
     agenda.tick.assert_called_once()
 
 
-def test_un_aviso_que_explota_no_se_lleva_a_los_demas(barrido, monkeypatch) -> None:
-    """El `for` está adentro del try, así que un aviso que levanta corta la
-    vuelta. Se prueba lo que HACE, no lo que convendría: el barrido sigue vivo
-    y el consejo no queda soltado a medias."""
+def test_un_aviso_que_EXPLOTA_tambien_suelta_su_consejo(barrido, monkeypatch) -> None:
+    """La rama que faltaba, y este test afirmaba lo contrario.
+
+    Decía «se prueba lo que HACE, no lo que convendría» y afirmaba
+    `devolver.assert_not_called()`. Lo que hacía estaba mal: el `SET NX` de
+    `tick` YA reclamó el consejo, así que un WhatsApp que tira timeout lo dejaba
+    marcado como dicho sin que nadie lo oyera, y sin reintento hasta que venciera
+    su TTL —24 horas—. La rama de `False` lo soltaba y la de la excepción no, que
+    es la misma falla con dos caminos. Lo cazó una revisión.
+
+    MUTACIÓN: sacar el `consejos.devolver(en_vuelo)` del `except` de
+    `_solicitudes_scheduler`. Cae éste y sólo éste.
+    """
     monkeypatch.setattr(consejos, "tick", Mock(return_value=[_consejo("a", "T", "C")]))
     monkeypatch.setattr(notificar, "avisar_dueno", Mock(side_effect=OSError("meta")))
 
     main._solicitudes_scheduler(_UnaVuelta())  # no levanta
 
+    barrido["devolver"].assert_called_once()
+    assert barrido["devolver"].call_args.args[0].clave == "a"
+
+
+def test_el_ULTIMO_que_salio_bien_no_se_suelta_si_el_barrido_explota_despues(
+    barrido, monkeypatch
+) -> None:
+    """El caso que el `en_vuelo = None` protege de verdad, y no era el otro.
+
+    La primera versión de este test usaba dos consejos y el segundo explotando —
+    y sacar el `en_vuelo = None` NO lo mataba, porque la vuelta siguiente
+    pisaba `en_vuelo` igual. Medía la asignación de la línea de arriba, no la
+    limpieza.
+
+    Lo que la limpieza protege es esto: el último consejo SALE BIEN y después
+    revienta algo que no es un aviso —`tick` es un generador y puede levantar al
+    pedirle el siguiente—. Sin limpiar, se soltaría el que YA salió, y el dueño
+    lo recibiría otra vez mañana.
+
+    MUTACIÓN: sacar `en_vuelo = None` tras el aviso. Cae éste y sólo éste.
+    """
+    def generador():
+        yield _consejo("a", "Salió", "C")
+        raise RuntimeError("erpnext se cayó pidiendo el siguiente")
+
+    monkeypatch.setattr(consejos, "tick", Mock(return_value=generador()))
+    monkeypatch.setattr(notificar, "avisar_dueno", Mock(return_value=True))
+
+    main._solicitudes_scheduler(_UnaVuelta())  # no levanta
+
     barrido["devolver"].assert_not_called()
+
+
+def test_el_que_YA_SALIO_no_se_suelta_cuando_el_siguiente_explota(
+    barrido, monkeypatch
+) -> None:
+    """La mitad que el arreglo podía romper, y por eso va su propio test.
+
+    Soltar «el último que vi» en vez de «el que estaba en vuelo» soltaría también
+    al que ya salió bien, y el dueño lo recibiría DOS veces mañana. Por eso
+    `en_vuelo` se pone en None después de cada aviso exitoso.
+
+    MUTACIÓN: no poner `en_vuelo = None` tras el aviso. Cae éste y sólo éste.
+    """
+    salio = _consejo("a", "Salió", "C")
+    explota = _consejo("b", "Explota", "C")
+    monkeypatch.setattr(consejos, "tick", Mock(return_value=[salio, explota]))
+    avisar = Mock(side_effect=[True, OSError("meta")])
+    monkeypatch.setattr(notificar, "avisar_dueno", avisar)
+
+    main._solicitudes_scheduler(_UnaVuelta())
+
+    barrido["devolver"].assert_called_once()
+    assert barrido["devolver"].call_args.args[0].clave == "b"

@@ -65,7 +65,18 @@ PROTOCOL_VERSION = "2025-06-18"
 PROTOCOL_VERSIONS_SOPORTADAS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 SERVER_NAME = "plus-agent"
-SERVER_TITLE = "Plus Agent — Lácteos Plus"
+
+
+def server_title() -> str:
+    """El nombre que ve el harness. Sale del negocio, no del código.
+
+    Decía «Plus Agent — Lácteos Plus», o sea el nombre de UN cliente horneado
+    en un archivo. Lo que un dueño ve en la lista de servidores de su Claude
+    Desktop tiene que ser SU negocio.
+    """
+    from app.conversacion import negocio
+
+    return f"Plus Agent — {negocio()}"
 
 # Cuerpo máximo de una petición. El webhook tiene su propio límite; éste es
 # para que un POST enorme no ocupe memoria antes de que se rechace el token.
@@ -252,7 +263,7 @@ def _initialize(peticion: dict) -> dict:
         "capabilities": {"tools": {"listChanged": False}},
         "serverInfo": {
             "name": SERVER_NAME,
-            "title": SERVER_TITLE,
+            "title": server_title(),
             "version": _version(),
         },
     }

@@ -44,24 +44,30 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import Field
 
-from app import ajustes, limites, policy
+from app import ajustes, idioma, limites, policy
 from app.formato import pesos
 from app.runtime_context import RuntimeContextError, require_management
 
-_SIN_PERMISO = (
-    "Ese número no está autorizado para ver ni cambiar los límites. "
-    "No cambié nada."
-)
+
+def _sin_permiso() -> str:
+    """La negativa de este módulo, en el idioma que fijó el dueño.
+
+    Era una constante de módulo, y una constante se evalúa al importar —o sea
+    antes de que haya un idioma que consultar—. Como función se resuelve cuando
+    se contesta, que es cuando se sabe a quién (mismo arreglo que en
+    app/tools/operaciones.py).
+    """
+    return idioma.t("ajustes.sin_permiso", idioma.gerencia())
 
 
-def _mostrar(fila: dict) -> str:
+def _mostrar(fila: dict, lengua: str) -> str:
     valor = fila["valor"]
     if fila["origen"] == limites.PERDIDO:
         # Not "sin configurar": he DID configure it, and the store lost it.
         # Nothing is in effect — not the .env either — see limites.resumen().
-        valor = "sin valor vigente"
+        valor = idioma.t("ajustes.sin_valor_vigente", lengua)
     elif valor == limites.NINGUNO:
-        valor = "sin configurar"
+        valor = idioma.t("ajustes.sin_configurar", lengua)
     elif fila["unidad"] == "$":
         try:
             valor = pesos(float(valor))
@@ -70,35 +76,34 @@ def _mostrar(fila: dict) -> str:
     elif fila["unidad"] == "%":
         valor = f"{valor}%"
     elif fila["unidad"] == "sí/no":
-        valor = "sí" if valor == "true" else "no"
+        valor = idioma.t("ajustes.si" if valor == "true" else "ajustes.no", lengua)
     elif fila["unidad"] == "días":
+        # Los días se guardan y se muestran como están: son el valor que
+        # parsea app/excepciones.py, no prosa de esta herramienta.
         valor = valor.replace(",", ", ")
-    origen = {
-        "dueño": "lo fijaste vos",
-        "arranque": "valor de arranque",
-        "default": "default del sistema",
-        limites.PERDIDO: "se perdió del almacén",
-    }.get(fila["origen"], fila["origen"])
+    clave_origen = {
+        "dueño": "ajustes.origen_dueno",
+        "arranque": "ajustes.origen_arranque",
+        "default": "ajustes.origen_default",
+        limites.PERDIDO: "ajustes.origen_perdido",
+    }.get(fila["origen"])
+    origen = idioma.t(clave_origen, lengua) if clave_origen else fila["origen"]
     linea = f"*{fila['alias']}*: {valor}  ({origen})"
     # A lost row carries the same problem as every other lost row; the tool
     # says it once, at the end, instead of ten times here.
     if fila["problema"] and fila["origen"] != limites.PERDIDO:
-        linea += f"\n   ⚠️ mal configurado: {fila['problema']}"
+        # El sangrado va ACÁ y no en el catálogo: idioma.t() hace .strip(),
+        # así que un texto que empieza con espacios los pierde.
+        linea += "\n   " + idioma.t(
+            "ajustes.mal_configurado", lengua, problema=fila["problema"]
+        )
     # He should know the ceiling is not the only thing standing between a new
     # customer and an automatic order: the address has to check out too.
     if fila["nombre"] == "AUTO_CONFIRM_MAX_CLIENTE_NUEVO":
         if not policy.CLIENTE_NUEVO_HABILITADO:
-            linea += (
-                "\n   ℹ️ todavía sin efecto: hasta que el sistema verifique la "
-                "dirección y la zona de entrega, un cliente nuevo siempre "
-                "espera a una persona"
-            )
+            linea += "\n   " + idioma.t("ajustes.cliente_nuevo_sin_efecto", lengua)
         elif fila["valor"] not in ("", "0"):
-            linea += (
-                "\n   ℹ️ sólo cuando la dirección del pedido cae en una zona de "
-                "reparto configurada (o ya se le entregó ahí antes); si no, el "
-                "pedido queda en borrador igual"
-            )
+            linea += "\n   " + idioma.t("ajustes.cliente_nuevo_zona", lengua)
     return linea
 
 
@@ -156,20 +161,22 @@ def _ver_limites(config: RunnableConfig) -> str:
     try:
         require_management(config)
     except RuntimeContextError:
-        return _SIN_PERMISO
+        return _sin_permiso()
+    lengua = idioma.gerencia()
     try:
         filas = [f for f in limites.resumen() if f["nombre"] in limites.LIMITES]
     except limites.LimiteError as exc:
-        return (
-            f"No pude leer los límites ({exc}). Mientras no se puedan leer, "
-            "ningún pedido se auto-confirma: todos quedan pendientes."
+        # El motivo también, no sólo la frase de alrededor: `limites.motivo` lo
+        # resuelve por la clave del LimiteError, y en español devuelve el mismo
+        # `str(exc)` de siempre.
+        return idioma.t(
+            "ajustes.limites_ilegibles", lengua, motivo=limites.motivo(exc, lengua)
         )
-    cuerpo = "\n".join(_mostrar(fila) for fila in filas)
+    cuerpo = "\n".join(_mostrar(fila, lengua) for fila in filas)
     return (
-        "Límites de auto-confirmación:\n"
-        f"{cuerpo}\n\n"
-        "Para cambiar uno, decime cuál y el valor nuevo. Te pido confirmación "
-        "antes de aplicarlo."
+        idioma.t("ajustes.limites_titulo", lengua)
+        + f"\n{cuerpo}\n\n"
+        + idioma.t("ajustes.limites_pie", lengua)
     )
 
 
@@ -215,7 +222,7 @@ def proponer_limite(
     try:
         actor = require_management(config)
     except RuntimeContextError:
-        return _SIN_PERMISO
+        return _sin_permiso()
     # UNA sola implementación, en app/ajustes.py: la comparte con el ruteo
     # determinista que atiende los comandos exactos de idioma. El estado —la
     # propuesta, su código, su vencimiento, su huella y la auditoría durable—
@@ -228,39 +235,30 @@ def _ver_reglas_de_entrega(config: RunnableConfig) -> str:
     try:
         require_management(config)
     except RuntimeContextError:
-        return _SIN_PERMISO
+        return _sin_permiso()
+    lengua = idioma.gerencia()
     try:
         filas = [f for f in limites.resumen() if f["nombre"] in limites.ENTREGA]
     except limites.LimiteError as exc:
-        return (
-            f"No pude leer las reglas de entrega ({exc}). Mientras no se puedan "
-            "leer, no se ofrece ninguna entrega fuera de día ni retiro."
+        return idioma.t(
+            "ajustes.entrega_ilegible", lengua, motivo=limites.motivo(exc, lengua)
         )
-    cuerpo = "\n".join(_mostrar(fila) for fila in filas)
+    cuerpo = "\n".join(_mostrar(fila, lengua) for fila in filas)
     # The owner has to hear this in words, because it is the one thing he needs
     # in order to repair it: the store lost his rules, the .env is NOT what the
     # system is running on, and nothing is offered until he sets them again.
     perdidas = any(fila["origen"] == limites.PERDIDO for fila in filas)
-    alerta = (
-        "\n⚠️ Se perdieron tus reglas de entrega: el almacén está vacío y ERPNext "
-        "tiene cambios tuyos registrados. Los valores del servidor NO rigen. Hasta "
-        "que las vuelvas a fijar no se ofrece reparto, entrega fuera de día ni "
-        "retiro: decime cada regla con su valor y te pido confirmación."
-        if perdidas
-        else ""
-    )
+    alerta = ("\n" + idioma.t("ajustes.entrega_perdida", lengua)) if perdidas else ""
     cuenta = limites.cuenta_cargo()
-    nota = (
-        f"\nCuenta contable del cargo: {cuenta} (se configura en el servidor)."
+    nota = "\n" + (
+        idioma.t("ajustes.cuenta_cargo", lengua, cuenta=cuenta)
         if cuenta
-        else "\n⚠️ Sin cuenta contable configurada: un cargo de envío no se "
-        "escribe en el pedido y queda para que lo agregue una persona."
+        else idioma.t("ajustes.sin_cuenta_cargo", lengua)
     )
     return (
-        "Reglas de entrega:\n"
-        f"{cuerpo}{alerta}\n{nota}\n\n"
-        "Para cambiar una, decime cuál y el valor nuevo. Te pido confirmación "
-        "antes de aplicarla."
+        idioma.t("ajustes.entrega_titulo", lengua)
+        + f"\n{cuerpo}{alerta}\n{nota}\n\n"
+        + idioma.t("ajustes.entrega_pie", lengua)
     )
 
 
@@ -269,20 +267,28 @@ def _historial_limites(config: RunnableConfig) -> str:
     try:
         require_management(config)
     except RuntimeContextError:
-        return _SIN_PERMISO
+        return _sin_permiso()
+    lengua = idioma.gerencia()
     try:
         entradas = limites.auditoria(10)
     except limites.LimiteError as exc:
-        return f"No pude leer el historial ({exc})."
+        return idioma.t(
+            "ajustes.historial_ilegible", lengua, motivo=limites.motivo(exc, lengua)
+        )
     if not entradas:
-        return "Todavía nadie cambió un límite; están todos en su valor inicial."
+        return idioma.t("ajustes.historial_vacio", lengua)
     lineas = []
     for entrada in entradas:
         nombre = str(entrada.get("limite") or "")
         defi = limites.TODOS.get(nombre)
-        lineas.append(
-            f"· {entrada.get('ts', '?')} — {defi.alias[0] if defi else nombre or '?'}: "
-            f"{entrada.get('anterior', '?')} → {entrada.get('nuevo', '?')} "
-            f"(desde {entrada.get('telefono', '?')})"
-        )
-    return "Últimos cambios de límites:\n" + "\n".join(lineas)
+        # El alias del ajuste, la fecha, los dos valores y el teléfono son
+        # DATOS: se interpolan tal cual y se leen igual en los dos idiomas.
+        lineas.append(idioma.t(
+            "ajustes.linea_historial", lengua,
+            ts=entrada.get("ts", "?"),
+            ajuste=defi.alias[0] if defi else nombre or "?",
+            anterior=entrada.get("anterior", "?"),
+            nuevo=entrada.get("nuevo", "?"),
+            telefono=entrada.get("telefono", "?"),
+        ))
+    return idioma.t("ajustes.historial_titulo", lengua) + "\n" + "\n".join(lineas)

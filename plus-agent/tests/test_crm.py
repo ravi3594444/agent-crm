@@ -25,6 +25,16 @@ from app.tools.crm import (
     editar_borrador,
 )
 
+# ESTE ARCHIVO AFIRMA CASTELLANO, así que lo DECLARA en vez de heredarlo.
+#
+# Las cinco herramientas dejaron de tener el texto escrito adentro: ahora sale
+# de `idioma.t(...)` en el idioma que fijó el dueño. Sin esta marca, las
+# aserciones de abajo («confirmado», «cancelado», «la mitad») son las de un
+# idioma y el entorno elige el otro — y ahí no falla la herramienta, falla la
+# celda de CI que corre con IDIOMA_GERENCIA=en, que es exactamente lo que pasó.
+# Ver el marcador `idioma` en pytest.ini y `_idioma_declarado` en conftest.py.
+pytestmark = pytest.mark.idioma("es")
+
 GERENTE = "5493511234567"
 AJENO = "5493519999999"
 FICHA = {"name": "CUST-0009", "customer_name": "Panadería San José"}
@@ -313,3 +323,114 @@ def test_el_punto_de_reposicion_se_escribe_en_la_fila_de_ese_deposito(erp):
     doctype, nombre, payload = erp["update"][0]
     assert (doctype, nombre) == ("Item Reorder", "IR-1")
     assert payload == {"warehouse_reorder_level": 20.0}
+
+
+# ================================ lo que una revisión encontró después
+
+def test_el_telefono_del_cliente_se_niega_aunque_lo_pida_el_cliente_HTTP(monkeypatch):
+    """Sacarlo de la firma de la herramienta no alcanza, y ésa es la lección.
+
+    `actualizar_cliente` ya no publica `telefono`, pero `update_doc` reenviaba
+    cualquier campo que le dieran sobre un doctype editable: un llamador directo
+    —la próxima herramienta que alguien escriba— podía cambiar `mobile_no` igual.
+    Una propiedad de la firma de UNA función de hoy contra una propiedad del
+    proceso; ésta es la segunda.
+
+    MUTACIÓN: sacar `Customer` de `CAMPOS_PROHIBIDOS`. Cae éste y sólo éste.
+    """
+    salio = Mock(side_effect=AssertionError("no tenía que salir"))
+    monkeypatch.setattr(erpnext, "_request", salio)
+
+    with pytest.raises(erpnext.ERPNextError, match="mobile_no"):
+        erpnext.update_doc("Customer", "CUST-0009", {"mobile_no": "549351000"})
+    salio.assert_not_called()
+
+
+def test_los_demas_campos_del_cliente_siguen_pasando(monkeypatch):
+    """La negativa es de UN campo, no del doctype: si no, no queda herramienta."""
+    visto: dict = {}
+
+    def _request(cliente, metodo, ruta, *, operation, **kw):
+        visto.update(kw.get("json") or {})
+        return {"data": {"name": "CUST-0009"}}
+
+    monkeypatch.setattr(erpnext, "_request", _request)
+    erpnext.update_doc("Customer", "CUST-0009", {"customer_group": "Comercial"})
+
+    assert visto == {"customer_group": "Comercial"}
+
+
+def test_un_nombre_que_le_queda_a_DOS_clientes_no_escribe_nada(erp, monkeypatch):
+    """Escribirle al primero de dos es cambiarle los datos al equivocado.
+
+    Y el dueño no tiene cómo enterarse: la respuesta le repite el nombre que él
+    escribió. Leer de más es un informe incompleto; escribir de más es un daño
+    silencioso, así que el `like` del camino de escritura pide DOS y con dos se
+    planta.
+
+    MUTACIÓN: volver a `limit=1` en la consulta aproximada. Cae éste y sólo éste.
+    """
+    def get_list(doctype, filters=None, fields=None, limit=None, **kw):
+        if doctype != "Customer":
+            return []
+        for campo, operador, _ in filters or []:
+            if campo == "name" and operador == "=":
+                return []          # no es un código exacto
+        return [
+            {"name": "CUST-0009", "customer_name": "Panadería San José"},
+            {"name": "CUST-0042", "customer_name": "Almacén San José"},
+        ][: (limit or 2)]
+
+    monkeypatch.setattr(erpnext, "get_list", get_list)
+
+    respuesta = actualizar_cliente.invoke(
+        {"cliente": "San José", "grupo": "Comercial"}, config=_config()
+    )
+
+    assert erp["update"] == []
+    assert "más de un cliente" in respuesta
+    assert "CUST-0009" in respuesta and "CUST-0042" in respuesta
+
+
+def test_un_punto_de_reposicion_negativo_se_rechaza(erp):
+    """Un negativo apaga el informe de stock bajo sin que nadie lo note: nada
+    queda nunca por debajo de -5, así que el aviso deja de existir en silencio.
+
+    MUTACIÓN: sacar `ge=0` del Field. Cae éste y sólo éste.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        actualizar_producto.invoke(
+            {"item_code": "LECHE-1L", "punto_de_reposicion": -5, "deposito": "Principal"},
+            config=_config(),
+        )
+    assert erp["update"] == []
+
+
+def test_si_la_descripcion_quedo_y_el_resto_falla_se_dice_que_paso_la_mitad(
+    erp, monkeypatch
+):
+    """Dos escrituras que no son atómicas: contestar sólo el error esconde una.
+
+    El dueño leería «no pude cambiar el punto de reposición» y creería que no
+    pasó nada, cuando la descripción YA está guardada. Mismo criterio que
+    `anotar_en_ficha` con su nota y su tarea.
+
+    MUTACIÓN: devolver `problema` pelado en `_con_lo_hecho`. Cae éste y sólo éste.
+    """
+    def get_list(doctype, filters=None, fields=None, limit=None, **kw):
+        return [] if doctype == "Item Reorder" else [dict(FICHA)]
+
+    monkeypatch.setattr(erpnext, "get_list", get_list)
+
+    respuesta = actualizar_producto.invoke(
+        {"item_code": "LECHE-1L", "descripcion": "Leche entera",
+         "punto_de_reposicion": 20, "deposito": "Principal"},
+        config=_config(),
+    )
+
+    assert ("Item", "LECHE-1L", {"description": "Leche entera"}) in erp["update"]
+    assert "Quedó cambiado" in respuesta
+    assert "descripción" in respuesta
+    assert "no tiene una regla de reposición" in respuesta

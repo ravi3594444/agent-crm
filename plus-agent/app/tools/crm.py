@@ -6,8 +6,8 @@ Durante meses la respuesta a «que el agente pueda hacer lo que le pido» fue qu
 escribir es peligroso. Era una respuesta demasiado ancha, y la línea correcta no
 es leer-contra-escribir: es **irreversible × plata**.
 
-Lo que se abre acá: la ficha de un cliente (dirección, teléfono, grupo,
-condición de pago), notas y recordatorios sobre cualquier registro, un
+Lo que se abre acá: la ficha de un cliente (grupo, condición de pago),
+notas y recordatorios sobre cualquier registro, un
 presupuesto en borrador, la corrección de un pedido QUE SIGUE EN BORRADOR, y la
 descripción y el punto de reposición de un producto. Todo eso se deshace
 escribiendo de nuevo, y nada de eso le cobra un peso a nadie.
@@ -20,7 +20,10 @@ Lo que NO se abre, y no está en este archivo ni alcanzable desde él:
     escribir uno mal no da error en ninguna parte: simplemente deja de
     confirmarse solo. `erpnext.DOCTYPES_EDITABLES` no lo incluye, así que la
     negativa es del cliente HTTP y no de la buena conducta de este archivo;
-  · los límites del dueño, que siguen necesitando su código de cuatro dígitos.
+  · los límites del dueño, que siguen necesitando su código de cuatro dígitos;
+  · **el teléfono del cliente**, que es su IDENTIDAD acá (así lo encuentra el
+    webhook): `erpnext.CAMPOS_PROHIBIDOS` se lo niega a cualquier llamador, no
+    sólo a la herramienta que hoy no lo pide.
 
 EL MODELO NO PONE UN PRECIO. NUNCA.
 -----------------------------------
@@ -70,25 +73,45 @@ def _sin_permiso() -> str:
     return idioma.t("permiso.sin_autorizacion", idioma.gerencia())
 
 
-def _buscar_cliente(nombre_o_codigo: str) -> dict | None:
-    """El código exacto primero, después el nombre. Igual que `ficha_cliente`.
+def _buscar_cliente(nombre_o_codigo: str) -> tuple[dict | None, str]:
+    """(ficha, problema). El código exacto primero, después el nombre.
 
-    `name` es la clave del documento y no puede coincidir con dos; el nombre va
-    con `like` y se queda con el primero, que es lo que ya hacía el resto.
+    UN `like` QUE DEVUELVE VARIOS NO ELIGE: ésta es la diferencia con
+    `ficha_cliente`, y es por lo que se hace de la ficha después. Leer la de
+    «San José» cuando hay dos y mostrar la primera es un informe incompleto;
+    ESCRIBIRLE a la primera es cambiarle los datos al cliente equivocado, y el
+    dueño no tiene cómo enterarse: la respuesta dice el nombre que él escribió.
+    Así que se piden DOS y con dos se devuelve el problema.
+
+    `name` es la clave del documento y no puede coincidir con dos, así que el
+    camino exacto no necesita esto.
     """
     exacto = erpnext.get_list(
         "Customer", filters=[["name", "=", nombre_o_codigo]],
         fields=["name", "customer_name"], limit=1,
     )
     if exacto:
-        return exacto[0]
+        return exacto[0], ""
     from app.clientes import patron_like
 
     aproximado = erpnext.get_list(
         "Customer", filters=[["customer_name", "like", patron_like(nombre_o_codigo)]],
-        fields=["name", "customer_name"], limit=1,
+        fields=["name", "customer_name"], limit=2,
     )
-    return aproximado[0] if aproximado else None
+    lengua = idioma.gerencia()
+    if not aproximado:
+        return None, idioma.t(
+            "crm.cliente_no_encontrado", lengua, nombre_o_codigo=nombre_o_codigo
+        )
+    if len(aproximado) > 1:
+        cuales = ", ".join(
+            f"{c.get('customer_name') or c['name']} ({c['name']})" for c in aproximado
+        )
+        return None, idioma.t(
+            "crm.cliente_ambiguo", lengua,
+            nombre_o_codigo=nombre_o_codigo, cuales=cuales,
+        )
+    return aproximado[0], ""
 
 
 def _lineas(lineas: list[LineaSimple]) -> list[dict]:
@@ -101,6 +124,25 @@ def _lineas(lineas: list[LineaSimple]) -> list[dict]:
         }
         for linea in lineas
     ]
+
+
+def _con_lo_hecho(hecho: list[str], problema: str) -> str:
+    """Un error que llega DESPUÉS de un cambio ya escrito lo nombra igual.
+
+    `actualizar_producto` hace hasta dos escrituras y no son atómicas. Si la
+    descripción se guardó y el punto de reposición falla, contestar sólo el
+    error deja al dueño creyendo que no pasó nada — y va a volver a pedir el
+    cambio de descripción, o peor, a no confiar en lo que ya está guardado.
+    «No pasó nada» y «pasó la mitad» son cosas distintas para el que lee, que es
+    la misma razón por la que `anotar_en_ficha` distingue la nota de la tarea.
+    """
+    if not hecho:
+        return problema
+    return f"{item_o_lo_hecho(hecho)} {problema}"
+
+
+def item_o_lo_hecho(hecho: list[str]) -> str:
+    return idioma.t("crm.lo_hecho", idioma.gerencia(), hecho=", ".join(hecho))
 
 
 # --------------------------------------------------------------- el cliente
@@ -138,10 +180,11 @@ def actualizar_cliente(
     except RuntimeContextError:
         return _sin_permiso()
 
-    ficha = _buscar_cliente(cliente)
+    ficha, problema = _buscar_cliente(cliente)
     if ficha is None:
-        return f"No encontré ningún cliente que se llame o se codifique «{cliente}»."
+        return problema
 
+    lengua = idioma.gerencia()
     cambios: dict = {}
     if grupo:
         cambios["customer_group"] = grupo.strip()
@@ -149,13 +192,19 @@ def actualizar_cliente(
         cambios["payment_terms"] = condicion_de_pago.strip()
 
     if not cambios:
-        return "No me dijiste qué cambiarle. Decime el grupo o la condición de pago."
+        return idioma.t("crm.cliente_sin_cambios", lengua)
     try:
         erpnext.update_doc("Customer", ficha["name"], cambios)
     except erpnext.ERPNextError as exc:
-        return f"No pude cambiar la ficha de {ficha.get('customer_name') or cliente}: {exc}"
+        return idioma.t(
+            "crm.cliente_error", lengua,
+            cliente=ficha.get("customer_name") or cliente, exc=exc,
+        )
     detalle = ", ".join(f"{k} = {v}" for k, v in cambios.items())
-    return f"Listo. {ficha.get('customer_name') or ficha['name']}: {detalle}."
+    return idioma.t(
+        "crm.cliente_listo", lengua,
+        cliente=ficha.get("customer_name") or ficha["name"], detalle=detalle,
+    )
 
 
 # ------------------------------------------------------------- notas y tareas
@@ -198,17 +247,18 @@ def anotar_en_ficha(
     except RuntimeContextError:
         return _sin_permiso()
 
+    lengua = idioma.gerencia()
     doctype = OBJETOS[sobre]
     texto = " ".join((nota or "").split())
     if not texto:
-        return "No me dijiste qué anotar."
+        return idioma.t("crm.nota_vacia", lengua)
     try:
         erpnext.registrar_comentario(doctype, cual, texto)
     except erpnext.ERPNextError as exc:
-        return f"No pude dejar la nota en {cual}: {exc}"
+        return idioma.t("crm.nota_error", lengua, cual=cual, exc=exc)
 
     if not recordarle_a:
-        return f"Anotado en {cual}."
+        return idioma.t("crm.nota_hecha", lengua, cual=cual)
     tarea: dict = {
         "description": texto,
         "allocated_to": recordarle_a.strip(),
@@ -223,8 +273,13 @@ def anotar_en_ficha(
     except erpnext.ERPNextError as exc:
         # La nota YA quedó. Decirlo así es la diferencia entre «no pasó nada» y
         # «pasó la mitad», y el dueño necesita saber cuál de las dos fue.
-        return f"La nota quedó en {cual}, pero no pude crearle la tarea a {recordarle_a}: {exc}"
-    return f"Anotado en {cual}, y le queda la tarea a {recordarle_a}."
+        return idioma.t(
+            "crm.tarea_error", lengua,
+            cual=cual, recordarle_a=recordarle_a, exc=exc,
+        )
+    return idioma.t(
+        "crm.nota_y_tarea", lengua, cual=cual, recordarle_a=recordarle_a
+    )
 
 
 # ------------------------------------------------------------- el presupuesto
@@ -258,12 +313,13 @@ def armar_presupuesto(
         require_management(config)
     except RuntimeContextError:
         return _sin_permiso()
+    lengua = idioma.gerencia()
     if not lineas:
-        return "Un presupuesto vacío no sirve. Decime al menos un producto."
+        return idioma.t("crm.presupuesto_vacio", lengua)
 
-    ficha = _buscar_cliente(cliente)
+    ficha, problema = _buscar_cliente(cliente)
     if ficha is None:
-        return f"No encontré ningún cliente que se llame o se codifique «{cliente}»."
+        return problema
 
     payload: dict = {
         "quotation_to": "Customer",
@@ -275,11 +331,12 @@ def armar_presupuesto(
     try:
         doc = erpnext.create_doc("Quotation", payload)
     except erpnext.ERPNextError as exc:
-        return f"No pude armar el presupuesto: {exc}"
-    return (
-        f"Presupuesto {doc.get('name')} en borrador para "
-        f"{ficha.get('customer_name') or ficha['name']}, con {len(lineas)} renglón/es. "
-        "Queda sin emitir: miralo antes de mandarlo."
+        return idioma.t("crm.presupuesto_error", lengua, exc=exc)
+    return idioma.t(
+        "crm.presupuesto_listo", lengua,
+        presupuesto=doc.get("name"),
+        cliente=ficha.get("customer_name") or ficha["name"],
+        renglones=len(lineas),
     )
 
 
@@ -309,13 +366,14 @@ def editar_borrador(
         require_management(config)
     except RuntimeContextError:
         return _sin_permiso()
+    lengua = idioma.gerencia()
     if not lineas and not fecha_entrega:
-        return "No me dijiste qué cambiarle: los renglones o la fecha."
+        return idioma.t("crm.borrador_sin_cambios", lengua)
 
     try:
         doc = erpnext.get_doc("Sales Order", pedido)
     except erpnext.ERPNextError as exc:
-        return f"No pude leer el pedido {pedido}: {exc}"
+        return idioma.t("crm.pedido_no_leido", lengua, pedido=pedido, exc=exc)
 
     # LA COMPROBACIÓN VA ACÁ Y AHORA, sobre el documento que acabo de leer. Que
     # el dueño lo llame «el que está esperando» no prueba que siga esperando:
@@ -323,11 +381,10 @@ def editar_borrador(
     # emitido.
     estado = int(doc.get("docstatus") or 0)
     if estado != 0:
-        cual = "confirmado" if estado == 1 else "cancelado"
-        return (
-            f"El pedido {pedido} ya está {cual}, así que no lo toco. "
-            "Un pedido confirmado se cambia por el camino de siempre, con tu código."
+        cual = idioma.t(
+            "crm.estado_confirmado" if estado == 1 else "crm.estado_cancelado", lengua
         )
+        return idioma.t("crm.pedido_no_borrador", lengua, pedido=pedido, cual=cual)
 
     cambios: dict = {}
     if lineas:
@@ -337,16 +394,19 @@ def editar_borrador(
     try:
         erpnext.update_doc("Sales Order", pedido, cambios)
     except erpnext.ERPNextError as exc:
-        return f"No pude cambiar el pedido {pedido}: {exc}"
+        return idioma.t("crm.pedido_error", lengua, pedido=pedido, exc=exc)
 
     dicho = []
     if lineas:
-        dicho.append(f"{len(lineas)} renglón/es")
+        dicho.append(
+            idioma.t("crm.cambio_renglones", lengua, renglones=len(lineas))
+        )
     if fecha_entrega:
-        dicho.append(f"entrega {fecha_entrega}")
-    return (
-        f"Pedido {pedido} actualizado ({', '.join(dicho)}). Sigue en BORRADOR: "
-        "hay que confirmarlo para que salga."
+        dicho.append(
+            idioma.t("crm.cambio_entrega", lengua, fecha_entrega=fecha_entrega)
+        )
+    return idioma.t(
+        "crm.pedido_actualizado", lengua, pedido=pedido, dicho=", ".join(dicho)
     )
 
 
@@ -362,8 +422,10 @@ def actualizar_producto(
     ] = None,
     punto_de_reposicion: Annotated[
         float | None,
-        Field(description="Debajo de esta cantidad, el producto aparece en el informe "
-                          "de stock bajo. Necesita `deposito`."),
+        Field(ge=0,
+              description="Debajo de esta cantidad, el producto aparece en el informe "
+                          "de stock bajo. Necesita `deposito`. Nunca negativo: un "
+                          "negativo apaga el aviso sin que se note."),
     ] = None,
     deposito: Annotated[
         str | None,
@@ -384,19 +446,21 @@ def actualizar_producto(
     except RuntimeContextError:
         return _sin_permiso()
 
+    lengua = idioma.gerencia()
     hecho: list[str] = []
     if descripcion:
         try:
             erpnext.update_doc("Item", item_code, {"description": descripcion.strip()})
-            hecho.append("descripción")
+            hecho.append(idioma.t("crm.hecho_descripcion", lengua))
         except erpnext.ERPNextError as exc:
-            return f"No pude cambiar la descripción de {item_code}: {exc}"
+            return idioma.t(
+                "crm.producto_descripcion_error", lengua, item_code=item_code, exc=exc
+            )
 
     if punto_de_reposicion is not None:
         if not deposito:
-            return (
-                "Para el punto de reposición necesito el depósito: el mismo producto "
-                "puede tener uno distinto en cada uno."
+            return _con_lo_hecho(
+                hecho, idioma.t("crm.reposicion_sin_deposito", lengua)
             )
         try:
             filas = erpnext.get_list(
@@ -408,21 +472,26 @@ def actualizar_producto(
                 parent="Item",
             )
         except erpnext.ERPNextError as exc:
-            return f"No pude leer el punto de reposición de {item_code}: {exc}"
+            return _con_lo_hecho(hecho, idioma.t(
+                "crm.reposicion_no_leida", lengua, item_code=item_code, exc=exc))
         if not filas:
-            return (
-                f"{item_code} no tiene una regla de reposición en {deposito} todavía. "
-                "Esa se crea en ERPNext una vez, y después la puedo ajustar."
-            )
+            return _con_lo_hecho(hecho, idioma.t(
+                "crm.reposicion_sin_regla", lengua,
+                item_code=item_code, deposito=deposito))
         try:
             erpnext.update_doc(
                 "Item Reorder", filas[0]["name"],
                 {"warehouse_reorder_level": float(punto_de_reposicion)},
             )
-            hecho.append(f"punto de reposición en {deposito} = {punto_de_reposicion:g}")
+            hecho.append(idioma.t(
+                "crm.hecho_reposicion", lengua, deposito=deposito,
+                punto_de_reposicion=f"{punto_de_reposicion:g}"))
         except erpnext.ERPNextError as exc:
-            return f"No pude cambiar el punto de reposición de {item_code}: {exc}"
+            return _con_lo_hecho(hecho, idioma.t(
+                "crm.reposicion_error", lengua, item_code=item_code, exc=exc))
 
     if not hecho:
-        return "No me dijiste qué cambiarle: la descripción o el punto de reposición."
-    return f"{item_code}: {', '.join(hecho)}."
+        return idioma.t("crm.producto_sin_cambios", lengua)
+    return idioma.t(
+        "crm.producto_listo", lengua, item_code=item_code, hecho=", ".join(hecho)
+    )
