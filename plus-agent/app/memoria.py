@@ -178,6 +178,11 @@ class Dato:
     quien: str
     cuando: float
     activo: bool = True
+    # SI EL DUEÑO DIJO QUE ESTO SE LE PUEDE CONTAR A UN CLIENTE. Default NO, y
+    # se guarda con la nota: es una decisión suya sobre ESA frase, no sobre la
+    # clave, así que tiene que sobrevivir al hash igual que el texto. Ver
+    # `CLAVES_PARA_CLIENTES` y `NUNCA_PARA_CLIENTES`.
+    para_clientes: bool = False
 
     def como_json(self) -> str:
         return json.dumps(
@@ -186,6 +191,7 @@ class Dato:
                 "quien": self.quien,
                 "cuando": round(self.cuando, 3),
                 "activo": self.activo,
+                "para_clientes": self.para_clientes,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -307,6 +313,17 @@ _HUECOS_POR_CLAVE = {hueco.clave: hueco for hueco in HUECOS}
 # cliente no tiene por qué escuchar sobre otro.
 CLAVES_PARA_CLIENTES = frozenset(h.clave for h in HUECOS if h.para_clientes)
 
+# LO QUE NO SE PUEDE PROMOVER, NI AUNQUE EL MODELO LO PIDA. El dueño puede
+# marcar una nota suelta como «contáselo a los clientes» (ver `anotar`), y eso
+# es una decisión suya sobre una frase que él escribió. Estas cuatro claves son
+# otra cosa: son las preguntas que el sistema le hizo A ÉL sobre a quién fiarle,
+# a cuántos días, qué producto no puede faltar y cómo se le mueve la venta. La
+# respuesta a cualquiera de ellas es información sobre TERCEROS o sobre cómo
+# compra, y un cliente no la tiene que escuchar aunque una conversación
+# confusa termine pidiéndolo. El piso es Python y no una línea del prompt: un
+# prompt se puede torcer.
+NUNCA_PARA_CLIENTES = frozenset(h.clave for h in HUECOS if not h.para_clientes)
+
 
 # ---------------------------------------------------------------------------
 # Validación. Todo lo que entra pasa por acá, y lo que no pasa no se guarda.
@@ -390,6 +407,10 @@ def _parsear(clave: str, crudo: object) -> Dato | None:
         quien=_texto(datos.get("quien")),
         cuando=cuando,
         activo=bool(datos.get("activo", True)),
+        # Ausente = False, que es lo que vale para las notas guardadas ANTES de
+        # que este campo existiera: una nota vieja no se vuelve pública porque
+        # el formato haya cambiado.
+        para_clientes=bool(datos.get("para_clientes", False)),
     )
 
 
@@ -430,13 +451,22 @@ def leer(clave: object) -> Dato | None:
     return None
 
 
-def anotar(clave: object, texto: object, quien: object) -> Dato:
+def anotar(
+    clave: object, texto: object, quien: object, para_clientes: bool = False
+) -> Dato:
     """Guarda UNA nota. Levanta `MemoriaError` y no escribe nada si algo falla.
 
     `quien` es el teléfono del equipo que lo dictó, y viene de
     `RunnableConfig` (app/runtime_context.py), nunca de un argumento del
     modelo. Una nota sin autor no se guarda: el autor es la mitad de la
     respuesta a «¿de dónde salió esto?».
+
+    `para_clientes` es el dueño diciendo «esto contáselo a los clientes». Sale
+    del modelo, así que tiene un piso de Python: sobre una de las claves de
+    `NUNCA_PARA_CLIENTES` se RECHAZA la nota entera en vez de guardarla
+    silenciosamente en privado. Guardarla igual sería dejar al dueño creyendo
+    que sus clientes se enteraron de algo; rechazarla le dice que esa no se
+    cuenta y por qué.
     """
     normalizada = normalizar_clave(clave)
     if not normalizada:
@@ -445,6 +475,14 @@ def anotar(clave: object, texto: object, quien: object) -> Dato:
     autor = " ".join(str(quien or "").split())
     if not autor:
         raise MemoriaError("no pude identificar quién dicta el dato; no anoté nada")
+    if para_clientes and normalizada in NUNCA_PARA_CLIENTES:
+        raise MemoriaError(
+            f"«{normalizada}» no se le cuenta a un cliente: esa palabra guarda "
+            "lo que me contaste sobre a quién fiarle, a cuántos días, qué "
+            "producto no puede faltar o cómo se te mueve la venta. Si lo que "
+            "querés contar es otra cosa, anotalo con otra palabra; y si es eso "
+            "mismo, anotalo sin marcarlo para clientes y lo uso yo"
+        )
 
     vigentes = activos()
     if normalizada not in {d.clave for d in vigentes} and len(vigentes) >= MAX_ALMACENADOS:
@@ -454,7 +492,10 @@ def anotar(clave: object, texto: object, quien: object) -> Dato:
             f"Decime cuál borro primero — la más vieja es «{mas_vieja.texto}»"
         )
 
-    dato = Dato(clave=normalizada, texto=limpio, quien=autor, cuando=_ahora())
+    dato = Dato(
+        clave=normalizada, texto=limpio, quien=autor, cuando=_ahora(),
+        para_clientes=bool(para_clientes),
+    )
     try:
         locks.conexion().hset(CLAVE_DATOS, normalizada, dato.como_json())
     except (locks.CoordinationError, RedisError) as exc:
@@ -642,7 +683,16 @@ def bloque_para_clientes(
     """
     origen = list(datos if datos is not None else activos())
     elegidos = seleccionar(
-        [dato for dato in origen if dato.clave in CLAVES_PARA_CLIENTES],
+        [
+            dato for dato in origen
+            # DOS PUERTAS, y el `and` del final es la que no se puede saltear:
+            # la clave está marcada de fábrica, O el dueño marcó ESTA nota. Lo
+            # segundo sale del modelo, así que se vuelve a comprobar acá contra
+            # `NUNCA_PARA_CLIENTES` — `anotar` ya lo rechaza, y una nota vieja
+            # o un hash editado a mano no pasan por `anotar`.
+            if (dato.clave in CLAVES_PARA_CLIENTES or dato.para_clientes)
+            and dato.clave not in NUNCA_PARA_CLIENTES
+        ],
         max_datos=max_datos,
         max_caracteres=max_caracteres,
     )

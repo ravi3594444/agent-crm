@@ -2660,6 +2660,21 @@ CATALOGO: dict[str, dict[str, str]] = {
             'deliver: tell them the manager confirms that one.'
         ),
     },
+    # Las dos que hacen VISIBLE que una nota pasó a ser pública. Van separadas
+    # de `memoria.anotado` y `memoria.linea` en vez de llevar un `{marca}`
+    # vacío: una marca que casi siempre es cadena vacía deja una frase con dos
+    # espacios seguidos, y peor, hace que el caso importante se escriba igual
+    # que el normal.
+    "memoria.anotado_publico": {
+        ES: "Anotado: «{texto}». Y esto se lo cuento a los clientes cuando "
+            "pregunten. Si preferís que me lo guarde, decímelo.",
+        EN: "Noted: \u201c{texto}\u201d. And I will tell customers this when "
+            "they ask. If you would rather I keep it to myself, tell me.",
+    },
+    "memoria.linea_publica": {
+        ES: "· {texto}  ({clave}) — esto lo saben los clientes",
+        EN: "· {texto}  ({clave}) — customers are told this",
+    },
 }
 
 

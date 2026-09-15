@@ -120,11 +120,15 @@ def test_a_fact_survives_the_round_trip_and_stays_readable_with_redis_cli(
     assert guardado.quien == GERENTE
     assert guardado.activo is True
 
-    # Un HASH pelado, una clave por dato, un JSON legible por valor.
+    # Un HASH pelado, una clave por dato, un JSON legible por valor. La forma
+    # se compara ENTERA y no con `>=`: el día que alguien agregue un campo,
+    # este test tiene que obligarlo a decidir si ese campo va al disco —que es
+    # lo que pasó con `para_clientes`, y por eso está escrito acá abajo—.
     crudo = almacen.hashes["plus-agent:memoria"]["panaderia_san_jose"]
     assert json.loads(crudo) == {
         "activo": True,
         "cuando": round(guardado.cuando, 3),
+        "para_clientes": False,
         "quien": GERENTE,
         "texto": "la panadería San José paga los viernes",
     }
@@ -369,6 +373,128 @@ def test_lo_que_el_dueno_ya_contesto_llega_al_agente_de_clientes() -> None:
     assert "manda la herramienta" in salida
 
 
+def test_una_nota_que_el_dueno_marco_para_clientes_cruza_aunque_la_clave_no_sea_hueco(
+    almacen: FakeRedis,
+) -> None:
+    """La segunda puerta: el dueño diciendo «esto contáselo a los clientes».
+
+    La lista de claves permitidas cubre las ocho preguntas que el sistema le
+    hace a él. Lo que NO cubre es lo que se le ocurra a él: «esta semana la
+    manteca está en promo», «el lunes no salimos». Eso no es un hueco y no va a
+    serlo nunca — es de esta semana—, así que la clave no alcanza y hace falta
+    que él lo diga sobre ESA frase.
+
+    `promo_semana` no es ninguno de los doce huecos, que es el punto.
+
+    MUTACIÓN: sacar `or dato.para_clientes` del filtro de
+    `bloque_para_clientes`. Cae ésta y sólo ésta.
+    """
+    memoria.anotar("promo_semana", "Esta semana la manteca esta en promo", GERENTE,
+                   para_clientes=True)
+
+    salida = memoria.bloque_para_clientes()
+
+    assert "manteca esta en promo" in salida
+
+
+def test_una_clave_privada_no_se_puede_promover_ni_pidiendolo(
+    almacen: FakeRedis,
+) -> None:
+    """EL PISO ES PYTHON, no una línea del prompt.
+
+    `para_clientes` sale del modelo, y el modelo lee una conversación. Las
+    cuatro claves de `NUNCA_PARA_CLIENTES` son las respuestas del dueño sobre a
+    quién fiarle, a cuántos días, qué producto no puede faltar y cómo se le
+    mueve la venta: información sobre TERCEROS o sobre cómo compra. Un prompt se
+    puede torcer; esto no.
+
+    Y se RECHAZA en vez de guardarse en privado sin decir nada: guardarla igual
+    dejaría al dueño creyendo que sus clientes se enteraron de algo.
+
+    MUTACIÓN: borrar el `if para_clientes and normalizada in NUNCA_PARA_CLIENTES:
+    raise`. Cae ésta y sólo ésta.
+    """
+    with pytest.raises(memoria.MemoriaError, match="no se le cuenta a un cliente"):
+        memoria.anotar("clientes_delicados", "A Perez no le fies", GERENTE,
+                       para_clientes=True)
+
+    # Y no quedó nada escrito: el rechazo es antes del `hset`.
+    assert memoria.leer("clientes_delicados") is None
+
+
+def test_una_nota_privada_marcada_a_mano_tampoco_cruza(almacen: FakeRedis) -> None:
+    """El MISMO piso, en el otro consumidor, y por eso son dos tests.
+
+    `anotar` rechaza la promoción, pero no todo lo que llega al filtro pasó por
+    `anotar`: una nota guardada antes de que este piso existiera, o un `HSET`
+    hecho a mano en el Redis del servidor, entran igual. Un permiso que se
+    comprueba sólo donde se escribe es un permiso que se puede saltear
+    escribiendo por otro lado.
+
+    Este `Dato` se construye a mano justamente para saltear `anotar`.
+
+    MUTACIÓN: sacar `and dato.clave not in NUNCA_PARA_CLIENTES` del filtro de
+    `bloque_para_clientes`. Cae ésta y sólo ésta — la de arriba sigue en verde
+    porque mide el otro lado.
+    """
+    colado = memoria.Dato(
+        clave="clientes_delicados", texto="A Perez no le fies", quien=GERENTE,
+        cuando=1.0, para_clientes=True,
+    )
+
+    assert memoria.bloque_para_clientes([colado]) == ""
+
+
+def test_la_marca_sobrevive_a_la_vuelta_por_el_hash(almacen: FakeRedis) -> None:
+    """Es una decisión del dueño sobre una frase: tiene que durar como la frase.
+
+    Se guarda y se vuelve a LEER del almacén, no se mira el objeto que devolvió
+    `anotar`: lo que el prompt del cliente arma sale de `activos()`, y entre
+    una cosa y la otra está el JSON.
+
+    MUTACIÓN: sacar `"para_clientes": self.para_clientes` de `como_json`.
+    MEDIDO: caen CUATRO, no una. Ésta, el guardia del formato del JSON —que
+    hace exactamente su trabajo—, y las dos que leen una nota promovida después
+    de guardarla, porque todas montan sobre esta misma vuelta. Se anota el
+    número en vez de buscarle una mutación cómoda: ésta es la que NOMBRA el
+    defecto (la marca no llegó al disco); las otras tres se caen de arriba.
+    """
+    memoria.anotar("promo_semana", "Esta semana la manteca esta en promo", GERENTE,
+                   para_clientes=True)
+
+    leida = memoria.leer("promo_semana")
+
+    assert leida is not None
+    assert leida.para_clientes is True
+
+
+def test_una_nota_vieja_sin_el_campo_no_se_vuelve_publica(almacen: FakeRedis) -> None:
+    """El default del formato, que es una decisión y no un descuido.
+
+    Las notas que ya estaban guardadas no tienen el campo. Leerlas como
+    públicas haría que un cambio de formato publicara, de golpe y sin que nadie
+    lo pida, todo lo que el dueño anotó hasta hoy.
+
+    El JSON se escribe a mano, sin `para_clientes`, que es exactamente la forma
+    que tiene una nota guardada por la versión anterior.
+
+    MUTACIÓN: `datos.get("para_clientes", False)` -> `datos.get("para_clientes",
+    True)`. Cae ésta y sólo ésta.
+    """
+    almacen.hset(
+        memoria.CLAVE_DATOS, "pagos",
+        json.dumps({"texto": "La panaderia paga los viernes", "quien": GERENTE,
+                    "cuando": 1.0, "activo": True}, ensure_ascii=False),
+    )
+
+    leida = memoria.leer("pagos")
+
+    assert leida is not None
+    assert leida.para_clientes is False
+    # Y por lo tanto no cruza.
+    assert memoria.bloque_para_clientes() == ""
+
+
 def test_el_bloque_de_clientes_no_rompe_un_pedido_con_redis_caido(
     almacen: FakeRedis,
 ) -> None:
@@ -563,8 +689,16 @@ def test_a_fact_has_nowhere_to_put_a_number() -> None:
 
     El grafo de imports dice que hoy nadie lo lee. Esto dice que aunque alguien
     lo leyera, no encontraría una ranura que una decisión pueda usar: el único
-    campo de contenido es `texto: str`. Agregarle un `monto: float` rompe acá,
-    que es donde tiene que doler.
+    campo de CONTENIDO sigue siendo `texto: str`. Agregarle un `monto: float`
+    rompe acá, que es donde tiene que doler.
+
+    `para_clientes: bool` se agregó a sabiendas de este guardia y es la
+    excepción que confirma su regla: no es contenido de la nota, es quién la
+    puede leer. Ninguna decisión de plata puede salir de un booleano de
+    visibilidad —`policy` no lo mira y no tiene cómo—, y la nota sigue sin
+    tener dónde poner un número. El guardia se actualiza en vez de aflojarse:
+    la lista sigue siendo exacta, así que el `monto: float` de mañana rompe
+    igual.
     """
     campos = {
         nombre: campo.type
@@ -577,6 +711,7 @@ def test_a_fact_has_nowhere_to_put_a_number() -> None:
         "quien": "str",
         "cuando": "float",
         "activo": "bool",
+        "para_clientes": "bool",
     }
 
 
@@ -930,3 +1065,60 @@ def test_la_herramienta_devuelve_la_pregunta_traducida(monkeypatch, almacen) -> 
     assert "?" in salida
     assert "¿" not in salida, f"salió la pregunta en castellano: {salida!r}"
     assert "memoria.hueco" not in salida, "salió la clave cruda"
+
+
+# ---------------------------------------------------------------------------
+# Lo que el dueño VE cuando una nota se vuelve pública
+# ---------------------------------------------------------------------------
+#
+# Dos, porque son dos momentos distintos y se rompen por separado: el turno en
+# que lo decide, y la lista que mira una semana después. El primero se lee una
+# vez y se pierde en el chat.
+
+
+def test_el_dueno_se_entera_en_el_mismo_turno_de_que_la_nota_es_publica(
+    almacen: FakeRedis,
+) -> None:
+    """Volver una nota pública sale de una charla. Si no se confirma, no se sabe.
+
+    MUTACIÓN: borrar el `if guardado.para_clientes:` de `anotar_dato`, o sea
+    contestar siempre `memoria.anotado`. Cae ésta y sólo ésta.
+    """
+    salida = str(anotar_dato.invoke(
+        {"sobre": "promo_semana", "dato": "Esta semana la manteca esta en promo",
+         "para_clientes": True},
+        config=_config(),
+    ))
+
+    assert "manteca esta en promo" in salida
+    # Escrito acá y no leído del catálogo: con la fila a los dos lados, cambiar
+    # la frase no rompería nada.
+    assert "se lo cuento a los clientes" in salida
+
+
+def test_el_listado_marca_cuales_saben_los_clientes(almacen: FakeRedis) -> None:
+    """La lista que el dueño mira cuando quiere saber qué tiene guardado.
+
+    Sin esto, una nota que se volvió pública por una conversación confusa no se
+    vuelve a ver nunca: la confirmación del momento ya quedó veinte mensajes
+    atrás.
+
+    Las dos mitades en la misma llamada — una pública y una privada—, o un
+    listado que marcara TODO cumpliría la primera.
+
+    MUTACIÓN: usar siempre `"memoria.linea"` en `ver_memoria`. Cae ésta y sólo
+    ésta.
+    """
+    memoria.anotar("promo_semana", "Esta semana la manteca esta en promo", GERENTE,
+                   para_clientes=True)
+    memoria.anotar("pagos", "La panaderia paga los viernes", GERENTE)
+
+    salida = str(ver_memoria.invoke({"que": "anotado"}, config=_config()))
+
+    publica = [fila for fila in salida.splitlines() if "manteca" in fila]
+    privada = [fila for fila in salida.splitlines() if "panaderia" in fila]
+    assert len(publica) == 1 and len(privada) == 1
+    assert "lo saben los clientes" in publica[0]
+    assert "lo saben los clientes" not in privada[0], (
+        "una nota privada se anuncia como pública"
+    )
