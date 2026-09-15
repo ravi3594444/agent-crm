@@ -83,6 +83,17 @@ Plain `python` has no frappe; wrong cwd gives `FileNotFoundError: .../logs/datab
 
 **`pytest` needs a real Redis Stack** at `REDIS_URL`, database 0 (RediSearch refuses `FT.CREATE` on any other). `app/graph.py` builds the checkpointer at import. Without it, two modules fail at collection and pytest aborts having run zero tests. CI sets `REDIS_OBLIGATORIO=1` so "no Redis" is a failure, not a silent skip.
 
+**Two test runs at once share Redis and fake a flaky lock test.** `pytest`
+uses the one Redis Stack at `REDIS_URL`, database 0, and the business locks are
+named from *constants* — `test_frontera_decisiones.py` takes
+`solicitud:SAL-ORD-TOMADO-1` for real. Run a second suite concurrently (a
+mutation batch in a worktree is still the same Redis) and whichever run asks
+second gets `CoordinationError` after its 2-second wait, on a test that is
+correct and passes alone. It reads exactly like a flake and it is not one:
+it is two suites, and the second is yours. CI never sees this — each matrix
+cell gets its own `services: redis` container. Run batches one at a time, or
+give one of them its own Redis on another port; do not "fix" the test.
+
 **`LLM_PROVIDER` blank means `qwen`, not gemini.** Always write `LLM_PROVIDER=gemini` explicitly. There is no fallback between providers, by design.
 
 **A free-tier Gemini key looks like a code problem.** Symptoms: 7–34 second replies with wild variance, then `HTTP 429`. Fix: create the key inside a billing-enabled project. Paid tier is ~1s.
@@ -149,7 +160,7 @@ pytest -q -rs             # needs Redis Stack
 
 ## Status
 
-**Working:** ERPNext + agent live on HTTPS. Three identities with real permission separation. WhatsApp webhook verified, token permanent (SYSTEM_USER). Gemini configured. 13 demo products, 7 demo customers seeded. Customer and management agents both answering. Two staff numbers, two customer numbers registered in Meta. The customer agent can now answer the delivery questions the owner configures by WhatsApp (`condiciones_de_entrega`, 12 customer tools) and the eight counter-answers he gave the management agent (`MEMORIA_PARA_CLIENTES`).
+**Working:** ERPNext + agent live on HTTPS. Three identities with real permission separation. WhatsApp webhook verified, token permanent (SYSTEM_USER). Gemini configured. 13 demo products, 7 demo customers seeded. Customer and management agents both answering. Two staff numbers, two customer numbers registered in Meta. The customer agent can now answer the delivery questions the owner configures by WhatsApp (`condiciones_de_entrega`, 12 customer tools) and the eight counter-answers he gave the management agent (`MEMORIA_PARA_CLIENTES`). The owner can also promote ONE note at a time with `anotar_dato(para_clientes=true)` — a second door on the same frontier, floored by the four private keys and checked on both sides.
 
 **Open:**
 1. **Gemini key on free tier** — the cause of rate limits and slowness. Highest priority.
