@@ -162,12 +162,158 @@ def _correr(env, http=_http_sano, limites=_limites_ok):
     reporte = readiness.Reporte()
     readiness.chequear_modelos(env, reporte)
     readiness.chequear_equipo(env, reporte)
+    readiness.chequear_idioma(env, reporte)
     waba = readiness.chequear_whatsapp(env, reporte, http)
     readiness.chequear_plantillas(env, reporte, http, waba)
     readiness.chequear_erpnext(env, reporte, http)
     readiness.chequear_stock_y_limites(env, reporte, limites)
     readiness.chequear_entrega(env, reporte, limites, http)
     return reporte
+
+
+# --------------------------------------------------- en qué idioma va a hablar
+# El interruptor existe, anda, y tiene una celda entera de CI
+# (`IDIOMA_DEFAULT=en`). Lo que no tenía era forma de enterarse: `.env.example`
+# lo nombraba de refilón adentro del comentario de LOCALE, sin renglón propio,
+# y el preflight no lo mencionaba. Para un dueño que lee en inglés, el síntoma
+# era un agente contestando en castellano y ninguna pista de por qué.
+
+
+# LAS DOS MITADES SALEN DE FUENTES DISTINTAS, y por eso los tests fijan las dos.
+# El respaldo del CLIENTE es la variable de entorno, y nada más. El idioma del
+# DUEÑO se resuelve en vivo con `idioma.gerencia()`, porque él lo cambia por
+# WhatsApp y eso queda guardado ENCIMA del `.env`. En producción `env` es
+# `os.environ` y las dos coinciden; en un test no, así que un test que fijara
+# sólo el entorno estaría afirmando sobre una mitad y adivinando la otra.
+
+
+def test_el_arranque_dice_en_que_idioma_le_va_a_hablar_a_cada_uno(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import idioma
+
+    monkeypatch.setattr(idioma, "gerencia", lambda: idioma.EN)
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "en"})
+
+    assert reporte.listo, reporte.texto()
+    assert "el dueño recibe EN" in reporte.texto()
+    assert "si no se sabe, EN" in reporte.texto()
+
+
+def test_sin_configurar_nada_dice_castellano_y_sigue_listo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Un despliegue que ya existe no tiene la variable y no migra por esto."""
+    from app import idioma
+
+    monkeypatch.setattr(idioma, "gerencia", lambda: idioma.ES)
+    reporte = _correr(BASE)
+
+    assert reporte.listo
+    assert "el dueño recibe ES" in reporte.texto()
+
+
+def test_el_idioma_del_dueno_y_el_del_cliente_se_informan_por_separado(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UN renglón informa DOS cosas, así que se hacen diferir a propósito.
+
+    Con un solo idioma en juego las dos mitades salen iguales y un informe que
+    confundiera una con la otra —o que imprimiera la misma dos veces— pasaría
+    igual. Acá el dueño lee castellano y el respaldo del cliente es inglés.
+    """
+    from app import idioma, limites
+
+    # Se finge lo GUARDADO, que es la única fuente que puede contradecir al
+    # `.env` candidato. Fingir `idioma.gerencia()` —como hacía este test— es
+    # fingir la resolución ya hecha, y con eso el chequeo no puede discrepar con
+    # el archivo que está revisando ni siquiera cuando discrepa de verdad.
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: idioma.ES)
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "en"})
+
+    texto = reporte.texto()
+    assert "el dueño recibe ES" in texto, texto
+    assert "si no se sabe, EN" in texto, texto
+
+
+def test_un_idioma_mal_escrito_es_un_error_y_no_un_silencio() -> None:
+    """`por_defecto()` cae al castellano sin decir nada, a propósito: un idioma
+    no autoriza nada y no puede dejar un mensaje sin salir. El precio es que
+    nadie se entera de que escribió mal la variable."""
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "aleman"})
+
+    assert not reporte.listo
+    assert "no es un idioma conocido" in reporte.texto()
+
+
+def test_lo_que_el_dueno_fijo_desde_su_telefono_le_gana_al_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La diferencia entre un preflight y un `cat .env`: acá el entorno y lo
+    guardado se CONTRADICEN, y gana lo guardado."""
+    from app import idioma, limites
+
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: idioma.EN)
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "es"})
+
+    texto = reporte.texto()
+    assert "el dueño recibe EN" in texto, texto
+    assert "lo cambió él desde su teléfono" in texto, texto
+
+
+def test_el_informe_habla_del_env_QUE_SE_LE_PASO_y_no_del_que_esta_exportado(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El preflight valida un `.env` CANDIDATO, que casi nunca es el que corre.
+
+    `idioma.gerencia()` cae a `os.environ` cuando no hay nada guardado, o sea al
+    archivo VIEJO — el que se quiere reemplazar. Así, revisando un archivo que
+    dice `IDIOMA_GERENCIA=en` con `es` exportado, el informe decía «el dueño
+    recibe ES»: contestaba sobre otro archivo, que es lo único que un preflight
+    no puede hacer.
+
+    MUTACIÓN: volver a `del_dueno = idioma.gerencia()` en `chequear_idioma`.
+    Cae éste y sólo éste.
+    """
+    from app import limites
+
+    monkeypatch.setenv("IDIOMA_GERENCIA", "es")
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: "")
+
+    reporte = _correr({**BASE, "IDIOMA_GERENCIA": "en"})
+
+    texto = reporte.texto()
+    assert "el dueño recibe EN" in texto, texto
+    # Y no se le atribuye al dueño un cambio que no hizo: esto sale del archivo.
+    assert "lo cambió él desde su teléfono" not in texto, texto
+
+
+def test_con_el_almacen_ILEGIBLE_el_informe_dice_lo_mismo_que_el_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Las TRES respuestas de `idioma_gerencia_guardado`, y las tres separadas.
+
+    `None` es «no se pudo leer» y no «no fijó nada». `limites.idioma_gerencia()`
+    con el almacén caído se va al DEFAULT sin mirar el entorno, así que informar
+    `fijado or por_defecto` haría que el preflight y el runtime contesten
+    distinto — justo cuando algo ya está roto, que es cuando más se mira el
+    preflight. El contrato de tres estados lo inventé yo y lo colapsé una línea
+    después con un `if del_almacen:`; lo cazó una revisión.
+
+    MUTACIÓN: volver a `if del_almacen:` en `chequear_idioma`. Cae éste y sólo
+    éste.
+    """
+    from app import limites
+
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: None)
+
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "es", "IDIOMA_GERENCIA": "en"})
+
+    texto = reporte.texto()
+    # El runtime, con el almacén caído, contesta ES: el default, sin mirar el
+    # entorno. El informe tiene que decir lo mismo.
+    assert "el dueño recibe ES" in texto, texto
+    assert "lo cambió él desde su teléfono" not in texto, texto
 
 
 def test_un_LOCALE_mal_escrito_se_dice_en_el_arranque() -> None:
@@ -573,6 +719,62 @@ def test_an_enabled_exception_missing_its_terms_is_called_out() -> None:
 
     assert "en sí pero falta" in texto
     assert "nada queda pre-autorizado" in texto
+
+
+def _excepcion_completa(**extra):
+    return _entrega(
+        ENTREGA_EXCEPCION_ACTIVA="true",
+        ENTREGA_EXCEPCION_DIAS="jueves",
+        ENTREGA_EXCEPCION_HORA="19:00",
+        ENTREGA_EXCEPCION_CARGO="1500",
+        **extra,
+    )
+
+
+def _con_tope(valor: str):
+    return [
+        {"nombre": "AUTO_CONFIRM_MAX", "alias": "tope", "unidad": "",
+         "valor": valor, "origen": "dueño", "problema": ""}
+    ]
+
+
+def test_an_exception_with_the_ceiling_at_zero_is_called_out() -> None:
+    """Los dos interruptores son válidos por separado y juntos no hacen nada.
+
+    Una excepción pre-autorizada EMITE el pedido sola: el cliente pide un día
+    de fuera, la regla del dueño lo autoriza, la oferta sale sin que nadie la
+    mire, el cliente contesta «acepto» y se emite. Con el tope en 0 —el dueño
+    diciendo «ningún pedido se emite sin mí»— esa emisión se rechaza al final
+    del camino, cuando al cliente ya se le prometieron condiciones y ya dijo
+    que sí. Lo que ve es que le ofrecen algo y después le dicen que espere.
+
+    Es un AVISO y no un error: ninguna de las dos configuraciones está rota.
+    Este es el único lugar donde se puede ver que no se llevan bien.
+    """
+    def mal_par():
+        return _excepcion_completa() + _con_tope("0")
+
+    texto = _correr(BASE, limites=mal_par).texto()
+
+    assert "tope de auto-confirmación está en 0" in texto
+    assert "termina esperando a una persona" in texto
+
+
+def test_the_same_exception_with_a_ceiling_set_is_not_called_out() -> None:
+    """La otra mitad: con un tope puesto, el par está bien y no se avisa nada.
+
+    Sin esto, «avisá cuando la excepción está en sí» lo cumpliría igual un
+    aviso que sale SIEMPRE, y el dueño aprendería a ignorarlo.
+
+    Mutación dirigida: sacarle el `and _es_cero(...)` a la condición. Mata a
+    este test y deja verde al de arriba.
+    """
+    def buen_par():
+        return _excepcion_completa() + _con_tope("30000")
+
+    texto = _correr(BASE, limites=buen_par).texto()
+
+    assert "tope de auto-confirmación está en 0" not in texto
 
 
 def test_a_fee_with_no_account_says_a_person_has_to_add_the_charge() -> None:
@@ -1334,3 +1536,468 @@ def test_los_tokens_por_persona_que_si_sirven_se_cuentan_sin_mostrarse() -> None
     assert "2 token(s) por persona, 2 de ellos del equipo" in texto
     assert TOKEN_PANEL not in texto and OTRO_TOKEN_PANEL not in texto
     assert _bloqueos_del_panel(reporte) == []
+
+
+def test_english_escrito_como_lo_escribe_una_persona_no_bloquea(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El preflight no puede ser MÁS estricto que lo que el sistema acepta.
+
+    `limites.idioma_gerencia()` pasa el valor por `idioma.normalizar`, que
+    entiende «english», «inglés», «eng». El preflight comparaba el crudo contra
+    los códigos, así que un `.env` que FUNCIONA —el agente contesta en inglés—
+    no pasaba, y el preflight existe para decir qué va a hacer el sistema, no
+    para inventar un contrato más angosto.
+
+    MUTACIÓN: volver a comparar `crudo.lower()` contra `idioma.IDIOMAS`. Cae
+    éste y sólo éste.
+    """
+    from app import limites
+
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: "")
+
+    reporte = _correr({**BASE, "IDIOMA_GERENCIA": "english"})
+
+    texto = reporte.texto()
+    # `Reporte.ok` es un MÉTODO que agrega una línea, no un booleano: `assert
+    # reporte.ok` es siempre verdadero y no prueba nada. Se mira el texto, que
+    # es lo mismo que hacen los otros ~15 tests de este archivo.
+    assert "no es un idioma conocido" not in texto, texto
+    assert "ERROR  IDIOMA_GERENCIA" not in texto, texto
+    assert "NO LISTO" not in texto, texto
+    # Y se informa el idioma RESUELTO —EN—, no la palabra que tecleó la persona.
+    assert "el dueño recibe EN" in texto, texto
+
+
+def test_una_falla_inesperada_leyendo_el_idioma_no_se_informa_en_verde(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`idioma_gerencia_guardado` YA convierte a None lo que se espera que falle.
+
+    Lo que llegue al `except Exception` de `chequear_idioma` es lo que NO se
+    esperaba —un error de programa—, y tragarlo como «no hay nada guardado»
+    hacía que el reporte siguiera y terminara en `ok`: un preflight en verde
+    sobre un bug. Un preflight que miente es peor que no tenerlo, porque se usa
+    justo cuando algo ya está raro.
+
+    MUTACIÓN: volver a `except Exception: del_almacen = None`. Cae éste y sólo
+    éste.
+    """
+    from app import limites
+
+    def explota():
+        raise TypeError("algo que nadie previó")
+
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", explota)
+
+    reporte = _correr({**BASE, "IDIOMA_GERENCIA": "en"})
+
+    texto = reporte.texto()
+    assert "ERROR  IDIOMA_GERENCIA" in texto, texto
+    assert "TypeError" in texto
+    # Y el informe entero dice que NO está listo, que es lo que alguien mira.
+    assert "NO LISTO" in texto
+
+
+# ===========================================================================
+# Los servidores MCP de terceros: lo único cuyo alcance no decide este repo
+# ===========================================================================
+#
+# Es la respuesta a un hallazgo de revisión («las herramientas externas pueden
+# escribir en ERPNext») que NO es un defecto: es la postura que pidió el dueño.
+# Lo que faltaba era que se VIERA antes de salir en vivo. `readiness` no puede
+# verificar la credencial del otro contenedor —vive adentro de ESE contenedor—
+# así que lo que le toca es decirlo, no callarlo ni fingir que lo miró.
+
+
+def _dos_servidores(_env=None) -> dict[str, dict]:
+    """Un HTTP y un stdio. El doble devuelve los DOS transportes a propósito:
+    con uno solo, un chequeo que ignorara el transporte pasaría igual.
+
+    Toma `_env` y no lo usa porque `chequear_mcp_externos` llama a
+    `servidores(env)`: un doble de cero argumentos explotaría con un TypeError
+    y el chequeo se leería como roto. Los tests que de verdad miden que se
+    HONRE ese mapa no usan doble, justamente porque un doble que ignora el
+    parámetro no puede discrepar con el código sobre él."""
+    return {
+        "erpnext": {"transporte": "http", "destino": "http://mcp-erpnext:3012/mcp"},
+        "local": {"transporte": "stdio", "destino": "npx -y algo"},
+    }
+
+
+def _reporte(monkeypatch, env: dict, leer=_dos_servidores):
+    from app import mcp_cliente
+
+    monkeypatch.setattr(mcp_cliente, "servidores", leer)
+    return readiness.ejecutar(env, con_red=False)
+
+
+def _informe(monkeypatch, env: dict, leer=_dos_servidores) -> str:
+    return _reporte(monkeypatch, env, leer).texto()
+
+
+def _bloqueos_de_mcp(reporte) -> list[tuple[str, str]]:
+    """Sólo las líneas de MCP que bloquean.
+
+    `BASE` no es un despliegue listo por su cuenta —le faltan dos cosas que no
+    tienen nada que ver con esto—, así que afirmar `"NO LISTO" not in texto`
+    mediría el fixture entero y no el chequeo. Mismo motivo y misma forma que
+    `_bloqueos_del_panel`.
+    """
+    return [
+        (clave, mensaje)
+        for nivel, clave, mensaje in reporte.lineas
+        if nivel in (readiness.FALTA, readiness.ERROR) and clave.startswith("MCP")
+    ]
+
+
+def test_sin_servidores_externos_se_dice_que_no_hay_y_no_avisa_nada() -> None:
+    """El default, y la mitad que evita que los avisos salgan siempre.
+
+    `MCP_EXTERNOS` vacío es lo que trae `.env.example` sin tocar: el agente usa
+    sus herramientas y no hay ninguna postura que revisar. Un chequeo que
+    avisara igual sería un aviso que nadie lee.
+
+    No monkeypatchea nada: con `MCP_EXTERNOS` vacío en el `env`, el chequeo
+    tiene que cortar ANTES de preguntarle a `mcp_cliente`.
+
+    MUTACIÓN: sacar el `return` de esa rama. Cae éste y sólo éste.
+
+    La versión anterior de este test decía matar esa mutación y NO la mataba.
+    Miraba tres subcadenas del texto: que estuviera «ninguno», que no
+    estuviera `MCP_EXTERNOS_BLOQUEAR` y que no estuviera «usuario de
+    ERPNext». Sin el `return`, el chequeo sigue de largo, `servidores()` no
+    saca ningún servidor de un `MCP_EXTERNOS` vacío y corta en la rama del
+    parser — que está ANTES de la lista de bloqueo y ANTES de la credencial.
+    Las tres subcadenas seguían como el test las quería, con el reporte
+    diciendo al mismo tiempo «ninguno» y «MCP_EXTERNOS tiene un valor del que
+    no sale ningún servidor». Lo que la mutación cambia no es ninguna de esas
+    tres cosas: es CUÁNTAS líneas de MCP hay. Eso es lo que se mide acá.
+    """
+    reporte = readiness.ejecutar(BASE, con_red=False)
+
+    lineas = [linea for linea in reporte.lineas if linea[1].startswith("MCP")]
+    assert len(lineas) == 1, (
+        "con MCP_EXTERNOS vacío el reporte dice UNA sola cosa sobre MCP; "
+        f"acá dice {len(lineas)}: {lineas}"
+    )
+    assert lineas[0][:2] == (readiness.OK, "MCP externos")
+    assert lineas[0][2].startswith("ninguno")
+
+
+# ---------------------------------------------------------------------------
+# La otra postura que decide qué se le cuenta a un desconocido
+# ---------------------------------------------------------------------------
+
+
+def nivel_de_memoria(reporte) -> str:
+    return _linea_de_memoria(reporte)[0]
+
+
+def _linea_de_memoria(reporte) -> tuple[str, str, str]:
+    lineas = [fila for fila in reporte.lineas if fila[1] == "Memoria para clientes"]
+    assert len(lineas) == 1, f"esperaba UNA línea de memoria, hay {len(lineas)}"
+    return lineas[0]
+
+
+def test_la_postura_de_la_memoria_de_clientes_sale_del_env_CANDIDATO(
+    monkeypatch,
+) -> None:
+    """El informe tiene que hablar del archivo que le pidieron revisar.
+
+    `MEMORIA_PARA_CLIENTES` decide si el agente que atiende desconocidos puede
+    usar lo que el dueño le contestó a su agente de gerencia. Un preflight que
+    dijera «encendida» sobre un `.env` que la apaga —o al revés— es peor que no
+    decir nada: es la clase de postura que se mira UNA vez, antes de salir en
+    vivo, y después se da por sabida.
+
+    El proceso y el candidato se ponen al REVÉS uno del otro en las dos vueltas,
+    que es la única forma de que no se puedan confundir.
+
+    MUTACIÓN: `conversacion.memoria_de_clientes_encendida(env)` ->
+    `...encendida()`. Cae éste y sólo éste.
+    """
+    monkeypatch.setenv("MEMORIA_PARA_CLIENTES", "true")
+    apagada = readiness.ejecutar(dict(BASE, MEMORIA_PARA_CLIENTES="false"), con_red=False)
+    nivel, _, mensaje = _linea_de_memoria(apagada)
+    assert (nivel, mensaje.split(":")[0]) == (readiness.OK, "apagada")
+
+    monkeypatch.setenv("MEMORIA_PARA_CLIENTES", "false")
+    encendida = readiness.ejecutar(dict(BASE, MEMORIA_PARA_CLIENTES="true"), con_red=False)
+    nivel, _, mensaje = _linea_de_memoria(encendida)
+    assert nivel == readiness.OK
+    assert mensaje.startswith("encendida")
+
+
+def test_la_linea_de_memoria_dice_QUE_cruza_y_sale_de_los_huecos(monkeypatch) -> None:
+    """«Encendida» sin decir qué cruza no es una postura: es una palabra.
+
+    El número y los nombres salen de `memoria.CLAVES_PARA_CLIENTES`, o sea de
+    cómo están marcados los huecos, y no de una constante escrita en readiness:
+    un hueco nuevo mal marcado tiene que mover este renglón. El test tampoco lee
+    la constante para armar lo que espera —se movería con ella—: nombra a mano
+    uno que tiene que estar y uno que no.
+
+    MUTACIÓN: `sorted(memoria.CLAVES_PARA_CLIENTES)` ->
+    `sorted(h.clave for h in memoria.HUECOS)` (o sea, decir que cruzan todos).
+    Cae éste y sólo éste.
+    """
+    monkeypatch.delenv("MEMORIA_PARA_CLIENTES", raising=False)
+    reporte = readiness.ejecutar(BASE, con_red=False)
+
+    _, _, mensaje = _linea_de_memoria(reporte)
+
+    assert "horario_corte" in mensaje, "no dice cuáles cruzan"
+    assert "clientes_delicados" not in mensaje, (
+        "el informe anuncia que cruza una nota privada"
+    )
+    # Y no bloquea: las dos posturas son válidas y el default es la que pidió
+    # el dueño. (Comparar este reporte con otro idéntico no probaría nada: los
+    # dos lados se moverían juntos.)
+    assert nivel_de_memoria(reporte) == readiness.OK
+
+
+def test_la_lista_de_servidores_sale_del_env_CANDIDATO_y_no_del_proceso(
+    monkeypatch,
+) -> None:
+    """Lo que readiness revisa es un `.env` que TODAVÍA NO ESTÁ PUESTO.
+
+    Ése es el trabajo del módulo: `ejecutar(env)` recibe un mapa candidato y lo
+    baja a cada chequeo. `mcp_cliente.servidores()` leía `os.environ`, así que
+    este chequeo aprobaba los servidores del proceso que corre readiness en vez
+    de los del archivo que le pidieron revisar — y los avisos de token faltante
+    iban con ellos.
+
+    NO monkeypatchea `servidores`: los otros tests de esta sección le ponen un
+    doble, y un doble no puede discrepar con el código sobre de dónde sale el
+    valor. Acá el proceso NO tiene `MCP_EXTERNOS` y el candidato SÍ, que es la
+    única forma de que los dos mapas no se puedan confundir.
+
+    MUTACIÓN: `mcp_cliente.servidores(env)` -> `mcp_cliente.servidores()`. Cae
+    éste y sólo éste — y para que sea cierto hubo que arreglar el test de abajo,
+    que en la primera corrida se caía con esta misma mutación por accidente:
+    ponía `MCP_EXTERNOS` sólo en el mapa candidato, así que también dependía de
+    que se honrara. Ahora lo pone en los dos lados, idéntico, y el único que
+    mide este hecho es éste.
+    """
+    monkeypatch.delenv("MCP_EXTERNOS", raising=False)
+    monkeypatch.delenv("MCP_EXTERNO_TOKEN_DELCANDIDATO", raising=False)
+    env = dict(BASE, MCP_EXTERNOS="delcandidato=http://mcp-delcandidato:3012/mcp")
+
+    texto = readiness.ejecutar(env, con_red=False).texto()
+
+    assert "delcandidato" in texto, (
+        "readiness leyó el entorno del proceso y no el .env que le pasaron"
+    )
+
+
+def test_un_token_que_saldria_en_claro_se_dice_por_lo_que_es(monkeypatch) -> None:
+    """«No se cargó ningún servidor», y después la causa — no al revés.
+
+    `mcp_cliente.servidores` levanta por DOS motivos: `MCP_EXTERNOS` mal escrito
+    y un token que saldría en claro hacia un destino que sale a la red. El texto
+    viejo de este `except` decía «MCP_EXTERNOS no se puede interpretar», que
+    para el segundo caso es falso y, peor, lo hace leer como un error de tipeo:
+    exactamente lo que logra que nadie mire un rechazo de seguridad.
+
+    Lo que los dos casos comparten es la consecuencia, y eso es lo que encabeza
+    ahora. La causa viene adjunta del `exc`, que en este caso nombra las dos
+    salidas.
+
+    MUTACIÓN: volver el mensaje a «MCP_EXTERNOS no se puede interpretar». Caen
+    DOS: éste y el de la entrada ilegible, y eso es lo correcto — el mensaje es
+    uno solo y los dos motivos lo comparten, que es justamente el punto del
+    cambio. Medido, no supuesto.
+
+    Las dos variables van IDÉNTICAS en `os.environ` y en el mapa candidato, a
+    propósito: así la mutación de la línea de arriba —`servidores(env)` ->
+    `servidores()`— NO cae acá. Ese hecho tiene su propio test, y si este
+    también se cayera con ella, no se sabría cuál de los dos la está midiendo.
+    """
+    monkeypatch.setenv("MCP_EXTERNOS", "afuera=http://mcp.publico.example.com/mcp")
+    monkeypatch.setenv("MCP_EXTERNO_TOKEN_AFUERA", "un-token-largo-de-verdad")
+    env = dict(
+        BASE,
+        MCP_EXTERNOS="afuera=http://mcp.publico.example.com/mcp",
+        MCP_EXTERNO_TOKEN_AFUERA="un-token-largo-de-verdad",
+    )
+
+    reporte = readiness.ejecutar(env, con_red=False)
+    texto = reporte.texto()
+
+    assert "no se cargó ningún servidor externo" in texto
+    # Y la salida, que sale del error de mcp_cliente: sin esto el dueño lee un
+    # rechazo y no sabe qué hacer con él.
+    assert "MCP_EXTERNOS_HTTP_INTERNOS" in texto
+    # No bloquea: el agente arranca con sus herramientas y el token NO salió.
+    assert _bloqueos_de_mcp(reporte) == []
+
+
+def test_con_servidores_externos_se_nombra_la_credencial_que_no_se_puede_ver(
+    monkeypatch,
+) -> None:
+    """LA LÍNEA QUE ES EL PUNTO DE TODO EL CHEQUEO.
+
+    Un servidor MCP de terceros actúa con UNA credencial de ERPNext y no tiene
+    permisos por herramienta: las tres identidades de este repo no aplican del
+    otro lado. Ese dato no está en ninguna variable que readiness pueda leer,
+    así que el chequeo no puede verificarlo y lo que tiene que hacer es decir
+    que hay que mirarlo a mano. Callarlo sería un «LISTO para probar en vivo»
+    sobre un alcance que nadie revisó.
+
+    Sale SIEMPRE que haya servidores, con lista de bloqueo o sin ella: el
+    filtro de este lado decide qué VE el modelo y la credencial del otro lado
+    decide qué PUEDE. Por eso este `env` trae la lista cargada — si el aviso
+    dependiera de ella, este assert se caería.
+
+    MUTACIÓN: meter ese `reporte.aviso` adentro del `if not ...BLOQUEAR`. Cae
+    éste y sólo éste.
+    """
+    env = dict(
+        BASE,
+        MCP_EXTERNOS="erpnext=http://mcp-erpnext:3012/mcp",
+        MCP_EXTERNOS_BLOQUEAR="erpnext_payroll*",
+        MCP_EXTERNO_TOKEN_ERPNEXT="un-token-largo-de-verdad",
+        MCP_EXTERNO_TOKEN_LOCAL="otro-token",
+    )
+
+    reporte = _reporte(monkeypatch, env)
+    texto = reporte.texto()
+
+    assert "usuario de ERPNext" in texto
+    assert "Revisalo a mano" in texto
+    # Y NO bloquea: es opcional y el dueño pidió que gerencia pueda hacer de
+    # todo. Un chequeo que bloqueara acá apagaría la función entera.
+    assert _bloqueos_de_mcp(reporte) == []
+
+
+def test_una_lista_de_bloqueo_vacia_se_avisa_y_una_cargada_no(monkeypatch) -> None:
+    """Las dos mitades, porque una sola se cumple avisando siempre.
+
+    `MCP_EXTERNOS_BLOQUEAR` vacío es el default del módulo y carga TODO lo que
+    el servidor publique, submit y delete incluidos. Con la lista cargada esa
+    decisión ya está tomada y repetirla es ruido.
+
+    MUTACIÓN: `if not _valor(env, "MCP_EXTERNOS_BLOQUEAR").strip()` -> `if
+    True`. Cae éste y sólo éste.
+    """
+    base = dict(
+        BASE,
+        MCP_EXTERNOS="erpnext=http://mcp-erpnext:3012/mcp",
+        MCP_EXTERNO_TOKEN_ERPNEXT="un-token-largo-de-verdad",
+        MCP_EXTERNO_TOKEN_LOCAL="otro-token",
+    )
+
+    vacia = _informe(monkeypatch, base)
+    cargada = _informe(monkeypatch, dict(base, MCP_EXTERNOS_BLOQUEAR="erpnext_payroll*"))
+
+    assert "se carga TODO lo que publiquen" in vacia
+    assert "se carga TODO lo que publiquen" not in cargada
+
+
+def test_un_servidor_http_sin_token_se_avisa_y_uno_stdio_no(monkeypatch) -> None:
+    """El token es POR SERVIDOR y sólo lo pide el que habla por HTTP.
+
+    Un stdio es un proceso hijo: no hay puerto al que llegar y pedirle un
+    bearer no significa nada. Avisar por él enseñaría a ignorar el aviso.
+
+    Los dos servidores del doble están sin token en el `env`, así que el aviso
+    tiene que nombrar al HTTP y NO al stdio: un chequeo que no mirara el
+    transporte los nombraría a los dos y este assert se cae.
+
+    MUTACIÓN: en el `sin_token`, sacar el `a["transporte"] == "http"`. Cae éste
+    y sólo éste.
+    """
+    env = dict(
+        BASE,
+        MCP_EXTERNOS="erpnext=http://mcp-erpnext:3012/mcp,local=npx -y algo",
+        MCP_EXTERNOS_BLOQUEAR="erpnext_payroll*",
+    )
+
+    texto = _informe(monkeypatch, env)
+
+    linea = [fila for fila in texto.splitlines() if "MCP externos sin token" in fila]
+    assert linea, f"no salió el aviso de token:\n{texto}"
+    assert "erpnext" in linea[0]
+    assert "local" not in linea[0]
+
+
+def test_un_MCP_EXTERNOS_ilegible_avisa_y_no_tumba_el_reporte(monkeypatch) -> None:
+    """Una línea mal escrita no puede dejar al dueño sin el resto del informe.
+
+    `servidores()` levanta `MCPExternoError` con una entrada sin `=`. Sin
+    atraparlo, esa excepción sale de `ejecutar` y se lleva puesto TODO el
+    reporte —incluidas las líneas que sí bloquean—, que es el peor momento
+    para quedarse sin diagnóstico.
+
+    MUTACIÓN: sacar el `try/except` alrededor de `mcp_cliente.servidores()`.
+    Cae éste y sólo éste.
+    """
+    def explota(_env=None) -> dict[str, dict]:
+        from app.mcp_cliente import MCPExternoError
+
+        raise MCPExternoError("la entrada 1 de MCP_EXTERNOS no tiene «nombre=destino»")
+
+    env = dict(BASE, MCP_EXTERNOS="esto-no-tiene-igual")
+
+    texto = _informe(monkeypatch, env, explota)
+
+    assert "no se cargó ningún servidor externo" in texto
+    # Y la causa VIENE ADJUNTA. Es lo que permite que un mensaje sirva para los
+    # dos motivos por los que `servidores` levanta: el que lo lee no se queda
+    # con la consecuencia sola.
+    assert "no tiene «nombre=destino»" in texto
+    # Y el informe SIGUE entero: es lo que la excepción se llevaba puesto.
+    assert texto.rstrip().endswith(")") and ("LISTO" in texto or "NO LISTO" in texto)
+
+
+def _linea_de_pasos(reporte, clave: str) -> tuple[str, str, str]:
+    lineas = [fila for fila in reporte.lineas if fila[1] == clave]
+    assert len(lineas) == 1, f"esperaba UNA línea de {clave}, hay {len(lineas)}"
+    return lineas[0]
+
+
+def test_el_techo_de_pasos_sale_del_env_CANDIDATO_y_no_del_proceso(monkeypatch) -> None:
+    """El preflight tiene que hablar del `.env` que le pidieron revisar.
+
+    Es el chequeo que se corre ANTES de recrear el contenedor, así que leerlo
+    del proceso informaría sobre el techo VIEJO — el que está por reemplazarse—
+    y en verde. El proceso y el candidato se ponen al revés uno del otro, que es
+    la única forma de que no se puedan confundir.
+
+    MUTACIÓN: `_valor(env, clave)` -> `os.getenv(clave)`. Cae éste y sólo éste.
+    """
+    monkeypatch.setenv("PASOS_MAX_CLIENTES", "3")
+    monkeypatch.setenv("PASOS_MAX_GERENCIA", "3")
+    reporte = readiness.ejecutar(
+        dict(BASE, PASOS_MAX_CLIENTES="9", PASOS_MAX_GERENCIA="21"), con_red=False
+    )
+
+    nivel, _, mensaje = _linea_de_pasos(reporte, "PASOS_MAX_CLIENTES")
+    assert nivel == readiness.OK
+    assert "9 llamadas" in mensaje and "ventas" in mensaje
+    nivel, _, mensaje = _linea_de_pasos(reporte, "PASOS_MAX_GERENCIA")
+    assert "21 llamadas" in mensaje and "gerencia" in mensaje
+
+
+def test_un_techo_de_pasos_sin_poner_se_informa_como_default() -> None:
+    """Un número que nadie escribió y uno que el dueño eligió no son lo mismo.
+
+    Los dos andan; lo que cambia es si mirarlo dos veces vale la pena.
+    """
+    reporte = readiness.ejecutar(dict(BASE), con_red=False)
+
+    nivel, _, mensaje = _linea_de_pasos(reporte, "PASOS_MAX_CLIENTES")
+    assert nivel == readiness.OK
+    assert "default" in mensaje
+
+
+def test_un_techo_de_pasos_invalido_es_un_ERROR_y_no_un_aviso() -> None:
+    """`app/pasos.py` revienta al importar con un techo así, o sea que el
+    contenedor no arranca. Un preflight que lo dijera en amarillo estaría
+    diciendo «se puede salir en vivo» sobre un agente que no levanta."""
+    for malo in ("0", "-2", "ocho"):
+        reporte = readiness.ejecutar(dict(BASE, PASOS_MAX_CLIENTES=malo), con_red=False)
+        nivel, _, mensaje = _linea_de_pasos(reporte, "PASOS_MAX_CLIENTES")
+        assert nivel == readiness.ERROR, f"{malo!r} pasó como {nivel}"
+        assert "no arranca" in mensaje

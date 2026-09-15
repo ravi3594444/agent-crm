@@ -505,7 +505,7 @@ def reglas() -> list[Regla]:
             Texto(ULTIMO_RESULTADO),
         ]),
         (contiene("reglas de entrega"), [
-            Llamada("ver_reglas_de_entrega", {}),
+            Llamada("ver_ajustes", {"que": "entrega"}),
             Texto(ULTIMO_RESULTADO),
         ]),
 

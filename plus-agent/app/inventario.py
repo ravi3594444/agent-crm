@@ -140,14 +140,26 @@ def ultimo_conteo(item_code: str, warehouse: str) -> datetime | None:
     return max(momentos) if momentos else None
 
 
-def confiable(item_code: str, warehouse: str) -> tuple[bool, str]:
+def confiable(
+    item_code: str, warehouse: str, *, ignorar_postura: bool = False
+) -> tuple[bool, str]:
     """(confiable, motivo). El motivo explica en criollo por qué no.
 
     Nunca levanta: cualquier duda vuelve como "no confiable", que es lo que
     tanto la política de auto-confirmación como el nivel que se le dice al
     cliente necesitan para no prometer nada.
+
+    `ignorar_postura` SALTEA EL INTERRUPTOR MAESTRO Y NADA MÁS: la antigüedad
+    del conteo, que exista, y que no venga del futuro se siguen comprobando
+    igual. Lo usa el modo sombra, y sin esto ese modo no podía contestar nada.
+    `policy._evaluar` aparta la postura y sigue de largo (`inventario_habilitado
+    = True`), pero después preguntaba acá y acá se volvía a mirar
+    `maestra_encendida()`: con `STOCK_CONFIABLE=false` todos los productos
+    volvían "no confiable", así que el informe decía «0 pedidos habrían pasado»
+    pasara lo que pasara. El dueño lo prendía una semana y no se enteraba de
+    nada. **Sólo para leer**: ningún camino que emita algo lo pone en True.
     """
-    if not maestra_encendida():
+    if not ignorar_postura and not maestra_encendida():
         return False, "el inventario está marcado como no confiable"
     horas = horas_de_validez()
     if horas <= 0:

@@ -18,6 +18,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 from conftest import RelojDePrueba
+from fakes import LeaseDoble
 
 from app import agenda, avisos, erpnext, outbound_status, pendientes, policy, reloj, router, sombra
 from tests.fakes import entrada_de_cola
@@ -230,7 +231,7 @@ def mundo(monkeypatch: pytest.MonkeyPatch) -> dict:
 
             raise CoordinationError("ocupado")
         locks_tomados.append(nombre)
-        yield
+        yield LeaseDoble()
 
     monkeypatch.setattr(erpnext, "add_comment", add_comment)
     monkeypatch.setattr(erpnext, "registrar_comentario", add_comment)

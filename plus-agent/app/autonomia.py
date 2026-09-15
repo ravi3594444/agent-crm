@@ -467,7 +467,14 @@ def conteos(dias: int = DIAS_DEFAULT) -> dict | None:
     faltan: list[str] = []
     for code, deposito in pares:
         try:
-            fresco, _motivo = inventario.confiable(code, deposito)
+            # `ignorar_postura=True`: este informe es LECTURA, y existe para
+            # que el dueño decida si prende el interruptor. Sin esto contaba
+            # cero conteos frescos con `STOCK_CONFIABLE=false` —la postura de
+            # lanzamiento— aunque el equipo hubiera contado todo esa mañana, y
+            # el número argumentaba contra prender justo lo que mide.
+            fresco, _motivo = inventario.confiable(
+                code, deposito, ignorar_postura=True
+            )
         except Exception:
             faltan.append(code)
             continue

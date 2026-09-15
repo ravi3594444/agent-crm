@@ -41,6 +41,45 @@ def patron_like(clave: str) -> str:
     return "%" + "%".join(clave) + "%"
 
 
+def buscar_una(
+    nombre_o_codigo: str, campos: list[str] | None = None
+) -> tuple[dict | None, list[dict]]:
+    """(ficha, candidatos). La ficha SÓLO si hay una sola.
+
+    UN `like` QUE DEVUELVE VARIOS NO ELIGE, y ésa es toda la regla. Leer la
+    ficha de «San José» cuando hay dos y mostrar la primera es un informe
+    incompleto; ESCRIBIRLE a la primera es cambiarle los datos al cliente
+    equivocado, y MANDARLE UN WHATSAPP a la primera es contarle a un comercio
+    algo del comercio de al lado. En los tres casos el dueño no tiene cómo
+    enterarse: la respuesta le dice el nombre que él escribió.
+
+    Vive acá y no en `app/tools/crm.py` porque ya había dos lugares que lo
+    necesitaban y uno de los dos —`avisar_al_cliente`— se había escrito con un
+    `limit=1` y elegía sola. Dos copias de una regla son dos reglas.
+
+    `candidatos` sale con DOS cuando hay ambigüedad para que cada llamador arme
+    su propio mensaje: el de escritura y el de mandar un mensaje no dicen lo
+    mismo, pero la decisión de no elegir es una sola. Vacío es «no hay ninguno».
+
+    `name` es la clave del documento y no puede coincidir con dos, así que el
+    camino exacto no necesita nada de esto.
+    """
+    pedidos = list(campos or ["name", "customer_name"])
+    exacto = erpnext.get_list(
+        "Customer", filters=[["name", "=", nombre_o_codigo]],
+        fields=pedidos, limit=1,
+    )
+    if exacto:
+        return exacto[0], []
+    aproximado = erpnext.get_list(
+        "Customer", filters=[["customer_name", "like", patron_like(nombre_o_codigo)]],
+        fields=pedidos, limit=2,
+    )
+    if len(aproximado) == 1:
+        return aproximado[0], []
+    return None, list(aproximado)
+
+
 def buscar_por_telefono(numero: str, get_list=None) -> dict | None:
     """Devuelve el Customer que corresponde a ese teléfono, o None."""
     clave = telefono.clave_busqueda(numero)

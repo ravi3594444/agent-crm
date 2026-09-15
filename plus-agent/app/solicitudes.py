@@ -165,6 +165,35 @@ RETIRO = "retiro"
 RESPALDO = "respaldo_automatico"
 DECIDE_EL_SISTEMA = "el sistema (regla configurada por el dueño)"
 
+
+def lo_decidio_una_persona(solicitud: Solicitud) -> bool:
+    """¿Miró esto un ser humano, o lo resolvió una regla sola?
+
+    Son dos caminos automáticos y hasta ahora se marcaban distinto: la
+    pre-autorización de una excepción de entrega no escribía `decidida_por` en
+    absoluto (quedaba ""), y el respaldo de una solicitud vencida escribía
+    `DECIDE_EL_SISTEMA`. Un predicado en un solo lugar es lo que evita que la
+    respuesta dependa de por cuál de los dos se llegó.
+
+    Importa porque lo que una persona aprueba y lo que aprueba una regla NO
+    tienen el mismo alcance: el encargado miró ESTE pedido; la regla del dueño
+    autorizó una FORMA de entrega, sin mirar el monto, la deuda ni el cliente.
+    """
+    from app import telefono as telefonos
+
+    quien = str(solicitud.decidida_por or "").strip()
+    if not quien or quien == DECIDE_EL_SISTEMA:
+        return False
+    # UN TELÉFONO, no «cualquier cosa que no sea la constante». `DECIDE_EL_SISTEMA`
+    # es una frase que además se IMPRIME —`texto_estado` la muestra y
+    # `_cerrar_confirmado` la escribe en el comentario del pedido—, y los
+    # registros son append-only y se releen durante meses. Si alguien mejora esa
+    # redacción, todos los registros viejos dejan de coincidir con la constante
+    # nueva, este predicado contesta «la decidió una persona» y los pedidos
+    # vuelven a emitirse salteándose los límites, sin un test en rojo. Un
+    # teléfono normaliza; una frase, no.
+    return bool(telefonos.normalizar(quien))
+
 CLAVE_INDICE = "wa:{inbound}:solicitudes"
 CACHE_TTL_SEGUNDOS = 30 * 24 * 60 * 60
 # Most drafts never carry a decision request, and app/policy.py asks about all
@@ -556,6 +585,42 @@ def _desde_erpnext(pedido: str) -> Solicitud | None:
         return None
 
 
+def leer_durable(pedido: str) -> Solicitud | None:
+    """El evento más nuevo del registro durable, SALTEÁNDOSE la caché.
+
+    `leer` y `leer_estricto` contestan con la caché cuando la hay, y para casi
+    todo está bien: toda escritura pasa por ERPNext antes que por Redis, así
+    que una entrada de caché no puede ser más nueva que el registro. Pero
+    puede ser más VIEJA, y ahí está el agujero: `_cachear` se traga los fallos
+    de Redis a propósito —una decisión durable no se pierde porque la caché no
+    tome— así que otro worker puede dejar escrito el rechazo, el vencimiento o
+    la revisión en ERPNext y la foto de `esperando_cliente` intacta en la
+    caché, con TTL de 30 días. Quien la lea después ve una oferta que ya
+    ninguna persona sostiene.
+
+    Para un barrido eso cuesta un tick. Para lo último que se mira antes de un
+    `submit_doc` cuesta una venta emitida contra una decisión que otro ya
+    tomó, y el submit no se deshace: por eso existe esta lectura y por eso no
+    mira Redis para contestar. De paso corrige la entrada vieja, que es lo que
+    hace que el worker siguiente no vuelva a tropezarse con la misma.
+
+    Levanta `LecturaIncierta` por lo mismo que `leer_estricto`: acá «no pude
+    leer» no puede valer como «nadie decidió nada».
+    """
+    pedido = str(pedido or "").strip()
+    if not pedido:
+        return None
+    try:
+        durable = _desde_erpnext_estricto(pedido)
+    except Exception as exc:
+        raise LecturaIncierta(
+            f"{pedido}: no pude leer los eventos ({type(exc).__name__})"
+        ) from exc
+    if durable is not None:
+        _cachear(durable)
+    return durable
+
+
 def leer_estricto(pedido: str) -> Solicitud | None:
     """El estado actual de la solicitud del pedido, o None — y `None` SÓLO
     quiere decir que no hay.
@@ -575,15 +640,7 @@ def leer_estricto(pedido: str) -> Solicitud | None:
     desde_cache = _desde_cache(pedido)
     if desde_cache is not None:
         return desde_cache
-    try:
-        durable = _desde_erpnext_estricto(pedido)
-    except Exception as exc:
-        raise LecturaIncierta(
-            f"{pedido}: no pude leer los eventos ({type(exc).__name__})"
-        ) from exc
-    if durable is not None:
-        _cachear(durable)
-    return durable
+    return leer_durable(pedido)
 
 
 def leer(pedido: str) -> Solicitud | None:
@@ -2491,7 +2548,13 @@ def aceptar_cliente(
 
     lengua = _lengua_cliente(telefono_cliente, lengua)
     try:
-        with distributed_lock(f"solicitud:{pedido}", lease_seconds=90, wait_seconds=10):
+        # 180 y no 90: acá adentro entró `limites_del_dueno`, que relee el
+        # pedido y corre `policy.evaluar` —historial, deuda, stock por renglón,
+        # precios— contra un ERPNext con `timeout=30`. Es la misma aritmética
+        # que MAPA ya registra para `decisiones.confirmar`: un lease que vence
+        # a mitad de la sección deja el pedido sin exclusión mutua mientras el
+        # submit sigue en vuelo, y nadie lo renueva.
+        with distributed_lock(f"solicitud:{pedido}", lease_seconds=180, wait_seconds=10) as lease:
             solicitud = leer(pedido)
             if solicitud is None or solicitud.estado != ESPERANDO_CLIENTE:
                 return _sin_oferta(pedido, solicitud, lengua)
@@ -2524,6 +2587,62 @@ def aceptar_cliente(
             aplicado, detalle_aplicado = _aplicar_terminos(pedido, solicitud)
             if not aplicado:
                 return _a_revision(solicitud, [detalle_aplicado], lengua)
+
+            # Los límites del dueño, sobre el documento YA con los términos
+            # puestos — con el cargo adentro del total y con la fecha acordada.
+            if not lo_decidio_una_persona(solicitud):
+                fuera = limites_del_dueno(pedido, solicitud)
+                if fuera:
+                    return _a_revision(solicitud, fuera, lengua)
+
+            # LA SOLICITUD, OTRA VEZ, JUSTO ANTES DE EMITIR. El estado se miró
+            # al entrar al lock, y desde entonces pasaron una relectura, una
+            # revalidación, la escritura de los términos y `policy.evaluar`
+            # entero: contra un ERPNext lento eso puede comerse el lease, y un
+            # lease vencido es el pedido sin exclusión mutua mientras esta
+            # llamada sigue caminando hacia el submit. Son DOS preguntas y las
+            # dos se hacen: «¿alguien decidió mientras tanto?», que es esto de
+            # acá abajo y que impide que el que decidió segundo pise al que
+            # decidió primero; y «¿sigo teniendo el lock?», que es `sigue_mio()`
+            # justo antes del submit. La primera achica la ventana; la que la
+            # cierra es la segunda, y hasta que `locks.Lease` existió no se
+            # podía hacer.
+            #
+            # Y se pregunta con `leer_durable`, NO con `leer`: el otro worker
+            # escribe en ERPNext y recién después cachea, y `_cachear` se traga
+            # el fallo de Redis, así que la caché puede seguir mostrando
+            # `esperando_cliente` sobre una solicitud que ya se rechazó o
+            # venció. Preguntarle a la caché justo acá es preguntarle a la
+            # única copia que puede estar vieja por el mismo motivo por el que
+            # hay que volver a preguntar.
+            try:
+                de_nuevo = leer_durable(pedido)
+            except LecturaIncierta as exc:
+                # «No sé» no es «no hay», y lo que sigue es el submit. El
+                # cliente escucha que no se pudo mirar —no que no hay nada
+                # esperándolo, que cierra la conversación sobre una oferta que
+                # capaz sigue viva— y la solicitud queda como estaba: en el
+                # índice, con su plazo, y el barrido vuelve.
+                print(f"[solicitudes] {exc}")
+                return idioma.t("oferta.no_verificable", lengua)
+            if de_nuevo is None or de_nuevo.id != solicitud.id or (
+                de_nuevo.estado != ESPERANDO_CLIENTE
+            ):
+                print(f"[solicitudes] {pedido}: la solicitud cambió mientras se verificaba")
+                return _sin_oferta(pedido, de_nuevo, lengua)
+
+            # ¿SIGO TENIENDO EL LOCK? Desde que se tomó pasaron una
+            # relectura, `revalidar`, la escritura de los términos, `policy`
+            # entero y la relectura durable de la solicitud: contra un ERPNext
+            # con `timeout=30` eso se puede comer los 180 s. Con el lease
+            # vencido, otro worker ya pudo tomar la llave y decidir otra cosa
+            # sobre este mismo pedido, así que el submit no sale. La solicitud
+            # queda como estaba —en el índice, con su plazo— y el barrido
+            # vuelve; el cliente escucha lo mismo que cuando no se pudo
+            # coordinar, porque es lo mismo que pasó.
+            if not lease.sigue_mio():
+                print(f"[solicitudes] {pedido}: perdí el lease antes del submit, no emito")
+                return idioma.t("oferta.procesando", lengua)
 
             try:
                 erp.submit_doc("Sales Order", pedido)
@@ -2700,6 +2819,58 @@ def _revision_sin_registro(
 # Revalidation. The same rules as the automatic path, re-run on the CURRENT
 # document — never a second implementation that could drift from app/policy.py.
 # ---------------------------------------------------------------------------
+
+
+def limites_del_dueno(pedido: str, solicitud: Solicitud) -> list[str]:
+    """Los límites del dueño sobre el pedido FINAL. Vacío quiere decir que pasan.
+
+    LA PRE-AUTORIZACIÓN CUBRE LA ENTREGA, NUNCA LA PLATA. Hay dos caminos que
+    emiten sin que nadie mire —la excepción de entrega pre-autorizada y el
+    respaldo de una solicitud vencida— y los dos llegaban al `submit` sin haber
+    pasado nunca por `policy.evaluar`: sin tope, sin deuda vencida, sin cliente
+    nuevo, sin cantidad por producto. `app/excepciones.py` ni siquiera importa
+    `policy`, así que lo único que miraba era que la excepción estuviera activa
+    y el mínimo. Pasaba incluso con `AUTO_CONFIRM_MAX=0`, que es el dueño
+    diciendo «ningún pedido se emite sin mí».
+
+    CORRE DESPUÉS DE `_aplicar_terminos` Y RELEE, y las dos cosas importan. El
+    cargo de la excepción lo escribe `_aplicar_terminos` y SUBE el
+    `grand_total`: mirar el documento de antes deja pasar un pedido que con el
+    cargo se va por encima del tope. Y la fecha de la oferta también se escribe
+    ahí, así que el documento viejo todavía trae la fecha vencida que la oferta
+    viene a reemplazar.
+
+    `entrega_acordada=True` apaga SÓLO el bloque de entrega de `policy`: el
+    dónde y el cuándo los fijó una oferta que salió de una regla del dueño.
+    Sin eso, un RETIRO EN EL LOCAL —que `excepciones.evaluar_respaldo` ofrece
+    justamente cuando la dirección NO está en zona— se caería siempre por la
+    zona de una entrega que no existe.
+
+    Con una persona detrás no se llama: ella miró ESTE pedido.
+    """
+    from app import policy
+
+    try:
+        final = erpnext.policy_get_doc("Sales Order", pedido)
+    except Exception as exc:
+        print(f"[solicitudes] {pedido}: no pude releer para los límites ({type(exc).__name__})")
+        return ["no pude releer el pedido para verificar los límites del dueño"]
+
+    try:
+        decision = policy.evaluar(final, entrega_acordada=True)
+    except Exception as exc:
+        # Todo lo demás en este camino convierte una lectura fallida en un
+        # motivo, no en una excepción: `aceptar_cliente` sólo atrapa
+        # `CoordinationError`, así que una excepción acá dejaría al cliente sin
+        # respuesta y al borrador tomando stock sin revisión ni plazo nuevo.
+        print(f"[solicitudes] {pedido}: límites no verificables ({type(exc).__name__})")
+        return ["no pude verificar los límites del dueño"]
+
+    if decision.auto:
+        return []
+    # `or` y no `extend` a secas: un rechazo SIN motivos no puede volverse un
+    # «no hay problemas» y emitir el pedido que política acaba de rechazar.
+    return list(decision.motivos) or ["los límites del dueño no autorizan este pedido"]
 
 
 def revalidar(so: dict, solicitud: Solicitud) -> list[str]:

@@ -19,6 +19,53 @@ class CoordinationError(RuntimeError):
     """Redis could not safely coordinate a business-critical operation."""
 
 
+class Lease:
+    """El lease tomado, para la única pregunta que un llamador necesita hacerle.
+
+    POR QUÉ EXISTE
+    --------------
+    Un lease vence solo. Nadie lo renueva —no hay un `extend()` en este repo— y
+    adentro de las secciones críticas de este sistema hay hasta cuatro llamadas
+    a ERPNext con `timeout` de 20 y 30 s. Cuando el lease se vence a mitad de
+    camino, la llamada NO falla: sigue caminando hacia el Submit sin exclusión
+    mutua, mientras otro worker toma la llave libre y decide otra cosa sobre el
+    mismo pedido.
+
+    `distributed_lock` hacía `yield None`, así que preguntar «¿lo sigo
+    teniendo?» era literalmente imposible: los dos lugares que emiten lo dicen
+    en un comentario y se conforman con mirar si alguien decidió mientras tanto.
+    Eso achica la ventana y no la cierra. Esta clase es la pieza que faltaba.
+
+    Es deliberadamente una sola pregunta y no el `Lock` de redis-py: un llamador
+    que pudiera hacer `release()` o `extend()` podría soltar el lease de otro, o
+    estirarlo para siempre. Lo único que hace falta del otro lado de un Submit
+    es saber si todavía es tuyo.
+    """
+
+    __slots__ = ("_lock", "_nombre")
+
+    def __init__(self, lock, nombre: str) -> None:
+        self._lock = lock
+        self._nombre = nombre
+
+    def sigue_mio(self) -> bool:
+        """True SÓLO si Redis confirma que el lease sigue siendo de este proceso.
+
+        **Falla cerrado.** Si Redis no contesta, la respuesta es False: del otro
+        lado de esta pregunta hay un efecto irreversible, y «no pude comprobar»
+        no es «sí». Una comprobación que falla abierta no comprueba nada, que es
+        la misma regla que el tope diario de `app/precios.py`.
+        """
+        try:
+            return bool(self._lock.owned())
+        except (RedisError, LockError) as exc:
+            print(
+                f"[locks] {self._nombre}: no pude comprobar el lease "
+                f"({type(exc).__name__}), lo doy por perdido"
+            )
+            return False
+
+
 _client: redis.Redis | None = None
 
 
@@ -53,8 +100,14 @@ def distributed_lock(
     *,
     lease_seconds: int = 60,
     wait_seconds: int = 5,
-) -> Iterator[None]:
-    """Acquire a named cross-worker lock, failing closed after a short wait."""
+) -> Iterator[Lease]:
+    """Acquire a named cross-worker lock, failing closed after a short wait.
+
+    Yields a `Lease`, que es lo que le permite al llamador preguntar
+    `sigue_mio()` justo antes de hacer algo irreversible. Los llamadores que no
+    emiten nada siguen escribiendo `with distributed_lock(...):` sin `as` y no
+    cambian en nada.
+    """
     lock = _redis().lock(
         f"plus-agent:business-lock:{name}",
         timeout=lease_seconds,
@@ -66,7 +119,7 @@ def distributed_lock(
         acquired = bool(lock.acquire(blocking=True))
         if not acquired:
             raise CoordinationError("no se pudo adquirir el lock distribuido")
-        yield
+        yield Lease(lock, name)
     except (RedisError, LockError) as exc:
         raise CoordinationError("falló la coordinación distribuida") from exc
     finally:

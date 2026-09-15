@@ -248,3 +248,29 @@ def listar(
     elegidas = elegidas[desde:]
     tope = int(limit) if limit else 0
     return [dict(fila) for fila in (elegidas[:tope] if tope > 0 else elegidas)]
+
+
+class LeaseDoble:
+    """El doble de `app.locks.Lease` — el lease que se le pasa a quien emite.
+
+    CONTESTA LO QUE EL TEST LE PUSO, no un `True` fijo. Un doble que dijera
+    siempre que sí no puede estar en desacuerdo con el código sobre el único
+    caso que importa —el lease vencido a mitad de la sección crítica— y dejaría
+    estructuralmente incapaz de fallar a todo test alrededor del submit, que es
+    justo el defecto que `CLAUDE.md` describe en «Tests que pueden estar en
+    desacuerdo con el código».
+
+    `preguntas` existe para poder afirmar que la comprobación SE HIZO: un
+    llamador que nunca pregunta y uno que pregunta y le dan que sí se ven igual
+    desde el resultado.
+    """
+
+    __slots__ = ("preguntas", "vigente")
+
+    def __init__(self, vigente: bool = True) -> None:
+        self.vigente = vigente
+        self.preguntas = 0
+
+    def sigue_mio(self) -> bool:
+        self.preguntas += 1
+        return self.vigente

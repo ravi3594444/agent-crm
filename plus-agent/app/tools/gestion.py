@@ -28,8 +28,19 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import Field
 
-from app import acciones
-from app.runtime_context import SIN_PERMISO, RuntimeContextError, require_management
+from app import acciones, idioma
+from app.runtime_context import RuntimeContextError, require_management
+
+
+def _sin_permiso() -> str:
+    """La negativa de estas dos herramientas, en el idioma del equipo.
+
+    Era `runtime_context.SIN_PERMISO` devuelta tal cual: el único texto que un
+    número no autorizado llega a ver salía siempre en castellano, también para
+    el dueño que tiene el sistema en inglés. El ES de la clave es igual a esa
+    constante, que sigue existiendo para los otros llamadores.
+    """
+    return idioma.t("permiso.sin_autorizacion", idioma.gerencia())
 
 
 @tool
@@ -53,11 +64,17 @@ def detalle_de_pedido(
     try:
         actor = require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
+        return _sin_permiso()
     try:
         return acciones.ejecutar_lectura("ver", pedido, actor.actor_phone)
     except acciones.AccionError as exc:
-        return f"No pude mostrarte el pedido: {exc}."
+        # `motivo_de` y no `exc`: el motivo viaja con su clave, así que se arma
+        # en el idioma del dueño. Interpolar la excepción metía castellano
+        # adentro de una frase ya traducida.
+        lengua = idioma.gerencia()
+        return idioma.t(
+            "gestion.no_pude_mostrar", lengua, exc=idioma.motivo_de(exc, lengua)
+        )
 
 
 @tool
@@ -117,21 +134,21 @@ def proponer_accion(
     try:
         actor = require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
+        return _sin_permiso()
+    lengua = idioma.gerencia()
     try:
         propuesta = acciones.proponer(accion, pedido, detalle, actor.actor_phone)
     except acciones.AccionError as exc:
-        return f"No preparé nada y no cambié nada: {exc}."
+        return idioma.t(
+            "gestion.no_prepare_nada", lengua, exc=idioma.motivo_de(exc, lengua)
+        )
 
     if propuesta.get("repetida"):
         # Misma acción, mismo pedido, mismos datos y todavía sin confirmar: ya
         # tiene el código en el teléfono. Mandarle otro sería darle dos formas
         # de ejecutar la misma cosa y una sola de acordarse cuál.
-        return (
-            f"Esto ya estaba preparado y sigue esperando tu confirmación:\n"
-            f"{propuesta['consecuencia']}\n\n"
-            "El código ya te lo mandé; contestá esos seis dígitos. No preparé "
-            "nada nuevo ni cambié nada."
+        return idioma.t(
+            "gestion.repetida", lengua, consecuencia=propuesta["consecuencia"]
         )
 
     entregado = acciones.mandar_codigo(actor.actor_phone, propuesta)
@@ -139,22 +156,19 @@ def proponer_accion(
         # Una acción esperando un código que nadie vio no se puede confirmar, y
         # sí puede confundirlo diez minutos después. Mejor no dejarla.
         acciones.descartar(actor.actor_phone, propuesta["pedido"])
-        return (
-            f"Preparé la acción ({propuesta['accion']} {propuesta['pedido']}) "
-            "pero NO pude mandarte el código de confirmación, así que la "
-            "descarté. No cambié nada. Probá de nuevo."
+        return idioma.t(
+            "gestion.sin_codigo", lengua,
+            accion=propuesta["accion"], pedido=propuesta["pedido"],
         )
 
+    # El salto de línea va acá y no adentro de la fila del catálogo: `idioma.t`
+    # hace `.strip()` sobre el texto, así que un "\n" final se perdería.
     reemplazo = (
-        f"Reemplacé lo que tenías esperando sobre {propuesta['pedido']}: ese "
-        "código anterior ya no sirve. Lo que hayas preparado sobre otro pedido "
-        "sigue esperando igual.\n"
+        idioma.t("gestion.reemplazo", lengua, pedido=propuesta["pedido"]) + "\n"
         if propuesta.get("reemplazo")
         else ""
     )
-    return (
-        f"{reemplazo}Preparada, todavía sin hacer:\n{propuesta['consecuencia']}\n\n"
-        "Te mandé el código de confirmación por separado: contestá con esos "
-        "seis dígitos y la hago. Yo no lo veo y no la puedo aplicar por vos. "
-        "Si no contestás, se descarta sola."
+    return idioma.t(
+        "gestion.preparada", lengua,
+        reemplazo=reemplazo, consecuencia=propuesta["consecuencia"],
     )

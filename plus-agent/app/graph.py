@@ -13,8 +13,9 @@ import os
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.prebuilt import ToolNode, create_react_agent
+from pydantic import ValidationError
 
-from app import erpnext, modelos
+from app import erpnext, modelos, pasos
 from app.conversacion import (
     business_today,
     prompt_clientes,
@@ -23,9 +24,9 @@ from app.conversacion import (
     texto_plano,
 )
 from app.tools.captura import (
+    avisar_al_cliente,
     confirmar_entrega,
     contar_stock,
-    redactar_mensaje_cliente,
     registrar_venta_offline,
 )
 from app.tools.catalogo import (
@@ -35,23 +36,32 @@ from app.tools.catalogo import (
     pedido_habitual,
 )
 from app.tools.configuracion import (
-    historial_limites,
     proponer_limite,
-    ver_limites,
-    ver_reglas_de_entrega,
+    ver_ajustes,
+)
+from app.tools.crm import (
+    actualizar_cliente,
+    actualizar_producto,
+    anotar_en_ficha,
+    armar_presupuesto,
+    cambiar_precio,
+    editar_borrador,
+)
+from app.tools.entrega import (
+    condiciones_de_entrega,
 )
 from app.tools.gerencia import (
-    cobranzas_vencidas,
     ejecutar_reporte,
     ficha_cliente,
-    pedidos_pendientes,
-    resumen_autonomia,
-    stock_bajo,
-    ventas_del_periodo,
+    informe,
 )
 from app.tools.gestion import (
     detalle_de_pedido,
     proponer_accion,
+)
+from app.tools.memoria import (
+    anotar_dato,
+    ver_memoria,
 )
 from app.tools.operaciones import (
     estado_del_sistema,
@@ -73,6 +83,13 @@ TOOLS_CLIENTES = [
     # acepta un teléfono como argumento, así que ningún mensaje puede pedir
     # el alta de otra persona.
     crear_cliente, crear_lead, crear_pedido, escalar_a_humano,
+    # Las condiciones de entrega que configuró el dueño (app/limites.py, grupo
+    # ENTREGA), en una sola herramienta. SÓLO LECTURA y sin un solo dato del
+    # cliente que termine escrito en ninguna parte. Es lo que hace el negocio
+    # EN GENERAL: no promete la entrega de un pedido —eso sigue siendo
+    # `pedir_excepcion_de_entrega` más la decisión de una persona— y un ajuste
+    # que falta sale como faltante, nunca como un «no repartimos».
+    condiciones_de_entrega,
     # Pide una excepción de entrega. NO decide: o el dueño la dejó autorizada
     # de antemano, o abre una solicitud para una persona (app/solicitudes.py).
     pedir_excepcion_de_entrega,
@@ -92,22 +109,36 @@ TOOLS_CLIENTES = [
 ]
 
 TOOLS_GERENCIA = [
-    pedidos_pendientes, ventas_del_periodo, stock_bajo,
-    cobranzas_vencidas, ficha_cliente, ejecutar_reporte,
+    # UNA herramienta para los cinco informes (pendientes, ventas, stock bajo,
+    # cobranzas, autonomía). Eran cinco, y `cobranzas_vencidas` era literalmente
+    # una de las siete consultas que `ejecutar_reporte` ya corre: dos
+    # herramientas plausibles para «¿cuánto me deben?». Lo que degrada la
+    # elección es el solapamiento, no la cantidad.
+    informe, ficha_cliente, ejecutar_reporte,
     buscar_producto, consultar_stock, estado_pedido,
     escalar_a_humano,
     # offline capture — how reality gets back into the system
     registrar_venta_offline, contar_stock, confirmar_entrega,
-    redactar_mensaje_cliente,
+    # ...y el mensaje al cliente, que ahora SALE —con el botón del dueño— en
+    # vez de devolver un borrador con un hueco para copiar a mano.
+    avisar_al_cliente,
     # the owner's own limits: read them out and PROPOSE a change. There is no
     # tool that confirms one, deliberately — the four-digit code never enters
     # this agent's context and the deterministic router in app/main.py is what
     # applies the change. An agent that could call both steps is one step.
     # NEVER in TOOLS_CLIENTES — a customer cannot be allowed near these.
-    ver_limites, proponer_limite, historial_limites,
-    # ...and his delivery rules, through the SAME propose/confirm pair. Reading
-    # them is its own tool; changing one is proponer_limite like everything else.
-    ver_reglas_de_entrega,
+    # ver_ajustes reads all THREE (limits, delivery rules, history) behind one
+    # closed Literal; proponer_limite is the only one that writes, and it stays
+    # its own tool — a read and a write behind one enum is one where the wrong
+    # branch writes.
+    ver_ajustes, proponer_limite,
+    # ...y las treinta cosas que repite todo el tiempo y no quiere volver a
+    # explicar (app/memoria.py). `ver_memoria` LEE detrás de un Literal;
+    # `anotar_dato` ESCRIBE, así que va suelta: misma línea que ver_ajustes y
+    # proponer_limite. Un dato no es un ajuste y NO lleva código de cuatro
+    # dígitos — hacerle tipear un código para anotar «la panadería paga los
+    # viernes» es exactamente la fricción de la que se queja.
+    ver_memoria, anotar_dato,
     # read-only operational status. No writes, no retries, no secrets, and
     # NEVER in TOOLS_CLIENTES: these count queues and name the provider.
     estado_del_sistema, ver_avisos_fallidos,
@@ -118,10 +149,89 @@ TOOLS_GERENCIA = [
     # the same reason. NEVER in TOOLS_CLIENTES: a customer near these is a
     # customer deciding his own order.
     detalle_de_pedido, proponer_accion,
-    # ...and the numbers he needs to decide whether to loosen anything
-    # (app/autonomia.py). Read-only, and it reports rather than advises.
-    resumen_autonomia,
+    # ...y lo que el dueño puede CAMBIAR (app/tools/crm.py). La línea no es
+    # leer-contra-escribir —era demasiado ancha— sino IRREVERSIBLE × PLATA:
+    # estas cinco se deshacen escribiendo de nuevo y no le cobran un peso a
+    # nadie. Lo irreversible sigue afuera y sigue sin ser alcanzable: emitir usa
+    # la credencial de política, cancelar un emitido no existe como herramienta,
+    # los límites piden su código de cuatro dígitos, y `Item Price` no está en
+    # `erpnext.DOCTYPES_EDITABLES` —la negativa es del cliente HTTP, no de la
+    # buena conducta de un archivo—.
+    #
+    # NINGUNA pone un precio: `LineaSimple` no tiene `rate`, igual que
+    # `pedidos.LineaPedido`. El precio lo resuelve ERPNext y lo verifica
+    # `policy._precio_autorizado`. Una herramienta donde el precio es un
+    # argumento del modelo convierte al modelo en la autoridad de precios.
+    #
+    # LA EXCEPCIÓN, Y LA DECIDIÓ EL DUEÑO: `cambiar_precio` escribe el precio de
+    # LISTA. No es el precio de un renglón, pero tampoco es inocente —
+    # `policy._precio_estandar` auto-confirma cuando el renglón coincide con la
+    # lista, así que quien escribe la lista influye en lo que se confirma solo—.
+    # Lo pidió explícitamente («no one can confirm everytime i need automated»)
+    # y es su negocio.
+    #
+    # Lo que sí queda acotado, porque no depende de su permiso sino de cómo se
+    # comporta un modelo: el único valor que el modelo aporta es el NÚMERO
+    # —lista, moneda y unidad salen de `policy` y del `stock_uom` leído de
+    # ERPNext—; ese número tiene que caer adentro de `PRECIO_CAMBIO_MAX_PCT`; y
+    # hay UN cambio por producto por día, porque una banda por llamada no acota
+    # una serie y el modelo puede llamar cinco veces en el mismo turno. Con la
+    # banda en 0, que es el default, no escribe nada. La puerta genérica sigue
+    # cerrada: `Item Price` no está en `erpnext.DOCTYPES_EDITABLES`.
+    actualizar_cliente, anotar_en_ficha, armar_presupuesto,
+    editar_borrador, actualizar_producto, cambiar_precio,
 ]
+
+# LAS HERRAMIENTAS DE OTRO SERVIDOR MCP, SI EL DUEÑO CONFIGURÓ UNO
+# ----------------------------------------------------------------
+# `TOOLS_GERENCIA` de arriba NO SE TOCA, y ésa es la decisión importante de este
+# bloque. Lo de afuera va a una lista APARTE, y sólo esa lista arma el agente.
+#
+# Si en cambio se le sumaran a `TOOLS_GERENCIA`, se llevarían puestas dos cosas
+# calladas: `mcp_server._catalogo()` lee esa constante, así que NUESTRO endpoint
+# MCP pasaría a re-publicar las herramientas de un tercero —incluido su
+# `erpnext_doc_submit`— con nuestro token y nuestra autenticación; y el test que
+# afirma «el catálogo publicado es exactamente el del agente» seguiría en verde,
+# porque los dos lados se moverían juntos. Una superficie de terceros
+# reexportada por nuestra puerta es lo peor de las dos: parece nuestra.
+#
+# `MCP_EXTERNOS` vacío = no-op, sin un import de más.
+#
+# NUNCA a TOOLS_CLIENTES, y el motivo está MEDIDO contra el servidor real, no
+# leído en un README: `erpnext_sales_order_create` declara
+# `items[].required = ["item_code", "qty", "rate"]`. El PRECIO lo pone el
+# modelo. No hay resolución de lista de precios del otro lado, así que
+# `policy._precio_autorizado` —que filtra Item Prices por price_list, currency y
+# uom— queda fuera de ese camino. Con un desconocido escribiendo del otro lado,
+# una herramienta donde el precio es un argumento del modelo es la regla 1 al
+# revés.
+#
+# Un fallo del servidor externo NO puede tumbar el agente: si no levanta, se
+# avisa y se sigue con las herramientas propias. Un ERP de terceros caído es un
+# martes; un agente que no contesta el WhatsApp es el negocio parado.
+def _con_externas() -> list:
+    try:
+        from app import mcp_cliente
+
+        externas = mcp_cliente.cargar(TOOLS_GERENCIA)
+        if not externas:
+            # COPIA, no la misma lista. Sin servidores externos el contenido es
+            # idéntico y la tentación es devolver la constante; entonces las dos
+            # son el MISMO objeto y un `TOOLS_AGENTE_GERENCIA.append(...)` de
+            # alguna sesión futura le agregaría una herramienta a lo que
+            # `mcp_server` publica, sin tocar una línea de ese archivo. Lo
+            # encontró su propio test, que fallaba con esto puesto.
+            return list(TOOLS_GERENCIA)
+        print(mcp_cliente.resumen(TOOLS_GERENCIA))
+        return TOOLS_GERENCIA + externas
+    except Exception as exc:  # el agente arranca igual, con lo suyo
+        print(f"[mcp] no pude cargar los servidores externos ({type(exc).__name__})")
+        return list(TOOLS_GERENCIA)
+
+
+# Lo que se le monta al agente. `TOOLS_GERENCIA` sigue siendo lo que este repo
+# escribió y lo que `app/mcp_server.py` publica.
+TOOLS_AGENTE_GERENCIA = _con_externas()
 
 # from_conn_string() is a CONTEXT MANAGER, not a constructor — using it
 # directly hands you a generator, not a saver. Construct directly instead,
@@ -207,19 +317,68 @@ _ERROR_MSG = (
     "ni de errores técnicos."
 )
 
+# UN VALOR DE ENUM EQUIVOCADO NO ES UNA HERRAMIENTA ROTA
+# -----------------------------------------------------
+# `_ERROR_MSG` manda a escalar_a_humano, y para una herramienta que falló de
+# verdad está bien. Pero desde que cinco informes son `informe(que=…)` y tres
+# lecturas de ajustes son `ver_ajustes(que=…)`, hay una falla nueva que NO es
+# una herramienta rota: el modelo llama bien y escribe mal el valor.
+#
+# Y es la falla probable, no una rara. El `Literal` no lo garantiza nadie en la
+# red: Gemini no tiene `strict` en su capa compatible con OpenAI y lo ignora en
+# silencio, así que el enum es una SUGERENCIA para el modelo y la validación
+# real es la de pydantic, acá. Peor: con herramientas en castellano, la falla
+# medida más común es que el modelo escriba el valor en el idioma del usuario
+# —`que="ventas del día"` en vez de `que="ventas"`— aunque haya entendido todo
+# bien (arXiv:2601.05366, «parameter value language mismatch»).
+#
+# Sin esto, ese error se convertía en «esa herramienta falló, escalá a una
+# persona»: un dueño preguntando «¿cómo venimos?» terminaba esperando a un
+# humano por un guión bajo. Con esto vuelve la lista de valores válidos y el
+# modelo reintenta. No se enumera NINGUNA herramienta: sólo los valores del
+# parámetro de la que ya llamó, que ya estaban en su propio esquema.
+def _valores_esperados(exc: ValidationError) -> tuple[str, str] | None:
+    for error in exc.errors():
+        if error.get("type") != "literal_error":
+            continue
+        campo = ".".join(str(x) for x in error.get("loc", ())) or "ese parámetro"
+        esperado = str((error.get("ctx") or {}).get("expected", "")).strip()
+        if esperado:
+            return campo, esperado
+    return None
+
+
+def _error_de_herramienta(exc: Exception) -> str:
+    if isinstance(exc, ValidationError):
+        detalle = _valores_esperados(exc)
+        if detalle:
+            campo, esperado = detalle
+            return (
+                f"El valor de «{campo}» no es uno de los que acepta esa "
+                f"herramienta. Los únicos válidos son: {esperado}. Llamala de "
+                "nuevo con uno de ésos, copiado tal cual —sin traducirlo, sin "
+                "acentos y sin mayúsculas—. No le muestres este mensaje a nadie "
+                "ni le hables de parámetros."
+            )
+    return _ERROR_MSG
+
+
+
 # The system prompt is built per call (prompt=) and never stored in the
 # checkpoint; the model only sees a bounded tail of the thread
 # (pre_model_hook=). See app/conversacion.py for why.
 agente_clientes = create_react_agent(
     model=_modelo_clientes,
-    tools=ToolNodeSinInventario(TOOLS_CLIENTES, handle_tool_errors=_ERROR_MSG),
+    tools=ToolNodeSinInventario(TOOLS_CLIENTES, handle_tool_errors=_error_de_herramienta),
     prompt=prompt_clientes,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,
 )
 agente_gerencia = create_react_agent(
     model=_modelo_gerencia,
-    tools=ToolNodeSinInventario(TOOLS_GERENCIA, handle_tool_errors=_ERROR_MSG),
+    tools=ToolNodeSinInventario(
+        TOOLS_AGENTE_GERENCIA, handle_tool_errors=_error_de_herramienta
+    ),
     prompt=prompt_gerencia,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,
@@ -263,8 +422,9 @@ def responder_cliente(
     every model call and every tool start of THIS turn, and nothing else.
     """
     with erpnext.customer_scope():
-        out = agente_clientes.invoke(
-            {"messages": [("user", mensaje)]},
+        return pasos.correr(
+            agente_clientes,
+            mensaje,
             config=_config(
                 {
                     "thread_id": f"cli:{thread_id}",
@@ -276,8 +436,10 @@ def responder_cliente(
                 },
                 callbacks,
             ),
+            modelo=_modelo_clientes,
+            armar_prompt=prompt_clientes,
+            rol="clientes",
         )
-    return texto_plano(out["messages"][-1])
 
 
 def responder_gerencia(
@@ -297,8 +459,9 @@ def responder_gerencia(
     being compared as if it were a number.
     """
     with erpnext.manager_scope():
-        out = agente_gerencia.invoke(
-            {"messages": [("user", mensaje)]},
+        return pasos.correr(
+            agente_gerencia,
+            mensaje,
             config=_config(
                 {
                     "thread_id": f"ger:{thread_id}",
@@ -308,5 +471,7 @@ def responder_gerencia(
                 },
                 callbacks,
             ),
+            modelo=_modelo_gerencia,
+            armar_prompt=prompt_gerencia,
+            rol="gerencia",
         )
-    return texto_plano(out["messages"][-1])

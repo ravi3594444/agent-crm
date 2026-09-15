@@ -16,10 +16,11 @@ Capture first. Accurate stock promises come only AFTER capture works.
 
 LAS TRES ESCRIBEN, ASÍ QUE LAS TRES AUTORIZAN.
 Estas herramientas crean documentos en ERPNext —una factura que mueve stock,
-un ajuste de inventario, un remito— y `redactar_mensaje_cliente` devuelve el
-teléfono de un cliente. Dos de ellas no chequeaban nada: alcanzaba con que el
-router dejara pasar el mensaje. Ahora las tres llaman a ``require_management``
-antes de leer o escribir cualquier cosa (app/runtime_context.py).
+un ajuste de inventario, un remito— y `avisar_al_cliente` le manda un WhatsApp
+a un cliente con el visto bueno del dueño. Dos de ellas no chequeaban nada:
+alcanzaba con que el router dejara pasar el mensaje. Ahora las cuatro llaman a
+``require_management`` antes de leer o escribir cualquier cosa
+(app/runtime_context.py).
 """
 from typing import Annotated
 
@@ -27,8 +28,17 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app import erpnext, idioma, notificar, policy
-from app.runtime_context import SIN_PERMISO, RuntimeContextError, require_management
+from app import (
+    clientes,
+    erpnext,
+    idioma,
+    notificar,
+    outbound_status,
+    policy,
+    salidas,
+    telefono,
+)
+from app.runtime_context import RuntimeContextError, require_management
 
 
 def _hoy() -> str:
@@ -78,9 +88,11 @@ def registrar_venta_offline(
     try:
         require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
+        return idioma.t("permiso.sin_autorizacion", idioma.gerencia())
+
+    lengua = idioma.gerencia()
     if not lineas:
-        return "Necesito saber qué productos se vendieron."
+        return idioma.t("captura.venta_sin_lineas", lengua)
 
     # Explicit company and warehouse: with update_stock ERPNext rejects any
     # stock item without a warehouse, and a multi-company site must never
@@ -113,9 +125,12 @@ def registrar_venta_offline(
         "Venta offline cargada por Agente IA vía WhatsApp. Requiere confirmación.",
     )
     detalle = ", ".join(f"{linea.cantidad:g} x {linea.item_code}" for linea in lineas)
-    return (
-        f"Cargado como {doc['name']} en borrador ({detalle}) para {cliente}. "
-        f"Confirmalo en el sistema y se descuenta del stock."
+    return idioma.t(
+        "captura.venta_cargada",
+        lengua,
+        factura=doc["name"],
+        detalle=detalle,
+        cliente=cliente,
     )
 
 
@@ -149,7 +164,7 @@ def contar_stock(
     try:
         actor = require_management(config)
     except RuntimeContextError:
-        return "No pude autenticar quién cuenta; no cargué el conteo."
+        return idioma.t("captura.conteo_sin_autenticar", idioma.gerencia())
     company, default_warehouse = erpnext.default_context()
     dep = deposito or default_warehouse
     bins = erpnext.get_list(
@@ -161,9 +176,12 @@ def contar_stock(
     if abs(cantidad_real - sistema) < 0.000001:
         # ERPNext refuses a reconciliation with no change; say so instead of
         # surfacing a technical error.
-        return (
-            f"El sistema ya tiene {sistema:g} de {item_code} en {dep}; "
-            "no hace falta ningún ajuste."
+        return idioma.t(
+            "captura.conteo_sin_diferencia",
+            idioma.gerencia(),
+            sistema=f"{sistema:g}",
+            item_code=item_code,
+            dep=dep,
         )
 
     doc = erpnext.create_doc(
@@ -236,15 +254,18 @@ def confirmar_entrega(
     try:
         require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
+        return idioma.t("permiso.sin_autorizacion", idioma.gerencia())
+
+    lengua = idioma.gerencia()
     try:
         so = erpnext.get_doc("Sales Order", numero_pedido)
     except erpnext.ERPNextError:
-        return f"No encontré el pedido {numero_pedido}."
+        return idioma.t(
+            "captura.pedido_no_encontrado", lengua, numero_pedido=numero_pedido
+        )
     if so["docstatus"] != 1:
-        return (
-            f"El pedido {numero_pedido} todavía está en borrador. "
-            f"Hay que confirmarlo antes de marcarlo entregado."
+        return idioma.t(
+            "captura.pedido_en_borrador", lengua, numero_pedido=numero_pedido
         )
     company, warehouse = erpnext.default_context()
     doc = erpnext.create_doc(
@@ -267,42 +288,109 @@ def confirmar_entrega(
             "remarks": f"Entrega reportada por WhatsApp. {nota}".strip(),
         },
     )
-    return f"Remito {doc['name']} creado en borrador para {so['customer']}. Confirmalo y baja el stock."
+    return idioma.t(
+        "captura.remito_creado",
+        lengua,
+        remito=doc["name"],
+        cliente=so["customer"],
+    )
 
 
+# DE UN BORRADOR QUE HABÍA QUE COPIAR A MANO, A UN MENSAJE QUE SALE
+# ----------------------------------------------------------------
+# Esto era `redactar_mensaje_cliente`, y devolvía un borrador con un hueco
+# literal —«[Redactá el mensaje acá, en tono cordial y breve, y mostráselo al
+# usuario…]»— para que una persona lo copiara y lo mandara desde su propio
+# WhatsApp. O sea que la frase del dueño «yo le digo cualquier cosa al manager
+# y él lo hace» terminaba, para todo lo que sale hacia un cliente, en copiar y
+# pegar.
+#
+# Ahora el modelo escribe el mensaje FINAL y Python se lo muestra al dueño con
+# un botón. Nada sale hasta que lo toca, y lo que toca es el texto exacto.
+#
+# NO es una herramienta más: reemplaza a la que había. La superficie de
+# gerencia sigue en 13. Una herramienta que redacta y otra que manda serían dos
+# candidatas plausibles para «avisale a Don José», que es exactamente el
+# solapamiento que hoy se sacó de `informe` y de `ver_ajustes`.
 @tool
-def redactar_mensaje_cliente(
+def avisar_al_cliente(
     config: RunnableConfig,
     cliente: Annotated[
         str,
-        Field(description="A quién hay que escribirle, como lo nombró el dueño."),
+        Field(description="A quién hay que escribirle, como lo nombró el dueño, o su "
+                          "código de ERPNext."),
     ],
-    intencion: Annotated[
+    mensaje: Annotated[
         str,
-        Field(description="Qué le quiere decir, en una frase y con sus palabras. El texto "
-                          "lo redactás vos, pero lo manda una persona."),
+        Field(description="El mensaje COMPLETO y ya redactado, tal como querés que lo "
+                          "lea el cliente. No es la intención ni un resumen: es el "
+                          "texto que va a salir. Breve, cordial y de vos."),
     ],
 ) -> str:
-    """Redacta un mensaje de WhatsApp para enviarle a un cliente.
-    NO lo envía — devuelve el texto para que una persona lo revise y mande.
+    """Le manda un WhatsApp a un cliente, después de que el dueño lo apruebe.
 
-    Ejemplo: "avisale a Don José que ya llegó el queso cremoso".
+    Vos escribís el mensaje; el dueño lo ve tal cual y lo aprueba con un botón.
+    NO sale nada hasta que lo toque: nunca le digas al dueño que el cliente ya
+    fue avisado.
+
+    Ejemplos:
+    - «avisale a Don José que ya llegó el queso cremoso»
+    - «decile a la panadería que mañana paso más tarde»
     """
     try:
-        require_management(config)
+        actor = require_management(config)
     except RuntimeContextError:
-        return SIN_PERMISO
-    fichas = erpnext.get_list(
-        "Customer",
-        filters=[["customer_name", "like", f"%{cliente}%"]],
-        fields=["customer_name", "mobile_no"], limit=1,
+        return idioma.t("permiso.sin_autorizacion", idioma.gerencia())
+
+    lengua = idioma.gerencia()
+    # El código EXACTO primero y después el nombre, igual que en `ficha_cliente`:
+    # `name` es la clave del documento y no puede coincidir con dos.
+    # UN `like` QUE DEVUELVE VARIOS NO ELIGE. Esto tenía `limit=1` y se quedaba
+    # con el primero: con dos «San José» cargados, el dueño aprobaba un mensaje
+    # que decía un nombre y salía para el otro comercio. La regla es la misma
+    # que la de escribir una ficha y vive en un solo lugar.
+    ficha, candidatos = clientes.buscar_una(
+        cliente, ["name", "customer_name", "mobile_no"]
     )
-    if not fichas:
-        return f"No encontré a '{cliente}' en el sistema."
-    c = fichas[0]
-    return (
-        f"Borrador para {c['customer_name']} ({c.get('mobile_no', 'sin teléfono')}), "
-        f"sobre: {intencion}\n\n"
-        f"[Redactá el mensaje acá, en tono cordial y breve, y mostráselo al usuario "
-        f"para que lo apruebe antes de mandarlo.]"
-    )
+    if ficha is None:
+        if not candidatos:
+            return idioma.t("salida.no_encontre", lengua, quien=cliente)
+        cuales = ", ".join(
+            f"{c.get('customer_name') or c['name']} ({c['name']})" for c in candidatos
+        )
+        return idioma.t("salida.cliente_ambiguo", lengua, quien=cliente, cuales=cuales)
+    nombre = ficha.get("customer_name") or ficha["name"]
+    # NORMALIZADO, no crudo. La ventana de 24 h se indexa por el número
+    # canónico que mandó Meta en el webhook de entrada; un `mobile_no` cargado
+    # como «+54 9 351 123-4567» da otra clave, así que la ventana de una charla
+    # que SÍ está abierta se leía cerrada y el mensaje no salía nunca.
+    telefono_cliente = telefono.normalizar(ficha.get("mobile_no"))
+    if not telefono_cliente:
+        return idioma.t("salida.sin_telefono", lengua, cliente=nombre)
+
+    # LA VENTANA DE 24 h, ANTES DE MOLESTAR AL DUEÑO. Meta no deja escribirle
+    # primero a alguien que hace más de un día que no escribe, salvo con una
+    # plantilla aprobada, y para esto no hay ninguna. Sin este chequeo el dueño
+    # tocaría el botón, el mensaje se encolaría, se gastaría los ocho reintentos
+    # y moriría en la cola de descarte — y él se quedaría creyendo que avisó.
+    if not outbound_status.window_open(telefono_cliente):
+        return idioma.t("salida.fuera_de_ventana", lengua, cliente=nombre)
+
+    try:
+        salida = salidas.proponer(
+            cliente=nombre, telefono=telefono_cliente,
+            texto=mensaje, pedida_por=actor.actor_phone,
+        )
+    except salidas.SalidaError:
+        return idioma.t("salida.no_pude_pedir", lengua)
+
+    # Si el botón no sale, la salida guardada no sirve para nada: nadie la
+    # puede aprobar y vence sola. Se consume acá mismo para no dejar basura con
+    # el teléfono de un cliente adentro esperando una hora.
+    if not notificar.pedir_visto_bueno_de_envio(
+        actor.actor_phone, salida.id, nombre, telefono_cliente, salida.texto
+    ):
+        salidas.consumir(salida.id)
+        return idioma.t("salida.no_pude_pedir", lengua)
+
+    return idioma.t("salida.esperando_visto_bueno", lengua)

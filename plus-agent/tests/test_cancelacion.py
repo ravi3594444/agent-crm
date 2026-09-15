@@ -19,6 +19,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from fakes import LeaseDoble
+
 from app import aprobacion, confirmacion, decisiones, erpnext, outbound_status
 from tests.fakes import FakeMarcas, listar
 
@@ -102,7 +104,7 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
     @contextmanager
     def lock(nombre, **kwargs):
         estado["locks"].append(nombre)
-        yield
+        yield LeaseDoble()
 
     monkeypatch.setattr(decisiones, "distributed_lock", lock)
     monkeypatch.setattr(decisiones, "es_equipo", lambda phone: phone == STAFF)

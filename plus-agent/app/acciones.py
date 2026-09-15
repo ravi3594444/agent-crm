@@ -112,7 +112,26 @@ MARCA_DURABLE = marcas.texto("accion")
 
 
 class AccionError(RuntimeError):
-    """Lo que se pidió no se puede preparar o no se puede aplicar."""
+    """Lo que se pidió no se puede preparar o no se puede aplicar.
+
+    Lleva `clave` y `datos` por el mismo motivo que `LimiteError`, y con la
+    misma forma: el motivo se arma cuando se LEE y no cuando se levanta, así
+    que sale en el idioma del que lo lee. Sin eso, `app/tools/gestion.py`
+    envolvía este texto en una frase ya traducida y el dueño con el sistema en
+    inglés recibía media frase en cada idioma.
+
+    `datos` admite un `lambda lengua: ...` para la parte que también hay que
+    traducir —una lista de nombres de términos, por ejemplo—; ver
+    `idioma.motivo_de`. El texto en castellano se sigue pasando y sigue siendo
+    `str(exc)`: es lo que va al log.
+    """
+
+    def __init__(
+        self, mensaje: object = "", clave: str = "", datos: dict | None = None
+    ) -> None:
+        super().__init__(mensaje)
+        self.clave = clave
+        self.datos = datos or {}
 
 
 # --------------------------------------------------------------- lista blanca
@@ -229,13 +248,17 @@ def resolver(nombre_o_alias: object) -> Accion:
     if not palabra:
         raise AccionError(
             "no me dijiste qué hacer; las acciones que puedo preparar son: "
-            + ", ".join(sorted(TODAS))
+            + ", ".join(sorted(TODAS)),
+            clave="accion.sin_verbo",
+            datos={"acciones": ", ".join(sorted(TODAS))},
         )
     accion = POR_PALABRA.get(palabra)
     if accion is None:
         raise AccionError(
             f"«{palabra}» no es una acción que exista. Las que puedo preparar "
-            "son: " + ", ".join(sorted(TODAS))
+            "son: " + ", ".join(sorted(TODAS)),
+            clave="accion.verbo_desconocido",
+            datos={"palabra": palabra, "acciones": ", ".join(sorted(TODAS))},
         )
     return accion
 
@@ -244,11 +267,14 @@ def pedido_valido(crudo: object) -> str:
     """El número de pedido en mayúsculas, o AccionError."""
     texto = " ".join(str(crudo or "").split())
     if not texto:
-        raise AccionError("falta el número de pedido")
+        raise AccionError("falta el número de pedido",
+                          clave="accion.falta_pedido")
     if not PEDIDO_RE.match(texto):
         raise AccionError(
             f"«{texto[:40]}» no tiene forma de número de pedido "
-            "(SAL-ORD-2026-00008). No adivino cuál es"
+            "(SAL-ORD-2026-00008). No adivino cuál es",
+            clave="accion.pedido_mal_formado",
+            datos={"texto": texto[:40]},
         )
     return texto.upper()
 
@@ -360,16 +386,39 @@ def _parametros(accion: Accion, detalle: object, pedido: str) -> dict:
 
     if accion.parametro == MOTIVO:
         if len(limpio) < 3:
+            from app import idioma
+
+            # `que` es PROSA («el motivo», «por qué»), no un dato: interpolarlo
+            # tal cual metía castellano adentro del mensaje en inglés. Va como
+            # llamable, igual que las otras dos partes de este archivo.
+            clave_que = ("accion.falta_el_motivo" if accion.nombre == "cancelar"
+                         else "accion.falta_por_que")
             que = "el motivo" if accion.nombre == "cancelar" else "por qué"
             raise AccionError(
                 f"falta {que}. «{accion.nombre}» se lo dice al cliente, así que "
-                "no lo invento: preguntale y volvé a pedírmelo"
+                "no lo invento: preguntale y volvé a pedírmelo",
+                clave="accion.falta_dato",
+                datos={
+                    "que": lambda lengua: idioma.t(clave_que, lengua),
+                    "accion": accion.nombre,
+                },
             )
         return {"motivo": limpio[:400]}
 
     con_cargo = accion.parametro == TERMINOS
     terminos = solicitudes.parsear_terminos(limpio, con_cargo=con_cargo)
     if terminos is None:
+        # Local, como en las otras dos funciones de este archivo que lo usan.
+        from app import idioma
+
+        ejemplo = solicitudes.como_pedir_los_terminos(
+            pedido, {} if con_cargo else {"metodo": "retiro"}
+        )
+        # Las DOS partes que cambian con `con_cargo` son frases, no datos, así
+        # que van como `lambda lengua:` y se arman recién cuando se lee. Ver
+        # `idioma.motivo_de`.
+        clave_necesito = ("accion.necesito_con_cargo" if con_cargo
+                          else "accion.necesito_sin_cargo")
         raise AccionError(
             "no entendí los términos, y no los invento: son una fecha y un "
             "precio que después hay que cumplir. Necesito "
@@ -378,7 +427,16 @@ def _parametros(accion: Accion, detalle: object, pedido: str) -> dict:
             + ". El día va como «mañana», «jueves», «4/9» o «2026-09-07»; la "
             "hora como 18:00"
             + (" y el cargo como un número (0 es sin cargo)" if con_cargo else "")
-            + f". Ejemplo: {solicitudes.como_pedir_los_terminos(pedido, {} if con_cargo else {'metodo': 'retiro'})}"
+            + f". Ejemplo: {ejemplo}",
+            clave="accion.terminos_no_entendidos",
+            datos={
+                "necesito": lambda lengua: idioma.t(clave_necesito, lengua),
+                "extra": (
+                    (lambda lengua: idioma.t("accion.cargo_como_numero", lengua))
+                    if con_cargo else ""
+                ),
+                "ejemplo": ejemplo,
+            },
         )
     return {"crudo": limpio[:200], **terminos}
 
@@ -407,7 +465,9 @@ def _consecuencia(accion: Accion, pedido: str, parametros: dict) -> str:
         so = erpnext.get_doc("Sales Order", pedido)
     except erpnext.ERPNextError as exc:
         raise AccionError(
-            f"no pude leer {pedido} en ERPNext, así que no preparé nada"
+            f"no pude leer {pedido} en ERPNext, así que no preparé nada",
+            clave="accion.no_pude_leer_pedido",
+            datos={"pedido": pedido},
         ) from exc
 
     cliente = str(so.get("customer_name") or so.get("customer") or "").strip()
@@ -428,13 +488,23 @@ def _consecuencia(accion: Accion, pedido: str, parametros: dict) -> str:
 
             raise AccionError(
                 f"{pedido} tiene una solicitud abierta y aprobarla es aprobar lo "
-                # En español, como el resto de este mensaje: ver la nota en
-                # app/decisiones.py.
+                # El castellano de `str(exc)` sigue siendo el de siempre: es lo
+                # que va al log. Ver la nota en app/decisiones.py.
                 f"que pidió el cliente, y de eso falta "
                 f"{solicitudes.enumerar(solicitudes.nombres_de_terminos(faltan, idioma.ES), idioma.ES)}. "
                 "No cambié nada. Decime los términos completos y preparo una "
                 "contraoferta (qué día, a qué hora y cuánto se cobra) o un retiro "
-                "(qué día y a qué hora)"
+                "(qué día y a qué hora)",
+                clave="accion.solicitud_abierta_faltan_terminos",
+                datos={
+                    "pedido": pedido,
+                    # La lista de lo que falta ES prosa —«el día y la hora»— y
+                    # quien levanta esto no sabe quién lo va a leer, así que se
+                    # arma con la lengua del lector y no con `idioma.ES`.
+                    "faltan": lambda lengua: solicitudes.enumerar(
+                        solicitudes.nombres_de_terminos(faltan, lengua), lengua
+                    ),
+                },
             )
         return (
             f"{encabezado}\nApruebo la excepción que pidió el cliente: "
@@ -452,7 +522,9 @@ def _consecuencia(accion: Accion, pedido: str, parametros: dict) -> str:
     if accion.nombre in ("contraoferta", "retiro") and solicitud is None:
         raise AccionError(
             f"{pedido} no tiene ninguna solicitud abierta, así que no hay nada "
-            "que ofrecerle al cliente. No preparé nada"
+            "que ofrecerle al cliente. No preparé nada",
+            clave="accion.sin_solicitud_abierta",
+            datos={"pedido": pedido},
         )
 
     if accion.nombre == "confirmar":
@@ -519,12 +591,15 @@ def ejecutar_lectura(nombre_o_alias: object, pedido_crudo: object, telefono: str
     from app import aprobacion
 
     if not telefono:
-        raise AccionError("no sé quién pregunta")
+        raise AccionError("no sé quién pregunta",
+                          clave="accion.sin_quien_pregunta")
     accion = resolver(nombre_o_alias)
     if accion.escritura:
         raise AccionError(
             f"«{accion.nombre}» cambia algo, así que no se hace de una: "
-            "hay que prepararla y confirmarla con el código"
+            "hay que prepararla y confirmarla con el código",
+            clave="accion.cambia_algo",
+            datos={"accion": accion.nombre},
         )
     pedido = pedido_valido(pedido_crudo)
     return str(aprobacion.manejar_boton(payload(accion, pedido, {}), telefono))
@@ -628,12 +703,15 @@ def proponer(
     ejecutarla y una sola de acordarse.
     """
     if not telefono:
-        raise AccionError("no sé quién pide la acción")
+        raise AccionError("no sé quién pide la acción",
+                          clave="accion.sin_quien_pide")
     accion = resolver(nombre_o_alias)
     if not accion.escritura:
         raise AccionError(
             f"«{accion.nombre}» es de sólo lectura: se hace en el momento, no "
-            "se propone"
+            "se propone",
+            clave="accion.solo_lectura",
+            datos={"accion": accion.nombre},
         )
     pedido = pedido_valido(pedido_crudo)
     parametros = _parametros(accion, detalle, pedido)
@@ -669,7 +747,8 @@ def proponer(
             _olvidar(telefono, anterior.get("codigo"))
         _indexar(telefono, pedido, propuesta["codigo"], propuesta["expira"])
     except (locks.CoordinationError, RedisError) as exc:
-        raise AccionError("no pude registrar la acción para confirmarla") from exc
+        raise AccionError("no pude registrar la acción para confirmarla",
+                          clave="accion.no_registre") from exc
     return {
         **{k: v for k, v in propuesta.items() if k != "codigo"},
         "repetida": False,
@@ -697,7 +776,8 @@ def _reservar(telefono: str, propuesta: dict) -> None:
         ):
             return
     propuesta["codigo"] = ""
-    raise AccionError("no pude registrar la acción para confirmarla")
+    raise AccionError("no pude registrar la acción para confirmarla",
+                          clave="accion.no_registre")
 
 
 def codigo_de(telefono: str, pedido: str) -> str:
@@ -809,19 +889,29 @@ def _codigo_que_no_abre_nada(telefono: str) -> AccionError:
     entonces, y recién la racha se lleva todo: no hay intentos infinitos, y el
     primer error no le cuesta a los otros pedidos.
     """
+    # ESTAS TRES SE DEVUELVEN, no se levantan, y por eso el barrido que le puso
+    # `clave` a los 28 `raise AccionError(` no las tocó. Salen por el mismo
+    # `idioma.motivo_de` del router de `main.py`, así que sin clave el dueño en
+    # inglés recibía la frase de alrededor traducida y esto en castellano.
     if not hay_pendientes(telefono):
-        return AccionError("no hay ninguna acción esperando confirmación")
+        return AccionError(
+            "no hay ninguna acción esperando confirmación",
+            clave="accion.codigo_sin_nada_esperando",
+        )
     if _fallo(telefono) >= INTENTOS_MAXIMOS:
         cuantas = descartar_todo(telefono)
         return AccionError(
             f"ese código no confirma nada, y van {INTENTOS_MAXIMOS} seguidos: "
             f"descarté lo que quedaba esperando ({cuantas}). No cambié nada — "
-            "pedime de nuevo lo que querías"
+            "pedime de nuevo lo que querías",
+            clave="accion.codigo_racha_agotada",
+            datos={"intentos": INTENTOS_MAXIMOS, "cuantas": cuantas},
         )
     return AccionError(
         "ese código no confirma ninguna acción tuya. No cambié nada, y lo que "
         "tenías esperando sigue esperando: fijate el mensaje del código y "
-        "contestá esos seis dígitos"
+        "contestá esos seis dígitos",
+        clave="accion.codigo_no_es_tuyo",
     )
 
 
@@ -838,52 +928,62 @@ def aplicar(codigo: object, telefono: str) -> dict:
     from app import aprobacion
 
     if not telefono:
-        raise AccionError("no sé quién confirma la acción")
+        raise AccionError("no sé quién confirma la acción",
+                          clave="accion.sin_quien_confirma")
     # El número puede haber salido de TELEFONOS_EQUIPO entre que propuso y
     # confirmó. Se pregunta de nuevo, acá, con la lista de este momento.
     if not es_equipo(telefono):
-        raise AccionError("ese número ya no está autorizado para esto")
+        raise AccionError("ese número ya no está autorizado para esto",
+                          clave="accion.numero_no_autorizado")
 
     limpio = str(codigo or "").strip()
     if not _CODIGO_RE.match(limpio):
-        raise AccionError("eso no tiene forma de código de confirmación")
+        raise AccionError("eso no tiene forma de código de confirmación",
+                          clave="accion.codigo_mal_formado")
     # El código ES la clave, así que buscar sólo puede encontrar SU propuesta.
     # Antes se leía «la propuesta del teléfono» y después se comparaba el
     # código: con dos pedidos preparados eso leía la que no era.
     try:
         crudo = locks.conexion().getdel(_clave(telefono, limpio))
     except (locks.CoordinationError, RedisError) as exc:
-        raise AccionError("no pude leer la acción pendiente") from exc
+        raise AccionError("no pude leer la acción pendiente",
+                          clave="accion.no_pude_leer_pendiente") from exc
     if not crudo:
         raise _codigo_que_no_abre_nada(telefono)
     propuesta = _descifrar(crudo)
     if propuesta is None:
-        raise AccionError("la acción pendiente quedó ilegible")
+        raise AccionError("la acción pendiente quedó ilegible",
+                          clave="accion.pendiente_ilegible")
     # Los rastros salen con ella, y sólo los suyos: el índice de SU pedido y su
     # lugar entre las vivas. Lo que espera sobre otro pedido no se toca.
     _olvidar(telefono, limpio, pedido=propuesta.get("pedido"))
     _limpiar_fallos(telefono)
     if str(propuesta.get("codigo")) != limpio:
-        raise AccionError("la acción pendiente quedó ilegible")
+        raise AccionError("la acción pendiente quedó ilegible",
+                          clave="accion.pendiente_ilegible")
     # El vencimiento va adentro de la propuesta y no sólo en el TTL: un TTL que
     # no corrió (un Redis restaurado desde un backup, un reloj movido) no puede
     # revivir un código de ayer.
     if _vencida(propuesta):
         raise AccionError(
-            "ese código ya venció. No cambié nada: pedime la acción de nuevo"
+            "ese código ya venció. No cambié nada: pedime la acción de nuevo",
+            clave="accion.codigo_vencido",
         )
     # Atado al teléfono: el código que le llegó a uno no lo puede usar otro,
     # aunque los dos estén en la lista del equipo.
     if telefono_mod.normalizar(propuesta.get("telefono")) != telefono_mod.normalizar(telefono):
-        raise AccionError("ese código no es de este número")
+        raise AccionError("ese código no es de este número",
+                          clave="accion.codigo_de_otro_numero")
 
     accion = resolver(propuesta.get("accion"))
     if not accion.escritura:
-        raise AccionError("la acción pendiente no es de las que se confirman")
+        raise AccionError("la acción pendiente no es de las que se confirman",
+                          clave="accion.pendiente_no_confirmable")
     pedido = pedido_valido(propuesta.get("pedido"))
     guardados = propuesta.get("parametros")
     if not isinstance(guardados, dict):
-        raise AccionError("los parámetros de la acción pendiente quedaron ilegibles")
+        raise AccionError("los parámetros de la acción pendiente quedaron ilegibles",
+                          clave="accion.parametros_ilegibles")
     # Se revalidan con los MISMOS validadores de la propuesta, sobre lo que el
     # dueño dictó, no sobre lo ya interpretado: si algo de eso dejó de ser
     # válido, no se ejecuta.
@@ -914,7 +1014,9 @@ def aplicar(codigo: object, telefono: str) -> dict:
             detalle = str(aprobacion.manejar_boton(payload(accion, pedido, parametros), telefono))
     except locks.CoordinationError as exc:
         raise AccionError(
-            f"no pude coordinar la acción sobre {pedido}; pedímela de nuevo en un momento"
+            f"no pude coordinar la acción sobre {pedido}; pedímela de nuevo en un momento",
+            clave="accion.no_pude_coordinar",
+            datos={"pedido": pedido},
         ) from exc
 
     _auditar(entrada)
@@ -949,7 +1051,8 @@ def _auditar_en_erpnext(entrada: dict) -> None:
         erpnext.registrar_comentario("Sales Order", entrada["pedido"], texto)
     except erpnext.ERPNextError as exc:
         raise AccionError(
-            "no pude registrar la autorización en ERPNext, así que no la ejecuté"
+            "no pude registrar la autorización en ERPNext, así que no la ejecuté",
+            clave="accion.no_registre_autorizacion",
         ) from exc
 
 
@@ -968,7 +1071,8 @@ def auditoria(maximo: int = 10) -> list[dict]:
     try:
         crudos = locks.conexion().lrange(CLAVE_AUDITORIA, -max(1, maximo), -1)
     except (locks.CoordinationError, RedisError) as exc:
-        raise AccionError("no pude leer el historial de acciones") from exc
+        raise AccionError("no pude leer el historial de acciones",
+                          clave="accion.no_pude_leer_historial") from exc
     entradas = []
     for crudo in reversed(list(crudos or [])):
         try:

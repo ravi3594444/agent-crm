@@ -110,12 +110,9 @@ def motivo(exc: Exception, lengua: str | None = None) -> str:
     Sin clave cae al texto en español, que es exactamente lo que hacía antes:
     una excepción de otro módulo o una vieja sigue saliendo, nunca vacía.
     """
-    clave = str(getattr(exc, "clave", "") or "")
-    if not clave:
-        return str(exc)
     from app import idioma as idioma_mod
 
-    return idioma_mod.t(clave, lengua, **getattr(exc, "datos", {}))
+    return idioma_mod.motivo_de(exc, lengua)
 
 
 # What KIND of value a setting holds. Each kind has exactly one validator and
@@ -423,6 +420,35 @@ LIMITES: dict[str, Definicion] = {
         unidad="sí/no",
         default="false",
         tipo=BOOLEANO,
+    ),
+    # LA BANDA DE PRECIO. Es lo que vuelve AUTOMÁTICO el cambio de precio: se
+    # pone UNA vez y después el agente mueve precios solo, sin código y sin que
+    # nadie confirme cada vez. En 0 —el default— no se mueve ninguno.
+    #
+    # Por qué hay banda y no es burocracia: un precio gobierna EN SILENCIO lo
+    # que se auto-confirma. Con AUTO_CONFIRM_MAX en 0 un precio equivocado no
+    # puede emitir nada; el día que el dueño lo levanta las dos cosas se
+    # multiplican y un cero de más se convierte en pedidos emitidos a un precio
+    # que nadie miró. La banda acota ESO — no le pide permiso a nadie.
+    #
+    # Es un PORCENTAJE contra el precio que ya está, así que un producto sin
+    # precio previo no tiene contra qué medirse: ese caso se rechaza y lo
+    # siembra `deploy/`. El máximo de 100 no es preferencia: arriba de duplicar,
+    # «cambiar un precio» dejó de ser la palabra para lo que está pasando.
+    "PRECIO_CAMBIO_MAX_PCT": Definicion(
+        nombre="PRECIO_CAMBIO_MAX_PCT",
+        alias=(
+            "banda de precio", "cambio de precio", "variacion de precio",
+            "variación de precio", "cuanto puede mover un precio",
+            "cuánto puede mover un precio",
+        ),
+        significado=(
+            "Cuánto puede moverse un precio de una sola vez, en por ciento, sin "
+            "que lo mire nadie. En 0 el agente no cambia ningún precio"
+        ),
+        unidad="%",
+        default="0",
+        maximo=100.0,
     ),
 }
 
@@ -853,21 +879,50 @@ def idioma_gerencia() -> str:
     """
     from app import idioma as idioma_mod
 
-    try:
-        crudo = locks.conexion().hgetall(CLAVE_VALORES)
-    except (locks.CoordinationError, RedisError) as exc:
-        print(f"[limites] no pude leer el idioma de gerencia ({type(exc).__name__})")
+    fijado = idioma_gerencia_guardado()
+    if fijado is None:
+        # No se pudo LEER, que no es lo mismo que «no fijó nada»: se va al
+        # default sin mirar el entorno, exactamente como antes de separar esto
+        # en dos funciones. Un refactor que corrige de paso una ruta de fallo
+        # que nadie pidió es un cambio de comportamiento escondido en un
+        # cambio de forma.
         return idioma_mod.por_defecto()
-    valores = {_texto(k): _texto(v) for k, v in (crudo or {}).items()}
-    fijado = valores.get("IDIOMA_GERENCIA", "").strip()
     if fijado:
-        elegido = idioma_mod.normalizar(fijado)
-        if elegido:
-            return elegido
+        return fijado
     del_entorno = idioma_mod.normalizar(os.getenv("IDIOMA_GERENCIA", ""))
     if del_entorno:
         return del_entorno
     return idioma_mod.por_defecto()
+
+
+def idioma_gerencia_guardado() -> str | None:
+    """SÓLO lo que el dueño dejó fijado por WhatsApp.
+
+    TRES respuestas, y hay que distinguir las tres:
+      - ``None`` -> no se pudo leer el almacén. No es «no fijó nada».
+      - ``""``   -> se leyó bien y no hay nada fijado.
+      - un idioma -> lo que el dueño eligió a mano, con su código.
+
+    Existe separado de `idioma_gerencia()` porque hay un llamador que necesita
+    las dos mitades por separado y no la resolución ya hecha: `readiness`, que
+    valida un `.env` CANDIDATO. Preguntando por la resolución completa recibía
+    el `os.environ` del proceso que está corriendo el chequeo —o sea el `.env`
+    VIEJO— y podía informar «el dueño recibe castellano» sobre un archivo que
+    dice `IDIOMA_GERENCIA=en`. Un preflight que contesta sobre otro archivo es
+    peor que no tenerlo.
+
+    Lo guardado le sigue GANANDO al entorno en los dos llamadores: es lo que el
+    dueño eligió a mano, con su código de cuatro dígitos.
+    """
+    from app import idioma as idioma_mod
+
+    try:
+        crudo = locks.conexion().hgetall(CLAVE_VALORES)
+    except (locks.CoordinationError, RedisError) as exc:
+        print(f"[limites] no pude leer el idioma de gerencia ({type(exc).__name__})")
+        return None
+    valores = {_texto(k): _texto(v) for k, v in (crudo or {}).items()}
+    return idioma_mod.normalizar(valores.get("IDIOMA_GERENCIA", "").strip()) or ""
 
 
 def _almacen() -> dict[str, str]:
@@ -1424,8 +1479,16 @@ def cuenta_cargo() -> str:
     return os.getenv(CUENTA_CARGO, "").strip()
 
 
-def resumen() -> list[dict]:
+def resumen(lengua: str | None = None) -> list[dict]:
     """Cada límite con su valor vigente y de dónde salió, para el dueño.
+
+    ``lengua`` decide en qué idioma sale `problema`. Sin ella el texto es el de
+    siempre (`str(exc)`, castellano), que es lo que mira el panel y lo que va
+    al log. LO QUE ARREGLA: `LimiteError` ya viajaba con `clave` y `datos`
+    justamente para esto, y acá se tiraban con un `str(exc)`; el resultado era
+    que `ver_ajustes` armaba una frase en inglés y le metía adentro el motivo
+    en castellano — media frase en cada idioma, que es el mismo defecto que
+    `motivo()` existe para no repetir.
 
     The delivery rows after a wipe read as LOST — valor "", origen PERDIDO and
     the problem spelled out — because that is the state entrega() decides in,
@@ -1446,7 +1509,7 @@ def resumen() -> list[dict]:
                 problema = ""
             except LimiteError as exc:
                 valor = crudo
-                problema = str(exc)
+                problema = motivo(exc, lengua)
         filas.append(
             {
                 "nombre": nombre,

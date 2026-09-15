@@ -248,6 +248,29 @@ def chequear_modelos(env: Mapping[str, str], reporte: Reporte) -> None:
         prov.nombre,
         "la conexión real se prueba a mano con `make verificar-modelos` (no en CI)",
     )
+    # EL TECHO DE PASOS, que es lo que acota la cuenta del modelo. Se lee desde
+    # `env` y no desde `pasos.PASOS_*` a propósito: readiness tiene que poder
+    # mirar un `.env` que todavía no es el del proceso — es el chequeo que se
+    # corre ANTES de recrear el contenedor. Un valor inválido no se reporta acá
+    # como aviso: `app/pasos.py` revienta al importar, o sea que el proceso no
+    # arranca, que es más fuerte que una línea en un informe.
+    for clave, por_defecto, quien in (
+        ("PASOS_MAX_CLIENTES", "8", "ventas"),
+        ("PASOS_MAX_GERENCIA", "14", "gerencia"),
+    ):
+        crudo = _valor(env, clave) or por_defecto
+        try:
+            techo = int(crudo)
+            if techo <= 0:
+                raise ValueError
+        except ValueError:
+            reporte.error(clave, f"{crudo!r} no es un entero > 0: el agente no arranca")
+            continue
+        reporte.ok(
+            clave,
+            f"hasta {techo} llamadas al modelo por mensaje de {quien}"
+            + ("" if _valor(env, clave) else " (default)"),
+        )
 
 
 # ------------------------------------------------------------- equipo/zonas
@@ -304,6 +327,99 @@ def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
 
 
 # ------------------------------------------------------------------- Panel
+
+
+def chequear_idioma(env: Mapping[str, str], reporte: Reporte) -> None:
+    """En qué idioma va a hablar cada agente, dicho en voz alta.
+
+    El interruptor existe, anda y está probado en CI —hay una celda entera con
+    `IDIOMA_DEFAULT=en`—, pero no se veía por ningún lado: `.env.example` lo
+    nombraba de refilón adentro del comentario de LOCALE y el preflight no lo
+    mencionaba. O sea que el que instalaba para un dueño que lee en inglés no
+    tenía cómo enterarse de que existía, y lo único que veía era un agente
+    contestando en castellano.
+
+    Esto no valida nada que pueda fallar: informa una decisión. Por eso es `ok`
+    y nunca `error`, salvo un valor escrito mal, que sí es un error porque el
+    sistema lo ignora en silencio y se va al default.
+    """
+    from app import idioma
+
+    crudo = _valor(env, "IDIOMA_DEFAULT")
+    if crudo and crudo.strip().lower() not in idioma.IDIOMAS:
+        reporte.error(
+            "IDIOMA_DEFAULT",
+            f"«{crudo}» no es un idioma conocido ({', '.join(sorted(idioma.IDIOMAS))}): "
+            "se ignora y todo sale en el idioma por defecto",
+        )
+        return
+    por_defecto = crudo.strip().lower() if crudo else idioma.ES
+
+    # CON LA MISMA REGLA QUE EL RUNTIME, no con una más estricta. Acá se
+    # comparaba el valor crudo contra `IDIOMA_GERENCIA`, pero
+    # `limites.idioma_gerencia()` lo pasa por `idioma.normalizar`, que acepta
+    # cómo lo escribe una persona: «english», «inglés», «eng». O sea que un
+    # `.env` que FUNCIONA —el sistema lo entiende y contesta en inglés— no
+    # pasaba el preflight, y el preflight existe para decir qué va a hacer el
+    # sistema, no para inventar un contrato más angosto.
+    #
+    # `IDIOMA_DEFAULT` se queda estricto arriba a propósito: `idioma.por_defecto`
+    # sí compara contra los códigos, así que ahí el estricto ES el runtime.
+    crudo_gerencia = _valor(env, "IDIOMA_GERENCIA").strip()
+    fijado = idioma.normalizar(crudo_gerencia) or ""
+    if crudo_gerencia and not fijado:
+        reporte.error(
+            "IDIOMA_GERENCIA",
+            f"«{crudo_gerencia}» no es un idioma conocido: se ignora",
+        )
+        return
+
+    # El del dueño puede estar guardado —él lo cambia por WhatsApp— y eso le
+    # GANA al `.env`. Se informa lo que el sistema va a hacer de verdad, no lo
+    # que dice el archivo, que es la diferencia entre un preflight y un `cat`.
+    #
+    # SE PREGUNTA POR LO GUARDADO Y NO POR LA RESOLUCIÓN YA HECHA. `idioma.
+    # gerencia()` cae a `os.environ` cuando no hay nada guardado, o sea al `.env`
+    # del proceso que está corriendo ESTE chequeo — que es justamente el viejo,
+    # el que se quiere reemplazar. Con `IDIOMA_GERENCIA=en` en el archivo
+    # candidato y `es` exportado, el preflight decía «el dueño recibe ES» sobre
+    # un archivo que dice lo contrario. Y `guardado` se deducía comparando dos
+    # valores que venían de fuentes distintas, así que también mentía.
+    from app import limites
+
+    try:
+        del_almacen = limites.idioma_gerencia_guardado()
+    except Exception as exc:
+        # `idioma_gerencia_guardado` YA convierte a `None` lo que se espera que
+        # falle (Redis caído, coordinación). Lo que llegue acá es lo que no se
+        # esperaba, y tragarlo como `None` hacía que el reporte siguiera y
+        # terminara en `ok`: un preflight en verde sobre un error de programa.
+        # No se propaga —`ejecutar()` llama a esto sin handler— pero se anota.
+        reporte.error(
+            "IDIOMA_GERENCIA",
+            f"no pude leer el idioma guardado ({type(exc).__name__})",
+        )
+        return
+    # LAS TRES RESPUESTAS, Y LAS TRES SEPARADAS. Acá decía `if del_almacen:`, que
+    # mete el `None` en la misma rama que el `""` — o sea que inventé el contrato
+    # de tres estados y lo colapsé una línea después. Con Redis caído
+    # `limites.idioma_gerencia()` se va al DEFAULT sin mirar el entorno, así que
+    # informar `fijado or por_defecto` hace que el preflight y el runtime
+    # contesten distinto justo cuando algo ya está roto, que es cuando más se
+    # mira el preflight.
+    if del_almacen is None:
+        del_dueno, guardado = por_defecto, False
+    elif del_almacen:
+        del_dueno, guardado = del_almacen, True
+    else:
+        del_dueno, guardado = fijado or por_defecto, False
+
+    reporte.ok(
+        "IDIOMA_DEFAULT",
+        f"el dueño recibe {del_dueno.upper()}"
+        + (" (lo cambió él desde su teléfono)" if guardado else "")
+        + f"; a un cliente se le espeja el idioma y, si no se sabe, {por_defecto.upper()}",
+    )
 
 
 def chequear_panel(env: Mapping[str, str], reporte: Reporte) -> None:
@@ -1018,11 +1134,19 @@ def chequear_entrega(
         reporte.aviso("Entrega", "sin Redis: no se verificaron las reglas de entrega")
         return
     try:
+        todas = list(resumen_limites())
         filas = {
             str(f.get("nombre")): f
-            for f in resumen_limites()
+            for f in todas
             if str(f.get("nombre")) in limites.ENTREGA
         }
+        # El tope NO es una regla de entrega, y por eso no está en `filas`. Se
+        # lee aparte porque la excepción pre-autorizada EMITE el pedido sola, y
+        # eso depende del tope: los dos tienen que estar de acuerdo o el cliente
+        # recibe una oferta que después no se puede cumplir.
+        tope = next(
+            (f for f in todas if str(f.get("nombre")) == "AUTO_CONFIRM_MAX"), None
+        )
     except Exception as exc:
         reporte.error(
             "Entrega",
@@ -1153,6 +1277,30 @@ def chequear_entrega(
                 "en sí pero falta " + ", ".join(faltan) + ": nada queda "
                 "pre-autorizado y cada caso lo decide una persona",
             )
+        elif tope is not None and not tope.get("problema") and _es_cero(
+            tope.get("valor")
+        ):
+            # LOS DOS INTERRUPTORES TIENEN QUE ESTAR DE ACUERDO, y este es el
+            # único lugar donde se puede ver que no lo están.
+            #
+            # Una excepción pre-autorizada termina EMITIENDO el pedido sola: el
+            # cliente pide un día de fuera, la regla del dueño lo autoriza, la
+            # oferta sale sin que nadie la mire, el cliente contesta «acepto» y
+            # `solicitudes` emite. Con el tope en 0 —que es el dueño diciendo
+            # «ningún pedido se emite sin mí»— esa emisión se rechaza al final
+            # del camino, y para entonces al cliente ya se le prometieron
+            # condiciones y ya contestó que sí. Lo que ve es que le ofrecen algo
+            # y después le dicen que espere a una persona.
+            #
+            # No es un error: las dos configuraciones son válidas por separado
+            # y ninguna está rota. Es que juntas no hacen lo que parecen.
+            reporte.aviso(
+                "ENTREGA_EXCEPCION_ACTIVA",
+                "en sí, pero el tope de auto-confirmación está en 0: la oferta "
+                "sale sola y después NO se puede emitir, así que al cliente se "
+                "le ofrece algo que termina esperando a una persona. Poné un "
+                "tope, o dejá la excepción en no",
+            )
         else:
             reporte.ok("ENTREGA_EXCEPCION_ACTIVA", "sí, con días, hora y cargo configurados")
 
@@ -1258,6 +1406,145 @@ def chequear_solicitudes(reporte: Reporte) -> None:
         reporte.ok("Borradores trabados", "ninguno")
 
 
+def chequear_memoria_de_clientes(env: Mapping[str, str], reporte: Reporte) -> None:
+    """Si el agente de clientes puede usar lo que el dueño ya contestó.
+
+    NO BLOQUEA: las dos posturas son válidas y el default es la que pidió el
+    dueño. Sale igual por el mismo motivo que la línea de la credencial de MCP:
+    es una decisión sobre QUÉ SE LE CUENTA A UN DESCONOCIDO, y el momento de
+    verla es antes de salir en vivo, no después de que un cliente repita algo
+    que no tenía que escuchar.
+
+    El interruptor se consulta donde vive, pasándole el mapa candidato, y no se
+    vuelve a escribir acá: dos lecturas de la misma variable son dos cosas que
+    tienen que coincidir y nada que las obligue —y la que se equivocaría es
+    ésta, que es la que le dice al dueño qué va a pasar—. La cuenta sale de
+    `memoria.HUECOS`, así que un hueco nuevo mal marcado mueve el número.
+    """
+    try:
+        from app import conversacion, memoria
+    except Exception as exc:  # pragma: no cover - problemas de import
+        reporte.aviso(
+            "Memoria para clientes", f"módulo no disponible ({type(exc).__name__})"
+        )
+        return
+    if not conversacion.memoria_de_clientes_encendida(env):
+        reporte.ok(
+            "Memoria para clientes",
+            "apagada: el agente de clientes no usa ninguna nota del dueño",
+        )
+        return
+    cruzan = sorted(memoria.CLAVES_PARA_CLIENTES)
+    reporte.ok(
+        "Memoria para clientes",
+        f"encendida: cruzan {len(cruzan)} de {len(memoria.HUECOS)} respuestas "
+        f"del dueño ({', '.join(cruzan)}). Lo que no está en esa lista —las "
+        "notas privadas y cualquier clave que él invente— no sale",
+    )
+
+
+def chequear_mcp_externos(env: Mapping[str, str], reporte: Reporte) -> None:
+    """Los servidores MCP de terceros: qué se conectó y QUIÉN decide qué pueden.
+
+    NO BLOQUEA, y el criterio es el del módulo: bloquear es para cuando el
+    sistema haría algo MAL. Esto es opcional —`MCP_EXTERNOS` vacío es el
+    default y deja al agente con sus herramientas— y el dueño pidió
+    explícitamente que gerencia pueda hacer de todo. Lo que sí hace falta es
+    que la postura se VEA antes de salir en vivo, porque es la única parte del
+    sistema donde el alcance no lo decide este repo.
+
+    LO QUE ESTE ARCHIVO NO PUEDE VERIFICAR, y por eso lo dice en vez de
+    callarlo: un servidor MCP de terceros actúa con UNA credencial de ERPNext
+    —la que tiene en SU entorno, adentro de SU contenedor— y no tiene permisos
+    por herramienta. Las tres identidades de este repo no aplican del otro
+    lado. Así que la pregunta operativa no es «¿qué herramientas cargué?» sino
+    «¿con qué usuario de ERPNext arrancó ese contenedor?», y la respuesta no
+    está en ninguna variable que readiness pueda leer.
+    """
+    # `MCP_EXTERNOS` se lee del `env` que recibe esta función y el PARSEO se
+    # delega al módulo que lo define, inyectado: duplicar acá el formato
+    # `nombre=destino` sería un segundo parser que puede discrepar con el que
+    # de verdad arma los clientes, y entonces readiness diría «dos servidores»
+    # de una línea que el agente lee distinto.
+    if not _valor(env, "MCP_EXTERNOS").strip():
+        reporte.ok("MCP externos", "ninguno: el agente usa sólo sus herramientas")
+        return
+
+    try:
+        from app import mcp_cliente
+    except Exception as exc:  # pragma: no cover - problemas de import
+        reporte.aviso("MCP externos", f"módulo no disponible ({type(exc).__name__})")
+        return
+
+    try:
+        # `servidores(env)` y no `servidores()`: `ejecutar` recibe un `.env`
+        # CANDIDATO —el que todavía no está puesto— y lo baja a cada chequeo.
+        # Con `os.environ`, readiness aprobaba los servidores del proceso que lo
+        # corre en vez de los del archivo que le pidieron revisar, y los avisos
+        # de token faltante iban con ellos.
+        configuracion = mcp_cliente.servidores(env)
+    except Exception as exc:
+        # DOS CAUSAS, UN MENSAJE, y el mensaje dice la consecuencia y después
+        # la causa. `servidores()` levanta por `MCP_EXTERNOS` mal escrito Y por
+        # un token que saldría en claro hacia un destino que sale a la red — y
+        # el texto viejo («MCP_EXTERNOS no se puede interpretar») leía el
+        # segundo como un error de tipeo, que es justo lo que hace que nadie
+        # mire el rechazo. Lo que las dos comparten es que NO SE CARGÓ NINGÚN
+        # SERVIDOR; el `exc` que se adjunta ya dice cuál de las dos fue, y en el
+        # caso del bearer nombra las dos salidas.
+        #
+        # AVISO y no FALTA por el criterio del módulo: el agente arranca con sus
+        # herramientas, que es el default, y el token justamente NO salió.
+        reporte.aviso(
+            "MCP externos", f"no se cargó ningún servidor externo ({exc})"
+        )
+        return
+
+    if not configuracion:
+        # `MCP_EXTERNOS` tiene algo y el parser no sacó ningún servidor: una
+        # línea de comas sueltas. No es lo mismo que no haber configurado nada.
+        reporte.aviso(
+            "MCP externos", "MCP_EXTERNOS tiene un valor del que no sale ningún servidor"
+        )
+        return
+
+    nombres = ", ".join(
+        f"{n} ({a['transporte']})" for n, a in sorted(configuracion.items())
+    )
+    reporte.ok("MCP externos", f"{len(configuracion)}: {nombres}")
+
+    # Un servidor HTTP sin token es un servidor al que le puede pedir cualquiera
+    # que llegue a su puerto. En la compose está en la red interna, así que no
+    # bloquea; pero no se asume.
+    sin_token = sorted(
+        n for n, a in configuracion.items()
+        if a["transporte"] == "http"
+        and not _valor(env, f"MCP_EXTERNO_TOKEN_{n.upper()}").strip()
+    )
+    if sin_token:
+        reporte.aviso(
+            "MCP externos sin token",
+            f"{', '.join(sin_token)}: sin MCP_EXTERNO_TOKEN_<NOMBRE>, le contesta "
+            "a cualquiera que llegue a ese puerto",
+        )
+
+    if not _valor(env, "MCP_EXTERNOS_BLOQUEAR").strip():
+        reporte.aviso(
+            "MCP_EXTERNOS_BLOQUEAR",
+            "vacío: se carga TODO lo que publiquen, incluidos submit, cancel y "
+            "delete. Ver .env.example para los dos dials",
+        )
+
+    # SIEMPRE, con lista de bloqueo o sin ella: el filtro de este lado decide
+    # qué VE el modelo, y la credencial del otro lado decide qué PUEDE. Las dos
+    # cosas hacen falta y sólo una está acá.
+    reporte.aviso(
+        "MCP externos: la credencial",
+        "lo que pueden hacer lo decide el usuario de ERPNext con el que arrancó "
+        "cada contenedor, no este archivo. Revisalo a mano",
+    )
+
+
 # ------------------------------------------------------------------- entry
 
 
@@ -1267,6 +1554,7 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
     http = _http_real if con_red else None
     chequear_modelos(env, reporte)
     chequear_equipo(env, reporte)
+    chequear_idioma(env, reporte)
     chequear_panel(env, reporte)
     waba = chequear_whatsapp(env, reporte, http)
     # El resumen de límites se resuelve ANTES de las plantillas: dos de ellas
@@ -1288,6 +1576,10 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
     # Se pasa con_red en vez de gatear acá: la función se auto-protege y
     # reporta «no verificado», que es la regla del módulo.
     chequear_borradores(reporte, con_red=con_red)
+    # Al final: es lo único que habla de un alcance que este repo no controla,
+    # y leerlo último es leerlo justo antes del veredicto.
+    chequear_memoria_de_clientes(env, reporte)
+    chequear_mcp_externos(env, reporte)
     return reporte
 
 
