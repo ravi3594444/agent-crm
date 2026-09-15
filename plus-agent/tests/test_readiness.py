@@ -1747,7 +1747,7 @@ def test_un_servidor_http_sin_token_se_avisa_y_uno_stdio_no(monkeypatch) -> None
 
     texto = _informe(monkeypatch, env)
 
-    linea = [l for l in texto.splitlines() if "MCP externos sin token" in l]
+    linea = [fila for fila in texto.splitlines() if "MCP externos sin token" in fila]
     assert linea, f"no salió el aviso de token:\n{texto}"
     assert "erpnext" in linea[0]
     assert "local" not in linea[0]
