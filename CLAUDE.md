@@ -81,6 +81,8 @@ Plain `python` has no frappe; wrong cwd gives `FileNotFoundError: .../logs/datab
 
 **SSH-in-browser mangles multi-line pastes.** Backslash continuations get dropped and the tail runs on the host. Always use single-line commands there.
 
+**LangGraph's default recursion limit is 10007, not 25.** The 25 everyone remembers is `langchain_core`'s; `langgraph._internal._config.DEFAULT_RECURSION_LIMIT` is 10007, and that is what applies when a hand-built config omits `recursion_limit` — which is what `graph._config()` did. At three supersteps per round (a `pre_model_hook` costs one), that is ~3335 model calls for one WhatsApp message. Measured on the real `responder_cliente` path: 121 model calls, 120 tool calls, stopped only because the scripted model ran out. Worse, the two ways LangGraph stops are both wrong for WhatsApp: `recursion_limit = 3n` returns an `AIMessage` reading `"Sorry, need more steps to process this request."` — no exception, no log line, straight to the customer in English — and any other number raises `GraphRecursionError`, which became «tuve un problema técnico» and threw away everything the turn had already found. `app/pasos.py` is the ceiling and the honest close; catch BOTH paths or you have only moved the failure.
+
 **`pytest` needs a real Redis Stack** at `REDIS_URL`, database 0 (RediSearch refuses `FT.CREATE` on any other). `app/graph.py` builds the checkpointer at import. Without it, two modules fail at collection and pytest aborts having run zero tests. CI sets `REDIS_OBLIGATORIO=1` so "no Redis" is a failure, not a silent skip.
 
 **Two test runs at once share Redis and fake a flaky lock test.** `pytest`

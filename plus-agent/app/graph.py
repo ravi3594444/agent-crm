@@ -15,7 +15,7 @@ from langgraph.checkpoint.redis import RedisSaver
 from langgraph.prebuilt import ToolNode, create_react_agent
 from pydantic import ValidationError
 
-from app import erpnext, modelos
+from app import erpnext, modelos, pasos
 from app.conversacion import (
     business_today,
     prompt_clientes,
@@ -422,8 +422,9 @@ def responder_cliente(
     every model call and every tool start of THIS turn, and nothing else.
     """
     with erpnext.customer_scope():
-        out = agente_clientes.invoke(
-            {"messages": [("user", mensaje)]},
+        return pasos.correr(
+            agente_clientes,
+            mensaje,
             config=_config(
                 {
                     "thread_id": f"cli:{thread_id}",
@@ -435,8 +436,10 @@ def responder_cliente(
                 },
                 callbacks,
             ),
+            modelo=_modelo_clientes,
+            armar_prompt=prompt_clientes,
+            rol="clientes",
         )
-    return texto_plano(out["messages"][-1])
 
 
 def responder_gerencia(
@@ -456,8 +459,9 @@ def responder_gerencia(
     being compared as if it were a number.
     """
     with erpnext.manager_scope():
-        out = agente_gerencia.invoke(
-            {"messages": [("user", mensaje)]},
+        return pasos.correr(
+            agente_gerencia,
+            mensaje,
             config=_config(
                 {
                     "thread_id": f"ger:{thread_id}",
@@ -467,5 +471,7 @@ def responder_gerencia(
                 },
                 callbacks,
             ),
+            modelo=_modelo_gerencia,
+            armar_prompt=prompt_gerencia,
+            rol="gerencia",
         )
-    return texto_plano(out["messages"][-1])
