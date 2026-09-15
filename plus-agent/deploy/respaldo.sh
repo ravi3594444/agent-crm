@@ -145,8 +145,13 @@ if [ "$SIMULACRO" = 1 ]; then
   log "  erpnext          : sitio $ERPNEXT_SITIO en el contenedor backend"
   log "  adjuntos         : $([ "$CON_ARCHIVOS" = 1 ] && echo 'sí (--with-files)' || echo 'no')"
   log "  copia remota     : $([ -n "$RESPALDO_GCS_BUCKET" ] && echo "gs://$RESPALDO_GCS_BUCKET ($SUBIDOR)" || echo 'no configurada')"
-  mkdir -p "$DESTINO" 2>/dev/null || morir "no puedo crear $DESTINO (¿permisos? probá: sudo mkdir -p $RESPALDO_DIR && sudo chown \$USER $RESPALDO_DIR)"
-  [ -w "$DESTINO" ] || morir "no puedo escribir en $DESTINO"
+  # SIN `mkdir`: la línea de arriba dice «no se escribe nada» y crear el
+  # directorio fechado ES escribir. Dejaba una carpeta vacía que la retención y
+  # el monitoreo cuentan como un respaldo. Se comprueba el PADRE, que es lo que
+  # de verdad hace falta para que el respaldo real pueda crear el suyo.
+  padre="$(dirname "$DESTINO")"
+  mkdir -p "$padre" 2>/dev/null || morir "no puedo crear $padre (¿permisos? probá: sudo mkdir -p $RESPALDO_DIR && sudo chown \$USER $RESPALDO_DIR)"
+  [ -w "$padre" ] || morir "no puedo escribir en $padre"
   log "permisos OK. Todo lo que hace falta está."
   exit 0
 fi

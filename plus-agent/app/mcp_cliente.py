@@ -67,6 +67,18 @@ from langchain_core.tools import StructuredTool
 PROTOCOLO_PREFERIDO = "2026-07-28"
 
 TIMEOUT_SEGUNDOS = 60.0
+# EL DESCUBRIMIENTO TIENE SU PROPIO TIMEOUT, y mucho más corto. `app/graph.py`
+# arma `TOOLS_AGENTE_GERENCIA` en el import, y descubrir son DOS pedidos
+# —`initialize` y `tools/list`— así que con el timeout de una llamada normal un
+# servidor configurado pero caído se llevaba ~2 minutos de arranque por cada
+# entrada de `MCP_EXTERNOS`, antes de que el agente contestara un solo WhatsApp.
+# Un ERP de terceros caído es un martes; un agente que tarda dos minutos en
+# arrancar es el negocio parado, que es exactamente lo que `_con_externas` dice
+# que no puede pasar.
+#
+# 60 s siguen valiendo para `tools/call`: ahí hay una persona esperando UNA
+# respuesta y un informe pesado de ERPNext tarda.
+TIMEOUT_DESCUBRIMIENTO_SEGUNDOS = 10.0
 MAX_RESULTADO = 60_000
 
 _META_VERSION = "io.modelcontextprotocol/protocolVersion"
@@ -180,6 +192,9 @@ class ClienteMCP:
         self.destino = configuracion["destino"]
         self.protocolo = PROTOCOLO_PREFERIDO
         self._siguiente_id = 0
+        # Por pedido y no por cliente: `cargar` lo baja mientras descubre y lo
+        # devuelve después, así que el mismo objeto sirve para las dos fases.
+        self.timeout = TIMEOUT_SEGUNDOS
         self._candado = threading.Lock()
         self._http: httpx.Client | None = None
         self._proceso: subprocess.Popen | None = None
@@ -219,8 +234,14 @@ class ClienteMCP:
 
     def _por_http(self, cuerpo: dict, cabeceras: dict) -> dict:
         if self._http is None:
-            self._http = httpx.Client(timeout=TIMEOUT_SEGUNDOS)
-        respuesta = self._http.post(self.destino, json=cuerpo, headers=cabeceras)
+            self._http = httpx.Client()
+        # El timeout va POR PEDIDO y no en el `Client`: el cliente se cachea y
+        # vive todo el proceso, así que uno fijado al construirlo se quedaría
+        # con el de la fase en que se creó — el corto del descubrimiento, para
+        # siempre.
+        respuesta = self._http.post(
+            self.destino, json=cuerpo, headers=cabeceras, timeout=self.timeout
+        )
         if respuesta.status_code >= 400:
             raise MCPExternoError(
                 f"{self.nombre} rechazó {cuerpo['method']} "
@@ -276,7 +297,7 @@ class ClienteMCP:
         # cerró, que devuelve ""— colgaba esta llamada para siempre, y con ella
         # todas las que esperan `self._candado`. El tope de 200 no ayudaba: se
         # trababa en el primero.
-        limite = time.monotonic() + TIMEOUT_SEGUNDOS
+        limite = time.monotonic() + self.timeout
         selector = selectors.DefaultSelector()
         selector.register(proceso.stdout, selectors.EVENT_READ)
         try:
@@ -286,7 +307,7 @@ class ClienteMCP:
                     self._matar()
                     raise MCPExternoError(
                         f"{self.nombre} no contestó a {cuerpo['method']} en "
-                        f"{TIMEOUT_SEGUNDOS:g}s"
+                        f"{self.timeout:g}s"
                     )
                 linea = proceso.stdout.readline()
                 if not linea:
@@ -417,12 +438,18 @@ def cargar(propias: list[Any] | None = None) -> list[StructuredTool]:
     _motivos.clear()
     for nombre, ajustes in configuracion.items():
         cliente = ClienteMCP(nombre, ajustes)
+        # LOS DOS PEDIDOS DEL DESCUBRIMIENTO, con el timeout corto, y vuelve al
+        # largo antes de que nadie la use: lo que corre acá bloquea el arranque
+        # del agente, lo que corre después tiene a alguien esperando.
+        cliente.timeout = TIMEOUT_DESCUBRIMIENTO_SEGUNDOS
         try:
             cliente.conectar()
             descriptores = cliente.listar()
         except Exception as exc:
             _motivos.append(f"{nombre}: no pude conectarme ({type(exc).__name__})")
             continue
+        finally:
+            cliente.timeout = TIMEOUT_SEGUNDOS
         _clientes[nombre] = cliente
         for descriptor in descriptores:
             suyo = str(descriptor.get("name") or "")

@@ -160,3 +160,37 @@ def test_la_herramienta_entrega_la_frase_entera_en_un_solo_idioma(monkeypatch):
     # Y NADA del castellano que `str(exc)` sigue teniendo para el log.
     assert "no es una acción que exista" not in respuesta
     assert "que puedo preparar" not in respuesta
+
+
+@pytest.mark.parametrize(
+    "verbo, en_castellano, en_ingles",
+    [("cancelar", "el motivo", "the reason"), ("rechazar", "por qué", "why")],
+)
+def test_el_hueco_que_falta_se_nombra_en_el_idioma_del_que_lo_lee(
+    verbo: str, en_castellano: str, en_ingles: str
+):
+    """EL SEGUNDO llamable del archivo, mutado aparte del primero.
+
+    `accion.falta_dato` interpola `{que}`, y `{que}` es prosa —«el motivo», «por
+    qué»— que además cambia según el verbo. Son dos cosas distintas que se
+    pueden romper por separado: que el fragmento no se traduzca, y que se
+    traduzca el fragmento del OTRO verbo. Por eso las dos ramas corren, y cada
+    una exige su propio fragmento y niega el del catálogo castellano.
+
+    MUTACIÓN: en `acciones._parametros`, `"que": lambda lengua: idioma.t(
+    clave_que, lengua)` -> `"que": que`. Caen estos dos y sólo estos: el
+    castellano no se mueve —es el mismo texto— y el inglés queda con el hueco
+    en castellano adentro de una frase inglesa.
+    """
+    accion = acciones.TODAS[verbo]
+    es, en = _motivos(lambda: acciones._parametros(accion, "", "SAL-ORD-2026-00008"))
+    _sano(es, en, "accion.falta_dato")
+
+    assert en_castellano in es
+    assert en_ingles in en
+    # Y NADA del castellano adentro del inglés. Es lo único que la mutación
+    # cambia: la cáscara ya salía traducida.
+    assert en_castellano not in en
+    # El verbo sí se interpola igual en los dos: es el comando que teclea el
+    # dueño, no una palabra del idioma.
+    assert verbo in es and verbo in en

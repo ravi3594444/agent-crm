@@ -1536,3 +1536,64 @@ def test_los_tokens_por_persona_que_si_sirven_se_cuentan_sin_mostrarse() -> None
     assert "2 token(s) por persona, 2 de ellos del equipo" in texto
     assert TOKEN_PANEL not in texto and OTRO_TOKEN_PANEL not in texto
     assert _bloqueos_del_panel(reporte) == []
+
+
+def test_english_escrito_como_lo_escribe_una_persona_no_bloquea(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El preflight no puede ser MÁS estricto que lo que el sistema acepta.
+
+    `limites.idioma_gerencia()` pasa el valor por `idioma.normalizar`, que
+    entiende «english», «inglés», «eng». El preflight comparaba el crudo contra
+    los códigos, así que un `.env` que FUNCIONA —el agente contesta en inglés—
+    no pasaba, y el preflight existe para decir qué va a hacer el sistema, no
+    para inventar un contrato más angosto.
+
+    MUTACIÓN: volver a comparar `crudo.lower()` contra `idioma.IDIOMAS`. Cae
+    éste y sólo éste.
+    """
+    from app import limites
+
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: "")
+
+    reporte = _correr({**BASE, "IDIOMA_GERENCIA": "english"})
+
+    texto = reporte.texto()
+    # `Reporte.ok` es un MÉTODO que agrega una línea, no un booleano: `assert
+    # reporte.ok` es siempre verdadero y no prueba nada. Se mira el texto, que
+    # es lo mismo que hacen los otros ~15 tests de este archivo.
+    assert "no es un idioma conocido" not in texto, texto
+    assert "ERROR  IDIOMA_GERENCIA" not in texto, texto
+    assert "NO LISTO" not in texto, texto
+    # Y se informa el idioma RESUELTO —EN—, no la palabra que tecleó la persona.
+    assert "el dueño recibe EN" in texto, texto
+
+
+def test_una_falla_inesperada_leyendo_el_idioma_no_se_informa_en_verde(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`idioma_gerencia_guardado` YA convierte a None lo que se espera que falle.
+
+    Lo que llegue al `except Exception` de `chequear_idioma` es lo que NO se
+    esperaba —un error de programa—, y tragarlo como «no hay nada guardado»
+    hacía que el reporte siguiera y terminara en `ok`: un preflight en verde
+    sobre un bug. Un preflight que miente es peor que no tenerlo, porque se usa
+    justo cuando algo ya está raro.
+
+    MUTACIÓN: volver a `except Exception: del_almacen = None`. Cae éste y sólo
+    éste.
+    """
+    from app import limites
+
+    def explota():
+        raise TypeError("algo que nadie previó")
+
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", explota)
+
+    reporte = _correr({**BASE, "IDIOMA_GERENCIA": "en"})
+
+    texto = reporte.texto()
+    assert "ERROR  IDIOMA_GERENCIA" in texto, texto
+    assert "TypeError" in texto
+    # Y el informe entero dice que NO está listo, que es lo que alguien mira.
+    assert "NO LISTO" in texto

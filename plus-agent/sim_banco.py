@@ -390,7 +390,13 @@ class Banco:
         config = uvicorn.Config(app_main.app, host="127.0.0.1",
                                 port=PUERTO_AGENTE, log_level="error")
         self._uvicorn = uvicorn.Server(config)
-        threading.Thread(target=self._uvicorn.run, daemon=True).start()
+        # EL HILO SE GUARDA. Era `Thread(...).start()` y se tiraba, así que
+        # `bajar()` sólo podía pedir `should_exit` y dormir un segundo: si el
+        # apagado tardaba más, el hilo seguía con el puerto tomado y el próximo
+        # `levantar()` moría en `_verificar_puertos()` acusando a un ocupante
+        # que éramos nosotros mismos.
+        self._hilo_uvicorn = threading.Thread(target=self._uvicorn.run, daemon=True)
+        self._hilo_uvicorn.start()
         for _ in range(90):
             try:
                 with urllib.request.urlopen(
@@ -413,6 +419,11 @@ class Banco:
         # cliente del modelo confía en el certificado del doble sin que nadie
         # apague la verificación de TLS.
         env["SSL_CERT_FILE"] = str(cert)
+        # SE GUARDA LO QUE HABÍA para poder devolverlo. `levantar()` pisa el
+        # entorno con credenciales falsas y endpoints de loopback; sin restaurar,
+        # todo lo que corra después en este proceso —otro test, una sesión
+        # interactiva— sigue apuntando al simulador y hereda claves muertas.
+        self._entorno_previo = {k: os.environ.get(k) for k in env}
         os.environ.update(env)
         # `__enter__` llama a `levantar()` DIRECTO, así que si algo de acá
         # adentro levanta, `__exit__` no corre y nadie baja lo que ya subió:
@@ -437,7 +448,18 @@ class Banco:
     def bajar(self) -> None:
         if self._uvicorn is not None:
             self._uvicorn.should_exit = True
-            time.sleep(1.0)
+            hilo = getattr(self, "_hilo_uvicorn", None)
+            if hilo is not None:
+                hilo.join(timeout=10)
+                if hilo.is_alive():
+                    # Se dice: el próximo `levantar()` va a fallar contra este
+                    # puerto y sin esta línea parece que el ocupante es otro.
+                    self._decir(
+                        f"uvicorn no terminó en 10s; :{PUERTO_AGENTE} puede "
+                        "seguir tomado"
+                    )
+            else:
+                time.sleep(1.0)
         for srv in self._servidores:
             # `shutdown()` frena `serve_forever()` y NO cierra el socket que
             # escucha. Sin `server_close()` el puerto sigue tomado por este
@@ -452,6 +474,15 @@ class Banco:
                 self._redis.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self._redis.kill()
+        # EL ENTORNO VUELVE A COMO ESTABA, y también cuando el arranque falló:
+        # `__enter__` llama a `levantar()` directo, así que el camino de error
+        # pasa por acá.
+        for clave, antes in (getattr(self, "_entorno_previo", None) or {}).items():
+            if antes is None:
+                os.environ.pop(clave, None)
+            else:
+                os.environ[clave] = antes
+        self._entorno_previo = {}
         self._decir("banco desarmado")
 
     def __enter__(self) -> "Banco":

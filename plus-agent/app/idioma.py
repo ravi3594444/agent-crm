@@ -2448,6 +2448,57 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: '«{palabra}» no es una acción que exista. Las que puedo preparar son: {acciones}',
         EN: '«{palabra}» is not an action that exists. The ones I can prepare are: {acciones}',
     },
+    # Los consejos al dueño (app/consejos.py). Los `TODO(idioma)` de ese
+    # archivo nombraban estas claves: el módulo se escribió mientras otra
+    # rama editaba el catálogo, y quedó pendiente. Es texto que lee el dueño.
+    "consejo.sin_costo": {
+        ES: 'no pude verificar el costo',
+        EN: 'I could not verify the cost',
+    },
+    "consejo.perdida.titulo": {
+        ES: 'Una venta por debajo del costo',
+        EN: 'A sale below cost',
+    },
+    "consejo.perdida.cuerpo": {
+        ES: 'El pedido {pedido} de {cliente} salió por debajo del costo: {perdida} contra la lista «{lista}».\n{detalle}',
+        EN: 'Order {pedido} for {cliente} went out below cost: {perdida} against price list «{lista}».\n{detalle}',
+    },
+    "consejo.perdida.piso": {
+        ES: '\n({sin_costo} de: {faltantes}, así que la pérdida es un piso)',
+        EN: '\n({sin_costo} for: {faltantes}, so the loss is a floor)',
+    },
+    "consejo.dormido.titulo": {
+        ES: 'Un cliente dejó de comprar',
+        EN: 'A customer stopped buying',
+    },
+    "consejo.dormido.cuerpo": {
+        ES: '{nombre} compraba cada {ritmo} días y hace {silencio} que no pide (último: {ultimo}). Son unos {faltantes} pedidos de menos, cerca de {estimado} a su promedio de {promedio}.',
+        EN: '{nombre} used to buy every {ritmo} days and has not ordered for {silencio} (last one: {ultimo}). That is about {faltantes} orders fewer, around {estimado} at their average of {promedio}.',
+    },
+    "consejo.deuda.titulo": {
+        ES: 'Deuda que está envejeciendo',
+        EN: 'A balance that is ageing',
+    },
+    "consejo.deuda.cuerpo": {
+        ES: '{nombre} debe {total} en {facturas} factura(s), la más vieja vencida hace {atraso} días (tolerás {tolerancia}).',
+        EN: '{nombre} owes {total} across {facturas} invoice(s), the oldest overdue by {atraso} days (you tolerate {tolerancia}).',
+    },
+    "consejo.quiebre.titulo": {
+        ES: 'Un producto no llega al próximo reparto',
+        EN: 'A product will not last until the next delivery run',
+    },
+    "consejo.quiebre.cuerpo": {
+        ES: '{item_code}: quedan {hay} y el mínimo es {nivel}. Se venden {por_dia} por día y el próximo reparto es el {proximo} ({dias} día(s)): llegás con {proyectado}.',
+        EN: '{item_code}: {hay} left and the minimum is {nivel}. {por_dia} sell per day and the next delivery run is {proximo} ({dias} day(s)): you arrive with {proyectado}.',
+    },
+    "consejo.quiebre.ya_abajo": {
+        ES: ' Ya está por debajo del mínimo.',
+        EN: ' It is already below the minimum.',
+    },
+    "consejo.quiebre.supuesto": {
+        ES: '\n(Asumo el stock del sistema: {supuesto}.)',
+        EN: "\n(I am assuming the system's stock figure: {supuesto}.)",
+    },
 }
 
 

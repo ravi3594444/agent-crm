@@ -714,6 +714,158 @@ def test_el_costo_se_mide_contra_el_dia_del_pedido_y_no_contra_hoy(erp, con_list
     assert [c.clave for c in salida] == ["perdida:SO-2"]
 
 
+def test_el_total_de_la_perdida_dice_en_que_moneda_es(erp, con_lista_de_costo):
+    """MUTACIÓN: `perdida=total` -> `perdida=pesos(entrada["perdida"], 2)`.
+
+    Cae éste y sólo éste. `pesos` escribe el símbolo que elige `LOCALE` y nunca
+    un código, así que un pedido en INR y uno en ARS le llegaban al dueño
+    idénticos —«$4.800,00» los dos— y la moneda quedaba sólo en `datos`, que él
+    no lee. Es el mismo defecto que `notificar.pedir_confirmacion` ya había
+    arreglado del lado de la autorización.
+
+    Se prueban las DOS monedas sobre la misma pérdida: con una sola, un código
+    pegado a mano en la plantilla pasaría igual.
+    """
+    erp.tablas["Sales Order"] = [
+        pedido("SO-INR", moneda="INR"),
+        pedido("SO-ARS", moneda="ARS"),
+    ]
+    erp.tablas["Sales Order Item"] = [
+        renglon("SO-INR", "LECHE-1L", qty=10, rate=100.0),
+        renglon("SO-ARS", "LECHE-1L", qty=10, rate=100.0),
+    ]
+    erp.tablas["Item Price"] = [precio(currency="INR"), precio(currency="ARS")]
+
+    por_pedido = {c.sobre: c for c in consejos.perdidas(HOY)}
+
+    assert sorted(por_pedido) == ["SO-ARS", "SO-INR"]
+    assert "INR" in por_pedido["SO-INR"].cuerpo
+    assert "ARS" in por_pedido["SO-ARS"].cuerpo
+    # Y cada uno dice SÓLO la suya: un código fijo en la plantilla diría las dos.
+    assert "ARS" not in por_pedido["SO-INR"].cuerpo
+    assert "INR" not in por_pedido["SO-ARS"].cuerpo
+
+
+# ---------------------------------------------- la fecha, por los dos bordes
+#
+# `perdidas` tenía SÓLO piso (`transaction_date >= desde`) y, adentro del bucle,
+# `_dia(...) or dia`. Son dos guardias que protegen la misma cosa por caminos
+# distintos, así que hay un test por guardia: el que mira el borde del servidor
+# hace que la página se llene de futuros, y el que mira el guardia de este lado
+# le saca el borde al servidor. Un solo test no podría distinguirlos — con los
+# dos guardias puestos, ninguna mutación sola cambia la respuesta.
+
+
+@pytest.fixture
+def servidor_sin_borde_de_arriba(erp, monkeypatch):
+    """Un ERPNext que IGNORA el `transaction_date <=`, que es cuando importa.
+
+    El borde de arriba lo pone la consulta, y el guardia de Python existe para
+    lo que llega igual: una fecha que el servidor ordenó pero que Python no sabe
+    leer, o un servidor que no aplicó el filtro. Con el doble honrando los dos,
+    sacarle el `if fecha > dia` al código no cambiaría ninguna respuesta y el
+    test no probaría nada.
+    """
+    original = erpnext.policy_get_list
+
+    def get_list(doctype, filters=None, **kw):
+        if doctype == "Sales Order":
+            filters = [
+                f for f in (filters or [])
+                if not (len(f) >= 2 and f[0] == "transaction_date" and f[1] == "<=")
+            ]
+        return original(doctype, filters=filters, **kw)
+
+    monkeypatch.setattr(erpnext, "policy_get_list", get_list)
+    return erp
+
+
+def test_una_venta_con_fecha_de_la_semana_que_viene_no_es_una_perdida_de_ayer(
+    servidor_sin_borde_de_arriba, con_lista_de_costo, capsys
+):
+    """MUTACIÓN: en `perdidas`, `if fecha is None or fecha > dia` -> `if fecha is None`.
+
+    Cae éste y sólo éste. ERPNext deja emitir un pedido con fecha futura, y el
+    consejo se lo presenta al dueño como una venta que YA pasó y ya perdió
+    plata: le pide que actúe sobre algo que todavía no ocurrió. El pedido de
+    control, con fecha de ayer y exactamente los mismos renglones, está para que
+    el assert no se pueda cumplir por la vía de no devolver nunca nada.
+    """
+    erp = servidor_sin_borde_de_arriba
+    erp.tablas["Sales Order"] = [
+        pedido("SO-FUTURO", dia=HOY + timedelta(days=7)),
+        pedido("SO-AYER", dia=HOY - timedelta(days=1)),
+    ]
+    erp.tablas["Sales Order Item"] = [
+        renglon("SO-FUTURO", "LECHE-1L", qty=10, rate=100.0),
+        renglon("SO-AYER", "LECHE-1L", qty=10, rate=100.0),
+    ]
+    erp.tablas["Item Price"] = [precio()]
+
+    salida = consejos.perdidas(HOY)
+
+    assert [c.sobre for c in salida] == ["SO-AYER"]
+    # Y no se descarta en silencio: el que despliega tiene de dónde enterarse.
+    assert "posterior a hoy" in capsys.readouterr().out
+
+
+def test_una_fecha_que_no_se_puede_leer_no_se_convierte_en_hoy(
+    servidor_sin_borde_de_arriba, con_lista_de_costo
+):
+    """MUTACIÓN: volver a `dia_pedido = _dia(cabecera.get("transaction_date")) or dia`
+    (y sacar el `fecha is None` de arriba, que es la misma decisión).
+
+    Cae éste y sólo éste. `_dia` devuelve None a propósito —una fecha ilegible
+    tiene que dejar la fila afuera, no ponerla en un extremo—, y ese `or dia` la
+    ponía en el extremo de hoy: el costo salía de la lista vigente HOY y el
+    pedido quedaba acusado de vender por debajo de un costo que no era el suyo.
+
+    Los dos pedidos tienen el MISMO renglón. El precio sólo tiene vigencia
+    hasta anteayer, así que con la fecha de hoy no hay costo verificable y con
+    la de hace cinco días sí: si el ilegible se fechara en hoy no aparecería
+    igual, pero el de control prueba que el detector sí funciona sobre esta
+    misma historia, y la mutación lo hace aparecer con el costo de hoy.
+    """
+    erp = servidor_sin_borde_de_arriba
+    ilegible = pedido("SO-ILEGIBLE", dia=HOY - timedelta(days=5))
+    ilegible["transaction_date"] = "2026-09-0X"  # pasa el `>=` de texto, no parsea
+    erp.tablas["Sales Order"] = [ilegible, pedido("SO-BUENO", dia=HOY - timedelta(days=5))]
+    erp.tablas["Sales Order Item"] = [
+        renglon("SO-ILEGIBLE", "LECHE-1L", qty=10, rate=100.0),
+        renglon("SO-BUENO", "LECHE-1L", qty=10, rate=100.0),
+    ]
+    erp.tablas["Item Price"] = [precio()]
+
+    salida = consejos.perdidas(HOY)
+
+    assert [c.sobre for c in salida] == ["SO-BUENO"]
+
+
+def test_las_ventas_del_futuro_no_le_comen_la_pagina_a_las_de_verdad(
+    erp, con_lista_de_costo, monkeypatch
+):
+    """MUTACIÓN: sacar `["transaction_date", "<=", dia.isoformat()]` de los filtros.
+
+    Cae éste y sólo éste, y es lo que el guardia de Python NO puede arreglar: la
+    página se pide `desc`, así que sin borde de arriba las fechas futuras son las
+    más nuevas y se llevan los lugares. Descartarlas después de leerlas llega
+    tarde — el pedido de verdad ya se quedó afuera de la consulta.
+    """
+    monkeypatch.setattr(consejos, "MAX_PEDIDOS_PERDIDA", 2)
+    erp.tablas["Sales Order"] = [
+        pedido("SO-F1", dia=HOY + timedelta(days=10)),
+        pedido("SO-F2", dia=HOY + timedelta(days=9)),
+        pedido("SO-F3", dia=HOY + timedelta(days=8)),
+        pedido("SO-REAL", dia=HOY - timedelta(days=1)),
+    ]
+    erp.tablas["Sales Order Item"] = [
+        renglon("SO-REAL", "LECHE-1L", qty=10, rate=100.0),
+    ]
+    erp.tablas["Item Price"] = [precio()]
+
+    assert [c.sobre for c in consejos.perdidas(HOY)] == ["SO-REAL"]
+
+
 def test_un_renglon_sin_costo_verificable_se_dice_y_no_se_adivina(erp, con_lista_de_costo):
     """MUTACIÓN: en `perdidas`, cambiar `entrada["sin_costo"].append(code)` por
     `continue` a secas (o sea, tirar la lista de lo que no se pudo verificar).
@@ -910,6 +1062,87 @@ def test_la_historia_se_pide_de_lo_mas_nuevo_a_lo_mas_viejo(erp, monkeypatch):
     assert [c.sobre for c in consejos.dormidos(HOY)] == []
 
 
+# --------------------------------------------------- la página que no entera
+#
+# `dormidos` pide MAX_PEDIDOS_HISTORIA + 1 justamente para poder DARSE CUENTA
+# de que había más, y de ahí salen DOS consumidores de la misma condición: el
+# aviso en el log y el recorte. Van en dos tests porque se mutan por separado
+# —borrar el `print` no toca el recorte, y borrar el recorte no toca el log—,
+# y un solo test que los mirara juntos no distinguiría cuál de los dos se cayó.
+
+
+def _seis_pedidos() -> list[dict]:
+    """Una página que se pasa del techo por uno, con el cliente en el borde.
+
+    Ordenada de lo más nuevo a lo más viejo, que es como la pide `dormidos`:
+
+        OTRO      HOY-1     <- entra siempre
+        DORMIDO   HOY-54    <- las tres que entran con el techo en 4
+        DORMIDO   HOY-56
+        DORMIDO   HOY-58
+        DORMIDO   HOY-60    <- LA CUARTA: la que decide si tiene ritmo
+        OTRO      HOY-100   <- no llega ni al `limit`
+
+    DORMIDO compra cada dos días y hace 54 que no aparece, así que con sus
+    cuatro compras adentro es un consejo y con tres es silencio: la fila que el
+    recorte saca es exactamente la que cambia la respuesta.
+    """
+    return [
+        compra("OTRO", HOY - timedelta(days=1)),
+        *[compra("DORMIDO", HOY - timedelta(days=atras)) for atras in (54, 56, 58, 60)],
+        compra("OTRO", HOY - timedelta(days=100)),
+    ]
+
+
+def test_la_pagina_llena_se_recorta_al_techo_y_no_al_techo_mas_uno(erp, monkeypatch):
+    """MUTACIÓN: borrar `pedidos = pedidos[:MAX_PEDIDOS_HISTORIA]`.
+
+    Cae éste y sólo éste. El `limit` es techo+1 —hay que pedir una de más para
+    saber que faltan—, así que sin el recorte el detector trabaja con una fila
+    que decidió no tener, y esa fila acá es la que hace aparecer el consejo.
+
+    Las dos mitades no se leen del catálogo ni de la constante: una corrida con
+    el techo en 4 y otra con el techo en 5, sobre la MISMA historia. Un test que
+    sólo pidiera `== []` pasaría también si `dormidos` devolviera siempre nada.
+    """
+    erp.tablas["Sales Order"] = _seis_pedidos()
+
+    # Techo 4: se piden 5, vuelven 5, se recorta a 4 y DORMIDO queda con tres
+    # compras — menos de MIN_PEDIDOS_PARA_RITMO, así que no tiene ritmo propio
+    # y no se lo juzga.
+    monkeypatch.setattr(consejos, "MAX_PEDIDOS_HISTORIA", 4)
+    assert [c.sobre for c in consejos.dormidos(HOY)] == []
+
+    # Techo 5: la misma historia entra entera y el mismo cliente SÍ sale.
+    monkeypatch.setattr(consejos, "MAX_PEDIDOS_HISTORIA", 5)
+    salida = consejos.dormidos(HOY)
+    assert [c.sobre for c in salida] == ["DORMIDO"]
+    assert salida[0].datos["ritmo_dias"] == 2
+
+
+def test_una_historia_recortada_se_dice_en_el_log(erp, monkeypatch, capsys):
+    """MUTACIÓN: borrar el `print` de adentro del `if`.
+
+    Cae éste y sólo éste. Recortar en silencio es el peor de los dos modos de
+    fallar: el consejo sale igual, con menos historia de la que dice tener, y
+    nadie tiene de dónde enterarse. La corrida sin recorte está para que el
+    assert no pueda cumplirse por la vía de no imprimir nunca nada.
+    """
+    monkeypatch.setattr(consejos, "MAX_PEDIDOS_HISTORIA", 4)
+    erp.tablas["Sales Order"] = _seis_pedidos()
+
+    consejos.dormidos(HOY)
+
+    anuncio = capsys.readouterr().out
+    assert "más de 4 pedidos" in anuncio
+
+    # Y la historia que entra entera no dice nada: un aviso que sale siempre no
+    # es un aviso.
+    erp.tablas["Sales Order"] = _seis_pedidos()[:4]
+    consejos.dormidos(HOY)
+    assert "más de" not in capsys.readouterr().out
+
+
 # ===========================================================================
 # 6. Detector 3: la deuda que envejece
 # ===========================================================================
@@ -976,6 +1209,35 @@ def test_la_misma_deuda_se_dice_una_vez_por_tramo_y_no_una_vez_por_semana(erp, t
     erp.cobranzas = [factura("MOROSO", monto=80_000.0, atraso=95)]
     despues = consejos.deudas(HOY)
     assert [c.clave for c in despues] == ["deuda:MOROSO:90"]
+
+
+def test_con_una_tolerancia_corta_llegar_a_30_sigue_siendo_una_noticia(erp, monkeypatch):
+    """MUTACIÓN: en `_tramo`, `elegido = 0` -> `elegido = TRAMOS_DEUDA[0]`.
+
+    Cae éste y sólo éste, porque es el único que corre con una tolerancia POR
+    DEBAJO del primer tramo — los demás usan `tolerancia_30`, donde nada se
+    emite antes de los 30 y la diferencia no se ve.
+
+    El dueño puede poner `CONSEJOS_DEUDA_DIAS` en 7. Con el piso viejo, el
+    primer aviso a los 10 días ya reclamaba `deuda:<cliente>:30`, así que
+    veinte días después —cuando la deuda de verdad cruza los 30— la clave
+    estaba tomada, el TTL de 14 días todavía no había vencido y el
+    empeoramiento real no avisaba nada. El tramo tiene que nombrar el escalón
+    que el atraso YA cruzó.
+    """
+    monkeypatch.setenv("CONSEJOS_DEUDA_DIAS", "7")
+    monkeypatch.delenv("CONSEJOS_DEUDA_MINIMA", raising=False)
+
+    erp.cobranzas = [factura("MOROSO", monto=80_000.0, atraso=10)]
+    temprano = consejos.deudas(HOY)
+
+    erp.cobranzas = [factura("MOROSO", monto=80_000.0, atraso=31)]
+    a_los_treinta = consejos.deudas(HOY)
+
+    # Los dos salen —la tolerancia es 7— y con claves DISTINTAS, que es lo que
+    # hace que el segundo se pueda reclamar aunque el primero siga vivo.
+    assert [c.clave for c in temprano] == ["deuda:MOROSO:0"]
+    assert [c.clave for c in a_los_treinta] == ["deuda:MOROSO:30"]
 
 
 def test_una_tolerancia_ilegible_apaga_el_detector(erp, monkeypatch):
@@ -1128,6 +1390,88 @@ def test_la_demanda_se_mide_en_unidad_de_stock(erp, reparto_semanal, monkeypatch
     assert salida[0].datos["demanda_diaria"] == pytest.approx(1.2)
 
 
+# ------------------------------------------- el techo de renglones por lote
+#
+# `_demanda_diaria` tiene DOS techos —la página de pedidos y los renglones de
+# cada lote— y el segundo se pedía justo, sin la fila de más que permite
+# enterarse. Van dos tests porque son dos consumidores de la misma condición:
+# el log y el recorte se mutan por separado.
+
+
+def _dos_renglones_del_mismo_pedido(erp, code: str, *, stock_qty: float) -> None:
+    """UN pedido con DOS renglones del mismo producto, que es legal en ERPNext.
+
+    Con `MAX_RENGLONES_POR_PEDIDO` en 1 el techo del lote es 1 y estos dos no
+    entran; en 2 entran los dos. La demanda sale de la mitad o del total, y ésa
+    es la diferencia que el recorte produce.
+    """
+    nombre = f"SO-DOBLE-{code}"
+    erp.tablas["Sales Order"].append(pedido(nombre, dia=HOY - timedelta(days=5)))
+    for _ in range(2):
+        erp.tablas["Sales Order Item"].append(
+            {
+                "parent": nombre,
+                "item_code": code,
+                "warehouse": DEPOSITO,
+                "qty": stock_qty,
+                "stock_qty": stock_qty,
+                "docstatus": 1,
+            }
+        )
+
+
+def test_un_lote_que_llena_el_techo_de_renglones_se_recorta(erp, reparto_semanal, monkeypatch):
+    """MUTACIÓN: en `_demanda_diaria`, `limit=tope + 1` -> `limit=tope`.
+
+    Cae éste y sólo éste, y es la mutación que importa: con el techo justo, un
+    lote lleno vuelve indistinguible de uno completo —`len(filas) > tope` no se
+    puede cumplir nunca— y la demanda sale más baja sin que nadie se entere.
+    Una demanda más baja es una proyección más alta y un quiebre que NO se
+    avisa, o sea un silencio idéntico al de «no hay nada que decir».
+
+    Las dos mitades son dos corridas con techos distintos sobre la MISMA venta,
+    no un número leído de la constante.
+    """
+    inventario_confiable(monkeypatch, maestra=True)
+    poner_stock(erp, "MANTECA-200", hay=6.0, minimo=5.0)
+    _dos_renglones_del_mismo_pedido(erp, "MANTECA-200", stock_qty=18.0)
+
+    # Techo 2: los dos renglones entran. 36/30 = 1,2 por día.
+    monkeypatch.setattr(consejos, "MAX_RENGLONES_POR_PEDIDO", 2)
+    entera = consejos.quiebres(HOY)
+    assert [c.sobre for c in entera] == ["MANTECA-200"]
+    assert entera[0].datos["demanda_diaria"] == pytest.approx(1.2)
+
+    # Techo 1: se pide uno de más para darse cuenta, y se calcula con uno solo.
+    monkeypatch.setattr(consejos, "MAX_RENGLONES_POR_PEDIDO", 1)
+    recortada = consejos.quiebres(HOY)
+    assert [c.sobre for c in recortada] == ["MANTECA-200"]
+    assert recortada[0].datos["demanda_diaria"] == pytest.approx(0.6)
+
+
+def test_un_lote_que_llena_el_techo_de_renglones_se_dice_en_el_log(
+    erp, reparto_semanal, monkeypatch, capsys
+):
+    """MUTACIÓN: borrar el `print` de adentro de ese `if`.
+
+    Cae éste y sólo éste. La proyección sigue saliendo —con menos renglones de
+    los que hubo— y sin el log no queda rastro de que salió recortada. La
+    corrida con el techo alto está para que el assert no se pueda cumplir por
+    la vía de no imprimir nunca.
+    """
+    inventario_confiable(monkeypatch, maestra=True)
+    poner_stock(erp, "MANTECA-200", hay=6.0, minimo=5.0)
+    _dos_renglones_del_mismo_pedido(erp, "MANTECA-200", stock_qty=18.0)
+
+    monkeypatch.setattr(consejos, "MAX_RENGLONES_POR_PEDIDO", 1)
+    consejos.quiebres(HOY)
+    assert "llenó el techo" in capsys.readouterr().out
+
+    monkeypatch.setattr(consejos, "MAX_RENGLONES_POR_PEDIDO", 2)
+    consejos.quiebres(HOY)
+    assert "llenó el techo" not in capsys.readouterr().out
+
+
 def test_un_producto_que_no_se_vende_no_es_una_urgencia(erp, reparto_semanal, monkeypatch):
     """MUTACIÓN: borrar el `if por_dia <= 0: continue` de `quiebres`.
 
@@ -1232,3 +1576,46 @@ def test_un_consejo_no_puede_ni_importar_lo_que_decide():
                 if alias.name.startswith("app."):
                     importados.add(alias.name.split(".", 1)[1].split(".")[0])
     assert importados & PROHIBIDOS == set()
+
+
+# ------------------------------------------- el idioma de lo que lee el dueño
+
+def test_un_consejo_sale_en_el_idioma_del_dueno(erp, con_lista_de_costo, monkeypatch):
+    """Los cuatro detectores escribían su prosa a mano, en castellano.
+
+    `main.py` se los pasa a `notificar.avisar_dueno`, que los manda tal cual: un
+    dueño con IDIOMA_GERENCIA=en recibía el consejo entero en castellano aunque
+    todo lo demás del agente ya le contestara en inglés. El módulo lo sabía —los
+    `TODO(idioma)` nombraban estas claves— y quedó pendiente porque se escribió
+    mientras otra rama editaba el catálogo.
+
+    Se corre la MISMA detección dos veces y se exige que difieran, y que ninguno
+    sea la clave cruda: `idioma.t` devuelve la clave cuando no existe, así que
+    «está en inglés» no distingue una traducción de una clave sin cargar.
+
+    MUTACIÓN: volver el `titulo`/`cuerpo` de `perdidas` a su literal castellano.
+    Cae ésta y sólo ésta.
+    """
+    erp.tablas["Sales Order"] = [pedido("SO-1")]
+    erp.tablas["Sales Order Item"] = [renglon("SO-1", "LECHE-1L", qty=10, rate=100.0)]
+    erp.tablas["Item Price"] = [precio()]
+
+    monkeypatch.setenv("IDIOMA_GERENCIA", "es")
+    en_es = consejos.perdidas(HOY)
+    monkeypatch.setenv("IDIOMA_GERENCIA", "en")
+    en_en = consejos.perdidas(HOY)
+
+    assert len(en_es) == len(en_en) == 1
+    uno_es, uno_en = en_es[0], en_en[0]
+
+    assert uno_es.titulo != uno_en.titulo, "el título sale igual en los dos idiomas"
+    assert uno_es.cuerpo != uno_en.cuerpo, "el cuerpo sale igual en los dos idiomas"
+    assert "consejo." not in uno_en.titulo + uno_en.cuerpo, "salió la clave cruda"
+    # Los dos lados escritos acá, no leídos del catálogo.
+    assert "por debajo del costo" in uno_es.titulo
+    assert "below cost" in uno_en.titulo
+    # Y el DATO no se traduce: el número de pedido vale igual en los dos.
+    assert "SO-1" in uno_es.cuerpo and "SO-1" in uno_en.cuerpo
+    # La clave durable tampoco cambia con el idioma: si cambiara, el mismo
+    # consejo se mandaría dos veces al cambiar de idioma.
+    assert uno_es.clave == uno_en.clave

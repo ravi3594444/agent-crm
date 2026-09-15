@@ -96,6 +96,11 @@ ERROR_PARSE = -32700
 ERROR_PETICION_INVALIDA = -32600
 ERROR_METODO = -32601
 ERROR_PARAMETROS = -32602
+
+# El centinela que separa «no vino `params`» de «vino `params: null`». Un
+# `.get("params")` pelado los hace indistinguibles, y la especificación dice
+# opcional, no anulable.
+_SIN_PARAMS = object()
 ERROR_INTERNO = -32603
 
 
@@ -342,8 +347,16 @@ def despachar(peticion: object, telefono: str) -> dict | None:
     # salía por el transporte: 500 por HTTP, y en stdio se lleva el servidor
     # puesto. Una sola comprobación acá cubre initialize, tools/call y lo que
     # se agregue después.
-    parametros = peticion.get("params")
-    if parametros is not None and not isinstance(parametros, dict):
+    #
+    # Y UN `"params": null` EXPLÍCITO NO ES LO MISMO QUE OMITIRLO. Con
+    # `.get("params")` los dos daban `None` y los dos salteaban la validación,
+    # así que el mismo cuerpo malformado se contestaba distinto según el
+    # método: `initialize` lo aceptaba como si nada y `tools/call` devolvía un
+    # RESULTADO con `isError` —que del otro lado se lee como «la herramienta
+    # corrió y falló»— en vez de un error de protocolo. `null` no es un objeto
+    # en ninguna de las dos, así que se rechaza en las dos, acá.
+    parametros = peticion.get("params", _SIN_PARAMS)
+    if parametros is not _SIN_PARAMS and not isinstance(parametros, dict):
         if es_notificacion:
             return None
         return _error(ident, ERROR_PARAMETROS, "params must be an object")

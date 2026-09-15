@@ -28,7 +28,7 @@ import pathlib
 
 import pytest
 
-from app import limites, locks, memoria, policy, router, solicitudes
+from app import idioma, limites, locks, memoria, policy, router, solicitudes
 from app.runtime_context import SIN_PERMISO
 from app.tools.memoria import anotar_dato, ver_memoria
 from tests.conftest import FakeRedis
@@ -742,6 +742,41 @@ def test_la_pregunta_que_lee_el_dueno_sale_en_su_idioma() -> None:
     assert "run up a balance" in en_en
     # Y el castellano de la tupla no cambió: es lo que sigue viendo el prompt.
     assert hueco.pregunta == en_es
+
+
+@pytest.mark.parametrize("clave", [h.clave for h in memoria.HUECOS])
+@pytest.mark.parametrize("lengua", list(idioma.IDIOMAS))
+def test_todos_los_huecos_estan_en_el_catalogo_en_todos_los_idiomas(
+    clave: str, lengua: str
+) -> None:
+    """El barrido, porque la de arriba mira UN hueco y `HUECOS` va a crecer.
+
+    `idioma.t` devuelve la CLAVE cuando la fila no existe, así que un hueco
+    nuevo sin traducir no rompe nada: le llega al dueño la cadena
+    `memoria.hueco.lo_que_sea` y la suite sigue verde. Esto lo convierte en un
+    fallo, para cada hueco y cada idioma que el producto dice hablar.
+
+    El assert no compara contra el catálogo —los dos lados se moverían juntos—:
+    compara contra LA CLAVE, que es exactamente lo que sale cuando falta la
+    fila. Y contra el castellano de la tupla, que es lo que salía antes.
+
+    MUTACIÓN: borrar una fila `memoria.hueco.*` del catálogo. Cae la celda de
+    ese hueco en los DOS idiomas y ninguna otra.
+    """
+    hueco = memoria._HUECOS_POR_CLAVE[clave]
+
+    salida = hueco.texto(lengua)
+
+    assert salida, "la pregunta salió vacía"
+    assert f"memoria.hueco.{clave}" != salida, (
+        f"«{clave}» no está en el catálogo: sale la clave cruda"
+    )
+    assert "memoria.hueco" not in salida
+    # Y en inglés, además, que no sea el castellano de la tupla sin tocar. Sin
+    # esto una fila EN copiada del ES pasaría, que es el modo más probable de
+    # equivocarse cargando el catálogo.
+    if lengua != idioma.ES:
+        assert salida != hueco.pregunta, "la fila EN es el castellano copiado"
 
 
 def test_la_herramienta_devuelve_la_pregunta_traducida(monkeypatch, almacen) -> None:

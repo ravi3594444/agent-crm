@@ -460,7 +460,7 @@ def test_el_titulo_que_ve_el_harness_es_el_negocio_del_dueno(con_token, monkeypa
     assert "Lácteos" not in titulo
 
 
-@pytest.mark.parametrize("params", [[1, 2], "hola", 7, True])
+@pytest.mark.parametrize("params", [[1, 2], "hola", 7, True, None])
 def test_un_params_que_no_es_objeto_es_un_error_y_no_una_excepcion(con_token, params):
     """Lo que entra por la red no tiene por qué ser lo que la spec promete.
 
@@ -477,6 +477,46 @@ def test_un_params_que_no_es_objeto_es_un_error_y_no_una_excepcion(con_token, pa
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params},
         DUENO,
     )
+    assert respuesta["error"]["code"] == mcp_server.ERROR_PARAMETROS
+    assert "result" not in respuesta
+
+
+def test_omitir_params_sigue_siendo_valido(con_token):
+    """La otra mitad del centinela, sin la cual se cumple rechazando todo.
+
+    La spec dice `params` OPCIONAL. `initialize` sin `params` tiene que
+    contestar un resultado, no un error — es lo que manda un cliente que no
+    negocia nada.
+
+    MUTACIÓN: `peticion.get("params", _SIN_PARAMS)` -> `peticion.get("params",
+    None)`, o sea volver a tratar la ausencia como un `null` rechazable. Cae
+    ésta y sólo ésta.
+    """
+    respuesta = mcp_server.despachar(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize"}, DUENO
+    )
+
+    assert "error" not in respuesta
+    assert respuesta["result"]["serverInfo"]
+
+
+def test_un_tools_call_con_params_null_es_un_error_de_protocolo(con_token):
+    """Y NO un resultado con `isError`, que es lo que devolvía.
+
+    `params` es obligatorio en `tools/call` —lleva el `name`—, así que
+    `"params": null` es un cuerpo malformado. Contestarlo con
+    `{"content": [...], "isError": true}` le dice al modelo del otro lado que
+    la herramienta CORRIÓ y falló: va a reintentar con otros argumentos en vez
+    de arreglar la petición. El mismo `null` en `initialize` pasaba de largo.
+
+    MUTACIÓN: en `despachar`, `peticion.get("params", _SIN_PARAMS)` ->
+    `peticion.get("params")`. Cae ésta, la celda `None` de la parametrizada de
+    arriba, y ninguna otra.
+    """
+    respuesta = mcp_server.despachar(
+        {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": None}, DUENO
+    )
+
     assert respuesta["error"]["code"] == mcp_server.ERROR_PARAMETROS
     assert "result" not in respuesta
 

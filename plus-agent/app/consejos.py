@@ -108,7 +108,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from itertools import pairwise
 
-from app import erpnext, inventario, locks, reloj
+from app import erpnext, idioma, inventario, locks, reloj
 from app.formato import pesos
 
 # --------------------------------------------------------------- las clases
@@ -186,8 +186,10 @@ _PREFIJO = "plus-agent:consejo"
 # la salida cuando no hay certeza, en vez de una cuenta hecha con un costo
 # adivinado.
 #
-# TODO(idioma): clave `consejo.sin_costo`. `app/idioma.py` lo está editando otra
-# sesión en paralelo, así que va como literal y con la clave anotada.
+# Los textos de los consejos salen del catálogo (`consejo.*`). Estaba escrito a
+# mano con un TODO porque el módulo se escribió mientras otra rama editaba
+# `app/idioma.py`; el TODO se cobró: con IDIOMA_GERENCIA=en el dueño recibía
+# los consejos en castellano.
 SIN_COSTO = "no pude verificar el costo"
 
 
@@ -571,6 +573,13 @@ def perdidas(dia: date) -> list[Consejo]:
                 ["company", "=", empresa],
                 ["docstatus", "=", 1],
                 ["transaction_date", ">=", desde],
+                # EL BORDE DE ARRIBA, que faltaba. Sólo había piso, así que un
+                # pedido emitido con fecha de la semana que viene —que ERPNext
+                # deja hacer— entraba en la ventana y se le presentaba al dueño
+                # como una venta que YA pasó y ya perdió plata. Se filtra
+                # también de este lado, más abajo, porque el servidor puede
+                # ordenar por un campo que Python después no sabe leer.
+                ["transaction_date", "<=", dia.isoformat()],
             ],
             fields=[
                 "name",
@@ -593,11 +602,31 @@ def perdidas(dia: date) -> list[Consejo]:
             "reviso las más nuevas"
         )
         pedidos = pedidos[:MAX_PEDIDOS_PERDIDA]
-    por_nombre = {
-        str(p.get("name") or "").strip(): p
-        for p in pedidos
-        if str(p.get("name") or "").strip()
-    }
+    # LA FECHA SE RESUELVE UNA SOLA VEZ, acá, y el que no tiene una legible no
+    # entra. Antes se resolvía adentro del bucle de renglones con `or dia`, y
+    # ese `or` era el defecto: una fecha ilegible se convertía en HOY, el costo
+    # salía de la lista de precios vigente hoy y el pedido se acusaba de vender
+    # bajo un costo que a lo mejor no era el suyo. `_dia` ya devuelve None
+    # justamente para que nadie la ponga en un extremo — `dormidos` la descarta
+    # igual, dos detectores más abajo.
+    por_nombre: dict[str, dict] = {}
+    fecha_de: dict[str, date] = {}
+    sin_fecha = 0
+    for p in pedidos:
+        nombre = str(p.get("name") or "").strip()
+        if not nombre:
+            continue
+        fecha = _dia(p.get("transaction_date"))
+        if fecha is None or fecha > dia:
+            sin_fecha += 1
+            continue
+        por_nombre[nombre] = p
+        fecha_de[nombre] = fecha
+    if sin_fecha:
+        print(
+            f"[consejos] {sin_fecha} venta(s) sin fecha legible o con fecha "
+            "posterior a hoy: no se revisa su margen"
+        )
     if not por_nombre:
         return []
 
@@ -630,7 +659,7 @@ def perdidas(dia: date) -> list[Consejo]:
         code = str(f.get("item_code") or "").strip()
         uom = str(f.get("uom") or "").strip()
         moneda = str(cabecera.get("currency") or "").strip()
-        dia_pedido = _dia(cabecera.get("transaction_date")) or dia
+        dia_pedido = fecha_de[pedido]
         entrada = acumulado.setdefault(
             pedido,
             {
@@ -682,21 +711,35 @@ def perdidas(dia: date) -> list[Consejo]:
             f"y cuesta {pesos(r['costo'], 2)} — {pesos(r['perdida'], 2)}"
             for r in entrada["renglones"]
         )
-        cuerpo = (
-            # TODO(idioma): clave `consejo.perdida.cuerpo`.
-            f"El pedido {pedido} de {cliente} salió por debajo del costo: "
-            f"{pesos(entrada['perdida'], 2)} contra la lista «{lista}».\n{detalle}"
+        # EL CÓDIGO DE MONEDA DEL PEDIDO, una vez, sobre el total. `pesos` pone
+        # el símbolo que elige `LOCALE` —la forma del número— y nunca el código;
+        # la moneda la dice el pedido, y es el dato. Sin esto un pedido en INR y
+        # uno en ARS se le mostraban al dueño idénticos, "$4.800,00" los dos, y
+        # la moneda quedaba sólo en `datos`, que él no lee. Es la misma línea que
+        # ya arma `notificar.pedir_confirmacion` para el total que autoriza.
+        #
+        # Va sobre el total y no en cada renglón: los renglones de un pedido son
+        # todos de su moneda, así que decirlo una vez alcanza y decirlo seis
+        # veces convierte el detalle en ruido.
+        moneda_pedido = str(cabecera.get("currency") or "").strip()
+        total = f"{pesos(entrada['perdida'], 2)} {moneda_pedido}".strip()
+        lengua = idioma.gerencia()
+        cuerpo = idioma.t(
+            "consejo.perdida.cuerpo", lengua, pedido=pedido, cliente=cliente,
+            perdida=total, lista=lista, detalle=detalle,
         )
         if entrada["sin_costo"]:
             faltantes = ", ".join(sorted(set(entrada["sin_costo"])))
-            cuerpo += f"\n({SIN_COSTO} de: {faltantes}, así que la pérdida es un piso)"
+            cuerpo += idioma.t(
+                "consejo.perdida.piso", lengua,
+                sin_costo=idioma.t("consejo.sin_costo", lengua), faltantes=faltantes,
+            )
         salida.append(
             Consejo(
                 clase=PERDIDA,
                 clave=f"{PERDIDA}:{pedido}",
                 sobre=pedido,
-                # TODO(idioma): clave `consejo.perdida.titulo`.
-                titulo="Una venta por debajo del costo",
+                titulo=idioma.t("consejo.perdida.titulo", lengua),
                 cuerpo=cuerpo,
                 peso=float(entrada["perdida"]),
                 datos={
@@ -820,14 +863,12 @@ def dormidos(dia: date) -> list[Consejo]:
                 clase=DORMIDO,
                 clave=f"{DORMIDO}:{cliente}",
                 sobre=cliente,
-                # TODO(idioma): clave `consejo.dormido.titulo`.
-                titulo="Un cliente dejó de comprar",
-                # TODO(idioma): clave `consejo.dormido.cuerpo`.
-                cuerpo=(
-                    f"{nombre} compraba cada {ritmo:g} días y hace {silencio} que no "
-                    f"pide (último: {ultimo.isoformat()}). Son unos {faltantes} pedidos "
-                    f"de menos, cerca de {pesos(estimado)} a su promedio de "
-                    f"{pesos(promedio)}."
+                titulo=idioma.t("consejo.dormido.titulo", idioma.gerencia()),
+                cuerpo=idioma.t(
+                    "consejo.dormido.cuerpo", idioma.gerencia(),
+                    nombre=nombre, ritmo=f"{ritmo:g}", silencio=silencio,
+                    ultimo=ultimo.isoformat(), faltantes=faltantes,
+                    estimado=pesos(estimado), promedio=pesos(promedio),
                 ),
                 peso=float(estimado),
                 datos={
@@ -882,8 +923,19 @@ def deuda_minima() -> float:
 
 
 def _tramo(dias: int) -> int:
-    """El escalón de antigüedad en el que cae este atraso."""
-    elegido = TRAMOS_DEUDA[0]
+    """El escalón de antigüedad en el que cae este atraso. 0 antes del primero.
+
+    CERO Y NO `TRAMOS_DEUDA[0]`, que es lo que devolvía. `deudas` emite a partir
+    de `CONSEJOS_DEUDA_DIAS`, que el dueño puede poner en 7 o en 20, así que un
+    atraso de 20 días caía en el tramo 30 sin tener 30 — y cuando de verdad
+    llegaba a 30, la clave `deuda:<cliente>:30` ya estaba reclamada y el
+    empeoramiento real no avisaba nada. El tramo tiene que nombrar el escalón
+    que el atraso YA cruzó; antes del primero no cruzó ninguno.
+
+    Con esto, un atraso por debajo de 30 se reclama como `:0` y su TTL de 14
+    días sigue siendo lo que evita el recordatorio semanal dentro de ese rango.
+    """
+    elegido = 0
     for corte in TRAMOS_DEUDA:
         if dias >= corte:
             elegido = corte
@@ -955,13 +1007,12 @@ def deudas(dia: date) -> list[Consejo]:
                 clase=DEUDA,
                 clave=f"{DEUDA}:{cliente}:{tramo}",
                 sobre=cliente,
-                # TODO(idioma): clave `consejo.deuda.titulo`.
-                titulo="Deuda que está envejeciendo",
-                # TODO(idioma): clave `consejo.deuda.cuerpo`.
-                cuerpo=(
-                    f"{entrada['nombre']} debe {pesos(entrada['total'])} en "
-                    f"{entrada['facturas']} factura(s), la más vieja vencida hace "
-                    f"{entrada['atraso']} días (tolerás {tolerancia:g})."
+                titulo=idioma.t("consejo.deuda.titulo", idioma.gerencia()),
+                cuerpo=idioma.t(
+                    "consejo.deuda.cuerpo", idioma.gerencia(),
+                    nombre=entrada["nombre"], total=pesos(entrada["total"]),
+                    facturas=entrada["facturas"], atraso=entrada["atraso"],
+                    tolerancia=f"{tolerancia:g}",
                 ),
                 peso=float(entrada["total"]),
                 datos={
@@ -1093,24 +1144,23 @@ def quiebres(dia: date) -> list[Consejo]:
         fresco, motivo = inventario.confiable(code, deposito)
         supuesto = "" if fresco else motivo
         ya = hay <= nivel
-        cuerpo = (
-            # TODO(idioma): clave `consejo.quiebre.cuerpo`.
-            f"{code}: quedan {hay:g} y el mínimo es {nivel:g}. "
-            f"Se venden {por_dia:.1f} por día y el próximo reparto es el "
-            f"{proximo.isoformat()} ({dias_hasta} día(s)): llegás con {proyectado:.1f}."
+        lengua = idioma.gerencia()
+        cuerpo = idioma.t(
+            "consejo.quiebre.cuerpo", lengua, item_code=code, hay=f"{hay:g}",
+            nivel=f"{nivel:g}", por_dia=f"{por_dia:.1f}",
+            proximo=proximo.isoformat(), dias=dias_hasta,
+            proyectado=f"{proyectado:.1f}",
         )
         if ya:
-            cuerpo += " Ya está por debajo del mínimo."
+            cuerpo += idioma.t("consejo.quiebre.ya_abajo", lengua)
         if supuesto:
-            # TODO(idioma): clave `consejo.quiebre.supuesto`.
-            cuerpo += f"\n(Asumo el stock del sistema: {supuesto}.)"
+            cuerpo += idioma.t("consejo.quiebre.supuesto", lengua, supuesto=supuesto)
         salida.append(
             Consejo(
                 clase=QUIEBRE,
                 clave=f"{QUIEBRE}:{code}:{deposito}",
                 sobre=code,
-                # TODO(idioma): clave `consejo.quiebre.titulo`.
-                titulo="Un producto no llega al próximo reparto",
+                titulo=idioma.t("consejo.quiebre.titulo", lengua),
                 cuerpo=cuerpo,
                 peso=float(nivel - proyectado),
                 supuesto=supuesto,
@@ -1154,12 +1204,29 @@ def _demanda_diaria(
         order_by="transaction_date desc",
     )
     nombres = [str(p.get("name") or "").strip() for p in pedidos]
+    if len(pedidos) > MAX_PEDIDOS_HISTORIA:
+        # La fila de más se pide justamente para saber esto y se descartaba sin
+        # mirarla. Una demanda calculada sobre media ventana es una demanda más
+        # baja, y una demanda más baja es un quiebre que NO se avisa: el silencio
+        # se ve igual que «no hay nada que decir». Los otros topes de este módulo
+        # ya se cuentan (`perdidas` y `dormidos` loguean, `_renglones` levanta).
+        print(
+            f"[consejos] más de {MAX_PEDIDOS_HISTORIA} ventas en la ventana de "
+            "demanda: la proyección de stock sale de menos ventas de las que hubo"
+        )
     nombres = [n for n in nombres if n][:MAX_PEDIDOS_HISTORIA]
     if not nombres:
         return {}
     vendido: dict[str, float] = {}
     for inicio in range(0, len(nombres), LOTE_PEDIDOS):
         lote = nombres[inicio : inicio + LOTE_PEDIDOS]
+        # EL SEGUNDO TECHO de esta función, y se mira igual que el primero.
+        # Se pedía `tope` justo, así que un lote que lo llenaba era
+        # indistinguible de uno que entraba entero: faltaban renglones, la
+        # demanda salía más baja, la proyección más alta y el quiebre no se
+        # avisaba. `+ 1` es la fila que permite darse cuenta, como en
+        # `_renglones`.
+        tope = len(lote) * MAX_RENGLONES_POR_PEDIDO
         filas = erpnext.policy_get_list(
             "Sales Order Item",
             filters=[
@@ -1169,9 +1236,21 @@ def _demanda_diaria(
                 ["docstatus", "=", 1],
             ],
             fields=["parent", "item_code", "warehouse", "stock_qty"],
-            limit=len(lote) * MAX_RENGLONES_POR_PEDIDO,
+            limit=tope + 1,
             parent="Sales Order",
         )
+        if len(filas) > tope:
+            # Se loguea y se sigue, no se levanta: `_renglones` levanta porque
+            # ahí faltar un renglón inventa una pérdida que no existe, y acá
+            # faltar uno sólo achica una demanda. Quedarse sin proyección
+            # tampoco le avisa el quiebre al dueño, así que la cuenta sale con
+            # lo que hay y el log dice con cuánto salió.
+            print(
+                f"[consejos] un lote de {len(lote)} ventas llenó el techo de "
+                f"{MAX_RENGLONES_POR_PEDIDO} renglones por pedido: la demanda "
+                "diaria sale de menos renglones de los que hubo"
+            )
+            filas = filas[:tope]
         for fila in filas:
             if str(fila.get("warehouse") or "").strip() != deposito:
                 continue

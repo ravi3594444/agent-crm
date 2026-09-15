@@ -360,6 +360,68 @@ def test_devolverla_no_la_convierte_en_un_boton_reusable(mundo, monkeypatch) -> 
     assert "ya no" in tercera.lower() or "no está" in tercera.lower()
 
 
+# ------------------------------------- la ventana, DOS veces y la del cliente
+
+
+def test_la_ventana_se_vuelve_a_mirar_recien_cuando_toca_el_boton(mundo, monkeypatch) -> None:
+    """Entre preparar el mensaje y aprobarlo pasa hasta una hora — el TTL de la
+    salida— y las 24 h de Meta corren igual.
+
+    Sin volver a mirarla acá, el mensaje se encola con la ventana ya cerrada, se
+    gasta los ocho reintentos y muere en la cola de descarte: el dueño lee «lo
+    mandé» y el cliente no recibe nada. Es un fallo mudo, que es el peor de los
+    que puede tener un botón de aprobación.
+
+    EL DOBLE DERIVA DE LO QUE RECIBE: `window_open` contesta según el NÚMERO que
+    le pasan y según el momento, no un `return_value` fijo. Con un
+    `Mock(return_value=False)` la prueba pasaría igual si el código consultara la
+    ventana del dueño —que es la que nunca está cerrada cuando él acaba de
+    escribir—, y ésa es justamente la forma equivocada de hacer esta consulta.
+
+    MUTACIÓN: en `app/aprobacion.py`, borrar el `if not
+    outbound_status.window_open(salida.telefono)`. Cae ésta y sólo ésta.
+    """
+    cerradas: set[str] = set()
+    monkeypatch.setattr(
+        outbound_status, "window_open", lambda tel: tel not in cerradas
+    )
+
+    # Se prepara con la ventana ABIERTA: el botón llega a salir.
+    _pedir()
+    id_salida = mundo["botones"].call_args.args[1]
+    mundo["encolar"].assert_not_called()
+
+    # Y una hora después ya no lo está — la del CLIENTE; la del dueño sigue
+    # abierta, porque él es el que está escribiendo.
+    cerradas.add(CLIENTE_TEL)
+    respuesta = aprobacion.manejar_boton(f"mandar:{id_salida}", GERENTE)
+
+    mundo["encolar"].assert_not_called()
+    assert "se cerró la ventana" in respuesta
+    # Y se le dice DE QUIÉN, que es lo que le deja hacer algo al respecto.
+    assert "Panadería San José" in respuesta
+
+
+def test_con_la_ventana_abierta_el_mismo_boton_sí_manda(mundo, monkeypatch) -> None:
+    """La otra mitad, sin la cual la de arriba se cumple no mandando nunca.
+
+    Misma preparación, mismo doble, mismo botón — y la ventana del cliente sigue
+    abierta cuando lo toca.
+    """
+    cerradas: set[str] = set()
+    monkeypatch.setattr(
+        outbound_status, "window_open", lambda tel: tel not in cerradas
+    )
+
+    _pedir()
+    id_salida = mundo["botones"].call_args.args[1]
+    respuesta = aprobacion.manejar_boton(f"mandar:{id_salida}", GERENTE)
+
+    mundo["encolar"].assert_called_once()
+    assert mundo["encolar"].call_args.args[2] == CLIENTE_TEL
+    assert "se cerró la ventana" not in respuesta
+
+
 # ------------------------------------------- a quién le sale, y a qué número
 
 def test_un_nombre_que_le_queda_a_DOS_clientes_no_manda_nada(monkeypatch) -> None:

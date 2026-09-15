@@ -72,9 +72,18 @@ def rubro() -> str:
 
     ESTO ESTABA ESCRITO A MANO: la primera línea del prompt decía «una empresa
     láctea argentina», así que el agente se presentaba como una lechería
-    aunque lo instalara una ferretería. Todo lo demás del prompt ya sale de
-    variables —el nombre del negocio, el del agente, el idioma, la zona—, y el
-    rubro era lo único que ataba el producto a UN cliente.
+    aunque lo instalara una ferretería. Con esto, esa línea —la de `identidad`,
+    la única que dice QUÉ negocio es— sale entera de variables: el nombre del
+    negocio, el del agente y el rubro.
+
+    LO QUE ESTO NO ARREGLA, y conviene tenerlo escrito porque el nombre de la
+    función promete más de lo que hace: el prompt sigue teniendo texto pensado
+    para un distribuidor que le vende a comercios —la línea de `prompts.py` que
+    nombra «almacenes, kioscos, panaderías, rotiserías»— y las descripciones de
+    varias herramientas siguen usando ejemplos lácteos, que el modelo también
+    lee (`tools/captura.py`, `tools/catalogo.py`). Un rubro cargado no los
+    cambia. Genérico de verdad quiere decir sacarlos también, y eso no está
+    hecho.
 
     Se limpia como `identidad`: una sola línea y acotado, porque viene del
     entorno y un valor mal cargado no puede empujar texto adentro del prompt.

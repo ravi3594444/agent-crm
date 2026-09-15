@@ -40,4 +40,6 @@ babel==2.18.0
 # sobre el SDK `mcp` —12 paquetes— y NO CONECTABA: el modo HTTP de
 # `@casys/mcp-erpnext` 3.0.4 exige el protocolo 2026-07-28 y le contesta 400 al
 # SDK, que habla 2025-06-18. Hablar el protocolo directo con el `httpx` que ya
-# estaba es menos código, menos imagen, y encima es lo único que funciona.
+# estaba es menos código y menos imagen. Y es lo único que se PROBÓ que
+# funciona con el SDK 1.30.0 —no que sea lo único posible: la v2 del SDK
+# soporta 2026-07-28 y no se evaluó.
