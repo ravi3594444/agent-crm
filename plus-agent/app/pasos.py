@@ -268,12 +268,19 @@ def correr(
         print(f"[agent] techo de pasos rol={rol} llamadas={llamadas} camino=centinela")
         return _cerrar_y_recordar(
             agente, mensajes,
+            # PISA el centinela en vez de escribir debajo. Esa frase en inglés
+            # la puso LangGraph y el grafo ya la guardó en el hilo: sin esto se
+            # queda ahí los 30 días del checkpointer, y el modelo la lee en cada
+            # turno siguiente como algo que dijo ÉL. Medido: el turno siguiente
+            # veía «Sorry, need more steps to process this request.» entre sus
+            # propios mensajes. `add_messages` reemplaza cuando el id coincide.
+            reemplazar_id=getattr(ultimo, "id", None),
             modelo=modelo, armar_prompt=armar_prompt, config=config,
         )
     return texto_plano(ultimo) if ultimo is not None else ""
 
 
-def _cerrar_y_recordar(agente, mensajes: list, **kw) -> str:
+def _cerrar_y_recordar(agente, mensajes: list, *, reemplazar_id=None, **kw) -> str:
     """El cierre, y además queda ANOTADO en el hilo como algo que el agente dijo.
 
     Sin esto el cliente lee «tengo leche a $1000, ¿te mando 10?» y contesta «sí
@@ -282,12 +289,21 @@ def _cerrar_y_recordar(agente, mensajes: list, **kw) -> str:
     excepción, así que no la escribió nadie — el grafo sólo guarda lo que pasó
     por sus nodos.
 
+    `reemplazar_id` es el id del mensaje que hay que PISAR, y sólo lo usa el
+    camino del centinela: ahí el grafo SÍ escribió algo —su frase en inglés— y
+    anotar debajo dejaría las dos. Sin id, se agrega.
+
     Si la escritura falla, el cliente igual recibe la respuesta: el hilo
     incompleto es un turno peor, y no contestar es el negocio parado.
     """
     texto = cerrar(mensajes, **kw)
+    anotado = (
+        AIMessage(content=texto, id=reemplazar_id)
+        if reemplazar_id
+        else AIMessage(content=texto)
+    )
     try:
-        agente.update_state(kw["config"], {"messages": [AIMessage(content=texto)]})
+        agente.update_state(kw["config"], {"messages": [anotado]})
     except Exception as exc:  # la respuesta ya es del cliente
         print(f"[agent] no pude anotar el cierre en el hilo type={type(exc).__name__}")
     return texto

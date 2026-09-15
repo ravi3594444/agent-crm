@@ -465,3 +465,64 @@ def test_el_cierre_recorta_DESPUES_de_limpiar_y_no_antes():
     assert "Dejame que lo miro." in recibido
     # Y los datos siguen llegando por su propio camino.
     assert f"resultado {max_history() * 2 - 1}" in recibido
+
+
+def test_el_centinela_no_se_queda_guardado_en_el_hilo(mundo, monkeypatch):
+    """No alcanza con que no SALGA: tampoco puede quedar GUARDADO.
+
+    El camino del centinela es el único en que el grafo escribe algo por su
+    cuenta —su frase en inglés— antes de que el cierre conteste. Anotar el
+    cierre DEBAJO deja las dos en el checkpoint, y ahí se quedan los 30 días del
+    TTL: el modelo la lee en cada turno siguiente como algo que dijo él, y
+    termina copiándole el tono a una cadena de error de una biblioteca.
+
+    Medido antes de arreglarlo: el turno 2 veía «Sorry, need more steps to
+    process this request.» entre sus propios mensajes.
+    """
+    guion = [herramientas("consultar_stock_prueba", producto="leche") for _ in range(60)]
+    mundo.instalar("clientes", guion)
+    _instalar_cierre(monkeypatch, "clientes")
+    monkeypatch.setattr(pasos, "limite_de_recursion", lambda n: 3 * n)
+    mundo.turno(CLIENTE, "cuanto sale la leche")
+
+    siguiente = mundo.instalar("clientes", [texto("Listo.")])
+    mundo.turno(CLIENTE, "si dale")
+
+    vistos = siguiente.vistos[0] if siguiente.vistos else []
+    assert vistos, "el turno siguiente no llegó al modelo"
+    for msg in vistos:
+        assert pasos.CENTINELA_SIN_PASOS not in str(getattr(msg, "content", "")), (
+            "el centinela de LangGraph quedó guardado en el hilo"
+        )
+    # Y lo que sí quedó es la respuesta del cierre, una sola vez.
+    cierres = [m for m in vistos if str(getattr(m, "content", "")).startswith("cierre sobre:")]
+    assert len(cierres) == 1, f"el cierre quedó {len(cierres)} veces"
+
+
+def test_el_turno_siguiente_al_techo_no_arrastra_una_llamada_colgada(mundo, monkeypatch):
+    """El techo corta el grafo, y lo que quede en el hilo lo paga el turno que viene.
+
+    Un `AIMessage` con `tool_calls` sin su `ToolMessage` es un 400 en cualquier
+    proveedor compatible con OpenAI, y este techo es lo que hace ALCANZABLE ese
+    corte —con el default de 10007 no se llegaba nunca—. Hoy no pasa, porque
+    LangGraph mira el presupuesto arriba del bucle y el último superpaso
+    completo es el de herramientas; esto lo fija, para que una versión que
+    cambie ese orden rompa un test y no la conversación de un cliente.
+    """
+    guion = [herramientas("consultar_stock_prueba", producto="leche") for _ in range(60)]
+    mundo.instalar("clientes", guion)
+    _instalar_cierre(monkeypatch, "clientes")
+    mundo.turno(CLIENTE, "cuanto sale la leche")
+
+    siguiente = mundo.instalar("clientes", [texto("Listo.")])
+    mundo.turno(CLIENTE, "si dale")
+
+    vistos = siguiente.vistos[0] if siguiente.vistos else []
+    respondidos = {getattr(m, "tool_call_id", None) for m in vistos}
+    colgadas = [
+        c["id"]
+        for m in vistos
+        for c in (getattr(m, "tool_calls", None) or [])
+        if c["id"] not in respondidos
+    ]
+    assert not colgadas, f"quedaron tool_calls sin respuesta: {colgadas}"
