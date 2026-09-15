@@ -1383,6 +1383,43 @@ def chequear_solicitudes(reporte: Reporte) -> None:
         reporte.ok("Borradores trabados", "ninguno")
 
 
+def chequear_memoria_de_clientes(env: Mapping[str, str], reporte: Reporte) -> None:
+    """Si el agente de clientes puede usar lo que el dueño ya contestó.
+
+    NO BLOQUEA: las dos posturas son válidas y el default es la que pidió el
+    dueño. Sale igual por el mismo motivo que la línea de la credencial de MCP:
+    es una decisión sobre QUÉ SE LE CUENTA A UN DESCONOCIDO, y el momento de
+    verla es antes de salir en vivo, no después de que un cliente repita algo
+    que no tenía que escuchar.
+
+    El interruptor se consulta donde vive, pasándole el mapa candidato, y no se
+    vuelve a escribir acá: dos lecturas de la misma variable son dos cosas que
+    tienen que coincidir y nada que las obligue —y la que se equivocaría es
+    ésta, que es la que le dice al dueño qué va a pasar—. La cuenta sale de
+    `memoria.HUECOS`, así que un hueco nuevo mal marcado mueve el número.
+    """
+    try:
+        from app import conversacion, memoria
+    except Exception as exc:  # pragma: no cover - problemas de import
+        reporte.aviso(
+            "Memoria para clientes", f"módulo no disponible ({type(exc).__name__})"
+        )
+        return
+    if not conversacion.memoria_de_clientes_encendida(env):
+        reporte.ok(
+            "Memoria para clientes",
+            "apagada: el agente de clientes no usa ninguna nota del dueño",
+        )
+        return
+    cruzan = sorted(memoria.CLAVES_PARA_CLIENTES)
+    reporte.ok(
+        "Memoria para clientes",
+        f"encendida: cruzan {len(cruzan)} de {len(memoria.HUECOS)} respuestas "
+        f"del dueño ({', '.join(cruzan)}). Lo que no está en esa lista —las "
+        "notas privadas y cualquier clave que él invente— no sale",
+    )
+
+
 def chequear_mcp_externos(env: Mapping[str, str], reporte: Reporte) -> None:
     """Los servidores MCP de terceros: qué se conectó y QUIÉN decide qué pueden.
 
@@ -1417,11 +1454,27 @@ def chequear_mcp_externos(env: Mapping[str, str], reporte: Reporte) -> None:
         return
 
     try:
-        configuracion = mcp_cliente.servidores()
+        # `servidores(env)` y no `servidores()`: `ejecutar` recibe un `.env`
+        # CANDIDATO —el que todavía no está puesto— y lo baja a cada chequeo.
+        # Con `os.environ`, readiness aprobaba los servidores del proceso que lo
+        # corre en vez de los del archivo que le pidieron revisar, y los avisos
+        # de token faltante iban con ellos.
+        configuracion = mcp_cliente.servidores(env)
     except Exception as exc:
-        # `MCP_EXTERNOS` mal escrito. AVISO y no FALTA: sin servidores válidos
-        # el agente arranca con lo suyo, que es el default.
-        reporte.aviso("MCP externos", f"MCP_EXTERNOS no se puede interpretar ({exc})")
+        # DOS CAUSAS, UN MENSAJE, y el mensaje dice la consecuencia y después
+        # la causa. `servidores()` levanta por `MCP_EXTERNOS` mal escrito Y por
+        # un token que saldría en claro hacia un destino que sale a la red — y
+        # el texto viejo («MCP_EXTERNOS no se puede interpretar») leía el
+        # segundo como un error de tipeo, que es justo lo que hace que nadie
+        # mire el rechazo. Lo que las dos comparten es que NO SE CARGÓ NINGÚN
+        # SERVIDOR; el `exc` que se adjunta ya dice cuál de las dos fue, y en el
+        # caso del bearer nombra las dos salidas.
+        #
+        # AVISO y no FALTA por el criterio del módulo: el agente arranca con sus
+        # herramientas, que es el default, y el token justamente NO salió.
+        reporte.aviso(
+            "MCP externos", f"no se cargó ningún servidor externo ({exc})"
+        )
         return
 
     if not configuracion:
@@ -1502,6 +1555,7 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
     chequear_borradores(reporte, con_red=con_red)
     # Al final: es lo único que habla de un alcance que este repo no controla,
     # y leerlo último es leerlo justo antes del veredicto.
+    chequear_memoria_de_clientes(env, reporte)
     chequear_mcp_externos(env, reporte)
     return reporte
 

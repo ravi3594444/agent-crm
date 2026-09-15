@@ -1610,9 +1610,15 @@ def test_una_falla_inesperada_leyendo_el_idioma_no_se_informa_en_verde(
 # así que lo que le toca es decirlo, no callarlo ni fingir que lo miró.
 
 
-def _dos_servidores() -> dict[str, dict]:
+def _dos_servidores(_env=None) -> dict[str, dict]:
     """Un HTTP y un stdio. El doble devuelve los DOS transportes a propósito:
-    con uno solo, un chequeo que ignorara el transporte pasaría igual."""
+    con uno solo, un chequeo que ignorara el transporte pasaría igual.
+
+    Toma `_env` y no lo usa porque `chequear_mcp_externos` llama a
+    `servidores(env)`: un doble de cero argumentos explotaría con un TypeError
+    y el chequeo se leería como roto. Los tests que de verdad miden que se
+    HONRE ese mapa no usan doble, justamente porque un doble que ignora el
+    parámetro no puede discrepar con el código sobre él."""
     return {
         "erpnext": {"transporte": "http", "destino": "http://mcp-erpnext:3012/mcp"},
         "local": {"transporte": "stdio", "destino": "npx -y algo"},
@@ -1677,6 +1683,154 @@ def test_sin_servidores_externos_se_dice_que_no_hay_y_no_avisa_nada() -> None:
     )
     assert lineas[0][:2] == (readiness.OK, "MCP externos")
     assert lineas[0][2].startswith("ninguno")
+
+
+# ---------------------------------------------------------------------------
+# La otra postura que decide qué se le cuenta a un desconocido
+# ---------------------------------------------------------------------------
+
+
+def nivel_de_memoria(reporte) -> str:
+    return _linea_de_memoria(reporte)[0]
+
+
+def _linea_de_memoria(reporte) -> tuple[str, str, str]:
+    lineas = [l for l in reporte.lineas if l[1] == "Memoria para clientes"]
+    assert len(lineas) == 1, f"esperaba UNA línea de memoria, hay {len(lineas)}"
+    return lineas[0]
+
+
+def test_la_postura_de_la_memoria_de_clientes_sale_del_env_CANDIDATO(
+    monkeypatch,
+) -> None:
+    """El informe tiene que hablar del archivo que le pidieron revisar.
+
+    `MEMORIA_PARA_CLIENTES` decide si el agente que atiende desconocidos puede
+    usar lo que el dueño le contestó a su agente de gerencia. Un preflight que
+    dijera «encendida» sobre un `.env` que la apaga —o al revés— es peor que no
+    decir nada: es la clase de postura que se mira UNA vez, antes de salir en
+    vivo, y después se da por sabida.
+
+    El proceso y el candidato se ponen al REVÉS uno del otro en las dos vueltas,
+    que es la única forma de que no se puedan confundir.
+
+    MUTACIÓN: `conversacion.memoria_de_clientes_encendida(env)` ->
+    `...encendida()`. Cae éste y sólo éste.
+    """
+    monkeypatch.setenv("MEMORIA_PARA_CLIENTES", "true")
+    apagada = readiness.ejecutar(dict(BASE, MEMORIA_PARA_CLIENTES="false"), con_red=False)
+    nivel, _, mensaje = _linea_de_memoria(apagada)
+    assert (nivel, mensaje.split(":")[0]) == (readiness.OK, "apagada")
+
+    monkeypatch.setenv("MEMORIA_PARA_CLIENTES", "false")
+    encendida = readiness.ejecutar(dict(BASE, MEMORIA_PARA_CLIENTES="true"), con_red=False)
+    nivel, _, mensaje = _linea_de_memoria(encendida)
+    assert nivel == readiness.OK
+    assert mensaje.startswith("encendida")
+
+
+def test_la_linea_de_memoria_dice_QUE_cruza_y_sale_de_los_huecos(monkeypatch) -> None:
+    """«Encendida» sin decir qué cruza no es una postura: es una palabra.
+
+    El número y los nombres salen de `memoria.CLAVES_PARA_CLIENTES`, o sea de
+    cómo están marcados los huecos, y no de una constante escrita en readiness:
+    un hueco nuevo mal marcado tiene que mover este renglón. El test tampoco lee
+    la constante para armar lo que espera —se movería con ella—: nombra a mano
+    uno que tiene que estar y uno que no.
+
+    MUTACIÓN: `sorted(memoria.CLAVES_PARA_CLIENTES)` ->
+    `sorted(h.clave for h in memoria.HUECOS)` (o sea, decir que cruzan todos).
+    Cae éste y sólo éste.
+    """
+    monkeypatch.delenv("MEMORIA_PARA_CLIENTES", raising=False)
+    reporte = readiness.ejecutar(BASE, con_red=False)
+
+    _, _, mensaje = _linea_de_memoria(reporte)
+
+    assert "horario_corte" in mensaje, "no dice cuáles cruzan"
+    assert "clientes_delicados" not in mensaje, (
+        "el informe anuncia que cruza una nota privada"
+    )
+    # Y no bloquea: las dos posturas son válidas y el default es la que pidió
+    # el dueño. (Comparar este reporte con otro idéntico no probaría nada: los
+    # dos lados se moverían juntos.)
+    assert nivel_de_memoria(reporte) == readiness.OK
+
+
+def test_la_lista_de_servidores_sale_del_env_CANDIDATO_y_no_del_proceso(
+    monkeypatch,
+) -> None:
+    """Lo que readiness revisa es un `.env` que TODAVÍA NO ESTÁ PUESTO.
+
+    Ése es el trabajo del módulo: `ejecutar(env)` recibe un mapa candidato y lo
+    baja a cada chequeo. `mcp_cliente.servidores()` leía `os.environ`, así que
+    este chequeo aprobaba los servidores del proceso que corre readiness en vez
+    de los del archivo que le pidieron revisar — y los avisos de token faltante
+    iban con ellos.
+
+    NO monkeypatchea `servidores`: los otros tests de esta sección le ponen un
+    doble, y un doble no puede discrepar con el código sobre de dónde sale el
+    valor. Acá el proceso NO tiene `MCP_EXTERNOS` y el candidato SÍ, que es la
+    única forma de que los dos mapas no se puedan confundir.
+
+    MUTACIÓN: `mcp_cliente.servidores(env)` -> `mcp_cliente.servidores()`. Cae
+    éste y sólo éste — y para que sea cierto hubo que arreglar el test de abajo,
+    que en la primera corrida se caía con esta misma mutación por accidente:
+    ponía `MCP_EXTERNOS` sólo en el mapa candidato, así que también dependía de
+    que se honrara. Ahora lo pone en los dos lados, idéntico, y el único que
+    mide este hecho es éste.
+    """
+    monkeypatch.delenv("MCP_EXTERNOS", raising=False)
+    monkeypatch.delenv("MCP_EXTERNO_TOKEN_DELCANDIDATO", raising=False)
+    env = dict(BASE, MCP_EXTERNOS="delcandidato=http://mcp-delcandidato:3012/mcp")
+
+    texto = readiness.ejecutar(env, con_red=False).texto()
+
+    assert "delcandidato" in texto, (
+        "readiness leyó el entorno del proceso y no el .env que le pasaron"
+    )
+
+
+def test_un_token_que_saldria_en_claro_se_dice_por_lo_que_es(monkeypatch) -> None:
+    """«No se cargó ningún servidor», y después la causa — no al revés.
+
+    `mcp_cliente.servidores` levanta por DOS motivos: `MCP_EXTERNOS` mal escrito
+    y un token que saldría en claro hacia un destino que sale a la red. El texto
+    viejo de este `except` decía «MCP_EXTERNOS no se puede interpretar», que
+    para el segundo caso es falso y, peor, lo hace leer como un error de tipeo:
+    exactamente lo que logra que nadie mire un rechazo de seguridad.
+
+    Lo que los dos casos comparten es la consecuencia, y eso es lo que encabeza
+    ahora. La causa viene adjunta del `exc`, que en este caso nombra las dos
+    salidas.
+
+    MUTACIÓN: volver el mensaje a «MCP_EXTERNOS no se puede interpretar». Caen
+    DOS: éste y el de la entrada ilegible, y eso es lo correcto — el mensaje es
+    uno solo y los dos motivos lo comparten, que es justamente el punto del
+    cambio. Medido, no supuesto.
+
+    Las dos variables van IDÉNTICAS en `os.environ` y en el mapa candidato, a
+    propósito: así la mutación de la línea de arriba —`servidores(env)` ->
+    `servidores()`— NO cae acá. Ese hecho tiene su propio test, y si este
+    también se cayera con ella, no se sabría cuál de los dos la está midiendo.
+    """
+    monkeypatch.setenv("MCP_EXTERNOS", "afuera=http://mcp.publico.example.com/mcp")
+    monkeypatch.setenv("MCP_EXTERNO_TOKEN_AFUERA", "un-token-largo-de-verdad")
+    env = dict(
+        BASE,
+        MCP_EXTERNOS="afuera=http://mcp.publico.example.com/mcp",
+        MCP_EXTERNO_TOKEN_AFUERA="un-token-largo-de-verdad",
+    )
+
+    reporte = readiness.ejecutar(env, con_red=False)
+    texto = reporte.texto()
+
+    assert "no se cargó ningún servidor externo" in texto
+    # Y la salida, que sale del error de mcp_cliente: sin esto el dueño lee un
+    # rechazo y no sabe qué hacer con él.
+    assert "MCP_EXTERNOS_HTTP_INTERNOS" in texto
+    # No bloquea: el agente arranca con sus herramientas y el token NO salió.
+    assert _bloqueos_de_mcp(reporte) == []
 
 
 def test_con_servidores_externos_se_nombra_la_credencial_que_no_se_puede_ver(
@@ -1779,7 +1933,7 @@ def test_un_MCP_EXTERNOS_ilegible_avisa_y_no_tumba_el_reporte(monkeypatch) -> No
     MUTACIÓN: sacar el `try/except` alrededor de `mcp_cliente.servidores()`.
     Cae éste y sólo éste.
     """
-    def explota() -> dict[str, dict]:
+    def explota(_env=None) -> dict[str, dict]:
         from app.mcp_cliente import MCPExternoError
 
         raise MCPExternoError("la entrada 1 de MCP_EXTERNOS no tiene «nombre=destino»")
@@ -1788,6 +1942,10 @@ def test_un_MCP_EXTERNOS_ilegible_avisa_y_no_tumba_el_reporte(monkeypatch) -> No
 
     texto = _informe(monkeypatch, env, explota)
 
-    assert "no se puede interpretar" in texto
+    assert "no se cargó ningún servidor externo" in texto
+    # Y la causa VIENE ADJUNTA. Es lo que permite que un mensaje sirva para los
+    # dos motivos por los que `servidores` levanta: el que lo lee no se queda
+    # con la consecuencia sola.
+    assert "no tiene «nombre=destino»" in texto
     # Y el informe SIGUE entero: es lo que la excepción se llevaba puesto.
     assert texto.rstrip().endswith(")") and ("LISTO" in texto or "NO LISTO" in texto)

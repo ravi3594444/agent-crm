@@ -11,6 +11,8 @@ bounded tail of the conversation.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import json
 import os
 
@@ -323,7 +325,7 @@ def _bloque_de_memoria() -> str:
         return ""
 
 
-def memoria_de_clientes_encendida() -> bool:
+def memoria_de_clientes_encendida(env: Mapping[str, str] | None = None) -> bool:
     """El interruptor de todo el bloque del lado del cliente. Default: SÍ.
 
     Existe porque esto cambia una decisión que estaba escrita y probada: hasta
@@ -340,8 +342,16 @@ def memoria_de_clientes_encendida() -> bool:
     Vive acá y no en `memoria.py` a propósito: ese módulo no lee UNA sola
     variable de entorno, y lo que este interruptor decide no es qué es la
     memoria sino DÓNDE entra, que es lo que compone este archivo.
+
+    `env` es para `readiness`, que revisa un `.env` CANDIDATO —el que todavía no
+    está puesto—. Va como parámetro y no como una segunda lectura escrita allá,
+    porque dos implementaciones del mismo interruptor son dos cosas que tienen
+    que coincidir y nada que las obligue: el informe diría «encendida» sobre un
+    archivo que la apaga, y ésa es la forma exacta de mentira que un preflight
+    no puede permitirse.
     """
-    return os.getenv("MEMORIA_PARA_CLIENTES", "true").strip().lower() == "true"
+    fuente = os.environ if env is None else env
+    return str(fuente.get("MEMORIA_PARA_CLIENTES", "true") or "").strip().lower() == "true"
 
 
 def _bloque_de_memoria_clientes() -> str:
