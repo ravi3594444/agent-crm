@@ -553,10 +553,21 @@ def bloque(
         )
         partes.append(f"{ENCABEZADO}\n{_MARCO}\n{cuerpo}")
     if hueco is not None:
+        # LA PREGUNTA VA EN EL IDIOMA DEL DUEÑO, aunque el bloque que la rodea
+        # sea castellano. No es una inconsistencia: el bloque son INSTRUCCIONES
+        # PARA EL MODELO —como `SYSTEM_GERENCIA` entero, que también es
+        # castellano a propósito— y la frase entre comillas es lo único de acá
+        # adentro que el modelo tiene que DECIR, textual: la línea de arriba le
+        # pide «preguntale ESTO, y nada más». Con el castellano de la tupla, un
+        # dueño que tiene el sistema en inglés recibía la pregunta en castellano
+        # en medio de una conversación en inglés, y `IDIOMA_REGLA` no alcanza
+        # para desarmar un «preguntá esto textual».
+        from app import idioma
+
         partes.append(
             "TODAVÍA NO SABÉS ESTO\n"
             "Cuando termines de contestar lo que te pidió, preguntale ESTO, y nada más:\n"
-            f"«{hueco.pregunta}»\n"
+            f"«{hueco.texto(idioma.gerencia())}»\n"
             "Con lo que conteste, llamá a anotar_dato con "
             f'sobre="{hueco.clave}" y su respuesta\n'
             "resumida en una frase. Si no contesta o cambia de tema, dejalo pasar: no\n"

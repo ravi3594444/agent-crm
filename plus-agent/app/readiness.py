@@ -1383,6 +1383,92 @@ def chequear_solicitudes(reporte: Reporte) -> None:
         reporte.ok("Borradores trabados", "ninguno")
 
 
+def chequear_mcp_externos(env: Mapping[str, str], reporte: Reporte) -> None:
+    """Los servidores MCP de terceros: qué se conectó y QUIÉN decide qué pueden.
+
+    NO BLOQUEA, y el criterio es el del módulo: bloquear es para cuando el
+    sistema haría algo MAL. Esto es opcional —`MCP_EXTERNOS` vacío es el
+    default y deja al agente con sus herramientas— y el dueño pidió
+    explícitamente que gerencia pueda hacer de todo. Lo que sí hace falta es
+    que la postura se VEA antes de salir en vivo, porque es la única parte del
+    sistema donde el alcance no lo decide este repo.
+
+    LO QUE ESTE ARCHIVO NO PUEDE VERIFICAR, y por eso lo dice en vez de
+    callarlo: un servidor MCP de terceros actúa con UNA credencial de ERPNext
+    —la que tiene en SU entorno, adentro de SU contenedor— y no tiene permisos
+    por herramienta. Las tres identidades de este repo no aplican del otro
+    lado. Así que la pregunta operativa no es «¿qué herramientas cargué?» sino
+    «¿con qué usuario de ERPNext arrancó ese contenedor?», y la respuesta no
+    está en ninguna variable que readiness pueda leer.
+    """
+    # `MCP_EXTERNOS` se lee del `env` que recibe esta función y el PARSEO se
+    # delega al módulo que lo define, inyectado: duplicar acá el formato
+    # `nombre=destino` sería un segundo parser que puede discrepar con el que
+    # de verdad arma los clientes, y entonces readiness diría «dos servidores»
+    # de una línea que el agente lee distinto.
+    if not _valor(env, "MCP_EXTERNOS").strip():
+        reporte.ok("MCP externos", "ninguno: el agente usa sólo sus herramientas")
+        return
+
+    try:
+        from app import mcp_cliente
+    except Exception as exc:  # pragma: no cover - problemas de import
+        reporte.aviso("MCP externos", f"módulo no disponible ({type(exc).__name__})")
+        return
+
+    try:
+        configuracion = mcp_cliente.servidores()
+    except Exception as exc:
+        # `MCP_EXTERNOS` mal escrito. AVISO y no FALTA: sin servidores válidos
+        # el agente arranca con lo suyo, que es el default.
+        reporte.aviso("MCP externos", f"MCP_EXTERNOS no se puede interpretar ({exc})")
+        return
+
+    if not configuracion:
+        # `MCP_EXTERNOS` tiene algo y el parser no sacó ningún servidor: una
+        # línea de comas sueltas. No es lo mismo que no haber configurado nada.
+        reporte.aviso(
+            "MCP externos", "MCP_EXTERNOS tiene un valor del que no sale ningún servidor"
+        )
+        return
+
+    nombres = ", ".join(
+        f"{n} ({a['transporte']})" for n, a in sorted(configuracion.items())
+    )
+    reporte.ok("MCP externos", f"{len(configuracion)}: {nombres}")
+
+    # Un servidor HTTP sin token es un servidor al que le puede pedir cualquiera
+    # que llegue a su puerto. En la compose está en la red interna, así que no
+    # bloquea; pero no se asume.
+    sin_token = sorted(
+        n for n, a in configuracion.items()
+        if a["transporte"] == "http"
+        and not _valor(env, f"MCP_EXTERNO_TOKEN_{n.upper()}").strip()
+    )
+    if sin_token:
+        reporte.aviso(
+            "MCP externos sin token",
+            f"{', '.join(sin_token)}: sin MCP_EXTERNO_TOKEN_<NOMBRE>, le contesta "
+            "a cualquiera que llegue a ese puerto",
+        )
+
+    if not _valor(env, "MCP_EXTERNOS_BLOQUEAR").strip():
+        reporte.aviso(
+            "MCP_EXTERNOS_BLOQUEAR",
+            "vacío: se carga TODO lo que publiquen, incluidos submit, cancel y "
+            "delete. Ver .env.example para los dos dials",
+        )
+
+    # SIEMPRE, con lista de bloqueo o sin ella: el filtro de este lado decide
+    # qué VE el modelo, y la credencial del otro lado decide qué PUEDE. Las dos
+    # cosas hacen falta y sólo una está acá.
+    reporte.aviso(
+        "MCP externos: la credencial",
+        "lo que pueden hacer lo decide el usuario de ERPNext con el que arrancó "
+        "cada contenedor, no este archivo. Revisalo a mano",
+    )
+
+
 # ------------------------------------------------------------------- entry
 
 
@@ -1414,6 +1500,9 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
     # Se pasa con_red en vez de gatear acá: la función se auto-protege y
     # reporta «no verificado», que es la regla del módulo.
     chequear_borradores(reporte, con_red=con_red)
+    # Al final: es lo único que habla de un alcance que este repo no controla,
+    # y leerlo último es leerlo justo antes del veredicto.
+    chequear_mcp_externos(env, reporte)
     return reporte
 
 

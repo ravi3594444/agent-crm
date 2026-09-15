@@ -537,6 +537,47 @@ def test_the_open_question_is_the_same_one_all_turn_long(almacen: FakeRedis) -> 
     assert memoria.bloque_de_prompt().count("TODAVÍA NO SABÉS ESTO") == 1
 
 
+def test_la_pregunta_del_bloque_sale_en_el_idioma_del_dueno(
+    almacen: FakeRedis, monkeypatch
+) -> None:
+    """EL CALL SITE DEL PROMPT, que es distinto del de la herramienta.
+
+    `ver_memoria` ya entregaba la pregunta traducida (su propia prueba, abajo).
+    Esto es el otro consumidor de `Hueco`: el bloque que se le inyecta al
+    prompt en CADA turno. La línea de arriba le dice al modelo «preguntale
+    ESTO, y nada más», así que la frase entre comillas es lo único del bloque
+    que él tiene que decir textual — con el castellano de la tupla, un dueño
+    con el sistema en inglés recibía la pregunta en castellano en medio de una
+    conversación en inglés.
+
+    El RESTO del bloque sigue en castellano y eso es correcto: son
+    instrucciones para el modelo, igual que `SYSTEM_GERENCIA` entero. Por eso
+    el assert exige las dos cosas a la vez.
+
+    MUTACIÓN: `hueco.texto(idioma.gerencia())` -> `hueco.pregunta` en
+    `memoria.bloque`. Cae ésta y sólo ésta — la de `ver_memoria` no la agarra,
+    que es el mismo punto ciego de «probar el primitivo no es probar el
+    arreglo» que ya costó tres hallazgos.
+    """
+    from app import idioma as idioma_mod
+
+    abierta = memoria.reclamar_pregunta()
+    assert abierta is not None
+
+    monkeypatch.setenv("IDIOMA_GERENCIA", "en")
+    bloque = memoria.bloque_de_prompt()
+
+    # La instrucción, en castellano: es para el modelo y no se traduce.
+    assert "TODAVÍA NO SABÉS ESTO" in bloque
+    # Y la frase que tiene que DECIR, en inglés. Escrita acá y no leída del
+    # catálogo: contra `idioma.t(...)` las dos mitades se moverían juntas.
+    assert f"«{abierta.pregunta}»" not in bloque, "salió el castellano de la tupla"
+    assert "«" in bloque and "»" in bloque
+    entre_comillas = bloque.split("«", 1)[1].split("»", 1)[0]
+    assert entre_comillas == abierta.texto(idioma_mod.EN)
+    assert "¿" not in entre_comillas, f"la pregunta salió en castellano: {entre_comillas!r}"
+
+
 def test_answering_the_question_retires_it_for_good(almacen: FakeRedis) -> None:
     abierta = memoria.reclamar_pregunta()
     assert abierta is not None

@@ -1597,3 +1597,182 @@ def test_una_falla_inesperada_leyendo_el_idioma_no_se_informa_en_verde(
     assert "TypeError" in texto
     # Y el informe entero dice que NO está listo, que es lo que alguien mira.
     assert "NO LISTO" in texto
+
+
+# ===========================================================================
+# Los servidores MCP de terceros: lo único cuyo alcance no decide este repo
+# ===========================================================================
+#
+# Es la respuesta a un hallazgo de revisión («las herramientas externas pueden
+# escribir en ERPNext») que NO es un defecto: es la postura que pidió el dueño.
+# Lo que faltaba era que se VIERA antes de salir en vivo. `readiness` no puede
+# verificar la credencial del otro contenedor —vive adentro de ESE contenedor—
+# así que lo que le toca es decirlo, no callarlo ni fingir que lo miró.
+
+
+def _dos_servidores() -> dict[str, dict]:
+    """Un HTTP y un stdio. El doble devuelve los DOS transportes a propósito:
+    con uno solo, un chequeo que ignorara el transporte pasaría igual."""
+    return {
+        "erpnext": {"transporte": "http", "destino": "http://mcp-erpnext:3012/mcp"},
+        "local": {"transporte": "stdio", "destino": "npx -y algo"},
+    }
+
+
+def _reporte(monkeypatch, env: dict, leer=_dos_servidores):
+    from app import mcp_cliente
+
+    monkeypatch.setattr(mcp_cliente, "servidores", leer)
+    return readiness.ejecutar(env, con_red=False)
+
+
+def _informe(monkeypatch, env: dict, leer=_dos_servidores) -> str:
+    return _reporte(monkeypatch, env, leer).texto()
+
+
+def _bloqueos_de_mcp(reporte) -> list[tuple[str, str]]:
+    """Sólo las líneas de MCP que bloquean.
+
+    `BASE` no es un despliegue listo por su cuenta —le faltan dos cosas que no
+    tienen nada que ver con esto—, así que afirmar `"NO LISTO" not in texto`
+    mediría el fixture entero y no el chequeo. Mismo motivo y misma forma que
+    `_bloqueos_del_panel`.
+    """
+    return [
+        (clave, mensaje)
+        for nivel, clave, mensaje in reporte.lineas
+        if nivel in (readiness.FALTA, readiness.ERROR) and clave.startswith("MCP")
+    ]
+
+
+def test_sin_servidores_externos_se_dice_que_no_hay_y_no_avisa_nada() -> None:
+    """El default, y la mitad que evita que los avisos salgan siempre.
+
+    `MCP_EXTERNOS` vacío es lo que trae `.env.example` sin tocar: el agente usa
+    sus herramientas y no hay ninguna postura que revisar. Un chequeo que
+    avisara igual sería un aviso que nadie lee.
+
+    No monkeypatchea nada: con `MCP_EXTERNOS` vacío en el `env`, el chequeo
+    tiene que cortar ANTES de preguntarle a `mcp_cliente`.
+
+    MUTACIÓN: sacar el `return` de esa rama. Cae éste y sólo éste.
+    """
+    texto = readiness.ejecutar(BASE, con_red=False).texto()
+
+    assert "MCP externos: ninguno" in texto
+    assert "MCP_EXTERNOS_BLOQUEAR" not in texto
+    assert "usuario de ERPNext" not in texto
+
+
+def test_con_servidores_externos_se_nombra_la_credencial_que_no_se_puede_ver(
+    monkeypatch,
+) -> None:
+    """LA LÍNEA QUE ES EL PUNTO DE TODO EL CHEQUEO.
+
+    Un servidor MCP de terceros actúa con UNA credencial de ERPNext y no tiene
+    permisos por herramienta: las tres identidades de este repo no aplican del
+    otro lado. Ese dato no está en ninguna variable que readiness pueda leer,
+    así que el chequeo no puede verificarlo y lo que tiene que hacer es decir
+    que hay que mirarlo a mano. Callarlo sería un «LISTO para probar en vivo»
+    sobre un alcance que nadie revisó.
+
+    Sale SIEMPRE que haya servidores, con lista de bloqueo o sin ella: el
+    filtro de este lado decide qué VE el modelo y la credencial del otro lado
+    decide qué PUEDE. Por eso este `env` trae la lista cargada — si el aviso
+    dependiera de ella, este assert se caería.
+
+    MUTACIÓN: meter ese `reporte.aviso` adentro del `if not ...BLOQUEAR`. Cae
+    éste y sólo éste.
+    """
+    env = dict(
+        BASE,
+        MCP_EXTERNOS="erpnext=http://mcp-erpnext:3012/mcp",
+        MCP_EXTERNOS_BLOQUEAR="erpnext_payroll*",
+        MCP_EXTERNO_TOKEN_ERPNEXT="un-token-largo-de-verdad",
+        MCP_EXTERNO_TOKEN_LOCAL="otro-token",
+    )
+
+    reporte = _reporte(monkeypatch, env)
+    texto = reporte.texto()
+
+    assert "usuario de ERPNext" in texto
+    assert "Revisalo a mano" in texto
+    # Y NO bloquea: es opcional y el dueño pidió que gerencia pueda hacer de
+    # todo. Un chequeo que bloqueara acá apagaría la función entera.
+    assert _bloqueos_de_mcp(reporte) == []
+
+
+def test_una_lista_de_bloqueo_vacia_se_avisa_y_una_cargada_no(monkeypatch) -> None:
+    """Las dos mitades, porque una sola se cumple avisando siempre.
+
+    `MCP_EXTERNOS_BLOQUEAR` vacío es el default del módulo y carga TODO lo que
+    el servidor publique, submit y delete incluidos. Con la lista cargada esa
+    decisión ya está tomada y repetirla es ruido.
+
+    MUTACIÓN: `if not _valor(env, "MCP_EXTERNOS_BLOQUEAR").strip()` -> `if
+    True`. Cae éste y sólo éste.
+    """
+    base = dict(
+        BASE,
+        MCP_EXTERNOS="erpnext=http://mcp-erpnext:3012/mcp",
+        MCP_EXTERNO_TOKEN_ERPNEXT="un-token-largo-de-verdad",
+        MCP_EXTERNO_TOKEN_LOCAL="otro-token",
+    )
+
+    vacia = _informe(monkeypatch, base)
+    cargada = _informe(monkeypatch, dict(base, MCP_EXTERNOS_BLOQUEAR="erpnext_payroll*"))
+
+    assert "se carga TODO lo que publiquen" in vacia
+    assert "se carga TODO lo que publiquen" not in cargada
+
+
+def test_un_servidor_http_sin_token_se_avisa_y_uno_stdio_no(monkeypatch) -> None:
+    """El token es POR SERVIDOR y sólo lo pide el que habla por HTTP.
+
+    Un stdio es un proceso hijo: no hay puerto al que llegar y pedirle un
+    bearer no significa nada. Avisar por él enseñaría a ignorar el aviso.
+
+    Los dos servidores del doble están sin token en el `env`, así que el aviso
+    tiene que nombrar al HTTP y NO al stdio: un chequeo que no mirara el
+    transporte los nombraría a los dos y este assert se cae.
+
+    MUTACIÓN: en el `sin_token`, sacar el `a["transporte"] == "http"`. Cae éste
+    y sólo éste.
+    """
+    env = dict(
+        BASE,
+        MCP_EXTERNOS="erpnext=http://mcp-erpnext:3012/mcp,local=npx -y algo",
+        MCP_EXTERNOS_BLOQUEAR="erpnext_payroll*",
+    )
+
+    texto = _informe(monkeypatch, env)
+
+    linea = [l for l in texto.splitlines() if "MCP externos sin token" in l]
+    assert linea, f"no salió el aviso de token:\n{texto}"
+    assert "erpnext" in linea[0]
+    assert "local" not in linea[0]
+
+
+def test_un_MCP_EXTERNOS_ilegible_avisa_y_no_tumba_el_reporte(monkeypatch) -> None:
+    """Una línea mal escrita no puede dejar al dueño sin el resto del informe.
+
+    `servidores()` levanta `MCPExternoError` con una entrada sin `=`. Sin
+    atraparlo, esa excepción sale de `ejecutar` y se lleva puesto TODO el
+    reporte —incluidas las líneas que sí bloquean—, que es el peor momento
+    para quedarse sin diagnóstico.
+
+    MUTACIÓN: sacar el `try/except` alrededor de `mcp_cliente.servidores()`.
+    Cae éste y sólo éste.
+    """
+    def explota() -> dict[str, dict]:
+        from app.mcp_cliente import MCPExternoError
+
+        raise MCPExternoError("la entrada 1 de MCP_EXTERNOS no tiene «nombre=destino»")
+
+    env = dict(BASE, MCP_EXTERNOS="esto-no-tiene-igual")
+
+    texto = _informe(monkeypatch, env, explota)
+
+    assert "no se puede interpretar" in texto
+    # Y el informe SIGUE entero: es lo que la excepción se llevaba puesto.
+    assert texto.rstrip().endswith(")") and ("LISTO" in texto or "NO LISTO" in texto)
