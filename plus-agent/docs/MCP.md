@@ -91,10 +91,12 @@ herramienta de escritorio para el dueño, no una función del producto.
 MCP_EXTERNOS=erpnext=http://mcp-erpnext:3012/mcp
 MCP_EXTERNO_TOKEN_ERPNEXT=<el MCP_AUTH_TOKEN de ese contenedor>
 
-# VACÍO EN ESTA RAMA, por decisión del dueño: la superficie entera, las 125,
-# precios incluidos. La línea que la volvería reversible, si alguna vez:
-#   MCP_EXTERNOS_BLOQUEAR=*_submit,*_cancel,*_delete,erpnext_method_call
-MCP_EXTERNOS_BLOQUEAR=
+# NO saca poderes: saca MÓDULOS que este negocio no usa (RRHH, nómina, activos,
+# manufactura, proyectos). 149 -> 108 herramientas, ~38.200 -> ~29.100 tokens
+# por turno. Submit, cancel y los precios SIGUEN estando, que es lo que el dueño
+# pidió. Ver .env.example para los dos dials que siguen.
+MCP_EXTERNOS_BLOQUEAR=erpnext_asset*,erpnext_attendance*,erpnext_employee*,...
+
 ```
 
 Y el contenedor, en `deploy/mcp-erpnext.compose.yml`:

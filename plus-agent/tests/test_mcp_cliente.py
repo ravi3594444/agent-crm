@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from app import mcp_cliente
-from app.mcp_cliente import ClienteMCP, MCPExternoError
+from app.mcp_cliente import ClienteMCP, MCPExternoError, _bloqueada
 
 VERSION = "2026-07-28"
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
@@ -317,3 +317,48 @@ def test_la_lista_del_agente_no_es_el_mismo_objeto_que_la_publicada():
     from app import graph
 
     assert graph.TOOLS_AGENTE_GERENCIA is not graph.TOOLS_GERENCIA
+
+
+# ------------------------------------------- el default de .env.example
+
+def test_el_bloqueo_por_defecto_saca_modulos_enteros_y_ningun_poder():
+    """`.env.example` trae una lista, no un vacío, y esto dice qué promete.
+
+    La línea existe porque un tercio de las 125 de Casys son de RRHH, nómina,
+    activos, manufactura y proyectos —cosas que una distribuidora no llama
+    nunca— y cada una viaja en el prompt de CADA turno. Lo que este test
+    protege es que ese recorte no se coma un poder: el dueño pidió
+    explícitamente submit, cancel y poder tocar precios.
+
+    Los dos lados se escriben acá y NO se importan del código: contra una
+    constante compartida, las dos mitades del assert se mueven juntas y alguien
+    puede agregar `*_submit` al default sin que nada se entere.
+
+    MUTACIÓN: agregarle `erpnext_doc_submit` (o `*_submit`) a la línea de
+    `.env.example`. Cae éste y sólo éste.
+    """
+    import pathlib
+
+    linea = ""
+    for cruda in (pathlib.Path(__file__).resolve().parents[1] / ".env.example").read_text().splitlines():
+        if cruda.startswith("MCP_EXTERNOS_BLOQUEAR="):
+            linea = cruda.split("=", 1)[1].strip()
+    assert linea, "el default quedó vacío: .env.example ya no recorta nada"
+    patrones = [p.strip() for p in linea.split(",") if p.strip()]
+
+    # Lo que SÍ tiene que sacar: los módulos que este negocio no usa.
+    for ajeno in ("erpnext_payroll_entry_list", "erpnext_salary_slip_get",
+                  "erpnext_leave_application_create", "erpnext_timesheet_list",
+                  "erpnext_asset_create", "erpnext_work_order_create",
+                  "erpnext_bom_list", "erpnext_project_create"):
+        assert _bloqueada(ajeno, patrones), f"{ajeno} debería estar bloqueada"
+
+    # Lo que NO puede sacar: los poderes que el dueño pidió.
+    for poder in ("erpnext_doc_submit", "erpnext_doc_cancel",
+                  "erpnext_sales_order_submit", "erpnext_sales_order_cancel",
+                  "erpnext_item_update", "erpnext_sales_order_create",
+                  "erpnext_payment_entry_list", "erpnext_stock_balance",
+                  "erpnext_ar_aging", "erpnext_customer_get"):
+        assert not _bloqueada(poder, patrones), (
+            f"{poder} es un poder que el dueño pidió y el default se lo comió"
+        )
