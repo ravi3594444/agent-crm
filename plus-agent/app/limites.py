@@ -110,12 +110,9 @@ def motivo(exc: Exception, lengua: str | None = None) -> str:
     Sin clave cae al texto en español, que es exactamente lo que hacía antes:
     una excepción de otro módulo o una vieja sigue saliendo, nunca vacía.
     """
-    clave = str(getattr(exc, "clave", "") or "")
-    if not clave:
-        return str(exc)
     from app import idioma as idioma_mod
 
-    return idioma_mod.t(clave, lengua, **getattr(exc, "datos", {}))
+    return idioma_mod.motivo_de(exc, lengua)
 
 
 # What KIND of value a setting holds. Each kind has exactly one validator and
@@ -1453,8 +1450,16 @@ def cuenta_cargo() -> str:
     return os.getenv(CUENTA_CARGO, "").strip()
 
 
-def resumen() -> list[dict]:
+def resumen(lengua: str | None = None) -> list[dict]:
     """Cada límite con su valor vigente y de dónde salió, para el dueño.
+
+    ``lengua`` decide en qué idioma sale `problema`. Sin ella el texto es el de
+    siempre (`str(exc)`, castellano), que es lo que mira el panel y lo que va
+    al log. LO QUE ARREGLA: `LimiteError` ya viajaba con `clave` y `datos`
+    justamente para esto, y acá se tiraban con un `str(exc)`; el resultado era
+    que `ver_ajustes` armaba una frase en inglés y le metía adentro el motivo
+    en castellano — media frase en cada idioma, que es el mismo defecto que
+    `motivo()` existe para no repetir.
 
     The delivery rows after a wipe read as LOST — valor "", origen PERDIDO and
     the problem spelled out — because that is the state entrega() decides in,
@@ -1475,7 +1480,7 @@ def resumen() -> list[dict]:
                 problema = ""
             except LimiteError as exc:
                 valor = crudo
-                problema = str(exc)
+                problema = motivo(exc, lengua)
         filas.append(
             {
                 "nombre": nombre,
