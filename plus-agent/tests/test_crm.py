@@ -105,11 +105,29 @@ def test_ninguna_herramienta_de_gerencia_deja_que_el_modelo_ponga_un_precio():
     porque las líneas son un modelo anidado y un `rate` viviría ahí adentro.
 
     MUTACIÓN: agregarle `precio: float` a `LineaSimple`. Cae éste y sólo éste.
+    LA EXCEPCIÓN, Y POR QUÉ SIGUE SIENDO UN GUARDIÁN
+    ------------------------------------------------
+    `cambiar_precio` publica `precio` a propósito: el dueño pidió cambiar
+    precios por WhatsApp sin confirmar cada vez, sabiendo que escribir la LISTA
+    influye en lo que se auto-confirma. Esa decisión es suya.
+
+    Lo que NO se afloja es la propiedad. La excepción se nombra UNA vez acá, y
+    el test afirma además que es la ÚNICA: si mañana otra herramienta gana un
+    campo de plata, o si `cambiar_precio` desaparece y alguien deja la excusa
+    puesta, esto se pone rojo. Un guardián con una lista de excepciones abierta
+    no es un guardián; con una lista cerrada y comprobada, sí.
+
+    MUTACIÓN CORRIDA: agregarle `precio: float` a `LineaSimple`. Cae éste y
+    sólo éste — `armar_presupuesto` y `editar_borrador` lo publicarían y no
+    están exceptuados.
     """
     from app import graph
 
     prohibidos = {"rate", "price", "precio", "amount", "importe",
                   "price_list_rate", "discount", "descuento"}
+    # Cerrada y comprobada más abajo. Agregar un nombre acá es una decisión del
+    # dueño sobre su plata, no una forma de poner un test en verde.
+    EXCEPTUADAS = {"cambiar_precio"}
 
     def campos(nodo) -> set[str]:
         encontrados: set[str] = set()
@@ -123,10 +141,23 @@ def test_ninguna_herramienta_de_gerencia_deja_que_el_modelo_ponga_un_precio():
                 encontrados |= campos(x)
         return encontrados
 
+    con_plata = set()
     for herramienta in graph.TOOLS_GERENCIA:
         publicados = campos(herramienta.tool_call_schema.model_json_schema())
         colision = {c for c in publicados if c.lower() in prohibidos}
+        if colision:
+            con_plata.add(herramienta.name)
+        if herramienta.name in EXCEPTUADAS:
+            continue
         assert not colision, f"{herramienta.name} deja poner {colision}"
+
+    # La otra mitad: la lista de excepciones no puede quedar vieja en ninguna de
+    # las dos direcciones. Sin esto, borrar `cambiar_precio` dejaría una excusa
+    # abierta para la próxima herramienta que se llame igual.
+    assert con_plata == EXCEPTUADAS, (
+        f"las herramientas con un campo de plata son {con_plata}, "
+        f"y las exceptuadas {EXCEPTUADAS}"
+    )
 
 
 def test_el_presupuesto_no_manda_ningun_precio_a_erpnext(erp):

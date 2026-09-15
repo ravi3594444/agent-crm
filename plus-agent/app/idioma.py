@@ -2315,6 +2315,14 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: '{item_code}: de {antes} a {ahora} por {unidad}. Releído y confirmado.',
         EN: '{item_code}: from {antes} to {ahora} per {unidad}. Read back and confirmed.',
     },
+    "crm.precio_ya_hoy": {
+        ES: 'A {item_code} ya le cambié el precio hoy. Uno por día por producto: '
+            'así una seguidilla de cambios chicos no termina siendo uno grande '
+            'sin que lo veas. Mañana lo muevo de nuevo.',
+        EN: "I already changed {item_code}'s price today. One per product per day, "
+            "so a run of small changes does not add up to a big one behind your "
+            "back. I can move it again tomorrow.",
+    },
     "crm.precio_error": {
         ES: 'No pude con el precio: {exc}',
         EN: 'I could not do the price: {exc}',

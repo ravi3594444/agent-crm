@@ -80,6 +80,10 @@ ARGUMENTOS: dict[str, dict] = {
     },
     "editar_borrador": {"pedido": "SAL-ORD-2026-00001", "fecha_entrega": "2026-12-01"},
     "actualizar_producto": {"item_code": "LECHE-ENT-1L", "descripcion": "Leche entera."},
+    # Escribe el precio de LISTA, así que la negativa por permiso importa más
+    # acá que en casi cualquier otra: es la única de las 21 que mueve un número
+    # del que después depende la auto-confirmación.
+    "cambiar_precio": {"producto": "LECHE-ENT-1L", "precio": 1850.0},
 }
 
 # Cómo se niega cada una. Casi todas comparten SIN_PERMISO; las que ya tenían su
@@ -245,10 +249,12 @@ def test_every_management_only_tool_is_covered_by_this_file() -> None:
     for nombre, ramas in COLAPSADAS.items():
         probadas = {a["que"] for n, a in LLAMADAS if n == nombre}
         assert probadas == set(ramas), f"{nombre}: faltan ramas {set(ramas) - probadas}"
-    # 20 hoy: 15 de lectura —eran 19, con cinco informes sueltos que ahora son
-    # uno— más las 5 de escritura de app/tools/crm.py. El número está acá para
-    # que un cambio de superficie se note, que es justo lo que acaba de pasar.
-    assert len(SOLO_GERENCIA) == 20
+    # 21 hoy: 15 de lectura —eran 19, con cinco informes sueltos que ahora son
+    # uno— más las 6 de escritura de app/tools/crm.py, la sexta `cambiar_precio`.
+    # El número está acá para que un cambio de superficie se note, que es justo
+    # lo que acaba de pasar: la herramienta entró y este test se puso rojo antes
+    # de que nadie se acordara de darle un caso de autorización.
+    assert len(SOLO_GERENCIA) == 21
 
 
 def test_no_management_tool_accepts_a_phone_or_an_identity_argument() -> None:
