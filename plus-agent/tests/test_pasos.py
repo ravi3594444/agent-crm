@@ -526,3 +526,120 @@ def test_el_turno_siguiente_al_techo_no_arrastra_una_llamada_colgada(mundo, monk
         if c["id"] not in respondidos
     ]
     assert not colgadas, f"quedaron tool_calls sin respuesta: {colgadas}"
+
+
+# --------- 7. el otro disparador: el proveedor que se cae a mitad del turno
+
+
+def test_un_429_a_mitad_del_turno_contesta_con_lo_averiguado(mundo, monkeypatch, webhook):
+    """El MISMO defecto que el techo, con el disparador que de verdad pasa.
+
+    Medido antes de arreglarlo: tres herramientas corrían y devolvían stock,
+    precio y pedidos, el proveedor devolvía 429 en la cuarta llamada, y el
+    cliente recibía «tuve un problema técnico». Las tres respuestas se tiraban.
+
+    Y el cierre es la llamada con MÁS chance de pasar justo ahí: va sin
+    herramientas, mientras que una llamada normal de gerencia manda ~29.100
+    tokens sólo de esquemas. Contra un tope de tokens por minuto, ésa es toda la
+    diferencia.
+    """
+    from test_progreso import OpenAIRateLimitError, falla
+
+    mundo.instalar("clientes", [
+        herramientas("consultar_stock_prueba", producto="leche"),
+        herramientas("ver_precio_prueba", producto="leche"),
+        falla(OpenAIRateLimitError("429 rate limit")),
+    ])
+    cierre = _instalar_cierre(monkeypatch, "clientes")
+
+    mundo.turno(CLIENTE, "cuanto sale la leche")
+    dichos = mundo.salida.textos(CLIENTE)
+
+    assert cierre.entradas, "el turno murió en la disculpa con dos consultas ya hechas"
+    assert dichos and dichos[-1].startswith("cierre sobre:")
+    assert webhook.texto_error_tecnico("es") not in dichos
+    assert webhook.texto_error_tecnico_avisado("es") not in dichos
+    # Y lo que las herramientas devolvieron llegó al cierre.
+    recibido = cierre.texto_recibido()
+    assert "stock de leche: 12" in recibido
+    assert "precio de leche: 1000" in recibido
+
+
+def test_un_429_ANTES_de_averiguar_nada_deja_la_disculpa_de_siempre(
+    mundo, monkeypatch, webhook
+):
+    """Sin un resultado de herramienta no hay respuesta que dar.
+
+    Una llamada más contra un proveedor que acaba de fallar es latencia que el
+    cliente paga para escuchar la misma disculpa. Es la mitad que decide que
+    esto sea una recuperación y no un reintento disfrazado.
+    """
+    from test_progreso import OpenAIRateLimitError, falla
+
+    mundo.instalar("clientes", [falla(OpenAIRateLimitError("429 rate limit"))])
+    cierre = _instalar_cierre(monkeypatch, "clientes")
+
+    mundo.turno(CLIENTE, "hola")
+    dichos = mundo.salida.textos(CLIENTE)
+
+    assert not cierre.entradas, "pagó una llamada de cierre sin nada que contar"
+    assert dichos[-1] in {
+        webhook.texto_error_tecnico("es"),
+        webhook.texto_error_tecnico_avisado("es"),
+    }
+
+
+def test_recuperarse_del_error_no_lo_hace_desaparecer_del_log(
+    mundo, monkeypatch, capsys
+):
+    """Un turno RECUPERADO no puede verse igual que uno que salió bien.
+
+    El TIPO del error ya se veía sin esto: `app/progreso.py` lo anota en
+    `error_modelo` desde el callback y `_log_turno` lo imprime en la línea de
+    latencia, pase lo que pase después. Asumir que sin este print el error
+    quedaba invisible era falso, y la primera versión de este test lo afirmaba
+    —y por eso sobrevivía a que le sacaran el print, que es un test incapaz de
+    fallar sobre la línea que dice cubrir—.
+
+    Lo que la línea de latencia NO dice es si la persona recibió una respuesta o
+    una disculpa: `[agent] error …` deja de salir cuando la excepción se ataja
+    acá. O sea que sin este renglón, un turno recuperado y uno que terminó en
+    disculpa se leen igual en el log, y lo único que los distingue es lo que
+    recibió alguien que no está mirando el log.
+    """
+    from test_progreso import OpenAIRateLimitError, falla
+
+    mundo.instalar("clientes", [
+        herramientas("consultar_stock_prueba", producto="leche"),
+        falla(OpenAIRateLimitError("429 rate limit")),
+    ])
+    _instalar_cierre(monkeypatch, "clientes")
+
+    mundo.turno(CLIENTE, "cuanto sale la leche")
+
+    salida = capsys.readouterr().out
+    assert "el turno se cortó" in salida, "no se ve que este turno se haya recuperado"
+    assert "OpenAIRateLimitError" in salida.split("el turno se cortó")[1].split("\n")[0], (
+        "el renglón de la recuperación no dice de qué se recuperó"
+    )
+
+
+def test_si_el_cierre_tambien_falla_tras_un_429_queda_la_disculpa(
+    mundo, monkeypatch, webhook
+):
+    """El proveedor caído se lleva puesto también al cierre: el piso no se mueve."""
+    from test_progreso import OpenAIRateLimitError, falla
+
+    mundo.instalar("clientes", [
+        herramientas("consultar_stock_prueba", producto="leche"),
+        falla(OpenAIRateLimitError("429 rate limit")),
+    ])
+    monkeypatch.setattr(graph_real, "_modelo_clientes", ModeloDeCierreRoto())
+
+    mundo.turno(CLIENTE, "cuanto sale la leche")
+    dichos = mundo.salida.textos(CLIENTE)
+
+    assert dichos[-1] in {
+        webhook.texto_error_tecnico("es"),
+        webhook.texto_error_tecnico_avisado("es"),
+    }

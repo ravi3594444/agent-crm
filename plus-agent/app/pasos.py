@@ -262,6 +262,36 @@ def correr(
             agente, _mensajes_del_hilo(agente, con_techo),
             modelo=modelo, armar_prompt=armar_prompt, config=config,
         )
+    except Exception as exc:
+        # EL TURNO SE CORTÓ POR OTRA COSA, y lo más probable en vivo es un 429
+        # del proveedor: la clave de Gemini en free tier es el problema #1 de
+        # CLAUDE.md. Tirar lo averiguado y pedir perdón es el MISMO defecto que
+        # el del techo, con otro disparador — y con éste, que es el frecuente.
+        #
+        # El cierre además es la llamada con MÁS chance de pasar justo acá: va
+        # SIN herramientas, y el turno de gerencia manda ~29.100 tokens sólo de
+        # esquemas de herramienta en cada llamada normal (docs/MCP.md lo mide).
+        # Contra un tope de tokens por minuto, ésa es la diferencia.
+        #
+        # SÓLO si hay algo que contar. Sin un resultado de herramienta no hay
+        # respuesta que dar, y una llamada más contra un proveedor que acaba de
+        # fallar es latencia que el cliente paga para escuchar la misma
+        # disculpa. Sin hallazgos se relanza y queda EXACTAMENTE el
+        # comportamiento anterior.
+        #
+        # Se loguea igual que lo loguearía `_generate_response`: recuperarse de
+        # un error no puede convertirlo en un error que no pasó.
+        recuperables = _mensajes_del_hilo(agente, con_techo)
+        if _hallazgos(recuperables) == _SIN_HALLAZGOS:
+            raise
+        print(
+            f"[agent] el turno se cortó rol={rol} type={type(exc).__name__}: "
+            "cierro con lo que ya averiguó"
+        )
+        return _cerrar_y_recordar(
+            agente, recuperables,
+            modelo=modelo, armar_prompt=armar_prompt, config=config,
+        )
     mensajes = list(salida.get("messages") or [])
     ultimo = mensajes[-1] if mensajes else None
     if ultimo is not None and texto_plano(ultimo).strip() == CENTINELA_SIN_PASOS:
