@@ -1281,7 +1281,7 @@ class DashboardAPI:
         confirm_match = re.fullmatch(r"/orders/([^/]{1,140})/confirm", path)
         readers = {
             "/snapshot": snapshot, "/controls": controls, "/operations": operations,
-            "/today": today, "/queue": queue,
+            "/today": today, "/queue": queue, "/sales": sales,
         }
         if path == "/config" and scope["method"] == "GET":
             # No company, model, origin, or business data is returned before auth.
@@ -1381,6 +1381,166 @@ class DashboardAPI:
             await reply(502, {"error": "Could not read CRM data. Check the agent service."})
             return
         await reply(200, data)
+
+
+
+# ------------------------------------------------------------------ ventas
+
+
+# DOS ventanas en UNA respuesta, y no un parámetro de período.
+#
+# El selector 7/30 del panel es de CLIENTE: `periodOrders()` ya filtra el
+# snapshot en el navegador, y `readers[path]` se llama SIN argumentos —no hay
+# query string en esta API—. Un top de productos no se puede recortar en el
+# navegador (haría falta el desglose por producto y por día, que es la consulta
+# entera otra vez), así que las dos ventanas se calculan acá, de una sola
+# lectura, y el panel elige cuál muestra. Una lectura, dos respuestas.
+VENTANA_VENTAS = 30
+
+
+def _agregar_ventas(pedidos: list[dict], renglones: list[dict], desde) -> dict:
+    """Los totales de UNA ventana. Se llama dos veces sobre la misma lectura."""
+    dentro = [p for p in pedidos if _dia_de(p) and _dia_de(p) >= desde]
+    nombres = {str(p.get("name") or "") for p in dentro}
+    total = sum(_float(p.get("grand_total")) for p in dentro)
+    por_cliente: dict[str, dict] = {}
+    for p in dentro:
+        cuenta = str(p.get("customer") or "")
+        if not cuenta:
+            continue
+        fila = por_cliente.setdefault(cuenta, {
+            "id": cuenta, "name": str(p.get("customer_name") or cuenta),
+            "orders": 0, "total": 0.0,
+        })
+        fila["orders"] += 1
+        fila["total"] += _float(p.get("grand_total"))
+    por_producto: dict[str, dict] = {}
+    for r in renglones:
+        if str(r.get("parent") or "") not in nombres:
+            continue
+        code = str(r.get("item_code") or "")
+        if not code:
+            continue
+        fila = por_producto.setdefault(code, {
+            "id": code, "name": str(r.get("item_name") or code),
+            "quantity": 0.0, "total": 0.0,
+        })
+        fila["quantity"] += _float(r.get("qty"))
+        fila["total"] += _float(r.get("amount"))
+    orden = lambda fila: -fila["total"]  # noqa: E731
+    return {
+        "total": round(total, 2),
+        "orders": len(dentro),
+        # Sin pedidos el promedio NO es 0: es «no hay promedio». Un 0 en la
+        # pantalla se lee como «vendí y el ticket fue cero».
+        "averageOrder": round(total / len(dentro), 2) if dentro else None,
+        "topCustomers": sorted(por_cliente.values(), key=orden)[:10],
+        "topProducts": sorted(por_producto.values(), key=orden)[:10],
+    }
+
+
+def sales() -> dict:
+    """Ventas CONFIRMADAS (docstatus=1) de esta empresa, últimos 30 días.
+
+    Es una consulta propia y no `gerencia._ventas_del_periodo`: esa herramienta
+    devuelve PROSA para el modelo —una frase con el total y el promedio ya
+    formateados— y de una frase no sale un gráfico. Los filtros son los mismos.
+
+    `company` va en el filtro por el mismo motivo que en `snapshot`: un ERPNext
+    puede tener varias empresas y este panel es de una.
+    """
+    from datetime import timedelta
+
+    from app import erpnext, policy
+
+    errors: list[str] = []
+    truncated: list[str] = []
+    empresa = erpnext.default_company()
+    hoy = policy._hoy_del_negocio()
+    desde = hoy - timedelta(days=VENTANA_VENTAS)
+
+    with erpnext.manager_scope():
+        try:
+            moneda = str(
+                erpnext.get_doc("Company", empresa, timeout=READ_TIMEOUT).get("default_currency") or ""
+            )
+        except erpnext.ERPNextError:
+            moneda, _ = "", errors.append("currency")
+        try:
+            pedidos = erpnext.get_list(
+                "Sales Order",
+                filters=[["docstatus", "=", 1], ["company", "=", empresa],
+                         ["transaction_date", ">=", desde.isoformat()]],
+                fields=["name", "customer", "customer_name", "grand_total", "transaction_date"],
+                order_by="transaction_date desc", limit=LIMIT, timeout=READ_TIMEOUT,
+            )
+        except erpnext.ERPNextError:
+            errors.append("sales")
+            pedidos = None
+        if pedidos is None:
+            return {"currency": moneda, "since": desde.isoformat(), "until": hoy.isoformat(),
+                    "last7": None, "last30": None, "daily": None,
+                    "errors": errors, "truncated": truncated}
+        if len(pedidos) >= LIMIT:
+            truncated.append("sales")
+        renglones: list[dict] = []
+        if pedidos:
+            try:
+                renglones = erpnext.get_list(
+                    "Sales Order Item",
+                    # `parent` NO es opcional en una tabla hija: Frappe la
+                    # rechaza sin él, y ese fue exactamente el bug por el que
+                    # `informe(que="stock_bajo")` nunca contestó contra un
+                    # ERPNext real. Es el DOCTYPE padre, no el documento.
+                    parent="Sales Order",
+                    filters=[["parent", "in", [str(p.get("name") or "") for p in pedidos]]],
+                    fields=["parent", "item_code", "item_name", "qty", "amount"],
+                    limit=LIMIT * 8, timeout=READ_TIMEOUT,
+                )
+            except erpnext.ERPNextError:
+                errors.append("products")
+
+    por_dia: dict[str, dict] = {}
+    for p in pedidos:
+        dia = _dia_de(p)
+        if not dia:
+            continue
+        fila = por_dia.setdefault(dia.isoformat(), {"date": dia.isoformat(), "total": 0.0, "orders": 0})
+        fila["total"] += _float(p.get("grand_total"))
+        fila["orders"] += 1
+    for fila in por_dia.values():
+        fila["total"] = round(fila["total"], 2)
+
+    return {
+        "currency": moneda,
+        "since": desde.isoformat(),
+        "until": hoy.isoformat(),
+        "last7": _agregar_ventas(pedidos, renglones, hoy - timedelta(days=7)),
+        "last30": _agregar_ventas(pedidos, renglones, desde),
+        "daily": sorted(por_dia.values(), key=lambda f: f["date"]),
+        "errors": errors,
+        "truncated": truncated,
+    }
+
+
+def _dia_de(pedido: dict):
+    """`transaction_date` como date, o None si no se puede leer."""
+    from datetime import date
+
+    crudo = pedido.get("transaction_date")
+    if isinstance(crudo, date):
+        return crudo
+    try:
+        return date.fromisoformat(str(crudo)[:10])
+    except ValueError:
+        return None
+
+
+def _float(valor: object) -> float:
+    try:
+        return float(valor or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def install_dashboard(application) -> None:

@@ -14,6 +14,7 @@ dashboard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dashboard)
 
 TOKEN = "dashboard-test-token-with-32-or-more-characters"
+dashboard_erp_error = type("ERPNextError", (RuntimeError,), {})
 
 
 def request(method="GET", token=None, origin=None, path="/snapshot"):
@@ -288,3 +289,130 @@ class DashboardIdentityTest(unittest.TestCase):
             os.environ, {"DASHBOARD_TOKENS": f"  {PERSONAL}  :{STAFF_CANONICAL}"}
         ):
             self.assertEqual(dashboard.quien("Bearer " + PERSONAL), STAFF_CANONICAL)
+
+
+# ---------------------------------------------------------------- ventas
+#
+# LO QUE ESTOS TESTS FIJAN
+# ------------------------
+# `sales()` hace UNA lectura de 30 días y compone DOS ventanas con ella, porque
+# `readers[path]` se llama sin argumentos —esta API no tiene query string— y un
+# top de productos no se puede recortar en el navegador. Ese "una lectura, dos
+# respuestas" es justo la forma en la que un valor derivado alimenta a más de un
+# consumidor, que es donde CLAUDE.md dice que hay que mutar cada consumidor por
+# separado: si un test sólo mira `last30`, el filtro por ventana es un no-op ahí
+# y la mutación sobrevive entera.
+class VentasTest(unittest.TestCase):
+    def _erp(self, pedidos, renglones=()):
+        """Un ERPNext falso que contesta lo que se le PASA, no lo que este
+        archivo supone: si `sales()` cambiara los filtros, este doble seguiría
+        devolviendo lo mismo y no probaría nada, así que guarda las llamadas."""
+        llamadas = []
+
+        class Falso:
+            ERPNextError = dashboard_erp_error
+
+            @staticmethod
+            def default_company():
+                return "Lacteos Test SA"
+
+            @staticmethod
+            def manager_scope():
+                from contextlib import nullcontext
+                return nullcontext()
+
+            @staticmethod
+            def get_doc(doctype, name, timeout=None):
+                return {"default_currency": "ARS"}
+
+            @staticmethod
+            def get_list(doctype, **kwargs):
+                llamadas.append((doctype, kwargs))
+                return list(renglones) if doctype == "Sales Order Item" else list(pedidos)
+
+        return Falso, llamadas
+
+    def _correr(self, pedidos, renglones=()):
+        import datetime as _dt
+
+        falso, llamadas = self._erp(pedidos, renglones)
+        hoy = _dt.date(2026, 9, 15)
+
+        class PolicyFalso:
+            @staticmethod
+            def _hoy_del_negocio():
+                return hoy
+
+        import sys
+        modulos = {"app.erpnext": falso, "app.policy": PolicyFalso}
+        real = {k: sys.modules.get(k) for k in modulos}
+        paquete = sys.modules.get("app")
+        try:
+            for k, v in modulos.items():
+                sys.modules[k] = v
+            if paquete is not None:
+                paquete.erpnext, paquete.policy = falso, PolicyFalso
+            return dashboard.sales(), llamadas
+        finally:
+            for k, v in real.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+
+    def test_las_dos_ventanas_salen_de_una_lectura_y_no_son_la_misma(self):
+        """Un pedido de hace 10 días entra en 30 y NO en 7.
+
+        Las DOS mitades se afirman a propósito: con sólo `last30` la mutación
+        que le pasa la fecha de 7 días a la ventana de 30 pasa desapercibida.
+        """
+        pedidos = [
+            {"name": "SO-1", "customer": "C1", "customer_name": "Uno",
+             "grand_total": 100, "transaction_date": "2026-09-14"},
+            {"name": "SO-2", "customer": "C2", "customer_name": "Dos",
+             "grand_total": 400, "transaction_date": "2026-09-05"},
+        ]
+        salida, _ = self._correr(pedidos)
+        self.assertEqual(salida["last7"]["orders"], 1, salida)
+        self.assertEqual(salida["last7"]["total"], 100, salida)
+        self.assertEqual(salida["last30"]["orders"], 2, salida)
+        self.assertEqual(salida["last30"]["total"], 500, salida)
+
+    def test_el_promedio_sin_pedidos_es_None_y_no_cero(self):
+        """Un 0 en pantalla se lee «vendí y el ticket fue cero»."""
+        salida, _ = self._correr([])
+        self.assertIsNone(salida["last7"]["averageOrder"], salida)
+        self.assertEqual(salida["last7"]["orders"], 0)
+
+    def test_el_top_de_productos_de_7_dias_no_cuenta_renglones_de_30(self):
+        """La lectura de renglones es de 30 días para las DOS ventanas.
+
+        Es el caso que un test sobre `last30` no puede ver: ahí el filtro por
+        pedido-dentro-de-la-ventana no descarta nada y es indistinguible de no
+        estar.
+        """
+        pedidos = [
+            {"name": "SO-1", "customer": "C1", "customer_name": "Uno",
+             "grand_total": 100, "transaction_date": "2026-09-14"},
+            {"name": "SO-2", "customer": "C2", "customer_name": "Dos",
+             "grand_total": 400, "transaction_date": "2026-09-05"},
+        ]
+        renglones = [
+            {"parent": "SO-1", "item_code": "LECHE", "item_name": "Leche", "qty": 2, "amount": 100},
+            {"parent": "SO-2", "item_code": "QUESO", "item_name": "Queso", "qty": 8, "amount": 400},
+        ]
+        salida, _ = self._correr(pedidos, renglones)
+        self.assertEqual([f["id"] for f in salida["last7"]["topProducts"]], ["LECHE"], salida)
+        self.assertEqual(
+            sorted(f["id"] for f in salida["last30"]["topProducts"]), ["LECHE", "QUESO"], salida
+        )
+
+    def test_la_tabla_hija_se_pide_con_su_doctype_padre(self):
+        """Frappe rechaza una tabla hija sin `parent`, y ese fue el bug por el
+        que `informe(que="stock_bajo")` nunca contestó contra un ERPNext real."""
+        pedidos = [{"name": "SO-1", "customer": "C1", "customer_name": "Uno",
+                    "grand_total": 100, "transaction_date": "2026-09-14"}]
+        _, llamadas = self._correr(pedidos, [])
+        hija = [k for d, k in llamadas if d == "Sales Order Item"]
+        self.assertEqual(len(hija), 1, llamadas)
+        self.assertEqual(hija[0].get("parent"), "Sales Order", hija)
