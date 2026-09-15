@@ -853,21 +853,50 @@ def idioma_gerencia() -> str:
     """
     from app import idioma as idioma_mod
 
-    try:
-        crudo = locks.conexion().hgetall(CLAVE_VALORES)
-    except (locks.CoordinationError, RedisError) as exc:
-        print(f"[limites] no pude leer el idioma de gerencia ({type(exc).__name__})")
+    fijado = idioma_gerencia_guardado()
+    if fijado is None:
+        # No se pudo LEER, que no es lo mismo que «no fijó nada»: se va al
+        # default sin mirar el entorno, exactamente como antes de separar esto
+        # en dos funciones. Un refactor que corrige de paso una ruta de fallo
+        # que nadie pidió es un cambio de comportamiento escondido en un
+        # cambio de forma.
         return idioma_mod.por_defecto()
-    valores = {_texto(k): _texto(v) for k, v in (crudo or {}).items()}
-    fijado = valores.get("IDIOMA_GERENCIA", "").strip()
     if fijado:
-        elegido = idioma_mod.normalizar(fijado)
-        if elegido:
-            return elegido
+        return fijado
     del_entorno = idioma_mod.normalizar(os.getenv("IDIOMA_GERENCIA", ""))
     if del_entorno:
         return del_entorno
     return idioma_mod.por_defecto()
+
+
+def idioma_gerencia_guardado() -> str | None:
+    """SÓLO lo que el dueño dejó fijado por WhatsApp.
+
+    TRES respuestas, y hay que distinguir las tres:
+      - ``None`` -> no se pudo leer el almacén. No es «no fijó nada».
+      - ``""``   -> se leyó bien y no hay nada fijado.
+      - un idioma -> lo que el dueño eligió a mano, con su código.
+
+    Existe separado de `idioma_gerencia()` porque hay un llamador que necesita
+    las dos mitades por separado y no la resolución ya hecha: `readiness`, que
+    valida un `.env` CANDIDATO. Preguntando por la resolución completa recibía
+    el `os.environ` del proceso que está corriendo el chequeo —o sea el `.env`
+    VIEJO— y podía informar «el dueño recibe castellano» sobre un archivo que
+    dice `IDIOMA_GERENCIA=en`. Un preflight que contesta sobre otro archivo es
+    peor que no tenerlo.
+
+    Lo guardado le sigue GANANDO al entorno en los dos llamadores: es lo que el
+    dueño eligió a mano, con su código de cuatro dígitos.
+    """
+    from app import idioma as idioma_mod
+
+    try:
+        crudo = locks.conexion().hgetall(CLAVE_VALORES)
+    except (locks.CoordinationError, RedisError) as exc:
+        print(f"[limites] no pude leer el idioma de gerencia ({type(exc).__name__})")
+        return None
+    valores = {_texto(k): _texto(v) for k, v in (crudo or {}).items()}
+    return idioma_mod.normalizar(valores.get("IDIOMA_GERENCIA", "").strip()) or ""
 
 
 def _almacen() -> dict[str, str]:

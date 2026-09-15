@@ -396,6 +396,8 @@ class MCPTransport:
         headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
         metodo = scope["method"]
 
+        origen = headers.get("origin", "")
+
         async def responder(codigo: int, cuerpo: object | None, extra: list | None = None):
             cabeceras = [
                 (b"cache-control", b"no-store"),
@@ -403,6 +405,17 @@ class MCPTransport:
                 (b"vary", b"Origin"),
                 (b"mcp-protocol-version", PROTOCOL_VERSION.encode()),
             ]
+            # VALIDAR EL ORIGEN Y NO DEVOLVERLO NO SIRVE DE NADA. Sin este
+            # header el navegador descarta la respuesta aunque el servidor la
+            # haya aceptado, así que un origen que SÍ está en la lista fallaba
+            # igual —en el preflight y en el POST—, y se veía como si la
+            # validación lo estuviera rechazando. Se hacen las dos mitades o
+            # ninguna: la lista decide, y lo que decide se dice.
+            #
+            # Se hace eco del origen exacto que llegó, nunca `*`: con
+            # credenciales de por medio un comodín es la lista vacía al revés.
+            if origen and origen.rstrip("/") in origenes_permitidos():
+                cabeceras.append((b"access-control-allow-origin", origen.encode()))
             if extra:
                 cabeceras.extend(extra)
             datos = b""

@@ -222,9 +222,13 @@ def test_el_idioma_del_dueno_y_el_del_cliente_se_informan_por_separado(
     confundiera una con la otra —o que imprimiera la misma dos veces— pasaría
     igual. Acá el dueño lee castellano y el respaldo del cliente es inglés.
     """
-    from app import idioma
+    from app import idioma, limites
 
-    monkeypatch.setattr(idioma, "gerencia", lambda: idioma.ES)
+    # Se finge lo GUARDADO, que es la única fuente que puede contradecir al
+    # `.env` candidato. Fingir `idioma.gerencia()` —como hacía este test— es
+    # fingir la resolución ya hecha, y con eso el chequeo no puede discrepar con
+    # el archivo que está revisando ni siquiera cuando discrepa de verdad.
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: idioma.ES)
     reporte = _correr({**BASE, "IDIOMA_DEFAULT": "en"})
 
     texto = reporte.texto()
@@ -247,14 +251,41 @@ def test_lo_que_el_dueno_fijo_desde_su_telefono_le_gana_al_env(
 ) -> None:
     """La diferencia entre un preflight y un `cat .env`: acá el entorno y lo
     guardado se CONTRADICEN, y gana lo guardado."""
-    from app import idioma
+    from app import idioma, limites
 
-    monkeypatch.setattr(idioma, "gerencia", lambda: idioma.EN)
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: idioma.EN)
     reporte = _correr({**BASE, "IDIOMA_DEFAULT": "es"})
 
     texto = reporte.texto()
     assert "el dueño recibe EN" in texto, texto
     assert "lo cambió él desde su teléfono" in texto, texto
+
+
+def test_el_informe_habla_del_env_QUE_SE_LE_PASO_y_no_del_que_esta_exportado(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El preflight valida un `.env` CANDIDATO, que casi nunca es el que corre.
+
+    `idioma.gerencia()` cae a `os.environ` cuando no hay nada guardado, o sea al
+    archivo VIEJO — el que se quiere reemplazar. Así, revisando un archivo que
+    dice `IDIOMA_GERENCIA=en` con `es` exportado, el informe decía «el dueño
+    recibe ES»: contestaba sobre otro archivo, que es lo único que un preflight
+    no puede hacer.
+
+    MUTACIÓN: volver a `del_dueno = idioma.gerencia()` en `chequear_idioma`.
+    Cae éste y sólo éste.
+    """
+    from app import limites
+
+    monkeypatch.setenv("IDIOMA_GERENCIA", "es")
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: "")
+
+    reporte = _correr({**BASE, "IDIOMA_GERENCIA": "en"})
+
+    texto = reporte.texto()
+    assert "el dueño recibe EN" in texto, texto
+    # Y no se le atribuye al dueño un cambio que no hizo: esto sale del archivo.
+    assert "lo cambió él desde su teléfono" not in texto, texto
 
 
 def test_un_LOCALE_mal_escrito_se_dice_en_el_arranque() -> None:

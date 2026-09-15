@@ -1402,6 +1402,18 @@ CATALOGO: dict[str, dict[str, str]] = {
         EN: "To change one, tell me the new version using the same word in "
             "parentheses; to delete it, tell me to forget it.",
     },
+    # Las DOS que faltaban. `app/tools/memoria.py` pasaba por el catálogo en
+    # todos sus caminos menos éstos dos, así que un dueño que puso el sistema en
+    # inglés recibía inglés para «lo anoté» y castellano para «no había nada» y
+    # para la confirmación de un cambio — en la misma conversación.
+    "memoria.no_habia": {
+        ES: "No tenía ningún dato guardado sobre «{sobre}», así que no borré nada.",
+        EN: "I had nothing stored about “{sobre}”, so I deleted nothing.",
+    },
+    "memoria.cambiado": {
+        ES: "Cambiado. Antes tenía: «{antes}».\nAhora: «{ahora}».",
+        EN: "Changed. It used to say: “{antes}”.\nNow: “{ahora}”.",
+    },
     # ------------------------------------------------ los informes de gerencia
     # app/tools/operaciones.py traducía las 40 cosas que devuelve y
     # app/tools/gerencia.py ninguna de las suyas, y los dos devuelven bloques

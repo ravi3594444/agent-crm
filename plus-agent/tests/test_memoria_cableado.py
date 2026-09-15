@@ -73,11 +73,42 @@ def test_lo_anotado_NO_aparece_en_el_prompt_de_un_cliente(redis_real) -> None:
 
 def test_sin_nada_anotado_no_queda_un_encabezado_vacio(redis_real) -> None:
     """Un título con nada debajo el modelo lo lee como una lista de la que ya
-    habló, y deja de preguntar por lo que justamente no sabe."""
+    habló, y deja de preguntar por lo que justamente no sabe.
+
+    ESTE TEST NO PODÍA FALLAR y estuvo así hasta que lo cazó una revisión.
+    Afirmaba que no aparecía `"LO QUE YA SABÉS DEL NEGOCIO"`, un texto que no
+    está en ninguna parte del repo: `memoria.ENCABEZADO` dice *«LO QUE TE FUE
+    DICIENDO EL DUEÑO»*. Los dos asserts eran verdaderos pasara lo que pasara, y
+    la regresión que el nombre promete cuidar quedó sin cuidar desde el día uno.
+
+    Se afirma contra la CONSTANTE y no contra su texto, que es lo correcto acá:
+    lo que se prueba es que el encabezado esté AUSENTE cuando no hay nada, y esa
+    propiedad no depende de cómo esté redactado. Renombrarlo mueve las dos
+    mitades y el test sigue probando lo mismo.
+
+    MUTACIÓN: sacarle a `memoria.bloque_de_prompt` el `if elegidos:` que rodea
+    el `partes.append(...)`. Cae éste y sólo éste.
+    """
     sistema = _sistema(conversacion.prompt_gerencia(_estado(), _config()))
 
-    assert "LO QUE YA SABÉS DEL NEGOCIO\n\n" not in sistema
-    assert "LO QUE YA SABÉS DEL NEGOCIO\nEso te lo dijo él" not in sistema
+    assert memoria.ENCABEZADO not in sistema
+
+
+def test_con_algo_anotado_el_encabezado_viene_CON_su_cuerpo(redis_real) -> None:
+    """La otra mitad, y sin ella la de arriba se cumple sola.
+
+    Un `bloque_de_prompt` que nunca escriba el encabezado pasa el test de
+    ausencia con las mejores notas y deja al dueño sin su memoria. Afirmar que
+    NO está cuando no hay nada sólo dice algo si además se afirma que SÍ está
+    —y con el dato debajo— cuando hay.
+    """
+    memoria.anotar("pagos", DATO, GERENTE)
+
+    sistema = _sistema(conversacion.prompt_gerencia(_estado(), _config()))
+
+    assert memoria.ENCABEZADO in sistema
+    cuerpo = sistema.split(memoria.ENCABEZADO, 1)[1]
+    assert DATO in cuerpo
 
 
 def test_con_redis_caido_el_dueno_igual_recibe_su_prompt(

@@ -216,6 +216,14 @@ def _bloque_decisiones(lengua: str) -> str:
     )
 
 
+# EL PORQUÉ VA ACÁ Y NO EN EL DOCSTRING, Y LA DIFERENCIA NO ES DE ESTILO:
+# `@tool` publica el docstring como `estado_del_sistema.description`, así que
+# viaja en el catálogo del modelo en CADA turno. El texto de selección decía
+# «si los avisos están saliendo», que es exactamente la pregunta que contesta
+# `ver_avisos_fallidos` —la otra herramienta que este mismo agente tiene—, y dos
+# herramientas plausibles para una pregunta es cómo se elige mal. La frase salió
+# del docstring; la explicación de por qué salió no tiene por qué ocupar el
+# contexto del modelo para siempre.
 @tool
 def estado_del_sistema(config: RunnableConfig) -> str:
     """Estado operativo del sistema: Redis, ERPNext, WhatsApp, modelos y colas.
@@ -223,9 +231,7 @@ def estado_del_sistema(config: RunnableConfig) -> str:
     Usala cuando el dueño pregunta si el sistema está funcionando, si hay algo
     trabado, o antes de una prueba en vivo. Contesta CUÁNTAS cosas quedaron en
     la cola, no cuáles: si pregunta por un aviso puntual, o qué cliente quedó
-    sin respuesta, eso es `ver_avisos_fallidos` —decía «si los avisos están
-    saliendo», que es la misma pregunta que la otra herramienta, y dos
-    herramientas plausibles para una pregunta es cómo se elige mal.
+    sin respuesta, eso es `ver_avisos_fallidos`.
 
     SÓLO LECTURA: no reintenta, no arregla y no cambia nada. Lo que no se pudo
     verificar dice NO DISPONIBLE o DESCONOCIDO — no lo interpretes como "cero"

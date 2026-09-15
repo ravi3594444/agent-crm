@@ -7,6 +7,7 @@ que no mandar el botón.
 """
 from __future__ import annotations
 
+import dataclasses
 import time
 from unittest.mock import Mock
 
@@ -139,3 +140,50 @@ def test_el_mensaje_vence_solo(redis_real) -> None:
 
     assert 0 < ttl <= salidas.TTL_SEGUNDOS
     assert salida.creada <= time.time()
+
+
+# ------------------------------------------- devolver lo que se consumió y no salió
+
+def test_devolver_la_repone_con_lo_que_le_QUEDABA_de_vida(redis_real) -> None:
+    """El vencimiento vuelve a ser el original, no una hora nueva.
+
+    Un TTL fresco convierte cada fallo de la cola en una hora más de vida para
+    una promesa que el cliente todavía no recibió. La que se aprobó hace 50
+    minutos tiene que seguir venciendo a los 60, no a los 110.
+
+    Mata a este test cambiar `ex=restante` por `ex=TTL_SEGUNDOS`.
+    """
+    salida = _proponer()
+    consumida = salidas.consumir(salida.id)
+    vieja = dataclasses.replace(consumida, creada=time.time() - 3000)
+
+    assert salidas.devolver(vieja) is True
+    restante = redis_real.ttl(salidas._clave(salida.id))
+    assert 500 < restante <= 700
+
+
+def test_una_salida_ya_vencida_no_revive(redis_real) -> None:
+    """Una promesa vieja que sale tarde es peor que una que no sale."""
+    salida = _proponer()
+    consumida = salidas.consumir(salida.id)
+    vencida = dataclasses.replace(
+        consumida, creada=time.time() - salidas.TTL_SEGUNDOS - 10
+    )
+
+    assert salidas.devolver(vencida) is False
+    assert salidas.leer(salida.id) is None
+
+
+def test_lo_devuelto_es_el_mismo_texto_y_el_mismo_id(redis_real) -> None:
+    """El id es la clave de idempotencia de la cola: si cambiara al devolver, el
+    reintento dejaría de estar deduplicado contra el intento que quizá encoló."""
+    salida = _proponer("Llegó el queso, ¿te mando 2?")
+    consumida = salidas.consumir(salida.id)
+
+    salidas.devolver(consumida)
+    repuesta = salidas.leer(salida.id)
+
+    assert repuesta is not None
+    assert repuesta.id == salida.id
+    assert repuesta.texto == salida.texto
+    assert repuesta.telefono == salida.telefono

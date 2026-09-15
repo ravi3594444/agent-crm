@@ -343,10 +343,23 @@ def chequear_idioma(env: Mapping[str, str], reporte: Reporte) -> None:
     # El del dueño puede estar guardado —él lo cambia por WhatsApp— y eso le
     # GANA al `.env`. Se informa lo que el sistema va a hacer de verdad, no lo
     # que dice el archivo, que es la diferencia entre un preflight y un `cat`.
+    #
+    # SE PREGUNTA POR LO GUARDADO Y NO POR LA RESOLUCIÓN YA HECHA. `idioma.
+    # gerencia()` cae a `os.environ` cuando no hay nada guardado, o sea al `.env`
+    # del proceso que está corriendo ESTE chequeo — que es justamente el viejo,
+    # el que se quiere reemplazar. Con `IDIOMA_GERENCIA=en` en el archivo
+    # candidato y `es` exportado, el preflight decía «el dueño recibe ES» sobre
+    # un archivo que dice lo contrario. Y `guardado` se deducía comparando dos
+    # valores que venían de fuentes distintas, así que también mentía.
+    from app import limites
+
     try:
-        del_dueno = idioma.gerencia()
-        guardado = del_dueno != (fijado or por_defecto)
+        del_almacen = limites.idioma_gerencia_guardado()
     except Exception:
+        del_almacen = None
+    if del_almacen:
+        del_dueno, guardado = del_almacen, True
+    else:
         del_dueno, guardado = fijado or por_defecto, False
 
     reporte.ok(
