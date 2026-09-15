@@ -133,6 +133,57 @@ TOOLS_GERENCIA = [
     detalle_de_pedido, proponer_accion,
 ]
 
+# LAS HERRAMIENTAS DE OTRO SERVIDOR MCP, SI EL DUEÑO CONFIGURÓ UNO
+# ----------------------------------------------------------------
+# `TOOLS_GERENCIA` de arriba NO SE TOCA, y ésa es la decisión importante de este
+# bloque. Lo de afuera va a una lista APARTE, y sólo esa lista arma el agente.
+#
+# Si en cambio se le sumaran a `TOOLS_GERENCIA`, se llevarían puestas dos cosas
+# calladas: `mcp_server._catalogo()` lee esa constante, así que NUESTRO endpoint
+# MCP pasaría a re-publicar las herramientas de un tercero —incluido su
+# `erpnext_doc_submit`— con nuestro token y nuestra autenticación; y el test que
+# afirma «el catálogo publicado es exactamente el del agente» seguiría en verde,
+# porque los dos lados se moverían juntos. Una superficie de terceros
+# reexportada por nuestra puerta es lo peor de las dos: parece nuestra.
+#
+# `MCP_EXTERNOS` vacío = no-op, sin un import de más.
+#
+# NUNCA a TOOLS_CLIENTES, y el motivo está MEDIDO contra el servidor real, no
+# leído en un README: `erpnext_sales_order_create` declara
+# `items[].required = ["item_code", "qty", "rate"]`. El PRECIO lo pone el
+# modelo. No hay resolución de lista de precios del otro lado, así que
+# `policy._precio_autorizado` —que filtra Item Prices por price_list, currency y
+# uom— queda fuera de ese camino. Con un desconocido escribiendo del otro lado,
+# una herramienta donde el precio es un argumento del modelo es la regla 1 al
+# revés.
+#
+# Un fallo del servidor externo NO puede tumbar el agente: si no levanta, se
+# avisa y se sigue con las herramientas propias. Un ERP de terceros caído es un
+# martes; un agente que no contesta el WhatsApp es el negocio parado.
+def _con_externas() -> list:
+    try:
+        from app import mcp_cliente
+
+        externas = mcp_cliente.cargar(TOOLS_GERENCIA)
+        if not externas:
+            # COPIA, no la misma lista. Sin servidores externos el contenido es
+            # idéntico y la tentación es devolver la constante; entonces las dos
+            # son el MISMO objeto y un `TOOLS_AGENTE_GERENCIA.append(...)` de
+            # alguna sesión futura le agregaría una herramienta a lo que
+            # `mcp_server` publica, sin tocar una línea de ese archivo. Lo
+            # encontró su propio test, que fallaba con esto puesto.
+            return list(TOOLS_GERENCIA)
+        print(mcp_cliente.resumen(TOOLS_GERENCIA))
+        return TOOLS_GERENCIA + externas
+    except Exception as exc:  # el agente arranca igual, con lo suyo
+        print(f"[mcp] no pude cargar los servidores externos ({type(exc).__name__})")
+        return list(TOOLS_GERENCIA)
+
+
+# Lo que se le monta al agente. `TOOLS_GERENCIA` sigue siendo lo que este repo
+# escribió y lo que `app/mcp_server.py` publica.
+TOOLS_AGENTE_GERENCIA = _con_externas()
+
 # from_conn_string() is a CONTEXT MANAGER, not a constructor — using it
 # directly hands you a generator, not a saver. Construct directly instead,
 # and setup() is mandatory: it creates the Redis indices.
@@ -276,7 +327,9 @@ agente_clientes = create_react_agent(
 )
 agente_gerencia = create_react_agent(
     model=_modelo_gerencia,
-    tools=ToolNodeSinInventario(TOOLS_GERENCIA, handle_tool_errors=_error_de_herramienta),
+    tools=ToolNodeSinInventario(
+        TOOLS_AGENTE_GERENCIA, handle_tool_errors=_error_de_herramienta
+    ),
     prompt=prompt_gerencia,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,

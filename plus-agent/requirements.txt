@@ -34,3 +34,11 @@ python-dotenv==1.2.3
 # LLAMADA y no deja estado en el proceso, así que no hay `setlocale` global que
 # se pise entre los hilos de barrido. Es la razón por la que se puede usar acá.
 babel==2.18.0
+
+# SÓLO para `MCP_EXTERNOS` (app/mcp_cliente.py): hablar con servidores MCP de
+# terceros. El import vive adentro de `cargar()`, así que sin la variable puesta
+# esto no se toca — pero SÍ se instala, y no es gratis: arrastra 12 paquetes
+# (mcp, jsonschema, sse-starlette, pydantic-settings, PyJWT, attrs, …) a la
+# imagen de producción. Ése es el precio de la superficie de un tercero, y está
+# escrito acá para que se vea al leer el archivo y no al medir la imagen.
+langchain-mcp-adapters==0.3.2
