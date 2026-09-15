@@ -25,6 +25,16 @@ from app.tools.crm import (
     editar_borrador,
 )
 
+# ESTE ARCHIVO AFIRMA CASTELLANO, así que lo DECLARA en vez de heredarlo.
+#
+# Las cinco herramientas dejaron de tener el texto escrito adentro: ahora sale
+# de `idioma.t(...)` en el idioma que fijó el dueño. Sin esta marca, las
+# aserciones de abajo («confirmado», «cancelado», «la mitad») son las de un
+# idioma y el entorno elige el otro — y ahí no falla la herramienta, falla la
+# celda de CI que corre con IDIOMA_GERENCIA=en, que es exactamente lo que pasó.
+# Ver el marcador `idioma` en pytest.ini y `_idioma_declarado` en conftest.py.
+pytestmark = pytest.mark.idioma("es")
+
 GERENTE = "5493511234567"
 AJENO = "5493519999999"
 FICHA = {"name": "CUST-0009", "customer_name": "Panadería San José"}

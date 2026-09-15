@@ -703,3 +703,208 @@ def test_lo_permitido_se_recorta_aunque_el_mensaje_lo_haya_re_capitalizado():
     assert restos_en_espanol("Reason: No hay stock.", ("no hay stock",)) == []
     # Y ampliar el recorte no puede tapar un resto: sin el permitido, se marca.
     assert "sin" in restos_en_espanol("Held back: Sin stock 3")
+
+
+# ======================================================================
+# LAS HERRAMIENTAS DE GERENCIA: el tercer audit, y por qué hacían falta
+# tres.
+#
+# Las dos auditorías de arriba no llegan acá, y no por olvido: por forma.
+# La de EJECUCIÓN corre un registro escrito a mano de constructores puros;
+# una @tool no es eso —lee ERPNext y Redis—. La ESTÁTICA mira los puntos de
+# salida a WhatsApp (`enviar_mensaje` y compañía); una @tool no llama a
+# ninguno: DEVUELVE un string y el modelo lo repite.
+#
+# Con lo cual las 70 claves que acaban de rutearse no tenían guard: el que
+# agregue la herramienta número 20 puede escribir `return "No pude leer el
+# pedido"` y la suite sigue verde, porque los tests de esas herramientas
+# afirman el CASTELLANO. El inglés se rompe solo, en silencio, que es
+# exactamente cómo se había roto antes.
+#
+# Este audit es estático a propósito: el defecto es un literal escrito en el
+# archivo, y para verlo no hace falta correr nada ni fabricar un doble.
+# ======================================================================
+
+# De `graph`, no de una lista: ver el test de abajo.
+_TOOLS = pathlib.Path(__file__).resolve().parents[1] / "app" / "tools"
+
+# Valores INTERNOS: se comparan, se guardan o son claves de un dict, y no los
+# lee nadie. Se permite el literal ENTERO y nunca la palabra suelta — `"pedido"`
+# pasa, `"No pude leer el pedido"` no—, que es lo que impide que este permiso
+# se convierta en una canilla abierta.
+_VALORES_INTERNOS = frozenset({
+    # claves de dicts internos y de las filas que arma `limites.resumen()`
+    "cliente", "pedido", "entrega", "origen", "problema", "pendientes",
+    "clientes", "gerencia", "destinatario", "falta",
+    # los centinelas de `limites.resumen()`, contra los que se COMPARA
+    "dueño", "sí/no", "días",
+    # los dos de `operaciones.py`, en mayúsculas justamente porque son lo que
+    # hay que entender: «no pude leer esto, no lo leas como cero»
+    "NO DISPONIBLE", "DESCONOCIDO",
+})
+
+# Texto que se escribe EN UN DOCUMENTO DE ERPNEXT (`remarks`, `add_comment`),
+# no en la respuesta al dueño. Es otro destinatario: el registro contable, que
+# tiene el idioma del sitio y no el del WhatsApp de una persona. Van escritos
+# acá enteros y a mano —no importados de `app/tools/captura.py`— porque una
+# constante compartida mueve las dos mitades del assert a la vez.
+#
+# NO es una excusa permanente: si algún día el dueño lee estos comentarios
+# desde ERPNext en inglés, salen del permiso y entran al catálogo.
+_TEXTO_QUE_VA_AL_ERP = (
+    "Pendiente de cobro.",
+    "Venta offline cargada por Agente IA vía WhatsApp. Requiere confirmación.",
+    # Los dos que siguen son el PREFIJO literal de una f-string, así que en el
+    # archivo terminan en un espacio; se comparan ya recortados.
+    "Conteo físico por WhatsApp. Sistema:",
+    "Entrega reportada por WhatsApp.",
+)
+
+
+def _modulos_solo_de_gerencia() -> set[str]:
+    """Los módulos cuyas herramientas SÓLO ve el equipo, según `graph`."""
+    from app import graph
+
+    def modulo(herramienta) -> str:
+        funcion = getattr(herramienta, "func", None) or getattr(
+            herramienta, "coroutine", None
+        )
+        return getattr(funcion, "__module__", "")
+
+    de_gerencia = {modulo(h) for h in graph.TOOLS_GERENCIA}
+    de_clientes = {modulo(h) for h in graph.TOOLS_CLIENTES}
+    return {m.rsplit(".", 1)[-1] for m in de_gerencia - de_clientes if m}
+
+
+def _literales_auditables(archivo: pathlib.Path) -> list[tuple[int, str]]:
+    """(línea, texto) de cada literal del archivo que el dueño podría leer.
+
+    Quedan afuera tres cosas, y las tres por el mismo motivo —no las lee el
+    dueño, las lee el MODELO—: los docstrings (de módulo, de función y el de
+    cada @tool, que es la descripción que viaja en el esquema), los argumentos
+    de `Field(...)`, y la CLAVE que se le pasa a `idioma.t(...)`, que es un
+    identificador y encima contiene palabras en castellano a propósito
+    (`crm.pedido_no_leido`).
+    """
+    arbol = ast.parse(archivo.read_text())
+    excluidos: set[int] = set()
+
+    for nodo in ast.walk(arbol):
+        if isinstance(nodo, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            cuerpo = getattr(nodo, "body", [])
+            if (cuerpo and isinstance(cuerpo[0], ast.Expr)
+                    and isinstance(cuerpo[0].value, ast.Constant)
+                    and isinstance(cuerpo[0].value.value, str)):
+                excluidos.add(id(cuerpo[0].value))
+        if isinstance(nodo, ast.Call):
+            nombre = getattr(nodo.func, "attr", None) or getattr(nodo.func, "id", None)
+            if nombre == "Field":
+                for kw in nodo.keywords:
+                    excluidos.update(id(s) for s in ast.walk(kw.value))
+            elif nombre == "t" and nodo.args:
+                excluidos.update(id(s) for s in ast.walk(nodo.args[0]))
+
+    # Las partes literales de una f-string son `ast.Constant` adentro del
+    # `JoinedStr`, así que este recorrido las agarra sin tratarlas aparte: lo
+    # interpolado es dato y no texto.
+    return [
+        (nodo.lineno, nodo.value)
+        for nodo in ast.walk(arbol)
+        if isinstance(nodo, ast.Constant)
+        and isinstance(nodo.value, str)
+        and id(nodo) not in excluidos
+    ]
+
+
+def _se_permite(texto: str) -> bool:
+    """¿Este literal puede quedar escrito a mano en castellano?
+
+    La comparación es por literal ENTERO y está acá, en una función sola, para
+    que se pueda probar sin un archivo de por medio: el permiso es la mitad
+    peligrosa de este audit —el que lo afloje a «contiene la palabra» lo apaga
+    sin romper nada— y una regla que no se puede ejercer directamente no se
+    puede defender con una mutación.
+    """
+    limpio = texto.strip()
+    return limpio in _VALORES_INTERNOS or limpio in _TEXTO_QUE_VA_AL_ERP
+
+
+def _castellano_suelto() -> dict[str, list[tuple[int, str]]]:
+    """Lo que quedó escrito a mano en castellano, por módulo."""
+    sucios: dict[str, list[tuple[int, str]]] = {}
+    for modulo in sorted(_modulos_solo_de_gerencia()):
+        archivo = _TOOLS / f"{modulo}.py"
+        if not archivo.exists():
+            continue
+        for linea, texto in _literales_auditables(archivo):
+            if _se_permite(texto):
+                continue
+            if restos_en_espanol(texto, PERMITIDO_EN_SALIDA_INGLESA):
+                sucios.setdefault(modulo, []).append((linea, texto[:80]))
+    return sucios
+
+
+def test_ninguna_herramienta_de_gerencia_tiene_castellano_escrito_a_mano():
+    """El guard de las 70 claves: que la número 71 no se escriba a mano.
+
+    Falla así: alguien agrega una herramienta y devuelve el castellano
+    directamente en vez de `idioma.t(...)`. Los tests de esa herramienta
+    afirman el castellano, así que pasan; el dueño con el sistema en inglés es
+    el único que se entera, y por WhatsApp.
+    """
+    assert _castellano_suelto() == {}
+
+
+def test_este_audit_mira_los_siete_modulos_y_no_una_lista_vieja():
+    """El guard del guard, y el que encontró dos módulos que nadie miró.
+
+    La lista de módulos sale de `graph.TOOLS_GERENCIA`, no de un tuple escrito
+    acá: con un tuple, la herramienta de gerencia que alguien agregue en un
+    archivo nuevo queda afuera del audit para siempre y nadie se entera. Cuando
+    se escribió esto, derivarla de `graph` mostró SIETE módulos y la tanda de
+    traducción había tocado cinco — `memoria` y `operaciones` no las había
+    mirado nadie (resultaron limpias, pero eso se supo por mirarlas).
+
+    El número va escrito acá y no leído de `graph`: contra `len(graph...)` las
+    dos mitades del assert se mueven juntas y un módulo que desaparece del
+    registro pasa desapercibido.
+    """
+    assert _modulos_solo_de_gerencia() == {
+        "captura", "configuracion", "crm", "gerencia", "gestion", "memoria",
+        "operaciones",
+    }
+
+
+def test_este_audit_inspecciona_algo():
+    """Un audit vacío no es un audit limpio — la lección de la estática.
+
+    Si `_literales_auditables` deja de encontrar literales (un cambio en el AST,
+    una exclusión de más), el test de arriba pasa por vacío y promete algo que
+    ya no hace. Por eso el piso es una aserción y no un comentario.
+    """
+    total = sum(
+        len(_literales_auditables(_TOOLS / f"{m}.py"))
+        for m in _modulos_solo_de_gerencia()
+        if (_TOOLS / f"{m}.py").exists()
+    )
+    assert total >= 200, f"el audit dejó de mirar literales: {total}"
+
+
+def test_el_permiso_de_los_valores_internos_es_por_literal_entero():
+    """Y no por palabra, que es lo que lo volvería una canilla abierta.
+
+    `"pedido"` es una clave de dict y está permitida. Si el permiso fuera por
+    palabra, `"No pude leer el pedido"` pasaría también — o sea, justo el
+    defecto que este audit existe para agarrar. Se prueba con el filtro de
+    verdad y no mirando el código.
+    """
+    # La clave del dict pasa; la frase que la CONTIENE, no. Se ejerce el filtro
+    # de verdad (`_se_permite`) y no el conjunto: contra el conjunto, aflojar la
+    # comparación a «contiene la palabra» no rompería nada.
+    assert _se_permite("pedido")
+    assert not _se_permite("No pude leer el pedido")
+    # Y la frase es, además, algo que el detector marca: si no lo fuera, el
+    # permiso no sería lo único que la deja pasar y este test no probaría eso.
+    assert restos_en_espanol("No pude leer el pedido",
+                             PERMITIDO_EN_SALIDA_INGLESA) != []
