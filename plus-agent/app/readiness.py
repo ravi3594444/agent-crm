@@ -306,6 +306,57 @@ def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
 # ------------------------------------------------------------------- Panel
 
 
+def chequear_idioma(env: Mapping[str, str], reporte: Reporte) -> None:
+    """En qué idioma va a hablar cada agente, dicho en voz alta.
+
+    El interruptor existe, anda y está probado en CI —hay una celda entera con
+    `IDIOMA_DEFAULT=en`—, pero no se veía por ningún lado: `.env.example` lo
+    nombraba de refilón adentro del comentario de LOCALE y el preflight no lo
+    mencionaba. O sea que el que instalaba para un dueño que lee en inglés no
+    tenía cómo enterarse de que existía, y lo único que veía era un agente
+    contestando en castellano.
+
+    Esto no valida nada que pueda fallar: informa una decisión. Por eso es `ok`
+    y nunca `error`, salvo un valor escrito mal, que sí es un error porque el
+    sistema lo ignora en silencio y se va al default.
+    """
+    from app import idioma
+
+    crudo = _valor(env, "IDIOMA_DEFAULT")
+    if crudo and crudo.strip().lower() not in idioma.IDIOMAS:
+        reporte.error(
+            "IDIOMA_DEFAULT",
+            f"«{crudo}» no es un idioma conocido ({', '.join(sorted(idioma.IDIOMAS))}): "
+            "se ignora y todo sale en el idioma por defecto",
+        )
+        return
+    por_defecto = crudo.strip().lower() if crudo else idioma.ES
+
+    fijado = _valor(env, "IDIOMA_GERENCIA").strip().lower()
+    if fijado and fijado not in idioma.IDIOMAS:
+        reporte.error(
+            "IDIOMA_GERENCIA",
+            f"«{fijado}» no es un idioma conocido: se ignora",
+        )
+        return
+
+    # El del dueño puede estar guardado —él lo cambia por WhatsApp— y eso le
+    # GANA al `.env`. Se informa lo que el sistema va a hacer de verdad, no lo
+    # que dice el archivo, que es la diferencia entre un preflight y un `cat`.
+    try:
+        del_dueno = idioma.gerencia()
+        guardado = del_dueno != (fijado or por_defecto)
+    except Exception:
+        del_dueno, guardado = fijado or por_defecto, False
+
+    reporte.ok(
+        "IDIOMA_DEFAULT",
+        f"el dueño recibe {del_dueno.upper()}"
+        + (" (lo cambió él desde su teléfono)" if guardado else "")
+        + f"; a un cliente se le espeja el idioma y, si no se sabe, {por_defecto.upper()}",
+    )
+
+
 def chequear_panel(env: Mapping[str, str], reporte: Reporte) -> None:
     """El panel: quién entra, y quién de los que entran puede decidir.
 
@@ -1299,6 +1350,7 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
     http = _http_real if con_red else None
     chequear_modelos(env, reporte)
     chequear_equipo(env, reporte)
+    chequear_idioma(env, reporte)
     chequear_panel(env, reporte)
     waba = chequear_whatsapp(env, reporte, http)
     # El resumen de límites se resuelve ANTES de las plantillas: dos de ellas

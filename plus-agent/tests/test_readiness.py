@@ -162,12 +162,99 @@ def _correr(env, http=_http_sano, limites=_limites_ok):
     reporte = readiness.Reporte()
     readiness.chequear_modelos(env, reporte)
     readiness.chequear_equipo(env, reporte)
+    readiness.chequear_idioma(env, reporte)
     waba = readiness.chequear_whatsapp(env, reporte, http)
     readiness.chequear_plantillas(env, reporte, http, waba)
     readiness.chequear_erpnext(env, reporte, http)
     readiness.chequear_stock_y_limites(env, reporte, limites)
     readiness.chequear_entrega(env, reporte, limites, http)
     return reporte
+
+
+# --------------------------------------------------- en qué idioma va a hablar
+# El interruptor existe, anda, y tiene una celda entera de CI
+# (`IDIOMA_DEFAULT=en`). Lo que no tenía era forma de enterarse: `.env.example`
+# lo nombraba de refilón adentro del comentario de LOCALE, sin renglón propio,
+# y el preflight no lo mencionaba. Para un dueño que lee en inglés, el síntoma
+# era un agente contestando en castellano y ninguna pista de por qué.
+
+
+# LAS DOS MITADES SALEN DE FUENTES DISTINTAS, y por eso los tests fijan las dos.
+# El respaldo del CLIENTE es la variable de entorno, y nada más. El idioma del
+# DUEÑO se resuelve en vivo con `idioma.gerencia()`, porque él lo cambia por
+# WhatsApp y eso queda guardado ENCIMA del `.env`. En producción `env` es
+# `os.environ` y las dos coinciden; en un test no, así que un test que fijara
+# sólo el entorno estaría afirmando sobre una mitad y adivinando la otra.
+
+
+def test_el_arranque_dice_en_que_idioma_le_va_a_hablar_a_cada_uno(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import idioma
+
+    monkeypatch.setattr(idioma, "gerencia", lambda: idioma.EN)
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "en"})
+
+    assert reporte.listo, reporte.texto()
+    assert "el dueño recibe EN" in reporte.texto()
+    assert "si no se sabe, EN" in reporte.texto()
+
+
+def test_sin_configurar_nada_dice_castellano_y_sigue_listo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Un despliegue que ya existe no tiene la variable y no migra por esto."""
+    from app import idioma
+
+    monkeypatch.setattr(idioma, "gerencia", lambda: idioma.ES)
+    reporte = _correr(BASE)
+
+    assert reporte.listo
+    assert "el dueño recibe ES" in reporte.texto()
+
+
+def test_el_idioma_del_dueno_y_el_del_cliente_se_informan_por_separado(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UN renglón informa DOS cosas, así que se hacen diferir a propósito.
+
+    Con un solo idioma en juego las dos mitades salen iguales y un informe que
+    confundiera una con la otra —o que imprimiera la misma dos veces— pasaría
+    igual. Acá el dueño lee castellano y el respaldo del cliente es inglés.
+    """
+    from app import idioma
+
+    monkeypatch.setattr(idioma, "gerencia", lambda: idioma.ES)
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "en"})
+
+    texto = reporte.texto()
+    assert "el dueño recibe ES" in texto, texto
+    assert "si no se sabe, EN" in texto, texto
+
+
+def test_un_idioma_mal_escrito_es_un_error_y_no_un_silencio() -> None:
+    """`por_defecto()` cae al castellano sin decir nada, a propósito: un idioma
+    no autoriza nada y no puede dejar un mensaje sin salir. El precio es que
+    nadie se entera de que escribió mal la variable."""
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "aleman"})
+
+    assert not reporte.listo
+    assert "no es un idioma conocido" in reporte.texto()
+
+
+def test_lo_que_el_dueno_fijo_desde_su_telefono_le_gana_al_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La diferencia entre un preflight y un `cat .env`: acá el entorno y lo
+    guardado se CONTRADICEN, y gana lo guardado."""
+    from app import idioma
+
+    monkeypatch.setattr(idioma, "gerencia", lambda: idioma.EN)
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "es"})
+
+    texto = reporte.texto()
+    assert "el dueño recibe EN" in texto, texto
+    assert "lo cambió él desde su teléfono" in texto, texto
 
 
 def test_un_LOCALE_mal_escrito_se_dice_en_el_arranque() -> None:
