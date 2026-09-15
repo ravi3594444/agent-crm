@@ -40,6 +40,7 @@ from app.aprobacion import manejar_boton
 from app.dashboard import install_dashboard
 from app.formato import sin_citas
 from app.graph import responder_cliente, responder_gerencia
+from app.mcp_server import install_mcp
 from app.outbound_status import record_inbound_window, record_outbound, update_status
 from app.progreso import Progreso
 from app.router import es_equipo
@@ -1661,6 +1662,9 @@ async def _lifespan(application: FastAPI):
 
 app = FastAPI(title="Plus Agent", lifespan=_lifespan)
 install_dashboard(app)
+# El mismo agente de gerencia, para n8n, Claude Code o el harness que sea.
+# Sin MCP_TOKENS configurado contesta 503 y no hay superficie: ver app/mcp_server.py.
+install_mcp(app)
 
 
 @app.get("/health")
