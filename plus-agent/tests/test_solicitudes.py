@@ -2153,6 +2153,116 @@ def test_a_decision_that_lands_DURING_the_checks_stops_the_submit(
     assert mundo["submits"] == []
 
 
+def test_la_ultima_mirada_antes_de_emitir_no_le_pregunta_a_la_cache(
+    mundo, monkeypatch
+) -> None:
+    """La decisión del otro camino está en ERPNext; la caché puede no tenerla.
+
+    El test de arriba deja las dos copias de acuerdo, porque `registrar`
+    escribe en ERPNext y cachea a continuación. Pero `_cachear` se traga los
+    fallos de Redis —a propósito: una decisión durable no se pierde porque la
+    caché no tome— y la entrada vieja vive 30 días. O sea que el otro camino
+    puede dejar `vencida` escrito en el pedido y `esperando_cliente` en la
+    caché, que es justo la copia a la que `leer` le pregunta primero.
+
+    Acá el barrido toma la llave que este worker perdió con el lease y vence la
+    oferta mientras se escriben los términos: ya soltó la reserva y ya le dijo
+    al cliente que se le pasó. Preguntándole a la caché, esta llamada emite
+    igual —una venta cerrada contra una oferta que ya nadie sostiene, sobre
+    stock que se le devolvió a los demás— y el submit no se deshace. Por eso la
+    última mirada es `leer_durable` y no `leer`.
+
+    Hallazgo de CodeRabbit sobre este PR.
+
+    Mutación dirigida: ponerle la caché adelante a `leer_durable`, las tres
+    líneas de `_desde_cache` que tiene `leer_estricto`. Mata a este test y a
+    ningún otro. Y por el SEGUNDO consumidor de esa misma lectura, una mutación
+    aparte: `_sin_oferta(pedido, solicitud, lengua)` en vez de `de_nuevo` —el
+    cliente vuelve a escuchar «no me quedó nada pendiente» sobre una oferta que
+    venció—. También mata a este test y a ningún otro.
+    """
+    _aprobar_y_esperar(mundo)
+    esperando = solicitudes.leer(SO)
+    redis = outbound_status._client
+    aplicar = erpnext.policy_aplicar_terminos
+    del_barrido: list = []
+    en_cache: list[str] = []
+
+    def aplicar_y_vencer(*args, **kwargs):
+        resultado = aplicar(*args, **kwargs)
+        # El barrido cierra la oferta y su caché NO entra: exactamente lo que
+        # `_cachear` se traga cuando Redis parpadea.
+        redis.caido = True
+        try:
+            del_barrido.append(
+                solicitudes.registrar(
+                    esperando,
+                    "vencida",
+                    estado=solicitudes.VENCIDA,
+                    motivo="sin respuesta; el borrador se cerró",
+                )
+            )
+        finally:
+            redis.caido = False
+        en_cache.append(solicitudes.leer(SO).estado)
+        return resultado
+
+    monkeypatch.setattr(erpnext, "policy_aplicar_terminos", aplicar_y_vencer)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    # Las dos mitades del escenario, o el test no estaría midiendo nada: el
+    # vencimiento quedó durable Y la caché se quedó con la foto vieja.
+    assert del_barrido and del_barrido[0] is not None, "el vencimiento no quedó durable"
+    assert en_cache == [solicitudes.ESPERANDO_CLIENTE], "la caché tenía que quedar vieja"
+    assert mundo["submits"] == []
+    # Y lo que escucha el cliente sale del registro durable, no de la caché:
+    # la oferta venció, no es que «no quedó nada pendiente de su parte».
+    assert respuesta == idioma.t("oferta.cerrada", idioma.ES, pedido=SO)
+
+
+def test_si_la_ultima_lectura_no_contesta_el_cliente_no_escucha_que_no_hay_nada(
+    mundo, monkeypatch
+) -> None:
+    """«No sé» no es «no hay», y lo que sigue a esta lectura es el submit.
+
+    Es el mismo motivo por el que existe `LecturaIncierta` y por el que
+    `decisiones.confirmar` lee con `leer_estricto`, un piso más abajo: la
+    lectura que decide si se emite no puede colapsar un ERPNext que no contesta
+    en «no hay ninguna oferta esperando». Acá ese colapso no llega al submit
+    —cualquiera de las dos respuestas frena— pero sí llega al cliente: le
+    cierra la conversación sobre una oferta que sigue viva, y la próxima vez
+    que escriba «acepto» ya no va a escribir.
+
+    La caché no está (un flush, un reinicio) porque lo que este test mide es
+    qué se contesta cuando la única fuente de verdad no contesta.
+
+    Mutación dirigida: en la rama del `except LecturaIncierta`, devolver
+    `_sin_oferta(pedido, None, lengua)` en vez de `oferta.no_verificable` —o
+    sea, volver a leer «no pude» como «no hay»—. Mata a este test y a ningún
+    otro.
+    """
+    _aprobar_y_esperar(mundo)
+    aplicar = erpnext.policy_aplicar_terminos
+
+    def aplicar_y_caerse(*args, **kwargs):
+        resultado = aplicar(*args, **kwargs)
+        _sin_redis()
+
+        def sin_erpnext(*a, **kw):
+            raise RuntimeError("ERPNext no contesta")
+
+        monkeypatch.setattr(erpnext, "policy_get_list", sin_erpnext)
+        return resultado
+
+    monkeypatch.setattr(erpnext, "policy_aplicar_terminos", aplicar_y_caerse)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["submits"] == []
+    assert respuesta == idioma.t("oferta.no_verificable", idioma.ES)
+
+
 def test_only_a_PHONE_counts_as_a_person_deciding(mundo, monkeypatch, lunes) -> None:
     """Quién decidió se mide con un teléfono, no con «no es la constante».
 

@@ -585,6 +585,42 @@ def _desde_erpnext(pedido: str) -> Solicitud | None:
         return None
 
 
+def leer_durable(pedido: str) -> Solicitud | None:
+    """El evento más nuevo del registro durable, SALTEÁNDOSE la caché.
+
+    `leer` y `leer_estricto` contestan con la caché cuando la hay, y para casi
+    todo está bien: toda escritura pasa por ERPNext antes que por Redis, así
+    que una entrada de caché no puede ser más nueva que el registro. Pero
+    puede ser más VIEJA, y ahí está el agujero: `_cachear` se traga los fallos
+    de Redis a propósito —una decisión durable no se pierde porque la caché no
+    tome— así que otro worker puede dejar escrito el rechazo, el vencimiento o
+    la revisión en ERPNext y la foto de `esperando_cliente` intacta en la
+    caché, con TTL de 30 días. Quien la lea después ve una oferta que ya
+    ninguna persona sostiene.
+
+    Para un barrido eso cuesta un tick. Para lo último que se mira antes de un
+    `submit_doc` cuesta una venta emitida contra una decisión que otro ya
+    tomó, y el submit no se deshace: por eso existe esta lectura y por eso no
+    mira Redis para contestar. De paso corrige la entrada vieja, que es lo que
+    hace que el worker siguiente no vuelva a tropezarse con la misma.
+
+    Levanta `LecturaIncierta` por lo mismo que `leer_estricto`: acá «no pude
+    leer» no puede valer como «nadie decidió nada».
+    """
+    pedido = str(pedido or "").strip()
+    if not pedido:
+        return None
+    try:
+        durable = _desde_erpnext_estricto(pedido)
+    except Exception as exc:
+        raise LecturaIncierta(
+            f"{pedido}: no pude leer los eventos ({type(exc).__name__})"
+        ) from exc
+    if durable is not None:
+        _cachear(durable)
+    return durable
+
+
 def leer_estricto(pedido: str) -> Solicitud | None:
     """El estado actual de la solicitud del pedido, o None — y `None` SÓLO
     quiere decir que no hay.
@@ -604,15 +640,7 @@ def leer_estricto(pedido: str) -> Solicitud | None:
     desde_cache = _desde_cache(pedido)
     if desde_cache is not None:
         return desde_cache
-    try:
-        durable = _desde_erpnext_estricto(pedido)
-    except Exception as exc:
-        raise LecturaIncierta(
-            f"{pedido}: no pude leer los eventos ({type(exc).__name__})"
-        ) from exc
-    if durable is not None:
-        _cachear(durable)
-    return durable
+    return leer_durable(pedido)
 
 
 def leer(pedido: str) -> Solicitud | None:
@@ -2578,7 +2606,24 @@ def aceptar_cliente(
             # si alguien decidió mientras tanto. Si la solicitud ya no es la
             # misma o dejó de esperar al cliente, no se emite: el que decidió
             # segundo no pisa al que decidió primero.
-            de_nuevo = leer(pedido)
+            #
+            # Y se pregunta con `leer_durable`, NO con `leer`: el otro worker
+            # escribe en ERPNext y recién después cachea, y `_cachear` se traga
+            # el fallo de Redis, así que la caché puede seguir mostrando
+            # `esperando_cliente` sobre una solicitud que ya se rechazó o
+            # venció. Preguntarle a la caché justo acá es preguntarle a la
+            # única copia que puede estar vieja por el mismo motivo por el que
+            # hay que volver a preguntar.
+            try:
+                de_nuevo = leer_durable(pedido)
+            except LecturaIncierta as exc:
+                # «No sé» no es «no hay», y lo que sigue es el submit. El
+                # cliente escucha que no se pudo mirar —no que no hay nada
+                # esperándolo, que cierra la conversación sobre una oferta que
+                # capaz sigue viva— y la solicitud queda como estaba: en el
+                # índice, con su plazo, y el barrido vuelve.
+                print(f"[solicitudes] {exc}")
+                return idioma.t("oferta.no_verificable", lengua)
             if de_nuevo is None or de_nuevo.id != solicitud.id or (
                 de_nuevo.estado != ESPERANDO_CLIENTE
             ):
