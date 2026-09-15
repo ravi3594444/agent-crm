@@ -306,6 +306,79 @@ def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
 # ------------------------------------------------------------------- Panel
 
 
+def chequear_idioma(env: Mapping[str, str], reporte: Reporte) -> None:
+    """En qué idioma va a hablar cada agente, dicho en voz alta.
+
+    El interruptor existe, anda y está probado en CI —hay una celda entera con
+    `IDIOMA_DEFAULT=en`—, pero no se veía por ningún lado: `.env.example` lo
+    nombraba de refilón adentro del comentario de LOCALE y el preflight no lo
+    mencionaba. O sea que el que instalaba para un dueño que lee en inglés no
+    tenía cómo enterarse de que existía, y lo único que veía era un agente
+    contestando en castellano.
+
+    Esto no valida nada que pueda fallar: informa una decisión. Por eso es `ok`
+    y nunca `error`, salvo un valor escrito mal, que sí es un error porque el
+    sistema lo ignora en silencio y se va al default.
+    """
+    from app import idioma
+
+    crudo = _valor(env, "IDIOMA_DEFAULT")
+    if crudo and crudo.strip().lower() not in idioma.IDIOMAS:
+        reporte.error(
+            "IDIOMA_DEFAULT",
+            f"«{crudo}» no es un idioma conocido ({', '.join(sorted(idioma.IDIOMAS))}): "
+            "se ignora y todo sale en el idioma por defecto",
+        )
+        return
+    por_defecto = crudo.strip().lower() if crudo else idioma.ES
+
+    fijado = _valor(env, "IDIOMA_GERENCIA").strip().lower()
+    if fijado and fijado not in idioma.IDIOMAS:
+        reporte.error(
+            "IDIOMA_GERENCIA",
+            f"«{fijado}» no es un idioma conocido: se ignora",
+        )
+        return
+
+    # El del dueño puede estar guardado —él lo cambia por WhatsApp— y eso le
+    # GANA al `.env`. Se informa lo que el sistema va a hacer de verdad, no lo
+    # que dice el archivo, que es la diferencia entre un preflight y un `cat`.
+    #
+    # SE PREGUNTA POR LO GUARDADO Y NO POR LA RESOLUCIÓN YA HECHA. `idioma.
+    # gerencia()` cae a `os.environ` cuando no hay nada guardado, o sea al `.env`
+    # del proceso que está corriendo ESTE chequeo — que es justamente el viejo,
+    # el que se quiere reemplazar. Con `IDIOMA_GERENCIA=en` en el archivo
+    # candidato y `es` exportado, el preflight decía «el dueño recibe ES» sobre
+    # un archivo que dice lo contrario. Y `guardado` se deducía comparando dos
+    # valores que venían de fuentes distintas, así que también mentía.
+    from app import limites
+
+    try:
+        del_almacen = limites.idioma_gerencia_guardado()
+    except Exception:
+        del_almacen = None
+    # LAS TRES RESPUESTAS, Y LAS TRES SEPARADAS. Acá decía `if del_almacen:`, que
+    # mete el `None` en la misma rama que el `""` — o sea que inventé el contrato
+    # de tres estados y lo colapsé una línea después. Con Redis caído
+    # `limites.idioma_gerencia()` se va al DEFAULT sin mirar el entorno, así que
+    # informar `fijado or por_defecto` hace que el preflight y el runtime
+    # contesten distinto justo cuando algo ya está roto, que es cuando más se
+    # mira el preflight.
+    if del_almacen is None:
+        del_dueno, guardado = por_defecto, False
+    elif del_almacen:
+        del_dueno, guardado = del_almacen, True
+    else:
+        del_dueno, guardado = fijado or por_defecto, False
+
+    reporte.ok(
+        "IDIOMA_DEFAULT",
+        f"el dueño recibe {del_dueno.upper()}"
+        + (" (lo cambió él desde su teléfono)" if guardado else "")
+        + f"; a un cliente se le espeja el idioma y, si no se sabe, {por_defecto.upper()}",
+    )
+
+
 def chequear_panel(env: Mapping[str, str], reporte: Reporte) -> None:
     """El panel: quién entra, y quién de los que entran puede decidir.
 
@@ -1018,11 +1091,19 @@ def chequear_entrega(
         reporte.aviso("Entrega", "sin Redis: no se verificaron las reglas de entrega")
         return
     try:
+        todas = list(resumen_limites())
         filas = {
             str(f.get("nombre")): f
-            for f in resumen_limites()
+            for f in todas
             if str(f.get("nombre")) in limites.ENTREGA
         }
+        # El tope NO es una regla de entrega, y por eso no está en `filas`. Se
+        # lee aparte porque la excepción pre-autorizada EMITE el pedido sola, y
+        # eso depende del tope: los dos tienen que estar de acuerdo o el cliente
+        # recibe una oferta que después no se puede cumplir.
+        tope = next(
+            (f for f in todas if str(f.get("nombre")) == "AUTO_CONFIRM_MAX"), None
+        )
     except Exception as exc:
         reporte.error(
             "Entrega",
@@ -1153,6 +1234,30 @@ def chequear_entrega(
                 "en sí pero falta " + ", ".join(faltan) + ": nada queda "
                 "pre-autorizado y cada caso lo decide una persona",
             )
+        elif tope is not None and not tope.get("problema") and _es_cero(
+            tope.get("valor")
+        ):
+            # LOS DOS INTERRUPTORES TIENEN QUE ESTAR DE ACUERDO, y este es el
+            # único lugar donde se puede ver que no lo están.
+            #
+            # Una excepción pre-autorizada termina EMITIENDO el pedido sola: el
+            # cliente pide un día de fuera, la regla del dueño lo autoriza, la
+            # oferta sale sin que nadie la mire, el cliente contesta «acepto» y
+            # `solicitudes` emite. Con el tope en 0 —que es el dueño diciendo
+            # «ningún pedido se emite sin mí»— esa emisión se rechaza al final
+            # del camino, y para entonces al cliente ya se le prometieron
+            # condiciones y ya contestó que sí. Lo que ve es que le ofrecen algo
+            # y después le dicen que espere a una persona.
+            #
+            # No es un error: las dos configuraciones son válidas por separado
+            # y ninguna está rota. Es que juntas no hacen lo que parecen.
+            reporte.aviso(
+                "ENTREGA_EXCEPCION_ACTIVA",
+                "en sí, pero el tope de auto-confirmación está en 0: la oferta "
+                "sale sola y después NO se puede emitir, así que al cliente se "
+                "le ofrece algo que termina esperando a una persona. Poné un "
+                "tope, o dejá la excepción en no",
+            )
         else:
             reporte.ok("ENTREGA_EXCEPCION_ACTIVA", "sí, con días, hora y cargo configurados")
 
@@ -1267,6 +1372,7 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
     http = _http_real if con_red else None
     chequear_modelos(env, reporte)
     chequear_equipo(env, reporte)
+    chequear_idioma(env, reporte)
     chequear_panel(env, reporte)
     waba = chequear_whatsapp(env, reporte, http)
     # El resumen de límites se resuelve ANTES de las plantillas: dos de ellas

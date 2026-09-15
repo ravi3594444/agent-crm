@@ -415,11 +415,23 @@ def inventario_confiable(
 
     monkeypatch.setenv("STOCK_CONFIABLE", "true" if maestra else "false")
     monkeypatch.setenv("STOCK_CONFIABLE_HORAS", "24")
-    monkeypatch.setattr(
-        inventario,
-        "confiable",
-        lambda code, warehouse: (fresco, "" if fresco else motivo),
-    )
+    def falso(code, warehouse, *, ignorar_postura=False):
+        """DERIVA DE LO QUE RECIBE, incluido el interruptor.
+
+        Antes era un `lambda` que devolvía `(fresco, motivo)` pase lo que pase,
+        y por eso ignoraba el `STOCK_CONFIABLE` que la línea de arriba acababa
+        de fijar. Un doble que descarta el parámetro bajo prueba no puede
+        discreparle al código sobre él: con ése puesto,
+        `test_the_master_switch_off_alone_does_not_fail_the_rules` afirmaba lo
+        CONTRARIO de lo que hacía producción —donde `confiable` miraba el
+        interruptor en su primera línea— y pasaba igual. Cuarta vez que aparece
+        el defecto que CLAUDE.md describe.
+        """
+        if not ignorar_postura and not maestra:
+            return False, "el inventario está marcado como no confiable"
+        return fresco, "" if fresco else motivo
+
+    monkeypatch.setattr(inventario, "confiable", falso)
 
 
 def entrega_autorizada(
@@ -485,6 +497,14 @@ def limites_sin_redis(monkeypatch):
         # con un .env que lo encienda, `crear_pedido` escribiría filas de agenda
         # en tests que no hablan de eso, y el barrido las despacharía.
         "AVISO_ANTES_DE_ENTREGA_HORAS",
+        # Los consejos al dueño (app/consejos.py). Misma fuga que las de
+        # arriba, y una peor: con `CONSEJOS_ACTIVO` encendido en un `.env` de
+        # desarrollo, un test que no habla de consejos haría que el barrido
+        # saliera a leer ERPNext y reclamara claves en Redis.
+        "CONSEJOS_ACTIVO",
+        "CONSEJOS_LISTA_COSTO",
+        "CONSEJOS_DEUDA_DIAS",
+        "CONSEJOS_DEUDA_MINIMA",
         # Los tokens del dashboard. Un `.env` de desarrollo que los tenga
         # haría pasar un test de «sin acceso configurado» por la razón
         # equivocada — y peor: uno que afirma que un token NO sirve podría

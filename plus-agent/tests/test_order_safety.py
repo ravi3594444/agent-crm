@@ -256,12 +256,62 @@ def test_usual_order_uses_bound_customer_not_model_input(
     result = catalogo.pedido_habitual.invoke({}, config=_customer_config("CUST-001"))
 
     assert "Último pedido" in result
+    # Esto fija la FIRMA de la llamada, no el comportamiento: el Mock devuelve
+    # lo mismo pase lo que pase, así que no puede estar en desacuerdo con el
+    # código sobre CUÁL pedido vuelve. Eso lo prueba el test de abajo.
     get_list.assert_called_once_with(
         "Sales Order",
         filters=[["customer", "=", "CUST-001"], ["docstatus", "=", 1]],
         fields=["name"],
         limit=1,
+        order_by="transaction_date desc, creation desc",
     )
+
+
+def test_usual_order_is_the_LAST_one_not_the_last_one_TOUCHED(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """«Lo de siempre» tiene que traer el pedido más reciente del cliente.
+
+    El doble ORDENA de verdad, con el `order_by` que le pasan: si derivara de lo
+    que este archivo supone —devolver siempre el primero de la lista— el assert
+    de abajo no podría estar en desacuerdo con el código, que es justamente cómo
+    el bug vivió acá sin que nadie lo viera.
+
+    Los datos están armados para que las dos ordenaciones NO coincidan: el
+    pedido viejo es el último modificado (alguien le dejó un comentario ayer),
+    el pedido nuevo es el último hecho. Con `modified desc` —el default de
+    Frappe cuando nadie pide otra cosa— gana el viejo.
+    """
+    filas = [
+        {"name": "SO-VIEJO", "transaction_date": "2026-01-10", "creation": "2026-01-10",
+         "modified": "2026-09-13"},
+        {"name": "SO-NUEVO", "transaction_date": "2026-09-01", "creation": "2026-09-01",
+         "modified": "2026-09-01"},
+    ]
+
+    def get_list_que_ordena(doctype, filters=None, fields=None, limit=20, **kw):
+        campo, _, sentido = (kw.get("order_by") or "modified desc").split(",")[0].partition(" ")
+        ordenadas = sorted(filas, key=lambda f: f[campo], reverse=sentido.strip() == "desc")
+        return [{"name": f["name"]} for f in ordenadas[:limit]]
+
+    # Y el segundo doble también deriva de lo que le PASAN. Con un
+    # `Mock(return_value=pedido)` acá, la respuesta imprimía el mismo nombre
+    # ordenara como ordenara la consulta, y este test pasaba con el bug puesto:
+    # lo comprobé mutando el order_by y viendo que no moría. Ese es el fallo que
+    # CLAUDE.md describe, cometido acá mismo.
+    def get_doc_que_mira_el_nombre(doctype, name, **kw):
+        doc = _order()
+        doc["name"] = name
+        return doc
+
+    monkeypatch.setattr(erpnext, "get_list", get_list_que_ordena)
+    monkeypatch.setattr(erpnext, "get_doc", get_doc_que_mira_el_nombre)
+
+    resultado = catalogo.pedido_habitual.invoke({}, config=_customer_config("CUST-001"))
+
+    assert "SO-NUEVO" in resultado
+    assert "SO-VIEJO" not in resultado
 
 
 @time_machine.travel(RealDateTime(2026, 8, 30, 2, 30, tzinfo=UTC), tick=False)

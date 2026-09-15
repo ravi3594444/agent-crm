@@ -267,6 +267,14 @@ def pedido_habitual(config: RunnableConfig) -> str:
         filters=[["customer", "=", actor.customer_code], ["docstatus", "=", 1]],
         fields=["name"],
         limit=1,
+        # SIN esto, «el último pedido» era el último MODIFICADO: Frappe ordena
+        # por `modified desc` cuando nadie le dice otra cosa, y a un pedido
+        # viejo lo toca cualquier cosa —un comentario, un cambio de estado, una
+        # cancelación— mucho después de hecho. Así que a un cliente que pedía
+        # «lo de siempre» se le podía ofrecer un pedido de hace meses, CON SU
+        # FECHA, que es lo que esta misma respuesta imprime dos líneas abajo.
+        # `creation` desempata dos pedidos del mismo día.
+        order_by="transaction_date desc, creation desc",
     )
     if not orders:
         return "Esta cuenta no tiene pedidos anteriores confirmados."

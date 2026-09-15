@@ -152,24 +152,31 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "Perdón, no pude armar la respuesta. ¿Me lo escribís de nuevo?",
         EN: "Sorry, I couldn't put together a reply. Could you send that again?",
     },
+    # OJO CON LAS PRIMERAS 24 LETRAS DE ESTOS CUATRO TEXTOS.
+    # `demo/piloto.py::_es_disculpa` reconoce una disculpa técnica comparando
+    # `texto[:24]` contra el catálogo, así que el arranque —«Perdón, tuve un
+    # problema» / «Sorry, I hit a technical»— es un contrato con el banco de
+    # pruebas y con los casos escritos a mano de tests/test_demo.py. La COLA se
+    # reescribe libremente; el arranque, no, o el banco deja de ver un turno roto.
+    # «no pude procesar tu mensaje» era lo único de acá que hablaba de máquinas.
     "fallback.problema_tecnico": {
         ES: (
-            "Perdón, tuve un problema técnico y no pude procesar tu mensaje. "
-            "Probá de nuevo en unos minutos."
+            "Perdón, tuve un problema técnico y no te pude contestar. "
+            "Probá de nuevo en un rato."
         ),
         EN: (
-            "Sorry, I hit a technical problem and couldn't process your message. "
-            "Try again in a few minutes."
+            "Sorry, I hit a technical problem and couldn't get back to you. "
+            "Try again in a bit."
         ),
     },
     "fallback.problema_tecnico_avisado": {
         ES: (
-            "Perdón, tuve un problema técnico. Ya avisé al equipo y te responden "
-            "en un rato."
+            "Perdón, tuve un problema técnico. Ya le avisé al equipo, "
+            "te contestan en un rato."
         ),
         EN: (
-            "Sorry, I hit a technical problem. I've told the team and they'll get "
-            "back to you shortly."
+            "Sorry, I hit a technical problem. I've told the team, they'll get "
+            "back to you in a bit."
         ),
     },
     # ------------------------------------------------------ estado de pedido
@@ -183,24 +190,34 @@ CATALOGO: dict[str, dict[str, str]] = {
     # al cliente no le sirven de nada y que además prometen un chequeo. Queda
     # sólo lo que necesita saber: quedó anotado, no está confirmado, le
     # contestamos. Sin día, sin hora y sin precio.
+    # El mensaje que más clientes leen de todo el producto: sale con CADA pedido
+    # que no se auto-confirma. Decía «Te anoté el pedido X. Todavía no está
+    # confirmado; te contesto dentro de N h.» — el punto y coma es de un mail,
+    # no de un WhatsApp, y «dentro de N h» es de un formulario. Lo que promete
+    # es exactamente lo mismo: no está confirmado, y contesto antes de N horas.
     "pedido.pendiente": {
         ES: (
-            "Te anoté el pedido {pedido}. Todavía no está confirmado; "
-            "te contesto dentro de {horas} h."
+            "Listo, te lo anoté: {pedido}. Todavía no está confirmado, "
+            "pero te contesto antes de {horas} h."
         ),
         EN: (
-            "I have noted down order {pedido}. It is not confirmed yet; "
-            "I will get back to you within {horas} h."
+            "Done, I've got it down: {pedido}. It's not confirmed yet, "
+            "but I'll get back to you within {horas} h."
         ),
     },
+    # La confirmación. La etiqueta «Items:» era una palabra en inglés adentro de
+    # un mensaje en español y convertía el recibo en un formulario; los renglones
+    # se entienden solos debajo del título. «Total:» y «Entrega:» se quedan: así
+    # escribe un remito cualquier almacenero, y son los dos datos que se buscan
+    # de un vistazo.
     "pedido.confirmado_cliente": {
         ES: (
             "✅ Pedido {pedido} confirmado\n"
-            "Items: {renglones}\nTotal: {total}\nEntrega: {entrega}"
+            "{renglones}\nTotal: {total}\nEntrega: {entrega}"
         ),
         EN: (
             "✅ Order {pedido} confirmed\n"
-            "Items: {renglones}\nTotal: {total}\nDelivery: {entrega}"
+            "{renglones}\nTotal: {total}\nDelivery: {entrega}"
         ),
     },
     "pedido.entrega_a_coordinar": {
@@ -210,24 +227,27 @@ CATALOGO: dict[str, dict[str, str]] = {
     # Sin saludo: estos llegan cuando ya se estuvo hablando, y el saludo va una
     # sola vez por conversación. «Hola!» en la mitad de una charla es lo que
     # delata que del otro lado hay un programa que no leyó lo anterior.
+    # «cumplirlo», «En breve» y «Perdón por la molestia» son de una carta
+    # documento. Lo que dice no cambia: no se hace, alguien del equipo escribe,
+    # y hubo una sola disculpa.
     "pedido.rechazado": {
         ES: (
-            "Sobre tu pedido {pedido}: no vamos a poder cumplirlo{motivo}. "
-            "En breve te escribe alguien del equipo. Perdón por la molestia."
+            "Sobre tu pedido {pedido}: no lo vamos a poder hacer{motivo}. "
+            "Ya te escribe alguien del equipo. Perdón."
         ),
         EN: (
-            "About your order {pedido}: we won't be able to fulfil it{motivo}. "
-            "Someone from our team will message you shortly. Sorry about that."
+            "About your order {pedido}: we can't do it{motivo}. "
+            "Someone from the team is writing to you now. Sorry about that."
         ),
     },
     "pedido.cancelado": {
         ES: (
             "Tu pedido {pedido} quedó cancelado ({motivo}). Si fue un error, "
-            "escribinos y lo revisamos."
+            "escribime y lo vemos."
         ),
         EN: (
-            "Your order {pedido} has been cancelled ({motivo}). If this is a "
-            "mistake, message us and we will sort it out."
+            "Your order {pedido} is cancelled ({motivo}). If that's a mistake, "
+            "message me and we'll sort it out."
         ),
     },
     "pedido.sin_confirmar": {
@@ -280,8 +300,8 @@ CATALOGO: dict[str, dict[str, str]] = {
         EN: "I don't have an open offer for you.",
     },
     "oferta.no_registre": {
-        ES: "No me quedó registrada tu respuesta. Escribime de nuevo en un momento.",
-        EN: "Your reply did not get saved. Message me again in a moment.",
+        ES: "No me llegó bien tu respuesta. Mandámela de nuevo en un minuto.",
+        EN: "Your reply didn't come through. Send it to me again in a minute.",
     },
     "oferta.procesando": {
         ES: "Justo estoy con algo de este pedido. Escribime en un minuto.",
@@ -315,10 +335,13 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "{pedido} ya quedó confirmado con lo que acordamos.",
         EN: "{pedido} is already closed on what we agreed.",
     },
+    # «está mirándolo una persona» es otra de las frases que
+    # tests/test_solicitudes.py usa para reconocer ESTE mensaje: queda igual, y
+    # lo que se arregla es el «Sobre {pedido} está mirándolo…» de adelante.
     "oferta.en_revision": {
         ES: (
-            "Sobre {pedido} está mirándolo una persona antes de cerrarlo. Te "
-            "contestamos en cuanto lo revise."
+            "El {pedido} está mirándolo una persona antes de cerrarlo. Te "
+            "contesto en cuanto lo vea."
         ),
         EN: (
             "Someone is looking at {pedido} before we close it. We'll get back to "
@@ -389,28 +412,34 @@ CATALOGO: dict[str, dict[str, str]] = {
             "you the details right away."
         ),
     },
+    # «a la brevedad» es de una nota de la municipalidad. «Te contesto en un
+    # rato» dice lo mismo y lo dice una persona.
+    # «necesito revisarlo con una persona» y «necesito que lo vea una persona»
+    # (abajo) NO son sólo redacción: tests/test_solicitudes.py las usa para
+    # distinguir ESTE mensaje del de al lado, incluso con un `not in`. Se
+    # conservan tal cual; lo que se arregla es el marco que las rodeaba.
     "oferta.a_revision": {
         ES: (
-            "Gracias por confirmar. Sobre {pedido} necesito revisarlo con una "
-            "persona antes de cerrarlo: cambió algo desde la oferta. Te "
-            "contestamos a la brevedad."
+            "Gracias por confirmar. Antes de cerrar el {pedido} necesito "
+            "revisarlo con una persona: cambió algo desde la oferta. Te "
+            "contesto en un rato."
         ),
         EN: (
             "Thanks for confirming. Someone has to look at {pedido} with me before "
-            "we close it: something moved since the offer. We'll get back to you "
-            "shortly."
+            "we close it: something moved since the offer. I'll get back to you "
+            "in a bit."
         ),
     },
     "oferta.revision_sin_registro": {
         ES: (
-            "Gracias por confirmar. Sobre {pedido} se me complicó algo y necesito "
-            "que lo vea una persona. No queda nada confirmado a tu nombre; te "
-            "contestamos a la brevedad."
+            "Gracias por confirmar. Con el {pedido} se me complicó algo y "
+            "necesito que lo vea una persona. No queda nada confirmado a tu "
+            "nombre. Te contesto en un rato."
         ),
         EN: (
             "Thanks for confirming. Something went wrong with {pedido} on my side "
-            "and a person has to look at it. Nothing is closed in your name; we'll "
-            "get back to you shortly."
+            "and someone has to look at it. Nothing is closed in your name. I'll "
+            "get back to you in a bit."
         ),
     },
     # ------------------------------------------------- avisos a la gerencia
@@ -465,7 +494,8 @@ CATALOGO: dict[str, dict[str, str]] = {
         EN: (
             "🔒 {pedido}: {horas} h went by with no decision, so I closed it to "
             "stop it reserving stock and told the customer it was not "
-            "confirmed. If it is still doable, it has to be redone with today's."
+            "confirmed. If it is still doable, it has to be redone with today's "
+            "stock and prices."
         ),
     },
     # El resumen de autonomía (app/autonomia.py). Cada número puede ser «no
@@ -665,8 +695,8 @@ CATALOGO: dict[str, dict[str, str]] = {
     },
     # --------------------------------------------------- entrega / vencimiento
     "entrega.fuera_de_dia": {
-        ES: "Esa entrega queda fuera de los días de reparto. La decide una persona.",
-        EN: "That delivery falls outside the delivery days. A person decides it.",
+        ES: "Ese día no salimos a repartir, así que eso lo decide el encargado.",
+        EN: "We don't run deliveries that day, so the manager decides that one.",
     },
     "entrega.fuera_de_zona": {
         ES: "No repartimos en esa zona por ahora.",
@@ -674,12 +704,12 @@ CATALOGO: dict[str, dict[str, str]] = {
     },
     "entrega.solicitud_vencida": {
         ES: (
-            "Se venció la espera por tu pedido {pedido} y no pude ofrecerte una "
-            "alternativa. Lo ve una persona."
+            "Sobre tu pedido {pedido}: se me pasó el tiempo y no pude ofrecerte "
+            "otra cosa. Lo está viendo el encargado."
         ),
         EN: (
-            "The wait on your order {pedido} expired and I couldn't offer an "
-            "alternative. A person will look at it."
+            "About your order {pedido}: time ran out and I couldn't offer you "
+            "anything else. The manager is looking at it."
         ),
     },
     # Sin «respondé con el botón»: al cliente la oferta le llega como texto o
@@ -708,16 +738,19 @@ CATALOGO: dict[str, dict[str, str]] = {
             "We can schedule it for a normal delivery day instead."
         ),
     },
+    # «no llegué a tener UNA respuesta» separa este mensaje de `entrega.respaldo`
+    # («la respuesta»), y tests/test_solicitudes.py se apoya en esa diferencia de
+    # un artículo, con un `in` de un lado y un `not in` del otro. No se toca.
     "entrega.vencida": {
         ES: (
             "Sobre tu pedido {pedido}: no llegué a tener una respuesta del "
-            "encargado, así que por ahora no queda confirmado. Escribime y lo "
-            "volvemos a ver con el stock del momento."
+            "encargado, así que no te lo puedo dar por confirmado. Escribime y "
+            "lo vemos de nuevo con lo que haya."
         ),
         EN: (
-            "About your order {pedido}: I did not get an answer in time, so it "
-            "is not confirmed. Message me and we will look at it again with "
-            "current stock."
+            "About your order {pedido}: the manager didn't get back to me in "
+            "time, so I can't call it confirmed. Message me and we'll look at it "
+            "again with whatever we have."
         ),
     },
     "entrega.respaldo_retiro": {
@@ -747,32 +780,35 @@ CATALOGO: dict[str, dict[str, str]] = {
             "confirming."
         ),
     },
+    # El inglés decía «nothing is charged» —«no se te cobra nada»— donde el
+    # español dice «no queda nada a tu nombre». No son lo mismo: uno habla de
+    # plata y el otro de que no hay pedido agendado, y la promesa que importa es
+    # la segunda. Se corrige junto con el tono.
     "entrega.revision_vencida": {
         ES: (
-            "Sobre tu pedido {pedido}: te había dicho que lo revisaba una "
-            "persona y no llegamos a hacerlo, así que no lo dejo agendado y no "
-            "queda nada a tu nombre. Perdón. Cuando quieras lo armamos de nuevo "
-            "con el stock del momento."
+            "Sobre tu pedido {pedido}: te dije que lo miraba una persona y no "
+            "llegamos a hacerlo, así que no lo dejo agendado y no queda nada a "
+            "tu nombre. Perdón. Cuando quieras lo armamos de nuevo con lo que "
+            "haya."
         ),
         EN: (
-            "About your order {pedido}: I said a person would review it and we "
-            "did not get to it, so it is not scheduled and nothing is charged. "
-            "Sorry. Message me and we will put it together again with current "
-            "stock."
+            "About your order {pedido}: I said someone would look at it and we "
+            "didn't get to it. Nothing is booked in your name. Sorry. Message me "
+            "whenever you like and we'll put it together again with whatever we "
+            "have."
         ),
     },
     "entrega.respaldo_vencido": {
         ES: (
             "Sobre tu pedido {pedido}: se venció el plazo de esa opción "
             "({terminos}), así que no queda agendada y no hay nada confirmado a "
-            "tu nombre. Cuando quieras, escribime y lo armamos con el stock del "
-            "momento."
+            "tu nombre. Cuando quieras escribime y lo armamos con lo que haya."
         ),
         EN: (
-            "About your order {pedido}: that option has run out, so it is not "
-            "scheduled and nothing is confirmed in your name ({terminos}). "
-            "Message me whenever you like and we will put it together with "
-            "current stock."
+            "About your order {pedido}: that option has run out, so it isn't "
+            "booked and nothing is confirmed in your name ({terminos}). Message "
+            "me whenever you like and we'll put it together with whatever we "
+            "have."
         ),
     },
     "entrega.aprobacion_vencida": {
@@ -815,6 +851,18 @@ CATALOGO: dict[str, dict[str, str]] = {
             "It applies from the next order on, with no restart. "
             "It's on record under your name ({ts})."
         ),
+    },
+    # El gemelo de `codigo.ajuste_no_aplicado` para el código de SEIS dígitos
+    # (una acción sobre un pedido). Estas dos estaban escritas a mano en
+    # `app/main.py`, así que el dueño con el sistema en inglés recibía la
+    # negativa en castellano justo en el camino del código de confirmación.
+    "codigo.accion_no_aplicada": {
+        ES: "No hice nada: {motivo}.",
+        EN: "I did nothing: {motivo}.",
+    },
+    "codigo.accion_error": {
+        ES: "No pude hacer esa acción en este momento. No cambié nada.",
+        EN: "I could not carry out that action right now. I changed nothing.",
     },
     "codigo.ajuste_no_aplicado": {
         ES: "No apliqué nada: {motivo}.",
@@ -1189,9 +1237,13 @@ CATALOGO: dict[str, dict[str, str]] = {
     },
     # ---------------------------------------- stock / precio / entrega
     "stock.no_confiable": {
-        ES: "No puedo prometer disponibilidad de {producto} ahora mismo.",
-        EN: "I can't promise availability of {producto} right now.",
+        ES: "Ahora mismo no te puedo asegurar que tengamos {producto}.",
+        EN: "Right now I can't promise we have {producto}.",
     },
+    # «el stock de {producto}» y no «el {producto}»: el nombre del catálogo lleva
+    # su propio género («Leche entera 1 L» es femenino, «Queso cremoso»
+    # masculino) y ninguna plantilla puede concordar con los dos. «Stock» es
+    # palabra de mostrador acá, así que no suena a sistema.
     "stock.insuficiente": {
         ES: "No me alcanza el stock de {producto} para esa cantidad.",
         EN: "I don't have enough stock of {producto} for that quantity.",
@@ -1298,6 +1350,233 @@ CATALOGO: dict[str, dict[str, str]] = {
     "boton.confirmar_conteo": {
         ES: "Confirmar conteo",
         EN: "Confirm count",
+    },
+    # Los dos del mensaje al cliente. «Mandarlo»/«No mandarlo» y no
+    # «Sí»/«No»: el botón se ve solo, sin la pregunta, cuando llega una
+    # notificación al celular.
+    "boton.mandar": {ES: "Mandarlo", EN: "Send it"},
+    "boton.no_mandar": {ES: "No mandarlo", EN: "Do not send"},
+    # La negativa GENÉRICA de una herramienta de gerencia. Hasta acá era sólo
+    # la constante `runtime_context.SIN_PERMISO`, en castellano y sin gemelo en
+    # inglés: el dueño que habla inglés recibía su única negativa en castellano.
+    # El ES de acá tiene que seguir siendo igual a esa constante, y hay un test
+    # que lo afirma — son dos literales en dos archivos distintos, así que
+    # cambiar uno no mueve al otro y el assert sirve de verdad.
+    "permiso.sin_autorizacion": {
+        ES: "Ese número no está autorizado para esto. No consulté ni cambié nada.",
+        EN: "That number is not authorized for this. I checked nothing and "
+            "changed nothing.",
+    },
+    # ------------------------------------------------ la memoria del negocio
+    "memoria.no_pude_leer": {
+        ES: "No pude leer los datos del negocio: {error}.",
+        EN: "I could not read your business notes: {error}.",
+    },
+    "memoria.olvidado": {
+        ES: "Listo, me olvido de esto: «{texto}».",
+        EN: "Done, I am forgetting this: \u201c{texto}\u201d.",
+    },
+    "memoria.no_anote": {
+        ES: "No anoté nada: {error}.",
+        EN: "I wrote nothing down: {error}.",
+    },
+    "memoria.anotado": {
+        ES: "Anotado: «{texto}». Si está mal, decímelo y lo corrijo.",
+        EN: "Noted: \u201c{texto}\u201d. If it is wrong, tell me and I will fix it.",
+    },
+    "memoria.nada_falta": {
+        ES: "Por ahora no me falta nada importante. Si hay algo del negocio que "
+            "querés que tenga presente, decímelo y lo anoto.",
+        EN: "Nothing important is missing right now. If there is anything about "
+            "the business you want me to keep in mind, tell me and I will note it.",
+    },
+    "memoria.falta": {
+        ES: "Me falta esto: {pregunta}\n(cuando me conteste, lo anoto con "
+            "sobre=\"{clave}\")",
+        EN: "This is what I am missing: {pregunta}\n(when they answer, I note it "
+            "with sobre=\"{clave}\")",
+    },
+    "memoria.sin_datos": {
+        ES: "Todavía no tengo ningún dato tuyo anotado. Decime cualquier cosa que "
+            "quieras que tenga presente —cómo te paga un cliente, qué no puede "
+            "faltar, qué hacés con una devolución— y la anoto.",
+        EN: "I have nothing of yours noted yet. Tell me anything you want me to "
+            "keep in mind \u2014how a customer pays you, what must never run out, "
+            "what you do with a return\u2014 and I will note it.",
+    },
+    "memoria.linea": {ES: "· {texto}  ({clave})", EN: "· {texto}  ({clave})"},
+    "memoria.listado": {
+        ES: "Tengo {total} datos tuyos anotados:",
+        EN: "I have {total} of your notes:",
+    },
+    "memoria.listado_pie": {
+        ES: "Para cambiar uno, decime el nuevo con la misma palabra entre "
+            "paréntesis; para borrarlo, decime que me olvide de eso.",
+        EN: "To change one, tell me the new version using the same word in "
+            "parentheses; to delete it, tell me to forget it.",
+    },
+    # Las DOS que faltaban. `app/tools/memoria.py` pasaba por el catálogo en
+    # todos sus caminos menos éstos dos, así que un dueño que puso el sistema en
+    # inglés recibía inglés para «lo anoté» y castellano para «no había nada» y
+    # para la confirmación de un cambio — en la misma conversación.
+    "memoria.no_habia": {
+        ES: "No tenía ningún dato guardado sobre «{sobre}», así que no borré nada.",
+        EN: "I had nothing stored about “{sobre}”, so I deleted nothing.",
+    },
+    "memoria.cambiado": {
+        ES: "Cambiado. Antes tenía: «{antes}».\nAhora: «{ahora}».",
+        EN: "Changed. It used to say: “{antes}”.\nNow: “{ahora}”.",
+    },
+    # ------------------------------------------------ los informes de gerencia
+    # app/tools/operaciones.py traducía las 40 cosas que devuelve y
+    # app/tools/gerencia.py ninguna de las suyas, y los dos devuelven bloques
+    # que el modelo relata casi textuales. Para un dueño que habla inglés, «¿de
+    # qué estoy corto?» volvía con las etiquetas en castellano. No era un
+    # criterio distinto: era que a este archivo nadie lo había traducido.
+    "gerencia.reporte_vacio": {
+        ES: "El reporte «{reporte}» no devolvió filas.",
+        EN: "Report \u201c{reporte}\u201d returned no rows.",
+    },
+    "gerencia.reporte_encabezado": {
+        ES: "Reporte «{reporte}» ({total} filas, muestro {muestro}):",
+        EN: "Report \u201c{reporte}\u201d ({total} rows, showing {muestro}):",
+    },
+    "gerencia.autonomia_fallo": {
+        ES: "No pude armar el resumen de autonomía: {error}.",
+        EN: "I could not build the autonomy summary: {error}.",
+    },
+    "gerencia.sin_pendientes": {
+        ES: "No hay pedidos pendientes de confirmación.",
+        EN: "No orders are waiting to be confirmed.",
+    },
+    "gerencia.pendientes_encabezado": {
+        ES: "{total} pedidos pendientes de confirmar:",
+        EN: "{total} orders waiting to be confirmed:",
+    },
+    # La antigüedad es con lo que decide a cuál atender primero.
+    "gerencia.antiguedad": {ES: " · hace {horas} h", EN: " · {horas} h ago"},
+    "gerencia.linea_pendiente": {
+        ES: "- {pedido} · {quien} · {monto} · entrega {fecha}{antiguedad}",
+        EN: "- {pedido} · {quien} · {monto} · delivery {fecha}{antiguedad}",
+    },
+    "gerencia.ventas_resumen": {
+        ES: "Últimos {dias} días: {total} pedidos confirmados, total {monto}. "
+            "Promedio {promedio} por pedido.",
+        EN: "Last {dias} days: {total} confirmed orders, {monto} in total. "
+            "Average {promedio} per order.",
+    },
+    "gerencia.ventas_vacio": {
+        ES: "Sin pedidos confirmados en los últimos {dias} días.",
+        EN: "No confirmed orders in the last {dias} days.",
+    },
+    "gerencia.stock_bajo_titulo": {ES: "Stock bajo:", EN: "Low stock:"},
+    "gerencia.stock_sin_alertas": {
+        ES: "Sin alertas de stock.",
+        EN: "No stock alerts.",
+    },
+    "gerencia.linea_stock": {
+        ES: "- {item}: {cantidad} (mínimo {minimo})",
+        EN: "- {item}: {cantidad} (minimum {minimo})",
+    },
+    "gerencia.sin_cobranzas": {
+        ES: "No hay saldos pendientes de cobro.",
+        EN: "There are no outstanding balances.",
+    },
+    "gerencia.cobranzas_encabezado": {
+        ES: "Total a cobrar {monto} en {total} facturas:",
+        EN: "{monto} outstanding across {total} invoices:",
+    },
+    "gerencia.linea_cobranza": {
+        ES: "- {cliente}: {monto}",
+        EN: "- {cliente}: {monto}",
+    },
+    "gerencia.cliente_no_encontrado": {
+        ES: "No encontré un cliente que coincida con «{quien}».",
+        EN: "I found no customer matching \u201c{quien}\u201d.",
+    },
+    "gerencia.ficha_encabezado": {
+        ES: "{nombre} ({codigo}) · {grupo} · {telefono}\nÚltimos pedidos:",
+        EN: "{nombre} ({codigo}) · {grupo} · {telefono}\nLatest orders:",
+    },
+    "gerencia.linea_pedido_cliente": {
+        ES: "  · {fecha} {pedido} {monto} ({estado})",
+        EN: "  · {fecha} {pedido} {monto} ({estado})",
+    },
+    "gerencia.ficha_sin_pedidos": {
+        ES: "  · sin pedidos confirmados",
+        EN: "  · no confirmed orders",
+    },
+    # Va adentro del encabezado de la ficha, donde iría el teléfono.
+    "gerencia.sin_telefono_corto": {ES: "s/tel", EN: "no phone"},
+    # ------------------------------------------------ mensajes a un cliente
+    # Lo que el dueño ve antes de aprobar. El texto va ENTRE COMILLAS y
+    # completo: lo que aprueba es exactamente lo que va a salir, y si se
+    # resumiera estaría aprobando otra cosa.
+    "salida.pedir_visto_bueno": {
+        ES: "Para {cliente} ({telefono}):\n\n«{texto}»\n\n¿Se lo mando?",
+        EN: "To {cliente} ({telefono}):\n\n\u201c{texto}\u201d\n\nShall I send it?",
+    },
+    "salida.mandado": {
+        ES: "Listo, se lo mandé a {cliente}.",
+        EN: "Done, I sent it to {cliente}.",
+    },
+    "salida.descartado": {
+        ES: "Listo, no se lo mando.",
+        EN: "Fine, I will not send it.",
+    },
+    # Venció o ya se usó. NO se distinguen los dos casos a propósito: el
+    # remedio del dueño es el mismo —pedirlo de nuevo— y decirle «ya se mandó»
+    # cuando en realidad venció sería decirle que el cliente fue avisado.
+    "salida.ya_no_esta": {
+        ES: "Ese mensaje ya no está para mandar: o salió, o pasó más de una "
+            "hora. Pedímelo de nuevo si querés.",
+        EN: "That message is no longer waiting: it either went out or it is "
+            "over an hour old. Ask me again if you still want it.",
+    },
+    "salida.sin_telefono": {
+        ES: "{cliente} no tiene teléfono cargado en el sistema, así que no le "
+            "puedo escribir. Cargáselo en ERPNext y volvé a pedírmelo.",
+        EN: "{cliente} has no phone number on file, so I cannot write to them. "
+            "Add it in ERPNext and ask me again.",
+    },
+    # La ventana de 24 h de Meta. Se le explica en sus términos —«hace más de
+    # un día que no te escribe»— y no con la palabra «ventana», que no
+    # significa nada para él.
+    "salida.fuera_de_ventana": {
+        ES: "Hace más de un día que {cliente} no te escribe, y WhatsApp no deja "
+            "escribirle primero salvo con un mensaje ya aprobado por Meta, que "
+            "para esto no hay. Te queda escribirle vos desde tu WhatsApp.",
+        EN: "{cliente} has not written to you in over a day, and WhatsApp only "
+            "allows starting a conversation with a message Meta approved in "
+            "advance, and there is none for this. You would have to write from "
+            "your own WhatsApp.",
+    },
+    "salida.no_encontre": {
+        ES: "No encontré a «{quien}» en el sistema.",
+        EN: "I could not find \u201c{quien}\u201d in the system.",
+    },
+    # Lo que la herramienta le devuelve AL MODELO. Dice explícitamente que no
+    # salió nada, porque el fallo natural del modelo acá es contestarle al
+    # dueño «ya le avisé» cuando todavía no tocó el botón.
+    "salida.esperando_visto_bueno": {
+        ES: "Le mandé el mensaje al dueño con un botón para aprobarlo. TODAVÍA "
+            "NO SALIÓ: no digas que el cliente fue avisado. Decile en una línea "
+            "que se lo pasaste para que lo apruebe.",
+        EN: "I sent the owner the message with a button to approve it. IT HAS "
+            "NOT GONE OUT YET: do not say the customer was told. Say in one "
+            "line that you passed it to them to approve.",
+    },
+    "salida.no_pude_pedir": {
+        ES: "No pude mandarle el mensaje al dueño para que lo apruebe, así que "
+            "no quedó nada pendiente. Decíselo y que le escriba él.",
+        EN: "I could not send the owner the message to approve, so nothing is "
+            "pending. Tell them, and that they should write to the customer.",
+    },
+    "salida.no_salio": {
+        ES: "Aprobaste el mensaje pero no lo pude poner en la cola de salida, "
+            "así que NO salió. Escribíle vos.",
+        EN: "You approved the message but I could not queue it, so it did NOT "
+            "go out. Write to them yourself.",
     },
     # Qué le falta a unos términos para ser una oferta. Son las piezas de una
     # frase («de eso falta qué día y a qué hora»), así que son prosa: antes
@@ -1582,12 +1861,12 @@ CATALOGO: dict[str, dict[str, str]] = {
     # ------------------------------------------------ fallback / revisión
     "fallback.error_tecnico": {
         ES: (
-            "Tuve un problema técnico con eso. Ya avisé al equipo y te "
-            "responden a la brevedad."
+            "Tuve un problema técnico con eso. Ya le avisé al equipo, "
+            "te contestan en un rato."
         ),
         EN: (
-            "I hit a technical problem with that. I've told the team and "
-            "they'll get back to you shortly."
+            "I hit a technical problem with that. I've told the team, "
+            "they'll get back to you in a bit."
         ),
     },
     "fallback.revisa_persona": {
@@ -1614,14 +1893,17 @@ CATALOGO: dict[str, dict[str, str]] = {
     # Las filas de `app/agenda.py`. El aviso al cliente NO promete día, hora ni
     # precio: `{hora}` es la hora de reparto que el cliente YA conocía, y la
     # frase dice justamente que a esa hora todavía no está confirmado.
+    # El número iba de yapa al final, entre paréntesis, como el pie de un
+    # formulario. Va adelante, que es donde lo pone una persona cuando retoma un
+    # pedido del que ya venían hablando.
     "pedido.aviso_antes_de_entrega": {
         ES: (
-            "Todavía no te lo pude confirmar para las {hora}. "
-            "Apenas lo vea el encargado te aviso. (Pedido {pedido})"
+            "Sobre el {pedido}: todavía no te lo pude confirmar para las {hora}. "
+            "Apenas lo vea el encargado te aviso."
         ),
         EN: (
-            "I haven't been able to confirm it for {hora} yet. "
-            "As soon as the manager sees it I'll let you know. (Order {pedido})"
+            "About {pedido}: I haven't been able to confirm it for {hora} yet. "
+            "As soon as the manager sees it I'll let you know."
         ),
     },
     "gerencia.plazo_asunto": {
@@ -1671,6 +1953,412 @@ CATALOGO: dict[str, dict[str, str]] = {
             "{motivo}. It keeps holding stock until you close it by hand."
         ),
     },
+    # ------------------------------------------------------------------
+    # Las cadenas fijas de las herramientas de gerencia. El prompt ya
+    # respetaba el idioma del dueño; estas lo esquivaban, así que un dueño
+    # con el sistema en inglés recibía castellano en cuanto una herramienta
+    # contestaba algo que no fuera un número.
+    "ajustes.cliente_nuevo_sin_efecto": {
+        ES: 'ℹ️ todavía sin efecto: hasta que el sistema verifique la dirección y la zona de entrega, un cliente nuevo siempre espera a una persona',
+        EN: 'ℹ️ no effect yet: until the system checks the address and the delivery zone, a new customer always waits for a person',
+    },
+    "ajustes.cliente_nuevo_zona": {
+        ES: 'ℹ️ sólo cuando la dirección del pedido cae en una zona de reparto configurada (o ya se le entregó ahí antes); si no, el pedido queda en borrador igual',
+        EN: "ℹ️ only when the order's address falls inside a configured delivery zone (or you have delivered there before); otherwise the order stays a draft anyway",
+    },
+    "ajustes.cuenta_cargo": {
+        ES: 'Cuenta contable del cargo: {cuenta} (se configura en el servidor).',
+        EN: 'Accounting head for the fee: {cuenta} (it is set on the server).',
+    },
+    "ajustes.entrega_ilegible": {
+        ES: 'No pude leer las reglas de entrega ({motivo}). Mientras no se puedan leer, no se ofrece ninguna entrega fuera de día ni retiro.',
+        EN: "I couldn't read the delivery rules ({motivo}). While they can't be read, nothing is offered off-schedule and nothing for pickup.",
+    },
+    "ajustes.entrega_perdida": {
+        ES: '⚠️ Se perdieron tus reglas de entrega: el almacén está vacío y ERPNext tiene cambios tuyos registrados. Los valores del servidor NO rigen. Hasta que las vuelvas a fijar no se ofrece reparto, entrega fuera de día ni retiro: decime cada regla con su valor y te pido confirmación.',
+        EN: "⚠️ Your delivery rules were lost: the store is empty and ERPNext has changes of yours on record. The server values are NOT in force. Until you set them again there is no round, nothing off-schedule and no pickup: tell me each rule with its value and I'll ask you to confirm.",
+    },
+    "ajustes.entrega_pie": {
+        ES: 'Para cambiar una, decime cuál y el valor nuevo. Te pido confirmación antes de aplicarla.',
+        EN: "To change one, tell me which and the new value. I'll ask you to confirm before applying it.",
+    },
+    "ajustes.entrega_titulo": {
+        ES: 'Reglas de entrega:',
+        EN: 'Delivery rules:',
+    },
+    "ajustes.historial_ilegible": {
+        ES: 'No pude leer el historial ({motivo}).',
+        EN: "I couldn't read the history ({motivo}).",
+    },
+    "ajustes.historial_titulo": {
+        ES: 'Últimos cambios de límites:',
+        EN: 'Latest changes to your limits:',
+    },
+    "ajustes.historial_vacio": {
+        ES: 'Todavía nadie cambió un límite; están todos en su valor inicial.',
+        EN: 'Nobody has changed a limit yet; they are all at their initial value.',
+    },
+    "ajustes.limites_ilegibles": {
+        ES: 'No pude leer los límites ({motivo}). Mientras no se puedan leer, ningún pedido se auto-confirma: todos quedan pendientes.',
+        EN: "I couldn't read the limits ({motivo}). While they can't be read, nothing confirms on its own: every order waits for you.",
+    },
+    "ajustes.limites_pie": {
+        ES: 'Para cambiar uno, decime cuál y el valor nuevo. Te pido confirmación antes de aplicarlo.',
+        EN: "To change one, tell me which and the new value. I'll ask you to confirm before applying it.",
+    },
+    "ajustes.limites_titulo": {
+        ES: 'Límites de auto-confirmación:',
+        EN: 'Auto-confirm limits:',
+    },
+    "ajustes.linea_historial": {
+        ES: '· {ts} — {ajuste}: {anterior} → {nuevo} (desde {telefono})',
+        EN: '· {ts} — {ajuste}: {anterior} → {nuevo} (from {telefono})',
+    },
+    "ajustes.mal_configurado": {
+        ES: '⚠️ mal configurado: {problema}',
+        EN: '⚠️ misconfigured: {problema}',
+    },
+    "ajustes.no": {
+        ES: 'no',
+        EN: 'no',
+    },
+    "ajustes.origen_arranque": {
+        ES: 'valor de arranque',
+        EN: 'start-up value',
+    },
+    "ajustes.origen_default": {
+        ES: 'default del sistema',
+        EN: 'system default',
+    },
+    "ajustes.origen_dueno": {
+        ES: 'lo fijaste vos',
+        EN: 'you set it',
+    },
+    "ajustes.origen_perdido": {
+        ES: 'se perdió del almacén',
+        EN: 'lost from the store',
+    },
+    "ajustes.si": {
+        ES: 'sí',
+        EN: 'yes',
+    },
+    "ajustes.sin_configurar": {
+        ES: 'sin configurar',
+        EN: 'not set',
+    },
+    "ajustes.sin_cuenta_cargo": {
+        ES: '⚠️ Sin cuenta contable configurada: un cargo de envío no se escribe en el pedido y queda para que lo agregue una persona.',
+        EN: '⚠️ No accounting head set: a delivery fee is not written into the order and a person has to add it.',
+    },
+    "ajustes.sin_permiso": {
+        ES: 'Ese número no está autorizado para ver ni cambiar los límites. No cambié nada.',
+        EN: 'That number is not authorized to see or change the limits. I changed nothing.',
+    },
+    "ajustes.sin_valor_vigente": {
+        ES: 'sin valor vigente',
+        EN: 'no value in effect',
+    },
+    "captura.conteo_sin_autenticar": {
+        ES: 'No pude autenticar quién cuenta; no cargué el conteo.',
+        EN: 'I could not verify who is doing the count, so I did not record it.',
+    },
+    "captura.conteo_sin_diferencia": {
+        ES: 'El sistema ya tiene {sistema} de {item_code} en {dep}; no hace falta ningún ajuste.',
+        EN: 'The system already has {sistema} of {item_code} in {dep}; no adjustment is needed.',
+    },
+    "captura.pedido_en_borrador": {
+        ES: 'El pedido {numero_pedido} todavía está en borrador. Hay que confirmarlo antes de marcarlo entregado.',
+        EN: 'Order {numero_pedido} is still a draft. It has to be confirmed before it can be marked as delivered.',
+    },
+    "captura.pedido_no_encontrado": {
+        ES: 'No encontré el pedido {numero_pedido}.',
+        EN: 'I could not find order {numero_pedido}.',
+    },
+    "captura.remito_creado": {
+        ES: 'Remito {remito} creado en borrador para {cliente}. Confirmalo y baja el stock.',
+        EN: 'Delivery note {remito} created in draft for {cliente}. Confirm it and the stock comes off.',
+    },
+    "captura.venta_cargada": {
+        ES: 'Cargado como {factura} en borrador ({detalle}) para {cliente}. Confirmalo en el sistema y se descuenta del stock.',
+        EN: 'Saved as {factura} in draft ({detalle}) for {cliente}. Confirm it in the system and it comes off stock.',
+    },
+    "captura.venta_sin_lineas": {
+        ES: 'Necesito saber qué productos se vendieron.',
+        EN: 'I need to know which products were sold.',
+    },
+    "crm.borrador_sin_cambios": {
+        ES: 'No me dijiste qué cambiarle: los renglones o la fecha.',
+        EN: 'You did not tell me what to change: the lines or the date.',
+    },
+    "crm.cambio_entrega": {
+        ES: 'entrega {fecha_entrega}',
+        EN: 'delivery {fecha_entrega}',
+    },
+    "crm.cambio_renglones": {
+        ES: '{renglones} renglón/es',
+        EN: '{renglones} line(s)',
+    },
+    "crm.cliente_ambiguo": {
+        ES: '«{nombre_o_codigo}» le queda a más de un cliente: {cuales} y puede que más. Pasame el código exacto — no quiero escribirle al equivocado.',
+        EN: '“{nombre_o_codigo}” fits more than one customer: {cuales}, and there may be more. Send me the exact code — I do not want to write to the wrong one.',
+    },
+    "crm.cliente_error": {
+        ES: 'No pude cambiar la ficha de {cliente}: {exc}',
+        EN: 'I could not update the record for {cliente}: {exc}',
+    },
+    "crm.cliente_listo": {
+        ES: 'Listo. {cliente}: {detalle}.',
+        EN: 'Done. {cliente}: {detalle}.',
+    },
+    "crm.cliente_no_encontrado": {
+        ES: 'No encontré ningún cliente que se llame o se codifique «{nombre_o_codigo}».',
+        EN: 'I could not find any customer named or coded “{nombre_o_codigo}”.',
+    },
+    "crm.cliente_sin_cambios": {
+        ES: 'No me dijiste qué cambiarle. Decime el grupo o la condición de pago.',
+        EN: 'You did not tell me what to change. Give me the group or the payment terms.',
+    },
+    "crm.estado_cancelado": {
+        ES: 'cancelado',
+        EN: 'cancelled',
+    },
+    "crm.estado_confirmado": {
+        ES: 'confirmado',
+        EN: 'confirmed',
+    },
+    "crm.hecho_descripcion": {
+        ES: 'descripción',
+        EN: 'description',
+    },
+    "crm.hecho_reposicion": {
+        ES: 'punto de reposición en {deposito} = {punto_de_reposicion}',
+        EN: 'reorder level in {deposito} = {punto_de_reposicion}',
+    },
+    "crm.lo_hecho": {
+        ES: 'Quedó cambiado: {hecho}. Pero:',
+        EN: 'This much did change: {hecho}. But:',
+    },
+    "crm.nota_error": {
+        ES: 'No pude dejar la nota en {cual}: {exc}',
+        EN: 'I could not leave the note on {cual}: {exc}',
+    },
+    "crm.nota_hecha": {
+        ES: 'Anotado en {cual}.',
+        EN: 'Noted on {cual}.',
+    },
+    "crm.nota_vacia": {
+        ES: 'No me dijiste qué anotar.',
+        EN: 'You did not tell me what to write down.',
+    },
+    "crm.nota_y_tarea": {
+        ES: 'Anotado en {cual}, y le queda la tarea a {recordarle_a}.',
+        EN: 'Noted on {cual}, and the task is now with {recordarle_a}.',
+    },
+    "crm.pedido_actualizado": {
+        ES: 'Pedido {pedido} actualizado ({dicho}). Sigue en BORRADOR: hay que confirmarlo para que salga.',
+        EN: 'Order {pedido} updated ({dicho}). Still a DRAFT: it has to be confirmed before it goes out.',
+    },
+    "crm.pedido_error": {
+        ES: 'No pude cambiar el pedido {pedido}: {exc}',
+        EN: 'I could not change order {pedido}: {exc}',
+    },
+    "crm.pedido_no_borrador": {
+        ES: 'El pedido {pedido} ya está {cual}, así que no lo toco. Un pedido confirmado se cambia por el camino de siempre, con tu código.',
+        EN: 'Order {pedido} is already {cual}, so I am not touching it. A confirmed order gets changed the usual way, with your code.',
+    },
+    "crm.pedido_no_leido": {
+        ES: 'No pude leer el pedido {pedido}: {exc}',
+        EN: 'I could not read order {pedido}: {exc}',
+    },
+    "crm.presupuesto_error": {
+        ES: 'No pude armar el presupuesto: {exc}',
+        EN: 'I could not put the quote together: {exc}',
+    },
+    "crm.presupuesto_listo": {
+        ES: 'Presupuesto {presupuesto} en borrador para {cliente}, con {renglones} renglón/es. Queda sin emitir: miralo antes de mandarlo.',
+        EN: 'Quote {presupuesto} drafted for {cliente}, with {renglones} line(s). It stays unsubmitted: have a look before you send it.',
+    },
+    "crm.presupuesto_vacio": {
+        ES: 'Un presupuesto vacío no sirve. Decime al menos un producto.',
+        EN: 'An empty quote is no use. Give me at least one product.',
+    },
+    "crm.producto_descripcion_error": {
+        ES: 'No pude cambiar la descripción de {item_code}: {exc}',
+        EN: 'I could not change the description of {item_code}: {exc}',
+    },
+    "crm.producto_listo": {
+        ES: '{item_code}: {hecho}.',
+        EN: '{item_code}: {hecho}.',
+    },
+    "crm.producto_sin_cambios": {
+        ES: 'No me dijiste qué cambiarle: la descripción o el punto de reposición.',
+        EN: 'You did not tell me what to change: the description or the reorder level.',
+    },
+    "crm.reposicion_error": {
+        ES: 'No pude cambiar el punto de reposición de {item_code}: {exc}',
+        EN: 'I could not change the reorder level for {item_code}: {exc}',
+    },
+    "crm.reposicion_no_leida": {
+        ES: 'No pude leer el punto de reposición de {item_code}: {exc}',
+        EN: 'I could not read the reorder level for {item_code}: {exc}',
+    },
+    "crm.reposicion_sin_deposito": {
+        ES: 'Para el punto de reposición necesito el depósito: el mismo producto puede tener uno distinto en cada uno.',
+        EN: 'For the reorder level I need the warehouse: the same product can have a different one in each.',
+    },
+    "crm.reposicion_sin_regla": {
+        ES: '{item_code} no tiene una regla de reposición en {deposito} todavía. Esa se crea en ERPNext una vez, y después la puedo ajustar.',
+        EN: '{item_code} does not have a reorder rule in {deposito} yet. That one is set up in ERPNext once, and after that I can adjust it.',
+    },
+    "crm.tarea_error": {
+        ES: 'La nota quedó en {cual}, pero no pude crearle la tarea a {recordarle_a}: {exc}',
+        EN: 'The note is on {cual}, but I could not create the task for {recordarle_a}: {exc}',
+    },
+    "gestion.no_prepare_nada": {
+        ES: 'No preparé nada y no cambié nada: {exc}.',
+        EN: 'I prepared nothing and changed nothing: {exc}.',
+    },
+    "gestion.no_pude_mostrar": {
+        ES: 'No pude mostrarte el pedido: {exc}.',
+        EN: "I couldn't show you that order: {exc}.",
+    },
+    "gestion.preparada": {
+        ES: '{reemplazo}Preparada, todavía sin hacer:\n{consecuencia}\n\nTe mandé el código de confirmación por separado: contestá con esos seis dígitos y la hago. Yo no lo veo y no la puedo aplicar por vos. Si no contestás, se descarta sola.',
+        EN: "{reemplazo}Prepared, not done yet:\n{consecuencia}\n\nI sent you the confirmation code separately: reply with those six digits and I'll do it. I don't see it and I can't apply it for you. If you don't reply, it's discarded on its own.",
+    },
+    "gestion.reemplazo": {
+        ES: 'Reemplacé lo que tenías esperando sobre {pedido}: ese código anterior ya no sirve. Lo que hayas preparado sobre otro pedido sigue esperando igual.',
+        EN: 'I replaced what you had waiting on {pedido}: that earlier code no longer works. Whatever you prepared on another order keeps waiting just the same.',
+    },
+    "gestion.repetida": {
+        ES: 'Esto ya estaba preparado y sigue esperando tu confirmación:\n{consecuencia}\n\nEl código ya te lo mandé; contestá esos seis dígitos. No preparé nada nuevo ni cambié nada.',
+        EN: 'This was already prepared and is still waiting for your confirmation:\n{consecuencia}\n\nI already sent you the code; reply with those six digits. I prepared nothing new and changed nothing.',
+    },
+    "gestion.sin_codigo": {
+        ES: 'Preparé la acción ({accion} {pedido}) pero NO pude mandarte el código de confirmación, así que la descarté. No cambié nada. Probá de nuevo.',
+        EN: 'I prepared the action ({accion} {pedido}) but could NOT send you the confirmation code, so I discarded it. Nothing was changed. Try again.',
+    },
+    # ------------------------------------------------------------------
+    # Los motivos de `AccionError` (app/acciones.py). Viajaban como texto
+    # en castellano adentro de un mensaje ya traducido: media frase en
+    # cada idioma. Ahora la excepción lleva la clave y el motivo se arma
+    # cuando se lee — ver `idioma.motivo_de`.
+    "accion.cambia_algo": {
+        ES: '«{accion}» cambia algo, así que no se hace de una: hay que prepararla y confirmarla con el código',
+        EN: '«{accion}» changes something, so it is not done in one step: it has to be prepared and confirmed with the code',
+    },
+    "accion.cargo_como_numero": {
+        ES: ' y el cargo como un número (0 es sin cargo)',
+        EN: ' and the charge as a number (0 means no charge)',
+    },
+    "accion.codigo_de_otro_numero": {
+        ES: 'ese código no es de este número',
+        EN: 'that code does not belong to this number',
+    },
+    "accion.codigo_mal_formado": {
+        ES: 'eso no tiene forma de código de confirmación',
+        EN: 'that is not shaped like a confirmation code',
+    },
+    "accion.codigo_vencido": {
+        ES: 'ese código ya venció. No cambié nada: pedime la acción de nuevo',
+        EN: 'that code has expired. I changed nothing: ask me for the action again',
+    },
+    "accion.falta_dato": {
+        ES: 'falta {que}. «{accion}» se lo dice al cliente, así que no lo invento: preguntale y volvé a pedírmelo',
+        EN: '{que} is missing. «{accion}» tells the customer, so I do not invent it: ask them and come back to me',
+    },
+    "accion.falta_pedido": {
+        ES: 'falta el número de pedido',
+        EN: 'the order number is missing',
+    },
+    "accion.necesito_con_cargo": {
+        ES: 'qué día, a qué hora y cuánto se cobra',
+        EN: 'what day, what time and how much is charged',
+    },
+    "accion.necesito_sin_cargo": {
+        ES: 'qué día y a qué hora',
+        EN: 'what day and what time',
+    },
+    "accion.no_pude_coordinar": {
+        ES: 'no pude coordinar la acción sobre {pedido}; pedímela de nuevo en un momento',
+        EN: 'I could not coordinate the action on {pedido}; ask me for it again in a moment',
+    },
+    "accion.no_pude_leer_historial": {
+        ES: 'no pude leer el historial de acciones',
+        EN: 'I could not read the action history',
+    },
+    "accion.no_pude_leer_pedido": {
+        ES: 'no pude leer {pedido} en ERPNext, así que no preparé nada',
+        EN: 'I could not read {pedido} in ERPNext, so I prepared nothing',
+    },
+    "accion.no_pude_leer_pendiente": {
+        ES: 'no pude leer la acción pendiente',
+        EN: 'I could not read the pending action',
+    },
+    "accion.no_registre": {
+        ES: 'no pude registrar la acción para confirmarla',
+        EN: 'I could not record the action so you could confirm it',
+    },
+    "accion.no_registre_autorizacion": {
+        ES: 'no pude registrar la autorización en ERPNext, así que no la ejecuté',
+        EN: 'I could not record the authorization in ERPNext, so I did not carry it out',
+    },
+    "accion.numero_no_autorizado": {
+        ES: 'ese número ya no está autorizado para esto',
+        EN: 'that number is no longer authorized for this',
+    },
+    "accion.parametros_ilegibles": {
+        ES: 'los parámetros de la acción pendiente quedaron ilegibles',
+        EN: "the pending action's parameters came back unreadable",
+    },
+    "accion.pedido_mal_formado": {
+        ES: '«{texto}» no tiene forma de número de pedido (SAL-ORD-2026-00008). No adivino cuál es',
+        EN: '«{texto}» is not shaped like an order number (SAL-ORD-2026-00008). I am not going to guess which one it is',
+    },
+    "accion.pendiente_ilegible": {
+        ES: 'la acción pendiente quedó ilegible',
+        EN: 'the pending action came back unreadable',
+    },
+    "accion.pendiente_no_confirmable": {
+        ES: 'la acción pendiente no es de las que se confirman',
+        EN: 'the pending action is not one of the ones that get confirmed',
+    },
+    "accion.sin_quien_confirma": {
+        ES: 'no sé quién confirma la acción',
+        EN: 'I do not know who is confirming the action',
+    },
+    "accion.sin_quien_pide": {
+        ES: 'no sé quién pide la acción',
+        EN: 'I do not know who is asking for the action',
+    },
+    "accion.sin_quien_pregunta": {
+        ES: 'no sé quién pregunta',
+        EN: 'I do not know who is asking',
+    },
+    "accion.sin_solicitud_abierta": {
+        ES: '{pedido} no tiene ninguna solicitud abierta, así que no hay nada que ofrecerle al cliente. No preparé nada',
+        EN: '{pedido} has no open request, so there is nothing to offer the customer. I prepared nothing',
+    },
+    "accion.sin_verbo": {
+        ES: 'no me dijiste qué hacer; las acciones que puedo preparar son: {acciones}',
+        EN: 'you did not tell me what to do; the actions I can prepare are: {acciones}',
+    },
+    "accion.solicitud_abierta_faltan_terminos": {
+        ES: '{pedido} tiene una solicitud abierta y aprobarla es aprobar lo que pidió el cliente, y de eso falta {faltan}. No cambié nada. Decime los términos completos y preparo una contraoferta (qué día, a qué hora y cuánto se cobra) o un retiro (qué día y a qué hora)',
+        EN: '{pedido} has an open request, and approving it means approving what the customer asked for — and {faltan} is missing from that. I changed nothing. Give me the full terms and I prepare a counter-offer (what day, what time and how much is charged) or a pickup (what day and what time)',
+    },
+    "accion.solo_lectura": {
+        ES: '«{accion}» es de sólo lectura: se hace en el momento, no se propone',
+        EN: '«{accion}» is read-only: it happens right away, it is not proposed',
+    },
+    "accion.terminos_no_entendidos": {
+        ES: 'no entendí los términos, y no los invento: son una fecha y un precio que después hay que cumplir. Necesito {necesito}. El día va como «mañana», «jueves», «4/9» o «2026-09-07»; la hora como 18:00{extra}. Ejemplo: {ejemplo}',
+        EN: 'I did not understand the terms, and I do not invent them: they are a date and a price that have to be honoured afterwards. I need {necesito}. The day goes like «tomorrow», «Thursday», «4/9» or «2026-09-07»; the time like 18:00{extra}. Example: {ejemplo}',
+    },
+    "accion.verbo_desconocido": {
+        ES: '«{palabra}» no es una acción que exista. Las que puedo preparar son: {acciones}',
+        EN: '«{palabra}» is not an action that exists. The ones I can prepare are: {acciones}',
+    },
 }
 
 
@@ -1687,6 +2375,33 @@ def claves_incompletas() -> list[str]:
             if not str(textos.get(idioma, "")).strip():
                 faltan.append(f"{clave}:{idioma}")
     return faltan
+
+
+def motivo_de(exc: Exception, lengua: str | None = None) -> str:
+    """El texto de una excepción que lleva `clave`, en el idioma del que lee.
+
+    Vive acá y no en cada módulo que tiene su propia excepción porque ya había
+    DOS copias —`limites.motivo` y la que iba a necesitar `acciones`— y dos
+    copias de una regla son dos reglas: la segunda se olvida el día que la
+    primera aprende algo. `limites.motivo` ahora llama a ésta y conserva su
+    nombre para los cinco lugares que ya lo usaban.
+
+    Sin clave cae a `str(exc)`, que es lo que hacía antes: una excepción de otro
+    módulo, o una vieja, sigue saliendo y nunca vacía.
+
+    UN DATO PUEDE SER LLAMABLE, y ésa es la parte que no tenía `limites.motivo`.
+    Casi todos los datos valen igual en los dos idiomas —un número de pedido, un
+    monto, un código—, pero algunos NO: «falta el día y la hora» es una lista de
+    nombres que hay que traducir, y quien levanta la excepción no sabe quién la
+    va a leer. Un `lambda lengua: ...` difiere esa parte hasta acá, que es el
+    único lugar donde el idioma ya se conoce.
+    """
+    clave = str(getattr(exc, "clave", "") or "")
+    if not clave:
+        return str(exc)
+    crudos = getattr(exc, "datos", None) or {}
+    datos = {k: (v(lengua) if callable(v) else v) for k, v in crudos.items()}
+    return t(clave, lengua, **datos)
 
 
 def t(clave: str, idioma: str | None = None, /, **params: object) -> str:

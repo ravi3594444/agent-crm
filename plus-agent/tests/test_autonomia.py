@@ -91,13 +91,31 @@ def mundo(monkeypatch: pytest.MonkeyPatch) -> dict:
         )
 
     monkeypatch.setattr(erpnext, "policy_get_list", policy_get_list)
+    posturas: list[bool] = []
+
+    def _confiable(code, dep, *, ignorar_postura=False):
+        """ANOTA la postura con que lo llamaron, y modela el conteo por producto.
+
+        El informe de autonomía existe para que el dueño decida si prende
+        `STOCK_CONFIABLE`, así que tiene que preguntar IGNORANDO ese
+        interruptor: si no, con la postura de lanzamiento contaba cero conteos
+        frescos aunque el equipo hubiera contado todo esa mañana, y el número
+        argumentaba en contra de prender justo lo que mide.
+        """
+        posturas.append(ignorar_postura)
+        return code in frescos, "" if code in frescos else f"nadie contó {code}"
+
     monkeypatch.setattr(
         inventario,
         "confiable",
-        lambda code, dep: (code in frescos, "" if code in frescos else f"nadie contó {code}"),
+        # Acepta `ignorar_postura` porque la función de verdad lo tiene. Acá no
+        # cambia nada: este doble modela el conteo POR PRODUCTO, y el
+        # interruptor maestro no es una propiedad del producto.
+        _confiable,
     )
     monkeypatch.setattr(autonomia, "_desde", lambda dias: AHORA - timedelta(days=dias))
     return {
+        "posturas": posturas,
         "comentarios": comentarios,
         "borradores": borradores,
         "renglones": renglones,
@@ -374,6 +392,36 @@ def test_an_unreadable_count_is_none(mundo) -> None:
 
 
 # ------------------------------------------------------------- los conteos
+
+
+def test_the_report_counts_fresh_counts_IGNORING_the_master_switch(
+    mundo, monkeypatch
+) -> None:
+    """El informe pregunta ignorando la postura, porque existe para decidirla.
+
+    `inventario.confiable` mira `STOCK_CONFIABLE` en su primera línea. Con la
+    postura de lanzamiento (`false`), preguntar sin `ignorar_postura` devuelve
+    "no confiable" para TODOS los productos, así que el informe reportaba cero
+    conteos frescos aunque el equipo hubiera contado todo esa mañana — y ese
+    cero es un argumento en contra de prender exactamente lo que el informe
+    mide. Es el mismo defecto que este PR arregla en `policy._evaluar`, una
+    función más allá y en el mismo informe.
+
+    Mutación dirigida: sacarle `ignorar_postura=True` a la llamada de
+    `autonomia.conteos`. Mata a este test y a ningún otro.
+    """
+    mundo["renglones"].append(
+        {"item_code": "LEC-ENT-1L", "warehouse": "Dep", "creation": _sello(1)}
+    )
+    mundo["frescos"].add("LEC-ENT-1L")
+
+    datos = autonomia.conteos()
+
+    assert datos["frescos"] == 1
+    assert mundo["posturas"], "tiene que haber preguntado por algún producto"
+    assert all(mundo["posturas"]), (
+        "toda consulta del informe ignora la postura"
+    )
 
 
 def test_key_products_are_the_ones_actually_ordered(mundo) -> None:

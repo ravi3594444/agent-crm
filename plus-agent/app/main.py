@@ -40,6 +40,7 @@ from app.aprobacion import manejar_boton
 from app.dashboard import install_dashboard
 from app.formato import sin_citas
 from app.graph import responder_cliente, responder_gerencia
+from app.mcp_server import install_mcp
 from app.outbound_status import record_inbound_window, record_outbound, update_status
 from app.progreso import Progreso
 from app.router import es_equipo
@@ -592,10 +593,15 @@ def _codigo_de_accion(text: str, telefono: str) -> str | None:
     try:
         resultado = acciones.aplicar(match.group(1), telefono)
     except acciones.AccionError as exc:
-        return f"No hice nada: {exc}."
+        # Igual que el camino del código de cuatro dígitos, tres funciones más
+        # arriba: el motivo sale por su clave, no interpolando la excepción.
+        lengua = idioma.gerencia()
+        return idioma.t(
+            "codigo.accion_no_aplicada", lengua, motivo=idioma.motivo_de(exc, lengua)
+        )
     except Exception as error:
         print(f"[acciones] confirmación falló type={_error_name(error)}")
-        return "No pude hacer esa acción en este momento. No cambié nada."
+        return idioma.t("codigo.accion_error", idioma.gerencia())
     return str(resultado["detalle"])
 
 
@@ -1571,7 +1577,7 @@ def _solicitudes_scheduler(stop: threading.Event) -> None:
     writing in, and the sweep must not sit in front of the inbound FIFO. A
     failure only skips one round.
     """
-    from app import agenda, pendientes, solicitudes
+    from app import agenda, consejos, notificar, pendientes, solicitudes
 
     while not stop.wait(_SOLICITUDES_TICK_SECONDS):
         try:
@@ -1594,6 +1600,34 @@ def _solicitudes_scheduler(stop: threading.Event) -> None:
             agenda.tick()
         except Exception as error:
             print(f"[agenda] tick type={_error_name(error)}")
+        # Y los consejos al dueño (app/consejos.py), con su propio try/except
+        # por el mismo motivo que los tres de arriba. No-op mientras
+        # CONSEJOS_ACTIVO no esté encendido, que es como arranca.
+        #
+        # `devolver` NO es opcional: es la otra mitad del reclamo. `tick` toma
+        # cada consejo con un SET NX para no decirlo dos veces; si el aviso no
+        # sale, hay que soltarlo o el dueño nunca se entera de eso — la falla
+        # del envío se habría comido el hecho.
+        # Y `devolver` tampoco es opcional cuando el aviso LEVANTA, que es el
+        # caso que faltaba: la rama de `False` lo soltaba y la excepción no, así
+        # que un WhatsApp que tira timeout dejaba el consejo reclamado hasta su
+        # TTL —dicho sin que nadie lo oyera, y sin reintento en 24 h—. Se guarda
+        # cuál está EN VUELO y se suelta ése solo: los que ya salieron bien no
+        # se sueltan, o el dueño los recibiría dos veces.
+        en_vuelo = None
+        try:
+            for consejo in consejos.tick():
+                en_vuelo = consejo
+                if not notificar.avisar_dueno(
+                    consejo.titulo, consejo.cuerpo,
+                    plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE",
+                ):
+                    consejos.devolver(consejo)
+                en_vuelo = None
+        except Exception as error:
+            if en_vuelo is not None:
+                consejos.devolver(en_vuelo)
+            print(f"[consejos] tick type={_error_name(error)}")
 
 
 def _digest_scheduler(stop: threading.Event) -> None:
@@ -1644,6 +1678,9 @@ async def _lifespan(application: FastAPI):
 
 app = FastAPI(title="Plus Agent", lifespan=_lifespan)
 install_dashboard(app)
+# El mismo agente de gerencia, para n8n, Claude Code o el harness que sea.
+# Sin MCP_TOKENS configurado contesta 503 y no hay superficie: ver app/mcp_server.py.
+install_mcp(app)
 
 
 @app.get("/health")

@@ -13,6 +13,7 @@ import os
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.prebuilt import ToolNode, create_react_agent
+from pydantic import ValidationError
 
 from app import erpnext, modelos
 from app.conversacion import (
@@ -23,9 +24,9 @@ from app.conversacion import (
     texto_plano,
 )
 from app.tools.captura import (
+    avisar_al_cliente,
     confirmar_entrega,
     contar_stock,
-    redactar_mensaje_cliente,
     registrar_venta_offline,
 )
 from app.tools.catalogo import (
@@ -35,23 +36,28 @@ from app.tools.catalogo import (
     pedido_habitual,
 )
 from app.tools.configuracion import (
-    historial_limites,
     proponer_limite,
-    ver_limites,
-    ver_reglas_de_entrega,
+    ver_ajustes,
+)
+from app.tools.crm import (
+    actualizar_cliente,
+    actualizar_producto,
+    anotar_en_ficha,
+    armar_presupuesto,
+    editar_borrador,
 )
 from app.tools.gerencia import (
-    cobranzas_vencidas,
     ejecutar_reporte,
     ficha_cliente,
-    pedidos_pendientes,
-    resumen_autonomia,
-    stock_bajo,
-    ventas_del_periodo,
+    informe,
 )
 from app.tools.gestion import (
     detalle_de_pedido,
     proponer_accion,
+)
+from app.tools.memoria import (
+    anotar_dato,
+    ver_memoria,
 )
 from app.tools.operaciones import (
     estado_del_sistema,
@@ -92,22 +98,36 @@ TOOLS_CLIENTES = [
 ]
 
 TOOLS_GERENCIA = [
-    pedidos_pendientes, ventas_del_periodo, stock_bajo,
-    cobranzas_vencidas, ficha_cliente, ejecutar_reporte,
+    # UNA herramienta para los cinco informes (pendientes, ventas, stock bajo,
+    # cobranzas, autonomía). Eran cinco, y `cobranzas_vencidas` era literalmente
+    # una de las siete consultas que `ejecutar_reporte` ya corre: dos
+    # herramientas plausibles para «¿cuánto me deben?». Lo que degrada la
+    # elección es el solapamiento, no la cantidad.
+    informe, ficha_cliente, ejecutar_reporte,
     buscar_producto, consultar_stock, estado_pedido,
     escalar_a_humano,
     # offline capture — how reality gets back into the system
     registrar_venta_offline, contar_stock, confirmar_entrega,
-    redactar_mensaje_cliente,
+    # ...y el mensaje al cliente, que ahora SALE —con el botón del dueño— en
+    # vez de devolver un borrador con un hueco para copiar a mano.
+    avisar_al_cliente,
     # the owner's own limits: read them out and PROPOSE a change. There is no
     # tool that confirms one, deliberately — the four-digit code never enters
     # this agent's context and the deterministic router in app/main.py is what
     # applies the change. An agent that could call both steps is one step.
     # NEVER in TOOLS_CLIENTES — a customer cannot be allowed near these.
-    ver_limites, proponer_limite, historial_limites,
-    # ...and his delivery rules, through the SAME propose/confirm pair. Reading
-    # them is its own tool; changing one is proponer_limite like everything else.
-    ver_reglas_de_entrega,
+    # ver_ajustes reads all THREE (limits, delivery rules, history) behind one
+    # closed Literal; proponer_limite is the only one that writes, and it stays
+    # its own tool — a read and a write behind one enum is one where the wrong
+    # branch writes.
+    ver_ajustes, proponer_limite,
+    # ...y las treinta cosas que repite todo el tiempo y no quiere volver a
+    # explicar (app/memoria.py). `ver_memoria` LEE detrás de un Literal;
+    # `anotar_dato` ESCRIBE, así que va suelta: misma línea que ver_ajustes y
+    # proponer_limite. Un dato no es un ajuste y NO lleva código de cuatro
+    # dígitos — hacerle tipear un código para anotar «la panadería paga los
+    # viernes» es exactamente la fricción de la que se queja.
+    ver_memoria, anotar_dato,
     # read-only operational status. No writes, no retries, no secrets, and
     # NEVER in TOOLS_CLIENTES: these count queues and name the provider.
     estado_del_sistema, ver_avisos_fallidos,
@@ -118,9 +138,21 @@ TOOLS_GERENCIA = [
     # the same reason. NEVER in TOOLS_CLIENTES: a customer near these is a
     # customer deciding his own order.
     detalle_de_pedido, proponer_accion,
-    # ...and the numbers he needs to decide whether to loosen anything
-    # (app/autonomia.py). Read-only, and it reports rather than advises.
-    resumen_autonomia,
+    # ...y lo que el dueño puede CAMBIAR (app/tools/crm.py). La línea no es
+    # leer-contra-escribir —era demasiado ancha— sino IRREVERSIBLE × PLATA:
+    # estas cinco se deshacen escribiendo de nuevo y no le cobran un peso a
+    # nadie. Lo irreversible sigue afuera y sigue sin ser alcanzable: emitir usa
+    # la credencial de política, cancelar un emitido no existe como herramienta,
+    # los límites piden su código de cuatro dígitos, y `Item Price` no está en
+    # `erpnext.DOCTYPES_EDITABLES` —la negativa es del cliente HTTP, no de la
+    # buena conducta de un archivo—.
+    #
+    # NINGUNA pone un precio: `LineaSimple` no tiene `rate`, igual que
+    # `pedidos.LineaPedido`. El precio lo resuelve ERPNext y lo verifica
+    # `policy._precio_autorizado`. Una herramienta donde el precio es un
+    # argumento del modelo convierte al modelo en la autoridad de precios.
+    actualizar_cliente, anotar_en_ficha, armar_presupuesto,
+    editar_borrador, actualizar_producto,
 ]
 
 # from_conn_string() is a CONTEXT MANAGER, not a constructor — using it
@@ -207,19 +239,66 @@ _ERROR_MSG = (
     "ni de errores técnicos."
 )
 
+# UN VALOR DE ENUM EQUIVOCADO NO ES UNA HERRAMIENTA ROTA
+# -----------------------------------------------------
+# `_ERROR_MSG` manda a escalar_a_humano, y para una herramienta que falló de
+# verdad está bien. Pero desde que cinco informes son `informe(que=…)` y tres
+# lecturas de ajustes son `ver_ajustes(que=…)`, hay una falla nueva que NO es
+# una herramienta rota: el modelo llama bien y escribe mal el valor.
+#
+# Y es la falla probable, no una rara. El `Literal` no lo garantiza nadie en la
+# red: Gemini no tiene `strict` en su capa compatible con OpenAI y lo ignora en
+# silencio, así que el enum es una SUGERENCIA para el modelo y la validación
+# real es la de pydantic, acá. Peor: con herramientas en castellano, la falla
+# medida más común es que el modelo escriba el valor en el idioma del usuario
+# —`que="ventas del día"` en vez de `que="ventas"`— aunque haya entendido todo
+# bien (arXiv:2601.05366, «parameter value language mismatch»).
+#
+# Sin esto, ese error se convertía en «esa herramienta falló, escalá a una
+# persona»: un dueño preguntando «¿cómo venimos?» terminaba esperando a un
+# humano por un guión bajo. Con esto vuelve la lista de valores válidos y el
+# modelo reintenta. No se enumera NINGUNA herramienta: sólo los valores del
+# parámetro de la que ya llamó, que ya estaban en su propio esquema.
+def _valores_esperados(exc: ValidationError) -> tuple[str, str] | None:
+    for error in exc.errors():
+        if error.get("type") != "literal_error":
+            continue
+        campo = ".".join(str(x) for x in error.get("loc", ())) or "ese parámetro"
+        esperado = str((error.get("ctx") or {}).get("expected", "")).strip()
+        if esperado:
+            return campo, esperado
+    return None
+
+
+def _error_de_herramienta(exc: Exception) -> str:
+    if isinstance(exc, ValidationError):
+        detalle = _valores_esperados(exc)
+        if detalle:
+            campo, esperado = detalle
+            return (
+                f"El valor de «{campo}» no es uno de los que acepta esa "
+                f"herramienta. Los únicos válidos son: {esperado}. Llamala de "
+                "nuevo con uno de ésos, copiado tal cual —sin traducirlo, sin "
+                "acentos y sin mayúsculas—. No le muestres este mensaje a nadie "
+                "ni le hables de parámetros."
+            )
+    return _ERROR_MSG
+
+
+
 # The system prompt is built per call (prompt=) and never stored in the
 # checkpoint; the model only sees a bounded tail of the thread
 # (pre_model_hook=). See app/conversacion.py for why.
 agente_clientes = create_react_agent(
     model=_modelo_clientes,
-    tools=ToolNodeSinInventario(TOOLS_CLIENTES, handle_tool_errors=_ERROR_MSG),
+    tools=ToolNodeSinInventario(TOOLS_CLIENTES, handle_tool_errors=_error_de_herramienta),
     prompt=prompt_clientes,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,
 )
 agente_gerencia = create_react_agent(
     model=_modelo_gerencia,
-    tools=ToolNodeSinInventario(TOOLS_GERENCIA, handle_tool_errors=_ERROR_MSG),
+    tools=ToolNodeSinInventario(TOOLS_GERENCIA, handle_tool_errors=_error_de_herramienta),
     prompt=prompt_gerencia,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,

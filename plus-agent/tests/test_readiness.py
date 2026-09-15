@@ -162,12 +162,158 @@ def _correr(env, http=_http_sano, limites=_limites_ok):
     reporte = readiness.Reporte()
     readiness.chequear_modelos(env, reporte)
     readiness.chequear_equipo(env, reporte)
+    readiness.chequear_idioma(env, reporte)
     waba = readiness.chequear_whatsapp(env, reporte, http)
     readiness.chequear_plantillas(env, reporte, http, waba)
     readiness.chequear_erpnext(env, reporte, http)
     readiness.chequear_stock_y_limites(env, reporte, limites)
     readiness.chequear_entrega(env, reporte, limites, http)
     return reporte
+
+
+# --------------------------------------------------- en qué idioma va a hablar
+# El interruptor existe, anda, y tiene una celda entera de CI
+# (`IDIOMA_DEFAULT=en`). Lo que no tenía era forma de enterarse: `.env.example`
+# lo nombraba de refilón adentro del comentario de LOCALE, sin renglón propio,
+# y el preflight no lo mencionaba. Para un dueño que lee en inglés, el síntoma
+# era un agente contestando en castellano y ninguna pista de por qué.
+
+
+# LAS DOS MITADES SALEN DE FUENTES DISTINTAS, y por eso los tests fijan las dos.
+# El respaldo del CLIENTE es la variable de entorno, y nada más. El idioma del
+# DUEÑO se resuelve en vivo con `idioma.gerencia()`, porque él lo cambia por
+# WhatsApp y eso queda guardado ENCIMA del `.env`. En producción `env` es
+# `os.environ` y las dos coinciden; en un test no, así que un test que fijara
+# sólo el entorno estaría afirmando sobre una mitad y adivinando la otra.
+
+
+def test_el_arranque_dice_en_que_idioma_le_va_a_hablar_a_cada_uno(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import idioma
+
+    monkeypatch.setattr(idioma, "gerencia", lambda: idioma.EN)
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "en"})
+
+    assert reporte.listo, reporte.texto()
+    assert "el dueño recibe EN" in reporte.texto()
+    assert "si no se sabe, EN" in reporte.texto()
+
+
+def test_sin_configurar_nada_dice_castellano_y_sigue_listo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Un despliegue que ya existe no tiene la variable y no migra por esto."""
+    from app import idioma
+
+    monkeypatch.setattr(idioma, "gerencia", lambda: idioma.ES)
+    reporte = _correr(BASE)
+
+    assert reporte.listo
+    assert "el dueño recibe ES" in reporte.texto()
+
+
+def test_el_idioma_del_dueno_y_el_del_cliente_se_informan_por_separado(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UN renglón informa DOS cosas, así que se hacen diferir a propósito.
+
+    Con un solo idioma en juego las dos mitades salen iguales y un informe que
+    confundiera una con la otra —o que imprimiera la misma dos veces— pasaría
+    igual. Acá el dueño lee castellano y el respaldo del cliente es inglés.
+    """
+    from app import idioma, limites
+
+    # Se finge lo GUARDADO, que es la única fuente que puede contradecir al
+    # `.env` candidato. Fingir `idioma.gerencia()` —como hacía este test— es
+    # fingir la resolución ya hecha, y con eso el chequeo no puede discrepar con
+    # el archivo que está revisando ni siquiera cuando discrepa de verdad.
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: idioma.ES)
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "en"})
+
+    texto = reporte.texto()
+    assert "el dueño recibe ES" in texto, texto
+    assert "si no se sabe, EN" in texto, texto
+
+
+def test_un_idioma_mal_escrito_es_un_error_y_no_un_silencio() -> None:
+    """`por_defecto()` cae al castellano sin decir nada, a propósito: un idioma
+    no autoriza nada y no puede dejar un mensaje sin salir. El precio es que
+    nadie se entera de que escribió mal la variable."""
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "aleman"})
+
+    assert not reporte.listo
+    assert "no es un idioma conocido" in reporte.texto()
+
+
+def test_lo_que_el_dueno_fijo_desde_su_telefono_le_gana_al_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La diferencia entre un preflight y un `cat .env`: acá el entorno y lo
+    guardado se CONTRADICEN, y gana lo guardado."""
+    from app import idioma, limites
+
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: idioma.EN)
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "es"})
+
+    texto = reporte.texto()
+    assert "el dueño recibe EN" in texto, texto
+    assert "lo cambió él desde su teléfono" in texto, texto
+
+
+def test_el_informe_habla_del_env_QUE_SE_LE_PASO_y_no_del_que_esta_exportado(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """El preflight valida un `.env` CANDIDATO, que casi nunca es el que corre.
+
+    `idioma.gerencia()` cae a `os.environ` cuando no hay nada guardado, o sea al
+    archivo VIEJO — el que se quiere reemplazar. Así, revisando un archivo que
+    dice `IDIOMA_GERENCIA=en` con `es` exportado, el informe decía «el dueño
+    recibe ES»: contestaba sobre otro archivo, que es lo único que un preflight
+    no puede hacer.
+
+    MUTACIÓN: volver a `del_dueno = idioma.gerencia()` en `chequear_idioma`.
+    Cae éste y sólo éste.
+    """
+    from app import limites
+
+    monkeypatch.setenv("IDIOMA_GERENCIA", "es")
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: "")
+
+    reporte = _correr({**BASE, "IDIOMA_GERENCIA": "en"})
+
+    texto = reporte.texto()
+    assert "el dueño recibe EN" in texto, texto
+    # Y no se le atribuye al dueño un cambio que no hizo: esto sale del archivo.
+    assert "lo cambió él desde su teléfono" not in texto, texto
+
+
+def test_con_el_almacen_ILEGIBLE_el_informe_dice_lo_mismo_que_el_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Las TRES respuestas de `idioma_gerencia_guardado`, y las tres separadas.
+
+    `None` es «no se pudo leer» y no «no fijó nada». `limites.idioma_gerencia()`
+    con el almacén caído se va al DEFAULT sin mirar el entorno, así que informar
+    `fijado or por_defecto` haría que el preflight y el runtime contesten
+    distinto — justo cuando algo ya está roto, que es cuando más se mira el
+    preflight. El contrato de tres estados lo inventé yo y lo colapsé una línea
+    después con un `if del_almacen:`; lo cazó una revisión.
+
+    MUTACIÓN: volver a `if del_almacen:` en `chequear_idioma`. Cae éste y sólo
+    éste.
+    """
+    from app import limites
+
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: None)
+
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "es", "IDIOMA_GERENCIA": "en"})
+
+    texto = reporte.texto()
+    # El runtime, con el almacén caído, contesta ES: el default, sin mirar el
+    # entorno. El informe tiene que decir lo mismo.
+    assert "el dueño recibe ES" in texto, texto
+    assert "lo cambió él desde su teléfono" not in texto, texto
 
 
 def test_un_LOCALE_mal_escrito_se_dice_en_el_arranque() -> None:
@@ -573,6 +719,62 @@ def test_an_enabled_exception_missing_its_terms_is_called_out() -> None:
 
     assert "en sí pero falta" in texto
     assert "nada queda pre-autorizado" in texto
+
+
+def _excepcion_completa(**extra):
+    return _entrega(
+        ENTREGA_EXCEPCION_ACTIVA="true",
+        ENTREGA_EXCEPCION_DIAS="jueves",
+        ENTREGA_EXCEPCION_HORA="19:00",
+        ENTREGA_EXCEPCION_CARGO="1500",
+        **extra,
+    )
+
+
+def _con_tope(valor: str):
+    return [
+        {"nombre": "AUTO_CONFIRM_MAX", "alias": "tope", "unidad": "",
+         "valor": valor, "origen": "dueño", "problema": ""}
+    ]
+
+
+def test_an_exception_with_the_ceiling_at_zero_is_called_out() -> None:
+    """Los dos interruptores son válidos por separado y juntos no hacen nada.
+
+    Una excepción pre-autorizada EMITE el pedido sola: el cliente pide un día
+    de fuera, la regla del dueño lo autoriza, la oferta sale sin que nadie la
+    mire, el cliente contesta «acepto» y se emite. Con el tope en 0 —el dueño
+    diciendo «ningún pedido se emite sin mí»— esa emisión se rechaza al final
+    del camino, cuando al cliente ya se le prometieron condiciones y ya dijo
+    que sí. Lo que ve es que le ofrecen algo y después le dicen que espere.
+
+    Es un AVISO y no un error: ninguna de las dos configuraciones está rota.
+    Este es el único lugar donde se puede ver que no se llevan bien.
+    """
+    def mal_par():
+        return _excepcion_completa() + _con_tope("0")
+
+    texto = _correr(BASE, limites=mal_par).texto()
+
+    assert "tope de auto-confirmación está en 0" in texto
+    assert "termina esperando a una persona" in texto
+
+
+def test_the_same_exception_with_a_ceiling_set_is_not_called_out() -> None:
+    """La otra mitad: con un tope puesto, el par está bien y no se avisa nada.
+
+    Sin esto, «avisá cuando la excepción está en sí» lo cumpliría igual un
+    aviso que sale SIEMPRE, y el dueño aprendería a ignorarlo.
+
+    Mutación dirigida: sacarle el `and _es_cero(...)` a la condición. Mata a
+    este test y deja verde al de arriba.
+    """
+    def buen_par():
+        return _excepcion_completa() + _con_tope("30000")
+
+    texto = _correr(BASE, limites=buen_par).texto()
+
+    assert "tope de auto-confirmación está en 0" not in texto
 
 
 def test_a_fee_with_no_account_says_a_person_has_to_add_the_charge() -> None:

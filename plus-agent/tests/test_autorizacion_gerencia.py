@@ -51,11 +51,7 @@ SOLO_GERENCIA = {t.name: t for t in TOOLS_GERENCIA if t.name not in _COMPARTIDAS
 # Argumentos mínimos válidos por herramienta. Las claves tienen que cubrir
 # exactamente SOLO_GERENCIA — lo verifica el primer test.
 ARGUMENTOS: dict[str, dict] = {
-    "pedidos_pendientes": {},
-    "resumen_autonomia": {},
-    "ventas_del_periodo": {},
-    "stock_bajo": {},
-    "cobranzas_vencidas": {},
+    "informe": {"que": "pendientes"},
     "ficha_cliente": {"nombre_o_codigo": "Don José"},
     "ejecutar_reporte": {"nombre_reporte": "Stock Balance"},
     "registrar_venta_offline": {
@@ -64,15 +60,26 @@ ARGUMENTOS: dict[str, dict] = {
     },
     "contar_stock": {"item_code": "LECHE-ENT-1L", "cantidad_real": 12},
     "confirmar_entrega": {"numero_pedido": "SAL-ORD-2026-00001"},
-    "redactar_mensaje_cliente": {"cliente": "Don José", "intencion": "llegó el queso"},
-    "ver_limites": {},
+    "avisar_al_cliente": {"cliente": "Don José", "mensaje": "Llegó el queso cremoso."},
+    "ver_memoria": {"que": "anotado"},
+    "anotar_dato": {"sobre": "pagos", "dato": "San José paga los viernes."},
+    "ver_ajustes": {"que": "limites"},
     "proponer_limite": {"limite": "tope", "valor": "50000"},
-    "historial_limites": {},
-    "ver_reglas_de_entrega": {},
     "estado_del_sistema": {},
     "ver_avisos_fallidos": {},
     "detalle_de_pedido": {"pedido": "SAL-ORD-2026-00001"},
     "proponer_accion": {"accion": "confirmar", "pedido": "SAL-ORD-2026-00001"},
+    # La superficie de ESCRITURA (app/tools/crm.py). Cada una tiene su guarda y
+    # cada guarda se prueba acá, igual que las de lectura: cinco puertas nuevas
+    # son cinco que se pueden abrir mal.
+    "actualizar_cliente": {"cliente": "Don José", "grupo": "Comercial"},
+    "anotar_en_ficha": {"sobre": "cliente", "cual": "CUST-0009", "nota": "Reclama."},
+    "armar_presupuesto": {
+        "cliente": "Don José",
+        "lineas": [{"item_code": "LECHE-ENT-1L", "cantidad": 2, "unidad": "Unidad"}],
+    },
+    "editar_borrador": {"pedido": "SAL-ORD-2026-00001", "fecha_entrega": "2026-12-01"},
+    "actualizar_producto": {"item_code": "LECHE-ENT-1L", "descripcion": "Leche entera."},
 }
 
 # Cómo se niega cada una. Casi todas comparten SIN_PERMISO; las que ya tenían su
@@ -81,11 +88,43 @@ NEGATIVAS = {
     "contar_stock": "No pude autenticar quién cuenta; no cargué el conteo.",
     "estado_del_sistema": "Ese número no está autorizado para ver el estado del sistema.",
     "ver_avisos_fallidos": "Ese número no está autorizado para ver el estado del sistema.",
-    "ver_limites": "Ese número no está autorizado",
+    "ver_ajustes": "Ese número no está autorizado",
     "proponer_limite": "Ese número no está autorizado",
-    "historial_limites": "Ese número no está autorizado",
-    "ver_reglas_de_entrega": "Ese número no está autorizado",
 }
+
+
+# UNA HERRAMIENTA COLAPSADA TIENE VARIOS CUERPOS, Y CADA UNO TIENE SU GUARDA.
+# `informe` son cinco lecturas detrás de un `que`, `ver_ajustes` son tres. La
+# cobertura POR NOMBRE dejó de alcanzar el día que se colapsaron: probar sólo
+# la primera rama dejaría las otras sin su guarda probada —que es exactamente
+# el agujero que este archivo existe para que no vuelva—. Los valores se LEEN
+# del esquema de cada herramienta, no se escriben acá, así que una rama nueva
+# sin caso de prueba rompe el archivo en vez de colarse.
+def _ramas(herramienta) -> tuple[str, ...]:
+    que = herramienta.args_schema.model_json_schema()["properties"].get("que", {})
+    return tuple(que.get("enum", ()))
+
+
+COLAPSADAS: dict[str, tuple[str, ...]] = {
+    nombre: _ramas(h) for nombre, h in SOLO_GERENCIA.items() if _ramas(h)
+}
+
+# Cada llamada que se prueba, como (nombre, argumentos): una por herramienta,
+# más una por cada rama que ARGUMENTOS no eligió.
+LLAMADAS: list[tuple[str, dict]] = [
+    *((nombre, ARGUMENTOS[nombre]) for nombre in sorted(ARGUMENTOS)),
+    *(
+        (nombre, {**ARGUMENTOS[nombre], "que": que})
+        for nombre in sorted(COLAPSADAS)
+        for que in COLAPSADAS[nombre]
+        if que != ARGUMENTOS[nombre].get("que")
+    ),
+]
+
+
+def _id(llamada: tuple[str, dict]) -> str:
+    nombre, args = llamada
+    return f"{nombre}:{args['que']}" if "que" in args else nombre
 
 
 @pytest.fixture(autouse=True)
@@ -195,8 +234,16 @@ def test_every_management_only_tool_is_covered_by_this_file() -> None:
         "una herramienta sólo-de-gerencia sin caso de prueba: agregala a "
         "ARGUMENTOS con sus argumentos mínimos"
     )
-    # 19 hoy. El número está acá para que un cambio de superficie se note.
-    assert len(SOLO_GERENCIA) == 19
+    # Toda rama de toda herramienta colapsada se prueba, no sólo la que eligió
+    # ARGUMENTOS. Hoy: informe (5) y ver_ajustes (3).
+    assert COLAPSADAS, "ninguna herramienta colapsada detectada: ¿cambió el esquema?"
+    for nombre, ramas in COLAPSADAS.items():
+        probadas = {a["que"] for n, a in LLAMADAS if n == nombre}
+        assert probadas == set(ramas), f"{nombre}: faltan ramas {set(ramas) - probadas}"
+    # 20 hoy: 15 de lectura —eran 19, con cinco informes sueltos que ahora son
+    # uno— más las 5 de escritura de app/tools/crm.py. El número está acá para
+    # que un cambio de superficie se note, que es justo lo que acaba de pasar.
+    assert len(SOLO_GERENCIA) == 20
 
 
 def test_no_management_tool_accepts_a_phone_or_an_identity_argument() -> None:
@@ -218,9 +265,9 @@ def test_no_management_tool_accepts_a_phone_or_an_identity_argument() -> None:
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("nombre", sorted(ARGUMENTOS))
+@pytest.mark.parametrize("llamada", LLAMADAS, ids=_id)
 def test_the_verified_manager_phone_is_never_refused(
-    nombre: str, monkeypatch: pytest.MonkeyPatch
+    llamada: tuple[str, dict], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Con el número del dueño, ninguna herramienta contesta una negativa.
 
@@ -239,10 +286,9 @@ def test_the_verified_manager_phone_is_never_refused(
     monkeypatch.setattr(erpnext, "default_context", Mock(return_value=("Co", "Dep")))
     monkeypatch.setattr(erpnext, "default_company", Mock(return_value="Co"))
 
+    nombre, args = llamada
     respuesta = str(
-        SOLO_GERENCIA[nombre].invoke(
-            dict(ARGUMENTOS[nombre]), config=_config("management", GERENTE)
-        )
+        SOLO_GERENCIA[nombre].invoke(dict(args), config=_config("management", GERENTE))
     )
 
     assert SIN_PERMISO not in respuesta
@@ -257,8 +303,8 @@ def test_a_manager_phone_in_any_human_format_still_authorizes(
     monkeypatch.setattr(erpnext, "get_list", Mock(return_value=[]))
     for crudo in ("+54 9 351 123-4567", "0351 15 123 4567", "5493511234567"):
         respuesta = str(
-            SOLO_GERENCIA["pedidos_pendientes"].invoke(
-                {}, config=_config("management", crudo)
+            SOLO_GERENCIA["informe"].invoke(
+                {"que": "pendientes"}, config=_config("management", crudo)
             )
         )
         assert SIN_PERMISO not in respuesta, crudo
@@ -269,15 +315,14 @@ def test_a_manager_phone_in_any_human_format_still_authorizes(
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("nombre", sorted(ARGUMENTOS))
+@pytest.mark.parametrize("llamada", LLAMADAS, ids=_id)
 @pytest.mark.parametrize("caso", sorted(NO_AUTORIZADOS))
 def test_unauthorized_identity_is_refused_and_writes_nothing(
-    nombre: str, caso: str, nada_de_escrituras: None
+    llamada: tuple[str, dict], caso: str, nada_de_escrituras: None
 ) -> None:
+    nombre, args = llamada
     respuesta = str(
-        SOLO_GERENCIA[nombre].invoke(
-            dict(ARGUMENTOS[nombre]), config=NO_AUTORIZADOS[caso]
-        )
+        SOLO_GERENCIA[nombre].invoke(dict(args), config=NO_AUTORIZADOS[caso])
     )
 
     assert NEGATIVAS.get(nombre, SIN_PERMISO) in respuesta, (
@@ -288,11 +333,9 @@ def test_unauthorized_identity_is_refused_and_writes_nothing(
 @pytest.mark.parametrize("caso", sorted(NO_AUTORIZADOS))
 def test_a_refusal_never_echoes_the_phone_it_refused(caso: str, nada_de_escrituras: None) -> None:
     """La negativa no dice qué número llamó ni repite el hash."""
-    for nombre in sorted(ARGUMENTOS):
+    for nombre, args in LLAMADAS:
         respuesta = str(
-            SOLO_GERENCIA[nombre].invoke(
-                dict(ARGUMENTOS[nombre]), config=NO_AUTORIZADOS[caso]
-            )
+            SOLO_GERENCIA[nombre].invoke(dict(args), config=NO_AUTORIZADOS[caso])
         )
         for secreto in (GERENTE, CLIENTE, DESCONOCIDO, HASH_DEL_GERENTE):
             assert secreto not in respuesta, f"{nombre}/{caso} filtró {secreto[:6]}…"

@@ -98,6 +98,41 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
             nombre, telefono, canal=decisiones.CANAL_WHATSAPP
         )["detalle"]
 
+    if accion in ("mandar", "nomandar"):
+        # El mensaje a un cliente que el dueño acaba de mirar. `consumir` es un
+        # GETDEL: el segundo toque no encuentra nada, así que un dedo impaciente
+        # no le manda dos veces la misma promesa al cliente.
+        from app import idioma, salidas
+
+        lengua = idioma.gerencia()
+        salida = salidas.consumir(nombre)
+        if salida is None:
+            # Venció o ya se usó, y NO se distinguen los dos casos: el remedio
+            # es el mismo —pedirlo de nuevo— y decirle «ya salió» cuando en
+            # realidad venció sería decirle que el cliente fue avisado.
+            return idioma.t("salida.ya_no_esta", lengua)
+        if accion == "nomandar":
+            return idioma.t("salida.descartado", lengua)
+        try:
+            from app import avisos
+
+            avisos.encolar(
+                # El id de la salida hace de clave de idempotencia de la cola,
+                # que está indexada por (evento, pedido). No hay pedido acá, y
+                # ese id es justamente lo único irrepetible que tenemos.
+                "mensaje_del_dueno", salida.id, salida.telefono, salida.texto,
+            )
+        except Exception as exc:
+            print(f"[aprobacion] mensaje a cliente no encolado ({type(exc).__name__})")
+            # `consumir` ya la borró, así que sin esto el mismo botón contesta
+            # «ya no está» y el dueño no puede reintentar lo que acaba de
+            # aprobar. Vuelve con su vencimiento original y con el MISMO id, que
+            # es la clave de idempotencia de la cola: si el encolado falló
+            # después de haber encolado, el reintento no manda dos veces.
+            salidas.devolver(salida)
+            return idioma.t("salida.no_salio", lengua)
+        return idioma.t("salida.mandado", lengua, cliente=salida.cliente)
+
     if accion == "contraoferta":
         # "contraoferta:<pedido>:<fecha> <hora> <cargo>"
         from app import decisiones

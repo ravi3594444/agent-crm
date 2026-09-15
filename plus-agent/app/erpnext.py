@@ -215,6 +215,82 @@ def create_doc(doctype: str, payload: dict) -> dict:
     return data
 
 
+# LOS ÚNICOS DOCTYPES QUE ESTE PROCESO PUEDE MODIFICAR
+# ----------------------------------------------------
+# `update_doc` es genérico —un PUT a `/api/resource/{doctype}/{name}`— y un
+# genérico sin lista es la forma exacta del agujero: el servidor MCP de ERPNext
+# de terceros que se evaluó en `docs/MCP.md` expone `doc_update` sobre CUALQUIER
+# doctype, así que una herramienta pensada para corregir la dirección de un
+# cliente alcanza también un `Item Price`.
+#
+# ITEM PRICE NO ESTÁ ACÁ, y es la ausencia más importante de la lista: un precio
+# gobierna en silencio lo que se auto-confirma (`policy._precio_autorizado`
+# filtra por price_list, currency Y uom), así que escribir uno mal no da error en
+# ninguna parte — deja de confirmarse solo y nadie sabe por qué. Tampoco están
+# `Sales Invoice` ni `Delivery Note`: eso es plata que ya salió.
+#
+# La lista es del CLIENTE y no de las herramientas a propósito. Que ninguna
+# herramienta llame a un doctype prohibido es una propiedad de la lista de
+# herramientas de hoy; que el cliente se niegue es una propiedad del proceso.
+DOCTYPES_EDITABLES = frozenset({
+    "Customer", "Address", "Contact", "Item", "Item Reorder",
+    "Quotation", "Sales Order", "ToDo",
+})
+
+# Campos que no se tocan AUNQUE su doctype sea editable.
+#
+# `Customer.mobile_no` es la IDENTIDAD del cliente en este sistema: es como
+# `clientes.buscar_por_telefono` decide de quién es un mensaje entrante, o sea
+# cómo el webhook sabe a qué cuenta atribuir un pedido. Cambiarlo deja los
+# mensajes del número viejo sin dueño — deja a una persona sin poder escribir—,
+# y eso no es reversible en el sentido que importa aunque el campo se pueda
+# reescribir.
+#
+# `actualizar_cliente` ya no lo publica como parámetro, y no alcanza: eso es una
+# propiedad de la firma de UNA herramienta de hoy. Esto es una propiedad del
+# proceso, y sigue valiendo para la herramienta que alguien escriba mañana.
+CAMPOS_PROHIBIDOS: dict[str, frozenset[str]] = {
+    "Customer": frozenset({"mobile_no"}),
+}
+
+
+def update_doc(doctype: str, name: str, payload: dict) -> dict:
+    """Modifica un documento existente. NUNCA emite ni cancela.
+
+    DOS GUARDAS, y las dos son estructurales:
+
+    1. El doctype tiene que estar en `DOCTYPES_EDITABLES`.
+    2. `docstatus` se BORRA del payload. Es el campo que lleva un documento de
+       borrador (0) a emitido (1) o a cancelado (2), así que un PUT que lo
+       acepte es un submit con otro nombre — y es exactamente cómo se cuela en
+       los clientes que reenvían el cuerpo del llamador tal cual. Emitir sigue
+       siendo `submit_doc`, con la credencial de política, que ninguna
+       herramienta alcanza.
+    """
+    if doctype not in DOCTYPES_EDITABLES:
+        raise ERPNextError(f"No se puede modificar {doctype} desde acá")
+    prohibidos = CAMPOS_PROHIBIDOS.get(doctype, frozenset())
+    tocados = prohibidos & set(payload or {})
+    if tocados:
+        raise ERPNextError(
+            f"No se puede modificar {doctype}.{sorted(tocados)[0]} desde acá"
+        )
+    cuerpo = {k: v for k, v in (payload or {}).items() if k != "docstatus"}
+    if not cuerpo:
+        raise ERPNextError(f"No hay nada que cambiar en {doctype}")
+    body = _request(
+        _active_client(),
+        "PUT",
+        _resource_path(doctype, name),
+        operation=f"la modificación de {doctype}",
+        json=cuerpo,
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(f"ERPNext devolvió datos inválidos al modificar {doctype}")
+    return data
+
+
 def add_comment(doctype: str, name: str, text: str) -> None:
     """Best-effort audit note; it never changes the known order outcome."""
     try:
