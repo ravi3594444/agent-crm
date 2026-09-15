@@ -1423,13 +1423,18 @@ def _dos_renglones_del_mismo_pedido(erp, code: str, *, stock_qty: float) -> None
 
 
 def test_un_lote_que_llena_el_techo_de_renglones_se_recorta(erp, reparto_semanal, monkeypatch):
-    """MUTACIÓN: en `_demanda_diaria`, `limit=tope + 1` -> `limit=tope`.
+    """MUTACIÓN: en `_demanda_diaria`, borrar `filas = filas[:tope]`.
 
-    Cae éste y sólo éste, y es la mutación que importa: con el techo justo, un
-    lote lleno vuelve indistinguible de uno completo —`len(filas) > tope` no se
-    puede cumplir nunca— y la demanda sale más baja sin que nadie se entere.
-    Una demanda más baja es una proyección más alta y un quiebre que NO se
-    avisa, o sea un silencio idéntico al de «no hay nada que decir».
+    Cae éste y sólo éste — MEDIDO, después de escribirlo mal: el docstring
+    decía `limit=tope + 1` -> `limit=tope`, y esa mutación deja este test EN
+    VERDE. Con el techo justo la demanda sale de `tope` renglones y con
+    `tope + 1` sale de `tope` también, porque el recorte saca la fila de más:
+    los dos números que este test compara no se mueven. Lo que sí mata es
+    borrar el recorte, que deja entrar la fila sonda y sube la demanda.
+
+    La lección, que es la de CLAUDE.md: la mutación hay que CORRERLA. Escrita
+    de memoria, ésta nombraba la línea de al lado — y la línea de al lado tiene
+    su propio test (`..._se_dice_en_el_log`), que es el que se caía.
 
     Las dos mitades son dos corridas con techos distintos sobre la MISMA venta,
     no un número leído de la constante.
