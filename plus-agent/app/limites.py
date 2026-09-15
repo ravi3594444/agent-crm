@@ -421,6 +421,35 @@ LIMITES: dict[str, Definicion] = {
         default="false",
         tipo=BOOLEANO,
     ),
+    # LA BANDA DE PRECIO. Es lo que vuelve AUTOMÁTICO el cambio de precio: se
+    # pone UNA vez y después el agente mueve precios solo, sin código y sin que
+    # nadie confirme cada vez. En 0 —el default— no se mueve ninguno.
+    #
+    # Por qué hay banda y no es burocracia: un precio gobierna EN SILENCIO lo
+    # que se auto-confirma. Con AUTO_CONFIRM_MAX en 0 un precio equivocado no
+    # puede emitir nada; el día que el dueño lo levanta las dos cosas se
+    # multiplican y un cero de más se convierte en pedidos emitidos a un precio
+    # que nadie miró. La banda acota ESO — no le pide permiso a nadie.
+    #
+    # Es un PORCENTAJE contra el precio que ya está, así que un producto sin
+    # precio previo no tiene contra qué medirse: ese caso se rechaza y lo
+    # siembra `deploy/`. El máximo de 100 no es preferencia: arriba de duplicar,
+    # «cambiar un precio» dejó de ser la palabra para lo que está pasando.
+    "PRECIO_CAMBIO_MAX_PCT": Definicion(
+        nombre="PRECIO_CAMBIO_MAX_PCT",
+        alias=(
+            "banda de precio", "cambio de precio", "variacion de precio",
+            "variación de precio", "cuanto puede mover un precio",
+            "cuánto puede mover un precio",
+        ),
+        significado=(
+            "Cuánto puede moverse un precio de una sola vez, en por ciento, sin "
+            "que lo mire nadie. En 0 el agente no cambia ningún precio"
+        ),
+        unidad="%",
+        default="0",
+        maximo=100.0,
+    ),
 }
 
 _VERDADEROS = frozenset({"true", "si", "sí", "1", "on", "yes", "y"})

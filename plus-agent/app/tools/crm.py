@@ -16,10 +16,16 @@ Lo que NO se abre, y no está en este archivo ni alcanzable desde él:
   · emitir cualquier cosa (`submit_doc` usa la credencial de política, que
     ninguna herramienta toca);
   · cancelar un documento ya emitido;
-  · **Item Price** — un precio gobierna EN SILENCIO lo que se auto-confirma, y
-    escribir uno mal no da error en ninguna parte: simplemente deja de
-    confirmarse solo. `erpnext.DOCTYPES_EDITABLES` no lo incluye, así que la
-    negativa es del cliente HTTP y no de la buena conducta de este archivo;
+  · **Item Price por la puerta genérica.** `erpnext.DOCTYPES_EDITABLES` sigue
+    sin incluirlo, así que `actualizar_registro` y cualquier herramienta que se
+    escriba mañana lo tienen negado por el cliente HTTP y no por la buena
+    conducta de este archivo. Lo que SÍ se abrió, abajo, es `cambiar_precio`:
+    una puerta del ancho de un precio, con la lista y la moneda tomadas de
+    `policy` y la unidad del `stock_uom` del producto, y acotada por
+    `PRECIO_CAMBIO_MAX_PCT`. La diferencia importa porque un precio gobierna EN
+    SILENCIO lo que se auto-confirma: escribir uno al que le falta una de esas
+    tres columnas no da error en ninguna parte, simplemente deja de confirmarse
+    solo. La puerta angosta hace que esa forma no se pueda escribir;
   · los límites del dueño, que siguen necesitando su código de cuatro dígitos;
   · **el teléfono del cliente**, que es su IDENTIDAD acá (así lo encuentra el
     webhook): `erpnext.CAMPOS_PROHIBIDOS` se lo niega a cualquier llamador, no
@@ -485,4 +491,128 @@ def actualizar_producto(
         return idioma.t("crm.producto_sin_cambios", lengua)
     return idioma.t(
         "crm.producto_listo", lengua, item_code=item_code, hecho=", ".join(hecho)
+    )
+
+
+@tool
+def cambiar_precio(
+    config: RunnableConfig,
+    producto: Annotated[
+        str, Field(description="Código exacto del producto en el catálogo.")
+    ],
+    precio: Annotated[
+        float,
+        Field(gt=0, description="El precio NUEVO de lista, en la moneda del "
+                                "negocio. Sin símbolo y sin puntos de miles."),
+    ],
+) -> str:
+    """Cambia el precio de lista de UN producto. Sin código y sin confirmar.
+
+    Es automática A PROPÓSITO. El dueño pone la banda UNA vez
+    («banda de precio 15%», con su código) y adentro de esa banda esto corre
+    solo para siempre. Fuera de la banda NO pide permiso: se niega y le dice la
+    cuenta. Una herramienta que a veces espera a un humano y a veces no es la
+    que deja al dueño sin saber si su precio quedó puesto.
+
+    Con la banda en 0 —el default— no cambia ningún precio, y lo dice.
+
+    EL MODELO PONE UN SOLO NÚMERO. `price_list` y `currency` salen de
+    `policy.PRICE_LIST`/`policy.CURRENCY` —las MISMAS constantes por las que
+    filtra la auto-confirmación, así que no pueden discrepar— y la unidad sale
+    del `stock_uom` del producto leído de ERPNext en el momento. Eso es lo que
+    vuelve imposible el precio inerte: `policy._precio_estandar` saltea
+    cualquier Item Price al que le falte uno de los tres, y un precio salteado
+    no da error en ninguna parte, simplemente deja de confirmarse solo.
+
+    Y relee después de escribir: lo que contesta es lo que quedó, no lo que se
+    mandó. Las dos cosas se diferencian justo cuando importa.
+    """
+    try:
+        require_management(config)
+    except RuntimeContextError:
+        return idioma.t("permiso.sin_autorizacion", idioma.gerencia())
+
+    from app import limites, policy
+
+    lengua = idioma.gerencia()
+    try:
+        banda = float(limites.vigente("PRECIO_CAMBIO_MAX_PCT") or 0)
+    except (TypeError, ValueError):
+        banda = 0.0
+    if banda <= 0:
+        return idioma.t("crm.precio_banda_cerrada", lengua)
+
+    lista = str(getattr(policy, "PRICE_LIST", "") or "").strip()
+    moneda = str(getattr(policy, "CURRENCY", "") or "").strip()
+    if not lista or not moneda:
+        # Escribir igual dejaría un precio que no auto-confirma y no avisa.
+        return idioma.t("crm.precio_sin_lista", lengua)
+
+    codigo = str(producto or "").strip()
+    if not codigo:
+        return idioma.t("crm.precio_sin_producto", lengua)
+    try:
+        ficha = erpnext.get_doc("Item", codigo)
+    except erpnext.ERPNextError as exc:
+        return idioma.t("crm.precio_error", lengua, exc=exc)
+    unidad = str(ficha.get("stock_uom") or "").strip()
+    if not unidad:
+        return idioma.t("crm.precio_sin_unidad", lengua, item_code=codigo)
+
+    filtro = [
+        ["item_code", "=", codigo], ["price_list", "=", lista],
+        ["currency", "=", moneda], ["uom", "=", unidad], ["selling", "=", 1],
+    ]
+    try:
+        actuales = erpnext.get_list(
+            "Item Price", filters=filtro, fields=["price_list_rate"], limit=2
+        )
+    except erpnext.ERPNextError as exc:
+        return idioma.t("crm.precio_error", lengua, exc=exc)
+    anterior = 0.0
+    if actuales:
+        try:
+            anterior = float(actuales[0].get("price_list_rate") or 0)
+        except (TypeError, ValueError):
+            anterior = 0.0
+    if anterior <= 0:
+        # Sin precio previo no hay contra qué medir la banda, y la banda es lo
+        # único que vuelve segura la automatización. El primero lo siembra
+        # `deploy/`, con las tres columnas puestas.
+        return idioma.t("crm.precio_sin_anterior", lengua, item_code=codigo)
+
+    nuevo = float(precio)
+    movimiento = abs(nuevo - anterior) / anterior * 100.0
+    if movimiento > banda + 0.0001:
+        return idioma.t(
+            "crm.precio_fuera_de_banda", lengua, item_code=codigo,
+            antes=f"{anterior:g}", ahora=f"{nuevo:g}",
+            movimiento=f"{movimiento:.1f}", banda=f"{banda:g}",
+        )
+
+    try:
+        erpnext.escribir_precio_de_lista(
+            item_code=codigo, price_list=lista, currency=moneda,
+            uom=unidad, rate=nuevo,
+        )
+    except erpnext.ERPNextError as exc:
+        return idioma.t("crm.precio_error", lengua, exc=exc)
+
+    # Se relee con el MISMO filtro por el que la auto-confirmación va a buscar
+    # este precio. Contestar «listo» por haber mandado el PUT es contestar otra
+    # pregunta.
+    leido = 0.0
+    try:
+        quedaron = erpnext.get_list(
+            "Item Price", filters=filtro, fields=["price_list_rate"], limit=2
+        )
+        if quedaron:
+            leido = float(quedaron[0].get("price_list_rate") or 0)
+    except (erpnext.ERPNextError, TypeError, ValueError):
+        leido = 0.0
+    if abs(leido - nuevo) >= 0.01:
+        return idioma.t("crm.precio_no_verificado", lengua, item_code=codigo)
+    return idioma.t(
+        "crm.precio_hecho", lengua, item_code=codigo,
+        antes=f"{anterior:g}", ahora=f"{leido:g}", unidad=unidad,
     )

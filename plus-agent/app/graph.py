@@ -44,6 +44,7 @@ from app.tools.crm import (
     actualizar_producto,
     anotar_en_ficha,
     armar_presupuesto,
+    cambiar_precio,
     editar_borrador,
 )
 from app.tools.entrega import (
@@ -157,12 +158,21 @@ TOOLS_GERENCIA = [
     # `erpnext.DOCTYPES_EDITABLES` —la negativa es del cliente HTTP, no de la
     # buena conducta de un archivo—.
     #
-    # NINGUNA pone un precio: `LineaSimple` no tiene `rate`, igual que
-    # `pedidos.LineaPedido`. El precio lo resuelve ERPNext y lo verifica
-    # `policy._precio_autorizado`. Una herramienta donde el precio es un
-    # argumento del modelo convierte al modelo en la autoridad de precios.
+    # NINGUNA DE ÉSTAS pone un precio EN UN PEDIDO: `LineaSimple` no tiene
+    # `rate`, igual que `pedidos.LineaPedido`. El precio de un renglón lo
+    # resuelve ERPNext y lo verifica `policy._precio_autorizado`. Una
+    # herramienta donde el precio del renglón es argumento del modelo convierte
+    # al modelo en la autoridad de precios, que es la regla 1 dada vuelta.
     actualizar_cliente, anotar_en_ficha, armar_presupuesto,
     editar_borrador, actualizar_producto,
+    # `cambiar_precio` es la excepción y hay que leerla como lo que es: cambia
+    # la LISTA, no un renglón. Sigue sin convertir al modelo en la autoridad de
+    # precios, y por dos motivos que están en su docstring: el único valor que
+    # el modelo aporta es el número —lista, moneda y unidad salen de `policy` y
+    # del `stock_uom` leído de ERPNext, no de él—, y el número tiene que caer
+    # adentro de `PRECIO_CAMBIO_MAX_PCT`, que el dueño puso a mano. En 0, que
+    # es el default, esta herramienta no escribe nada.
+    cambiar_precio,
 ]
 
 # LAS HERRAMIENTAS DE OTRO SERVIDOR MCP, SI EL DUEÑO CONFIGURÓ UNO

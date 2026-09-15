@@ -2261,6 +2261,64 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: 'No me dijiste qué cambiarle: la descripción o el punto de reposición.',
         EN: 'You did not tell me what to change: the description or the reorder level.',
     },
+    # LOS PRECIOS. La negativa siempre dice QUÉ falta y cómo se destraba: un
+    # «no puedo» sin la salida deja al dueño esperando a que alguien confirme
+    # algo que nadie le va a confirmar.
+    "crm.precio_banda_cerrada": {
+        ES: 'Todavía no puedo cambiar precios solo. Decime cuánto lo dejo mover '
+            'de una vez —por ejemplo «banda de precio 15%»— y te mando el código. '
+            'Después de eso los cambio sin preguntarte más.',
+        EN: 'I cannot change prices on my own yet. Tell me how much I may move '
+            'one at a time — say "price band 15%" — and I will send you the code. '
+            'After that I change them without asking you again.',
+    },
+    "crm.precio_sin_lista": {
+        ES: 'No tengo configurada la lista de precios y la moneda con las que '
+            'trabaja la confirmación automática. Si escribo el precio así, queda '
+            'puesto y no lo mira nadie. Eso se arregla en el .env del servidor.',
+        EN: 'The price list and currency that automatic confirmation works with '
+            'are not configured. If I write the price like that it lands and '
+            'nothing ever looks at it. That is fixed in the server .env.',
+    },
+    "crm.precio_sin_producto": {
+        ES: 'Decime el código del producto.',
+        EN: 'Tell me the product code.',
+    },
+    "crm.precio_sin_unidad": {
+        ES: '{item_code} no tiene unidad de stock cargada, así que el precio '
+            'quedaría sin unidad y la confirmación automática no lo encontraría.',
+        EN: '{item_code} has no stock UOM, so the price would land without a unit '
+            'and automatic confirmation would never find it.',
+    },
+    "crm.precio_sin_anterior": {
+        ES: '{item_code} no tiene precio todavía. El primero no lo pongo solo: '
+            'sin uno anterior no hay contra qué medir cuánto se mueve.',
+        EN: '{item_code} has no price yet. I do not set the first one on my own: '
+            'with nothing before it there is no way to measure the move.',
+    },
+    "crm.precio_fuera_de_banda": {
+        ES: 'No lo cambié. {item_code} está en {antes} y me pedís {ahora}: es '
+            '{movimiento}% y me dejaste mover hasta {banda}%. Si va en serio, '
+            'subime la banda y lo hago.',
+        EN: 'I did not change it. {item_code} is at {antes} and you asked for '
+            '{ahora}: that is {movimiento}% and you let me move up to {banda}%. '
+            'If you mean it, raise the band and I will.',
+    },
+    "crm.precio_no_verificado": {
+        ES: 'Mandé el precio de {item_code} pero al releerlo no me quedó el que '
+            'mandé. No te digo que está puesto sin haberlo visto: miralo en ERPNext.',
+        EN: 'I sent the price for {item_code} but on reading it back it was not '
+            'the one I sent. I will not tell you it is set without seeing it: '
+            'check it in ERPNext.',
+    },
+    "crm.precio_hecho": {
+        ES: '{item_code}: de {antes} a {ahora} por {unidad}. Releído y confirmado.',
+        EN: '{item_code}: from {antes} to {ahora} per {unidad}. Read back and confirmed.',
+    },
+    "crm.precio_error": {
+        ES: 'No pude con el precio: {exc}',
+        EN: 'I could not do the price: {exc}',
+    },
     "crm.reposicion_error": {
         ES: 'No pude cambiar el punto de reposición de {item_code}: {exc}',
         EN: 'I could not change the reorder level for {item_code}: {exc}',
