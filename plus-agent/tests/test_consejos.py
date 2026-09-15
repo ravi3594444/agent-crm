@@ -725,25 +725,31 @@ def test_el_total_de_la_perdida_dice_en_que_moneda_es(erp, con_lista_de_costo):
 
     Se prueban las DOS monedas sobre la misma pérdida: con una sola, un código
     pegado a mano en la plantilla pasaría igual.
+
+    Y LOS PEDIDOS NO SE LLAMAN `SO-INR` NI `SO-ARS`, que es como estaba escrito
+    y por qué la mutación SOBREVIVIÓ la primera vez que se corrió: el cuerpo
+    interpola `{pedido}`, así que «INR in cuerpo» lo cumplía el NÚMERO DE
+    PEDIDO y el assert no miraba la moneda en absoluto. Con `SO-UNO` y `SO-DOS`
+    el único lugar de donde puede salir «INR» es el código del pedido.
     """
     erp.tablas["Sales Order"] = [
-        pedido("SO-INR", moneda="INR"),
-        pedido("SO-ARS", moneda="ARS"),
+        pedido("SO-UNO", moneda="INR"),
+        pedido("SO-DOS", moneda="ARS"),
     ]
     erp.tablas["Sales Order Item"] = [
-        renglon("SO-INR", "LECHE-1L", qty=10, rate=100.0),
-        renglon("SO-ARS", "LECHE-1L", qty=10, rate=100.0),
+        renglon("SO-UNO", "LECHE-1L", qty=10, rate=100.0),
+        renglon("SO-DOS", "LECHE-1L", qty=10, rate=100.0),
     ]
     erp.tablas["Item Price"] = [precio(currency="INR"), precio(currency="ARS")]
 
     por_pedido = {c.sobre: c for c in consejos.perdidas(HOY)}
 
-    assert sorted(por_pedido) == ["SO-ARS", "SO-INR"]
-    assert "INR" in por_pedido["SO-INR"].cuerpo
-    assert "ARS" in por_pedido["SO-ARS"].cuerpo
+    assert sorted(por_pedido) == ["SO-DOS", "SO-UNO"]
+    assert "INR" in por_pedido["SO-UNO"].cuerpo
+    assert "ARS" in por_pedido["SO-DOS"].cuerpo
     # Y cada uno dice SÓLO la suya: un código fijo en la plantilla diría las dos.
-    assert "ARS" not in por_pedido["SO-INR"].cuerpo
-    assert "INR" not in por_pedido["SO-ARS"].cuerpo
+    assert "ARS" not in por_pedido["SO-UNO"].cuerpo
+    assert "INR" not in por_pedido["SO-DOS"].cuerpo
 
 
 # ---------------------------------------------- la fecha, por los dos bordes
