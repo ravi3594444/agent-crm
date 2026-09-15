@@ -311,3 +311,122 @@ def test_a_wildcard_origin_is_not_an_origin(monkeypatch):
     """
     monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "*")
     assert mcp_server.origen_aceptable("https://evil.example") is False
+
+
+# ------------------------------------------------------------ CORS del endpoint
+
+def _llamar_transporte(metodo: str, cabeceras: dict, cuerpo: bytes = b""):
+    """Corre `MCPTransport` como ASGI y devuelve (código, headers, cuerpo)."""
+    import asyncio
+
+    transporte = mcp_server.MCPTransport()
+    eventos = [{"type": "http.request", "body": cuerpo, "more_body": False}]
+    salida: dict = {}
+
+    async def receive():
+        return eventos.pop(0) if eventos else {"type": "http.disconnect"}
+
+    async def send(mensaje):
+        if mensaje["type"] == "http.response.start":
+            salida["codigo"] = mensaje["status"]
+            salida["headers"] = {
+                k.decode().lower(): v.decode() for k, v in mensaje["headers"]
+            }
+        else:
+            salida["cuerpo"] = mensaje.get("body", b"")
+
+    scope = {
+        "type": "http",
+        "method": metodo,
+        "path": "/",
+        "headers": [(k.encode(), v.encode()) for k, v in cabeceras.items()],
+    }
+    asyncio.run(transporte(scope, receive, send))
+    return salida
+
+
+def test_un_origen_permitido_recibe_el_header_que_lo_habilita(con_token, monkeypatch):
+    """Validar el origen y NO devolverlo no sirve de nada.
+
+    Sin `access-control-allow-origin` el navegador descarta la respuesta aunque
+    el servidor la haya aceptado, así que un origen que SÍ está en la lista
+    fallaba igual —en el preflight y en el POST— y se veía como si la validación
+    lo estuviera rechazando. Son dos mitades de una sola cosa.
+
+    MUTACIÓN: sacar el `cabeceras.append((b"access-control-allow-origin", …))`.
+    Caen éste y el del POST, y ningún otro.
+    """
+    monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "https://panel.example")
+
+    respuesta = _llamar_transporte("OPTIONS", {"origin": "https://panel.example"})
+
+    assert respuesta["codigo"] == 204
+    assert respuesta["headers"]["access-control-allow-origin"] == "https://panel.example"
+
+
+def test_el_POST_tambien_lo_devuelve_y_no_solo_el_preflight(con_token, monkeypatch):
+    """Un preflight que pasa y un POST que no es el mismo fallo, más tarde."""
+    monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "https://panel.example")
+
+    respuesta = _llamar_transporte(
+        "POST",
+        {"origin": "https://panel.example", "authorization": f"Bearer {TOKEN}",
+         "content-type": "application/json"},
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode(),
+    )
+
+    assert respuesta["codigo"] == 200
+    assert respuesta["headers"]["access-control-allow-origin"] == "https://panel.example"
+
+
+def test_un_cliente_sin_origen_no_recibe_el_header_y_funciona_igual(
+    con_token, monkeypatch
+):
+    """n8n, Claude Code y un script no mandan `Origin` y no necesitan CORS.
+
+    Devolverles un `access-control-allow-origin` vacío sería peor que no
+    mandarlo: el header existiría sin nombrar a nadie.
+    """
+    monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "https://panel.example")
+
+    respuesta = _llamar_transporte(
+        "POST",
+        {"authorization": f"Bearer {TOKEN}", "content-type": "application/json"},
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}).encode(),
+    )
+
+    assert respuesta["codigo"] == 200
+    assert "access-control-allow-origin" not in respuesta["headers"]
+
+
+def test_un_origen_de_afuera_se_frena_y_no_se_le_habilita_nada(con_token, monkeypatch):
+    monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "https://panel.example")
+
+    respuesta = _llamar_transporte("OPTIONS", {"origin": "https://evil.example"})
+
+    assert respuesta["codigo"] == 403
+    assert "access-control-allow-origin" not in respuesta["headers"]
+
+
+def test_sin_token_configurado_el_endpoint_no_existe(monkeypatch):
+    """503 y NO 401: el problema no es el token que trajo el cliente."""
+    monkeypatch.setenv("MCP_TOKENS", "")
+
+    respuesta = _llamar_transporte("POST", {"authorization": "Bearer lo-que-sea"})
+
+    assert respuesta["codigo"] == 503
+
+
+def test_un_GET_no_abre_ningun_canal_de_eventos(con_token):
+    """No ofrecemos SSE iniciado por el servidor: este servidor no manda nada
+    que el cliente no haya pedido."""
+    respuesta = _llamar_transporte("GET", {"authorization": f"Bearer {TOKEN}"})
+
+    assert respuesta["codigo"] == 405
+
+
+def test_sin_token_valido_es_401_y_lo_dice_con_el_header_del_protocolo(con_token):
+    respuesta = _llamar_transporte("POST", {"authorization": "Bearer " + "z" * 40})
+
+    assert respuesta["codigo"] == 401
+    assert respuesta["headers"]["www-authenticate"].startswith("Bearer")
