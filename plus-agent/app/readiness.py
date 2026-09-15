@@ -357,7 +357,16 @@ def chequear_idioma(env: Mapping[str, str], reporte: Reporte) -> None:
         del_almacen = limites.idioma_gerencia_guardado()
     except Exception:
         del_almacen = None
-    if del_almacen:
+    # LAS TRES RESPUESTAS, Y LAS TRES SEPARADAS. Acá decía `if del_almacen:`, que
+    # mete el `None` en la misma rama que el `""` — o sea que inventé el contrato
+    # de tres estados y lo colapsé una línea después. Con Redis caído
+    # `limites.idioma_gerencia()` se va al DEFAULT sin mirar el entorno, así que
+    # informar `fijado or por_defecto` hace que el preflight y el runtime
+    # contesten distinto justo cuando algo ya está roto, que es cuando más se
+    # mira el preflight.
+    if del_almacen is None:
+        del_dueno, guardado = por_defecto, False
+    elif del_almacen:
         del_dueno, guardado = del_almacen, True
     else:
         del_dueno, guardado = fijado or por_defecto, False

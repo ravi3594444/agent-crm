@@ -1603,14 +1603,25 @@ def _solicitudes_scheduler(stop: threading.Event) -> None:
         # cada consejo con un SET NX para no decirlo dos veces; si el aviso no
         # sale, hay que soltarlo o el dueño nunca se entera de eso — la falla
         # del envío se habría comido el hecho.
+        # Y `devolver` tampoco es opcional cuando el aviso LEVANTA, que es el
+        # caso que faltaba: la rama de `False` lo soltaba y la excepción no, así
+        # que un WhatsApp que tira timeout dejaba el consejo reclamado hasta su
+        # TTL —dicho sin que nadie lo oyera, y sin reintento en 24 h—. Se guarda
+        # cuál está EN VUELO y se suelta ése solo: los que ya salieron bien no
+        # se sueltan, o el dueño los recibiría dos veces.
+        en_vuelo = None
         try:
             for consejo in consejos.tick():
+                en_vuelo = consejo
                 if not notificar.avisar_dueno(
                     consejo.titulo, consejo.cuerpo,
                     plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE",
                 ):
                     consejos.devolver(consejo)
+                en_vuelo = None
         except Exception as error:
+            if en_vuelo is not None:
+                consejos.devolver(en_vuelo)
             print(f"[consejos] tick type={_error_name(error)}")
 
 

@@ -6,8 +6,8 @@ Durante meses la respuesta a «que el agente pueda hacer lo que le pido» fue qu
 escribir es peligroso. Era una respuesta demasiado ancha, y la línea correcta no
 es leer-contra-escribir: es **irreversible × plata**.
 
-Lo que se abre acá: la ficha de un cliente (dirección, teléfono, grupo,
-condición de pago), notas y recordatorios sobre cualquier registro, un
+Lo que se abre acá: la ficha de un cliente (grupo, condición de pago),
+notas y recordatorios sobre cualquier registro, un
 presupuesto en borrador, la corrección de un pedido QUE SIGUE EN BORRADOR, y la
 descripción y el punto de reposición de un producto. Todo eso se deshace
 escribiendo de nuevo, y nada de eso le cobra un peso a nadie.
@@ -20,7 +20,10 @@ Lo que NO se abre, y no está en este archivo ni alcanzable desde él:
     escribir uno mal no da error en ninguna parte: simplemente deja de
     confirmarse solo. `erpnext.DOCTYPES_EDITABLES` no lo incluye, así que la
     negativa es del cliente HTTP y no de la buena conducta de este archivo;
-  · los límites del dueño, que siguen necesitando su código de cuatro dígitos.
+  · los límites del dueño, que siguen necesitando su código de cuatro dígitos;
+  · **el teléfono del cliente**, que es su IDENTIDAD acá (así lo encuentra el
+    webhook): `erpnext.CAMPOS_PROHIBIDOS` se lo niega a cualquier llamador, no
+    sólo a la herramienta que hoy no lo pide.
 
 EL MODELO NO PONE UN PRECIO. NUNCA.
 -----------------------------------
@@ -70,25 +73,44 @@ def _sin_permiso() -> str:
     return idioma.t("permiso.sin_autorizacion", idioma.gerencia())
 
 
-def _buscar_cliente(nombre_o_codigo: str) -> dict | None:
-    """El código exacto primero, después el nombre. Igual que `ficha_cliente`.
+def _buscar_cliente(nombre_o_codigo: str) -> tuple[dict | None, str]:
+    """(ficha, problema). El código exacto primero, después el nombre.
 
-    `name` es la clave del documento y no puede coincidir con dos; el nombre va
-    con `like` y se queda con el primero, que es lo que ya hacía el resto.
+    UN `like` QUE DEVUELVE VARIOS NO ELIGE: ésta es la diferencia con
+    `ficha_cliente`, y es por lo que se hace de la ficha después. Leer la de
+    «San José» cuando hay dos y mostrar la primera es un informe incompleto;
+    ESCRIBIRLE a la primera es cambiarle los datos al cliente equivocado, y el
+    dueño no tiene cómo enterarse: la respuesta dice el nombre que él escribió.
+    Así que se piden DOS y con dos se devuelve el problema.
+
+    `name` es la clave del documento y no puede coincidir con dos, así que el
+    camino exacto no necesita esto.
     """
     exacto = erpnext.get_list(
         "Customer", filters=[["name", "=", nombre_o_codigo]],
         fields=["name", "customer_name"], limit=1,
     )
     if exacto:
-        return exacto[0]
+        return exacto[0], ""
     from app.clientes import patron_like
 
     aproximado = erpnext.get_list(
         "Customer", filters=[["customer_name", "like", patron_like(nombre_o_codigo)]],
-        fields=["name", "customer_name"], limit=1,
+        fields=["name", "customer_name"], limit=2,
     )
-    return aproximado[0] if aproximado else None
+    if not aproximado:
+        return None, (
+            f"No encontré ningún cliente que se llame o se codifique «{nombre_o_codigo}»."
+        )
+    if len(aproximado) > 1:
+        cuales = ", ".join(
+            f"{c.get('customer_name') or c['name']} ({c['name']})" for c in aproximado
+        )
+        return None, (
+            f"«{nombre_o_codigo}» le queda a más de un cliente: {cuales} y puede que "
+            "más. Pasame el código exacto — no quiero escribirle al equivocado."
+        )
+    return aproximado[0], ""
 
 
 def _lineas(lineas: list[LineaSimple]) -> list[dict]:
@@ -101,6 +123,25 @@ def _lineas(lineas: list[LineaSimple]) -> list[dict]:
         }
         for linea in lineas
     ]
+
+
+def _con_lo_hecho(hecho: list[str], problema: str) -> str:
+    """Un error que llega DESPUÉS de un cambio ya escrito lo nombra igual.
+
+    `actualizar_producto` hace hasta dos escrituras y no son atómicas. Si la
+    descripción se guardó y el punto de reposición falla, contestar sólo el
+    error deja al dueño creyendo que no pasó nada — y va a volver a pedir el
+    cambio de descripción, o peor, a no confiar en lo que ya está guardado.
+    «No pasó nada» y «pasó la mitad» son cosas distintas para el que lee, que es
+    la misma razón por la que `anotar_en_ficha` distingue la nota de la tarea.
+    """
+    if not hecho:
+        return problema
+    return f"{item_o_lo_hecho(hecho)} {problema}"
+
+
+def item_o_lo_hecho(hecho: list[str]) -> str:
+    return f"Quedó cambiado: {', '.join(hecho)}. Pero:"
 
 
 # --------------------------------------------------------------- el cliente
@@ -138,9 +179,9 @@ def actualizar_cliente(
     except RuntimeContextError:
         return _sin_permiso()
 
-    ficha = _buscar_cliente(cliente)
+    ficha, problema = _buscar_cliente(cliente)
     if ficha is None:
-        return f"No encontré ningún cliente que se llame o se codifique «{cliente}»."
+        return problema
 
     cambios: dict = {}
     if grupo:
@@ -261,9 +302,9 @@ def armar_presupuesto(
     if not lineas:
         return "Un presupuesto vacío no sirve. Decime al menos un producto."
 
-    ficha = _buscar_cliente(cliente)
+    ficha, problema = _buscar_cliente(cliente)
     if ficha is None:
-        return f"No encontré ningún cliente que se llame o se codifique «{cliente}»."
+        return problema
 
     payload: dict = {
         "quotation_to": "Customer",
@@ -362,8 +403,10 @@ def actualizar_producto(
     ] = None,
     punto_de_reposicion: Annotated[
         float | None,
-        Field(description="Debajo de esta cantidad, el producto aparece en el informe "
-                          "de stock bajo. Necesita `deposito`."),
+        Field(ge=0,
+              description="Debajo de esta cantidad, el producto aparece en el informe "
+                          "de stock bajo. Necesita `deposito`. Nunca negativo: un "
+                          "negativo apaga el aviso sin que se note."),
     ] = None,
     deposito: Annotated[
         str | None,
@@ -394,9 +437,10 @@ def actualizar_producto(
 
     if punto_de_reposicion is not None:
         if not deposito:
-            return (
+            return _con_lo_hecho(
+                hecho,
                 "Para el punto de reposición necesito el depósito: el mismo producto "
-                "puede tener uno distinto en cada uno."
+                "puede tener uno distinto en cada uno.",
             )
         try:
             filas = erpnext.get_list(
@@ -408,11 +452,13 @@ def actualizar_producto(
                 parent="Item",
             )
         except erpnext.ERPNextError as exc:
-            return f"No pude leer el punto de reposición de {item_code}: {exc}"
+            return _con_lo_hecho(
+                hecho, f"No pude leer el punto de reposición de {item_code}: {exc}")
         if not filas:
-            return (
+            return _con_lo_hecho(
+                hecho,
                 f"{item_code} no tiene una regla de reposición en {deposito} todavía. "
-                "Esa se crea en ERPNext una vez, y después la puedo ajustar."
+                "Esa se crea en ERPNext una vez, y después la puedo ajustar.",
             )
         try:
             erpnext.update_doc(
@@ -421,7 +467,8 @@ def actualizar_producto(
             )
             hecho.append(f"punto de reposición en {deposito} = {punto_de_reposicion:g}")
         except erpnext.ERPNextError as exc:
-            return f"No pude cambiar el punto de reposición de {item_code}: {exc}"
+            return _con_lo_hecho(
+                hecho, f"No pude cambiar el punto de reposición de {item_code}: {exc}")
 
     if not hecho:
         return "No me dijiste qué cambiarle: la descripción o el punto de reposición."

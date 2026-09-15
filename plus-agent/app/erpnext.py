@@ -237,6 +237,22 @@ DOCTYPES_EDITABLES = frozenset({
     "Quotation", "Sales Order", "ToDo",
 })
 
+# Campos que no se tocan AUNQUE su doctype sea editable.
+#
+# `Customer.mobile_no` es la IDENTIDAD del cliente en este sistema: es como
+# `clientes.buscar_por_telefono` decide de quién es un mensaje entrante, o sea
+# cómo el webhook sabe a qué cuenta atribuir un pedido. Cambiarlo deja los
+# mensajes del número viejo sin dueño — deja a una persona sin poder escribir—,
+# y eso no es reversible en el sentido que importa aunque el campo se pueda
+# reescribir.
+#
+# `actualizar_cliente` ya no lo publica como parámetro, y no alcanza: eso es una
+# propiedad de la firma de UNA herramienta de hoy. Esto es una propiedad del
+# proceso, y sigue valiendo para la herramienta que alguien escriba mañana.
+CAMPOS_PROHIBIDOS: dict[str, frozenset[str]] = {
+    "Customer": frozenset({"mobile_no"}),
+}
+
 
 def update_doc(doctype: str, name: str, payload: dict) -> dict:
     """Modifica un documento existente. NUNCA emite ni cancela.
@@ -253,6 +269,12 @@ def update_doc(doctype: str, name: str, payload: dict) -> dict:
     """
     if doctype not in DOCTYPES_EDITABLES:
         raise ERPNextError(f"No se puede modificar {doctype} desde acá")
+    prohibidos = CAMPOS_PROHIBIDOS.get(doctype, frozenset())
+    tocados = prohibidos & set(payload or {})
+    if tocados:
+        raise ERPNextError(
+            f"No se puede modificar {doctype}.{sorted(tocados)[0]} desde acá"
+        )
     cuerpo = {k: v for k, v in (payload or {}).items() if k != "docstatus"}
     if not cuerpo:
         raise ERPNextError(f"No hay nada que cambiar en {doctype}")

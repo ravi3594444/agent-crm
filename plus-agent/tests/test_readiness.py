@@ -288,6 +288,34 @@ def test_el_informe_habla_del_env_QUE_SE_LE_PASO_y_no_del_que_esta_exportado(
     assert "lo cambió él desde su teléfono" not in texto, texto
 
 
+def test_con_el_almacen_ILEGIBLE_el_informe_dice_lo_mismo_que_el_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Las TRES respuestas de `idioma_gerencia_guardado`, y las tres separadas.
+
+    `None` es «no se pudo leer» y no «no fijó nada». `limites.idioma_gerencia()`
+    con el almacén caído se va al DEFAULT sin mirar el entorno, así que informar
+    `fijado or por_defecto` haría que el preflight y el runtime contesten
+    distinto — justo cuando algo ya está roto, que es cuando más se mira el
+    preflight. El contrato de tres estados lo inventé yo y lo colapsé una línea
+    después con un `if del_almacen:`; lo cazó una revisión.
+
+    MUTACIÓN: volver a `if del_almacen:` en `chequear_idioma`. Cae éste y sólo
+    éste.
+    """
+    from app import limites
+
+    monkeypatch.setattr(limites, "idioma_gerencia_guardado", lambda: None)
+
+    reporte = _correr({**BASE, "IDIOMA_DEFAULT": "es", "IDIOMA_GERENCIA": "en"})
+
+    texto = reporte.texto()
+    # El runtime, con el almacén caído, contesta ES: el default, sin mirar el
+    # entorno. El informe tiene que decir lo mismo.
+    assert "el dueño recibe ES" in texto, texto
+    assert "lo cambió él desde su teléfono" not in texto, texto
+
+
 def test_un_LOCALE_mal_escrito_se_dice_en_el_arranque() -> None:
     """`formato.pesos` cae al de por defecto en silencio, a propósito: un monto
     mal formateado no puede dejar un mensaje sin salir. El precio de esa
