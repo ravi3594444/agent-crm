@@ -54,8 +54,10 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import selectors
 import subprocess
 import threading
+import time
 from typing import Any
 
 import httpx
@@ -126,6 +128,35 @@ def patrones_bloqueados() -> list[str]:
     """
     crudo = os.getenv("MCP_EXTERNOS_BLOQUEAR", "")
     return [p.strip() for p in crudo.split(",") if p.strip()]
+
+
+# Lo único que un proceso de terceros necesita del entorno para arrancar. Todo
+# lo demás se pasa por `MCP_EXTERNO_ENV_<NOMBRE>`, que nombra las variables
+# permitidas para ESE servidor.
+_DEL_SISTEMA = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "TMPDIR")
+
+
+def entorno_para(nombre: str) -> dict[str, str]:
+    """El entorno de un servidor stdio. NO es `os.environ`.
+
+    Era `env=dict(os.environ)`, o sea que cualquier comando configurado como
+    servidor MCP arrancaba con TODAS nuestras credenciales adentro: las tres
+    claves de ERPNext, el token de WhatsApp, la del modelo, la URL de Redis y
+    los tokens del panel y de MCP. Un servidor MCP es código de otro que corre
+    en nuestro proceso hijo; no tiene por qué ver nada de eso.
+
+    Lo que pasa: seis variables del sistema —las que hacen falta para que un
+    proceso arranque y sepa dónde está— y NADA más, salvo lo que el dueño
+    nombre explícitamente en `MCP_EXTERNO_ENV_<NOMBRE>` (una lista de nombres
+    de variable separados por coma). Nombres, no valores: el valor se sigue
+    tomando del entorno, así que un secreto no se escribe dos veces.
+    """
+    salida = {k: os.environ[k] for k in _DEL_SISTEMA if k in os.environ}
+    crudo = os.getenv(f"MCP_EXTERNO_ENV_{nombre.upper()}", "")
+    for pedida in (v.strip() for v in crudo.split(",")):
+        if pedida and pedida in os.environ:
+            salida[pedida] = os.environ[pedida]
+    return salida
 
 
 def _bloqueada(nombre: str, patrones: list[str]) -> bool:
@@ -205,31 +236,70 @@ class ClienteMCP:
                     break
         return json.loads(texto)
 
+    def _matar(self) -> None:
+        """Deja el proceso muerto y olvidado, para que el próximo lo rearranque."""
+        proceso, self._proceso = self._proceso, None
+        if proceso is None:
+            return
+        try:
+            proceso.kill()
+            proceso.wait(timeout=5)
+        except Exception:
+            # Ya lo estamos tirando: lo que falle acá no cambia nada.
+            pass
+
     def _por_stdio(self, cuerpo: dict) -> dict:
         if self._proceso is None:
             partes = self.destino.split()
             self._proceso = subprocess.Popen(
                 partes, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, text=True, bufsize=1,
-                env=dict(os.environ),
+                env=entorno_para(self.nombre),
             )
         proceso = self._proceso
         if proceso.stdin is None or proceso.stdout is None:
             raise MCPExternoError(f"{self.nombre} no tiene stdin/stdout")
-        proceso.stdin.write(json.dumps(cuerpo) + "\n")
-        proceso.stdin.flush()
+        try:
+            proceso.stdin.write(json.dumps(cuerpo) + "\n")
+            proceso.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError) as exc:
+            # El hijo se murió. Sin esto el `Popen` muerto quedaba cacheado
+            # para siempre y el servidor stdio no volvía hasta reiniciar el
+            # contenedor entero; además el proceso nunca se recogía.
+            self._matar()
+            raise MCPExternoError(f"{self.nombre} cerró la entrada") from exc
         # El servidor puede escribir notificaciones antes de la respuesta; se
         # lee hasta encontrar la que lleva NUESTRO id.
-        for _ in range(200):
-            linea = proceso.stdout.readline()
-            if not linea:
-                raise MCPExternoError(f"{self.nombre} cerró la salida")
-            try:
-                mensaje = json.loads(linea)
-            except json.JSONDecodeError:
-                continue
-            if mensaje.get("id") == cuerpo["id"]:
-                return mensaje
+        #
+        # CON FECHA LÍMITE, y no sólo con un tope de mensajes. `readline()` no
+        # tiene timeout: un proceso VIVO que deja de contestar —no uno que se
+        # cerró, que devuelve ""— colgaba esta llamada para siempre, y con ella
+        # todas las que esperan `self._candado`. El tope de 200 no ayudaba: se
+        # trababa en el primero.
+        limite = time.monotonic() + TIMEOUT_SEGUNDOS
+        selector = selectors.DefaultSelector()
+        selector.register(proceso.stdout, selectors.EVENT_READ)
+        try:
+            for _ in range(200):
+                queda = limite - time.monotonic()
+                if queda <= 0 or not selector.select(queda):
+                    self._matar()
+                    raise MCPExternoError(
+                        f"{self.nombre} no contestó a {cuerpo['method']} en "
+                        f"{TIMEOUT_SEGUNDOS:g}s"
+                    )
+                linea = proceso.stdout.readline()
+                if not linea:
+                    self._matar()
+                    raise MCPExternoError(f"{self.nombre} cerró la salida")
+                try:
+                    mensaje = json.loads(linea)
+                except json.JSONDecodeError:
+                    continue
+                if mensaje.get("id") == cuerpo["id"]:
+                    return mensaje
+        finally:
+            selector.close()
         raise MCPExternoError(f"{self.nombre} no contestó a {cuerpo['method']}")
 
     def pedir(self, metodo: str, params: dict | None = None,

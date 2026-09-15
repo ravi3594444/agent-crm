@@ -18,6 +18,10 @@ from unittest.mock import Mock
 
 import pytest
 
+# Afirma el literal castellano «Fecha de hoy» del prompt de gerencia, así
+# que declara su idioma en vez de heredarlo del entorno.
+pytestmark = pytest.mark.idioma("es")
+
 from app import conversacion, locks, memoria
 
 GERENTE = "5493511234567"

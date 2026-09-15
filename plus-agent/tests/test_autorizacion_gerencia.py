@@ -195,8 +195,13 @@ def nada_de_escrituras(monkeypatch: pytest.MonkeyPatch) -> None:
     contadores que envuelven a una de ellas, para que la prueba no dependa de
     cuál de las dos usa cada herramienta.
     """
-    for name in ("get_list", "get_doc", "create_doc", "submit_doc", "add_comment",
-                 "run_report", "policy_get_list", "default_context",
+    # `update_doc` va en la lista: `actualizar_producto` (rama `descripcion`)
+    # llega derecho a `erpnext.update_doc("Item", ...)`, y sin cortarlo una
+    # guarda de autorización rota alcanzaba a hacer el PUT de verdad ANTES de
+    # que fallara la aserción sobre la respuesta. El `erp` de `test_crm.py` es
+    # de función y no cubre este archivo.
+    for name in ("get_list", "get_doc", "create_doc", "update_doc", "submit_doc",
+                 "add_comment", "run_report", "policy_get_list", "default_context",
                  "default_company", "registrar_comentario"):
         monkeypatch.setattr(
             erpnext, name,

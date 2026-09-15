@@ -332,11 +332,22 @@ def chequear_idioma(env: Mapping[str, str], reporte: Reporte) -> None:
         return
     por_defecto = crudo.strip().lower() if crudo else idioma.ES
 
-    fijado = _valor(env, "IDIOMA_GERENCIA").strip().lower()
-    if fijado and fijado not in idioma.IDIOMAS:
+    # CON LA MISMA REGLA QUE EL RUNTIME, no con una más estricta. Acá se
+    # comparaba el valor crudo contra `IDIOMA_GERENCIA`, pero
+    # `limites.idioma_gerencia()` lo pasa por `idioma.normalizar`, que acepta
+    # cómo lo escribe una persona: «english», «inglés», «eng». O sea que un
+    # `.env` que FUNCIONA —el sistema lo entiende y contesta en inglés— no
+    # pasaba el preflight, y el preflight existe para decir qué va a hacer el
+    # sistema, no para inventar un contrato más angosto.
+    #
+    # `IDIOMA_DEFAULT` se queda estricto arriba a propósito: `idioma.por_defecto`
+    # sí compara contra los códigos, así que ahí el estricto ES el runtime.
+    crudo_gerencia = _valor(env, "IDIOMA_GERENCIA").strip()
+    fijado = idioma.normalizar(crudo_gerencia) or ""
+    if crudo_gerencia and not fijado:
         reporte.error(
             "IDIOMA_GERENCIA",
-            f"«{fijado}» no es un idioma conocido: se ignora",
+            f"«{crudo_gerencia}» no es un idioma conocido: se ignora",
         )
         return
 
@@ -355,8 +366,17 @@ def chequear_idioma(env: Mapping[str, str], reporte: Reporte) -> None:
 
     try:
         del_almacen = limites.idioma_gerencia_guardado()
-    except Exception:
-        del_almacen = None
+    except Exception as exc:
+        # `idioma_gerencia_guardado` YA convierte a `None` lo que se espera que
+        # falle (Redis caído, coordinación). Lo que llegue acá es lo que no se
+        # esperaba, y tragarlo como `None` hacía que el reporte siguiera y
+        # terminara en `ok`: un preflight en verde sobre un error de programa.
+        # No se propaga —`ejecutar()` llama a esto sin handler— pero se anota.
+        reporte.error(
+            "IDIOMA_GERENCIA",
+            f"no pude leer el idioma guardado ({type(exc).__name__})",
+        )
+        return
     # LAS TRES RESPUESTAS, Y LAS TRES SEPARADAS. Acá decía `if del_almacen:`, que
     # mete el `None` en la misma rama que el `""` — o sea que inventé el contrato
     # de tres estados y lo colapsé una línea después. Con Redis caído

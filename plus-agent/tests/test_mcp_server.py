@@ -458,3 +458,38 @@ def test_el_titulo_que_ve_el_harness_es_el_negocio_del_dueno(con_token, monkeypa
     titulo = respuesta["result"]["serverInfo"]["title"]
     assert "Ferretería Rivadavia" in titulo
     assert "Lácteos" not in titulo
+
+
+@pytest.mark.parametrize("params", [[1, 2], "hola", 7, True])
+def test_un_params_que_no_es_objeto_es_un_error_y_no_una_excepcion(con_token, params):
+    """Lo que entra por la red no tiene por qué ser lo que la spec promete.
+
+    Los handlers hacían `(peticion.get("params") or {}).get(...)`. Con un array
+    o un string —truthy y sin `.get`— eso levanta AttributeError, y como el
+    despacho no lo atrapaba salía por el transporte: 500 por HTTP, y en stdio
+    se lleva el servidor puesto. Un cliente mal escrito podía apagar el
+    endpoint de gerencia.
+
+    MUTACIÓN: sacarle a `despachar` la comprobación de que `params` es un
+    objeto. Cae ésta y sólo ésta.
+    """
+    respuesta = mcp_server.despachar(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params},
+        DUENO,
+    )
+    assert respuesta["error"]["code"] == mcp_server.ERROR_PARAMETROS
+    assert "result" not in respuesta
+
+
+def test_un_params_malo_en_una_notificacion_no_contesta_nada(con_token):
+    """Y sigue sin contestarle a algo sin `id`, que la spec prohíbe.
+
+    El arreglo no puede convertir una notificación en una respuesta: eso es
+    otro bug, y más difícil de ver.
+
+    MUTACIÓN: devolver `_error(...)` sin mirar `es_notificacion`. Cae ésta y
+    sólo ésta.
+    """
+    assert mcp_server.despachar(
+        {"jsonrpc": "2.0", "method": "initialize", "params": [1, 2]}, DUENO
+    ) is None

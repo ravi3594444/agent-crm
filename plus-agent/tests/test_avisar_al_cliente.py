@@ -36,6 +36,23 @@ FICHA = {
 TEXTO = "Llegó el queso cremoso, ¿te mando 2 hormas mañana?"
 
 
+def _como_like(patron: str, valor: str) -> bool:
+    """El `LIKE` de SQL: `%` es cualquier cosa, `_` es un carácter.
+
+    Está acá y no en el doble para que se lea una vez: lo que ERPNext hace con
+    `["customer_name", "like", patron]` es esto, y el doble tiene que hacer lo
+    mismo o la prueba mide otra cosa.
+    """
+    import re
+
+    partes = [re.escape(p) for p in re.split(r"([%_])", patron)]
+    expresion = "".join(
+        ".*" if p == re.escape("%") else "." if p == re.escape("_") else p
+        for p in partes
+    )
+    return re.fullmatch(expresion, valor, re.IGNORECASE | re.DOTALL) is not None
+
+
 def _config() -> dict:
     return {
         "configurable": {
@@ -65,10 +82,14 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
         for campo, operador, valor in filters or []:
             if campo == "name" and operador == "=" and valor == FICHA["name"]:
                 return [dict(FICHA)]
-            if campo == "customer_name" and operador == "like":
-                aguja = str(valor).strip("%").casefold()
-                if aguja and aguja in FICHA["customer_name"].casefold():
-                    return [dict(FICHA)]
+            # UN `LIKE` DE VERDAD, no `strip("%")`. El doble viejo suponía que
+            # el patrón era `%nombre%` y por eso no podía discrepar con el
+            # código sobre la forma del patrón: `clientes.patron_like` manda
+            # `%S%a%n%…%`, que con aquel doble no matcheaba nada y dejaba la
+            # búsqueda sin resultados. Un doble deriva de lo que RECIBE.
+            if (campo == "customer_name" and operador == "like"
+                    and _como_like(str(valor), FICHA["customer_name"])):
+                return [dict(FICHA)]
         return []
 
     monkeypatch.setattr(erpnext, "get_list", get_list)
@@ -337,3 +358,81 @@ def test_devolverla_no_la_convierte_en_un_boton_reusable(mundo, monkeypatch) -> 
 
     encolar.assert_called_once()
     assert "ya no" in tercera.lower() or "no está" in tercera.lower()
+
+
+# ------------------------------------------- a quién le sale, y a qué número
+
+def test_un_nombre_que_le_queda_a_DOS_clientes_no_manda_nada(monkeypatch) -> None:
+    """Elegir solo acá no es mostrar el informe equivocado: es CONTARLE algo al
+    comercio de al lado.
+
+    La herramienta tenía `limit=1` sobre un `like` y se quedaba con el primero.
+    El dueño aprobaba un botón que decía «Panadería San José» y el mensaje
+    salía para «San José Distribuciones», sin forma de enterarse: la respuesta
+    le repite el nombre que él escribió.
+
+    MUTACIÓN: volver a `limit=1` en `clientes.buscar_una` (o devolver
+    `aproximado[0]` con dos). Cae ésta y sólo ésta.
+    """
+    otra = {"name": "CUST-0042", "customer_name": "San José Distribuciones",
+            "mobile_no": "5493510000001"}
+
+    def get_list(doctype, filters=None, fields=None, limit=None, **kw):
+        if doctype != "Customer":
+            return []
+        for campo, operador, _valor in filters or []:
+            if campo == "name" and operador == "=":
+                return []
+            if campo == "customer_name" and operador == "like":
+                # Los dos matchean; `limit` es lo que el código pide de verdad.
+                return [dict(FICHA), dict(otra)][: (limit or 2)]
+        return []
+
+    monkeypatch.setattr(erpnext, "get_list", get_list)
+    botones = Mock(return_value=True)
+    monkeypatch.setattr(notificar, "pedir_visto_bueno_de_envio", botones)
+
+    respuesta = _pedir()
+
+    botones.assert_not_called()
+    assert "CUST-0009" in respuesta and "CUST-0042" in respuesta
+    assert "San José Distribuciones" in respuesta
+
+
+def test_el_telefono_de_la_ficha_se_normaliza_antes_de_mirar_la_ventana(
+    monkeypatch,
+) -> None:
+    """La ventana de 24 h se indexa por el número canónico de Meta.
+
+    Un `mobile_no` cargado a mano —«+54 9 351 666-7777»— da otra clave, así que
+    una charla que SÍ está abierta se leía cerrada y el mensaje no salía nunca.
+    El dueño veía «hace más de un día que no te escribe» sobre alguien que le
+    había escrito hacía diez minutos.
+
+    MUTACIÓN: volver a `str(ficha.get("mobile_no") or "").strip()`. Cae ésta y
+    sólo ésta.
+    """
+    from app import telefono as telefono_mod
+
+    formateada = dict(FICHA, mobile_no="+54 9 351 666-7777")
+
+    def get_list(doctype, filters=None, fields=None, limit=None, **kw):
+        return [dict(formateada)] if doctype == "Customer" else []
+
+    monkeypatch.setattr(erpnext, "get_list", get_list)
+    vistos: list[str] = []
+    monkeypatch.setattr(
+        outbound_status, "window_open",
+        lambda numero: vistos.append(numero) or True,
+    )
+    botones = Mock(return_value=True)
+    monkeypatch.setattr(notificar, "pedir_visto_bueno_de_envio", botones)
+
+    _pedir()
+
+    # Lo que se consultó es el canónico, no lo que estaba escrito en la ficha.
+    assert vistos == [telefono_mod.normalizar("+54 9 351 666-7777")]
+    assert vistos[0] == CLIENTE_TEL
+    assert " " not in vistos[0] and "+" not in vistos[0]
+    # Y lo que se guarda para mandar es ese mismo número.
+    assert botones.call_args.args[3] == CLIENTE_TEL

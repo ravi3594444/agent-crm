@@ -334,6 +334,20 @@ def despachar(peticion: object, telefono: str) -> dict | None:
     ident = peticion.get("id")
     es_notificacion = "id" not in peticion
 
+    # `params` TIENE QUE SER UN OBJETO, y se comprueba acá y no en cada handler.
+    # La especificación permite omitirlo, pero si viene tiene que ser un objeto
+    # (o un array, que nosotros no aceptamos). Los handlers hacían
+    # `(peticion.get("params") or {}).get(...)`, que con un array o un string
+    # —truthy y sin `.get`— levanta AttributeError; y como nadie lo atrapaba,
+    # salía por el transporte: 500 por HTTP, y en stdio se lleva el servidor
+    # puesto. Una sola comprobación acá cubre initialize, tools/call y lo que
+    # se agregue después.
+    parametros = peticion.get("params")
+    if parametros is not None and not isinstance(parametros, dict):
+        if es_notificacion:
+            return None
+        return _error(ident, ERROR_PARAMETROS, "params must be an object")
+
     if metodo == "initialize":
         return None if es_notificacion else _resultado(ident, _initialize(peticion))
     if metodo.startswith("notifications/"):

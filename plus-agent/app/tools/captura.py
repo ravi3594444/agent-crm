@@ -28,7 +28,16 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from app import erpnext, idioma, notificar, outbound_status, policy, salidas
+from app import (
+    clientes,
+    erpnext,
+    idioma,
+    notificar,
+    outbound_status,
+    policy,
+    salidas,
+    telefono,
+)
 from app.runtime_context import RuntimeContextError, require_management
 
 
@@ -336,19 +345,26 @@ def avisar_al_cliente(
     lengua = idioma.gerencia()
     # El código EXACTO primero y después el nombre, igual que en `ficha_cliente`:
     # `name` es la clave del documento y no puede coincidir con dos.
-    campos = ["name", "customer_name", "mobile_no"]
-    fichas = erpnext.get_list(
-        "Customer", filters=[["name", "=", cliente]], fields=campos, limit=1,
-    ) or erpnext.get_list(
-        "Customer",
-        filters=[["customer_name", "like", f"%{cliente}%"]],
-        fields=campos, limit=1,
+    # UN `like` QUE DEVUELVE VARIOS NO ELIGE. Esto tenía `limit=1` y se quedaba
+    # con el primero: con dos «San José» cargados, el dueño aprobaba un mensaje
+    # que decía un nombre y salía para el otro comercio. La regla es la misma
+    # que la de escribir una ficha y vive en un solo lugar.
+    ficha, candidatos = clientes.buscar_una(
+        cliente, ["name", "customer_name", "mobile_no"]
     )
-    if not fichas:
-        return idioma.t("salida.no_encontre", lengua, quien=cliente)
-    ficha = fichas[0]
+    if ficha is None:
+        if not candidatos:
+            return idioma.t("salida.no_encontre", lengua, quien=cliente)
+        cuales = ", ".join(
+            f"{c.get('customer_name') or c['name']} ({c['name']})" for c in candidatos
+        )
+        return idioma.t("salida.cliente_ambiguo", lengua, quien=cliente, cuales=cuales)
     nombre = ficha.get("customer_name") or ficha["name"]
-    telefono_cliente = str(ficha.get("mobile_no") or "").strip()
+    # NORMALIZADO, no crudo. La ventana de 24 h se indexa por el número
+    # canónico que mandó Meta en el webhook de entrada; un `mobile_no` cargado
+    # como «+54 9 351 123-4567» da otra clave, así que la ventana de una charla
+    # que SÍ está abierta se leía cerrada y el mensaje no salía nunca.
+    telefono_cliente = telefono.normalizar(ficha.get("mobile_no"))
     if not telefono_cliente:
         return idioma.t("salida.sin_telefono", lengua, cliente=nombre)
 

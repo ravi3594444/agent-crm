@@ -86,32 +86,23 @@ def _buscar_cliente(nombre_o_codigo: str) -> tuple[dict | None, str]:
     `name` es la clave del documento y no puede coincidir con dos, así que el
     camino exacto no necesita esto.
     """
-    exacto = erpnext.get_list(
-        "Customer", filters=[["name", "=", nombre_o_codigo]],
-        fields=["name", "customer_name"], limit=1,
-    )
-    if exacto:
-        return exacto[0], ""
-    from app.clientes import patron_like
+    from app import clientes
 
-    aproximado = erpnext.get_list(
-        "Customer", filters=[["customer_name", "like", patron_like(nombre_o_codigo)]],
-        fields=["name", "customer_name"], limit=2,
-    )
+    ficha, candidatos = clientes.buscar_una(nombre_o_codigo)
+    if ficha is not None:
+        return ficha, ""
     lengua = idioma.gerencia()
-    if not aproximado:
+    if not candidatos:
         return None, idioma.t(
             "crm.cliente_no_encontrado", lengua, nombre_o_codigo=nombre_o_codigo
         )
-    if len(aproximado) > 1:
-        cuales = ", ".join(
-            f"{c.get('customer_name') or c['name']} ({c['name']})" for c in aproximado
-        )
-        return None, idioma.t(
-            "crm.cliente_ambiguo", lengua,
-            nombre_o_codigo=nombre_o_codigo, cuales=cuales,
-        )
-    return aproximado[0], ""
+    cuales = ", ".join(
+        f"{c.get('customer_name') or c['name']} ({c['name']})" for c in candidatos
+    )
+    return None, idioma.t(
+        "crm.cliente_ambiguo", lengua,
+        nombre_o_codigo=nombre_o_codigo, cuales=cuales,
+    )
 
 
 def _lineas(lineas: list[LineaSimple]) -> list[dict]:

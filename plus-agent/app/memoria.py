@@ -203,6 +203,18 @@ class Hueco:
     clave: str
     pregunta: str
 
+    def texto(self, lengua: str | None = None) -> str:
+        """La pregunta en el idioma del que la va a leer.
+
+        `pregunta` sigue siendo el castellano y es lo que usa el bloque del
+        prompt —que es castellano entero, igual que `SYSTEM_GERENCIA`—. Esto es
+        para lo que sale POR LA HERRAMIENTA: `ver_memoria` armaba una frase
+        traducida y le metía adentro la pregunta en castellano.
+        """
+        from app import idioma
+
+        return idioma.t(f"memoria.hueco.{self.clave}", lengua)
+
 
 # LOS HUECOS. Uno por línea, en el orden en que se inventaron; el orden en que
 # se PREGUNTAN lo decide la rotación, no esta lista.
@@ -565,7 +577,12 @@ def bloque_de_prompt() -> str:
         datos = activos()
     except MemoriaError:
         datos = []
-    return bloque(datos, hueco=reclamar_pregunta())
+    try:
+        hueco = reclamar_pregunta()
+    except MemoriaError:
+        # El prompt sin pregunta es correcto; el prompt que no sale, no.
+        hueco = None
+    return bloque(datos, hueco=hueco)
 
 
 # ---------------------------------------------------------------------------
@@ -632,5 +649,11 @@ def reclamar_pregunta() -> Hueco | None:
             return _HUECOS_POR_CLAVE.get(_texto(cliente.get(CLAVE_PREGUNTA)))
         cliente.hset(CLAVE_PREGUNTADO, elegido.clave, str(_ahora()))
         return elegido
-    except (locks.CoordinationError, RedisError, MemoriaError):
-        return None
+    except (locks.CoordinationError, RedisError, MemoriaError) as exc:
+        # NO `return None`. `None` ya significa «no queda ninguna por
+        # preguntar», y colapsar las dos cosas hacía que un Redis caído le
+        # contestara al dueño «no me falta nada importante» — una conclusión
+        # sobre SU negocio, sacada de una falla de infraestructura. Es la misma
+        # distinción de tres estados que documenta
+        # `limites.idioma_gerencia_guardado`.
+        raise MemoriaError("no pude leer las preguntas pendientes") from exc

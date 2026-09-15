@@ -75,11 +75,16 @@ def ver_memoria(
         return idioma.t("permiso.sin_autorizacion", idioma.gerencia())
     lengua = idioma.gerencia()
     if que == "falta":
-        hueco = memoria.reclamar_pregunta()
+        try:
+            hueco = memoria.reclamar_pregunta()
+        except memoria.MemoriaError:
+            return idioma.t("memoria.no_pude_leer", lengua)
         if hueco is None:
             return idioma.t("memoria.nada_falta", lengua)
+        # `hueco.texto(lengua)` y no `hueco.pregunta`: la pregunta es prosa y
+        # viajaba sin traducir adentro de una frase que sí se traducía.
         return idioma.t(
-            "memoria.falta", lengua, pregunta=hueco.pregunta, clave=hueco.clave
+            "memoria.falta", lengua, pregunta=hueco.texto(lengua), clave=hueco.clave
         )
     try:
         datos = memoria.activos()

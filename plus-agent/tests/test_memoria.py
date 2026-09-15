@@ -667,3 +667,101 @@ def test_with_nothing_stored_the_tool_invites_him_to_say_something(
     respuesta = ver_memoria.invoke({"que": "anotado"}, config=_config())
 
     assert "Todavía no tengo ningún dato tuyo anotado" in respuesta
+
+
+def test_un_redis_caido_no_es_una_conclusion_sobre_el_negocio(monkeypatch) -> None:
+    """«No me falta nada importante» es una respuesta sobre SU negocio.
+
+    `reclamar_pregunta` devolvía None por las dos cosas —no queda ninguna, y no
+    pude leer— y `ver_memoria(que="falta")` leía las dos como la primera. Con
+    Redis caído el dueño recibía una conclusión tranquilizadora sacada de una
+    falla de infraestructura. Es la misma distinción de tres estados que
+    documenta `limites.idioma_gerencia_guardado`.
+
+    MUTACIÓN: volver el `raise MemoriaError` a `return None`. Cae ésta y sólo
+    ésta.
+    """
+    from redis.exceptions import RedisError
+
+    from app import memoria as memoria_mod
+
+    def explota():
+        raise RedisError("caído")
+
+    monkeypatch.setattr(memoria_mod.locks, "conexion", explota)
+
+    with pytest.raises(memoria_mod.MemoriaError):
+        memoria_mod.reclamar_pregunta()
+
+
+def test_el_prompt_sale_igual_aunque_no_se_pueda_leer_la_pregunta(monkeypatch) -> None:
+    """El otro consumidor del MISMO valor, y quiere lo contrario.
+
+    La herramienta tiene que enterarse del fallo; el prompt NO puede levantar,
+    porque un prompt que no sale deja al agente sin contestar. Sin pregunta es
+    degradación correcta; sin prompt no.
+
+    MUTACIÓN: sacarle el try/except a `bloque_de_prompt`. Cae ésta y sólo ésta.
+    """
+    from redis.exceptions import RedisError
+
+    from app import memoria as memoria_mod
+
+    def explota():
+        raise RedisError("caído")
+
+    monkeypatch.setattr(memoria_mod.locks, "conexion", explota)
+
+    # No levanta, y lo que devuelve es utilizable (vacío es válido).
+    assert isinstance(memoria_mod.bloque_de_prompt(), str)
+
+
+def test_la_pregunta_que_lee_el_dueno_sale_en_su_idioma() -> None:
+    """La misma mitad-de-frase-en-cada-idioma que `AccionError`.
+
+    `ver_memoria` armaba `memoria.falta` traducida y le interpolaba adentro la
+    pregunta en castellano. El bloque del PROMPT sigue en castellano a
+    propósito: todo `SYSTEM_GERENCIA` lo está, y es el modelo quien lee eso.
+
+    MUTACIÓN de ESTA prueba: que `Hueco.texto` devuelva `self.pregunta`. La del
+    call site vive en la prueba de abajo — ésta sola NO la agarra, y eso se
+    midió: revertir `app/tools/memoria.py` a `hueco.pregunta` dejaba los 3310
+    en verde. Probar el primitivo no es probar el arreglo.
+    """
+    from app import idioma as idioma_mod
+    from app import memoria as memoria_mod
+
+    hueco = memoria_mod._HUECOS_POR_CLAVE["clientes_delicados"]
+    en_es = hueco.texto(idioma_mod.ES)
+    en_en = hueco.texto(idioma_mod.EN)
+
+    assert en_es != en_en, "la pregunta sale igual en los dos idiomas"
+    assert "memoria.hueco" not in en_en, "salió la clave cruda: no está en el catálogo"
+    # Los dos lados escritos acá, no leídos del catálogo ni de HUECOS.
+    assert "acumular deuda" in en_es
+    assert "run up a balance" in en_en
+    # Y el castellano de la tupla no cambió: es lo que sigue viendo el prompt.
+    assert hueco.pregunta == en_es
+
+
+def test_la_herramienta_devuelve_la_pregunta_traducida(monkeypatch, almacen) -> None:
+    """EL CALL SITE, que es lo que el dueño lee.
+
+    La prueba de arriba mira `Hueco.texto`. Ésta mira que `ver_memoria` lo USE:
+    la mutación que vuelve a `pregunta=hueco.pregunta` sobrevivía a todo lo
+    demás con 3310 en verde, igual que pasó con `gestion.py` y `AccionError`.
+    Es el mismo punto ciego dos veces, así que acá queda escrito.
+
+    MUTACIÓN: `pregunta=hueco.pregunta` en `app/tools/memoria.py`. Cae ésta y
+    sólo ésta.
+    """
+    from app.tools.memoria import ver_memoria
+
+    monkeypatch.setenv("IDIOMA_GERENCIA", "en")
+
+    salida = str(ver_memoria.invoke({"que": "falta"}, config=_config()))
+
+    # Una pregunta en inglés, y NADA del castellano de `HUECOS`.
+    assert "?" in salida
+    assert "¿" not in salida, f"salió la pregunta en castellano: {salida!r}"
+    assert "memoria.hueco" not in salida, "salió la clave cruda"

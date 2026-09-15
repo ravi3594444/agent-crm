@@ -386,12 +386,22 @@ def _parametros(accion: Accion, detalle: object, pedido: str) -> dict:
 
     if accion.parametro == MOTIVO:
         if len(limpio) < 3:
+            from app import idioma
+
+            # `que` es PROSA («el motivo», «por qué»), no un dato: interpolarlo
+            # tal cual metía castellano adentro del mensaje en inglés. Va como
+            # llamable, igual que las otras dos partes de este archivo.
+            clave_que = ("accion.falta_el_motivo" if accion.nombre == "cancelar"
+                         else "accion.falta_por_que")
             que = "el motivo" if accion.nombre == "cancelar" else "por qué"
             raise AccionError(
                 f"falta {que}. «{accion.nombre}» se lo dice al cliente, así que "
                 "no lo invento: preguntale y volvé a pedírmelo",
                 clave="accion.falta_dato",
-                datos={"que": que, "accion": accion.nombre},
+                datos={
+                    "que": lambda lengua: idioma.t(clave_que, lengua),
+                    "accion": accion.nombre,
+                },
             )
         return {"motivo": limpio[:400]}
 
@@ -879,19 +889,29 @@ def _codigo_que_no_abre_nada(telefono: str) -> AccionError:
     entonces, y recién la racha se lleva todo: no hay intentos infinitos, y el
     primer error no le cuesta a los otros pedidos.
     """
+    # ESTAS TRES SE DEVUELVEN, no se levantan, y por eso el barrido que le puso
+    # `clave` a los 28 `raise AccionError(` no las tocó. Salen por el mismo
+    # `idioma.motivo_de` del router de `main.py`, así que sin clave el dueño en
+    # inglés recibía la frase de alrededor traducida y esto en castellano.
     if not hay_pendientes(telefono):
-        return AccionError("no hay ninguna acción esperando confirmación")
+        return AccionError(
+            "no hay ninguna acción esperando confirmación",
+            clave="accion.codigo_sin_nada_esperando",
+        )
     if _fallo(telefono) >= INTENTOS_MAXIMOS:
         cuantas = descartar_todo(telefono)
         return AccionError(
             f"ese código no confirma nada, y van {INTENTOS_MAXIMOS} seguidos: "
             f"descarté lo que quedaba esperando ({cuantas}). No cambié nada — "
-            "pedime de nuevo lo que querías"
+            "pedime de nuevo lo que querías",
+            clave="accion.codigo_racha_agotada",
+            datos={"intentos": INTENTOS_MAXIMOS, "cuantas": cuantas},
         )
     return AccionError(
         "ese código no confirma ninguna acción tuya. No cambié nada, y lo que "
         "tenías esperando sigue esperando: fijate el mensaje del código y "
-        "contestá esos seis dígitos"
+        "contestá esos seis dígitos",
+        clave="accion.codigo_no_es_tuyo",
     )
 
 

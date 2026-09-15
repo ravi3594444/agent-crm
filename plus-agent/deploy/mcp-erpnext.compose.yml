@@ -3,7 +3,14 @@
 # verse que alguien lo puso.
 #
 #   cd /srv/agent-crm/plus-agent
-#   docker compose -f docker-compose.yml -f ../deploy/mcp-erpnext.compose.yml up -d
+#   docker compose -f docker-compose.yml -f deploy/mcp-erpnext.compose.yml up -d
+#
+# EL OVERLAY TAMBIÉN TOCA `agente`, y no es un detalle: sin eso el agente queda
+# en la red por defecto del proyecto (`plus-agent_default`) y este contenedor en
+# `frappe_docker_default`, o sea que `http://mcp-erpnext:3012/mcp` no resuelve y
+# la integración entera no anda. Se lo agrega a la red de ERPNext SIN sacarlo de
+# la suya —por eso `default` va escrito en la lista—: si no, pierde a `redis`,
+# que vive en la del proyecto.
 #
 # LA PREGUNTA QUE IMPORTA NO ES QUÉ HERRAMIENTAS CARGA, ES CON QUÉ USUARIO.
 # Este servidor actúa con UNA credencial de ERPNext y no tiene permisos por
@@ -13,12 +20,26 @@
 # `erpnext_doc_create` —genérico sobre cualquier doctype, o sea que alcanza
 # `Item Price`—. Elegí ese usuario a conciencia; es el único control que hay.
 services:
+  # El agente entra a la red de ERPNext para poder llamar a mcp-erpnext por su
+  # nombre. `default` es la red del proyecto y va explícita: nombrar redes acá
+  # REEMPLAZA la lista, no la amplía, así que omitirla lo desconectaría de redis.
+  agente:
+    networks:
+      - default
+      - frappe_docker_default
+
   mcp-erpnext:
     image: node:22-alpine
     container_name: mcp-erpnext
     restart: unless-stopped
+    # CON LA VERSIÓN FIJA. `npx -y @casys/mcp-erpnext` resuelve `latest` en
+    # CADA arranque: el contenedor descarga y ejecuta lo que haya publicado el
+    # registro ese día, con una credencial de ERPNext adentro. Un `restart` no
+    # debería poder cambiar el código que corre. Para subir de versión se edita
+    # acá, a conciencia y en un commit.
     command: >
-      npx -y @casys/mcp-erpnext --http --port=3012 --hostname=0.0.0.0
+      npx -y @casys/mcp-erpnext@${MCP_ERPNEXT_VERSION:-3.0.4}
+      --http --port=3012 --hostname=0.0.0.0
     environment:
       # El MISMO `frontend:8080` que usa el agente, y por el mismo motivo:
       # apuntar a `backend:8000` devuelve «404 backend does not exist», porque

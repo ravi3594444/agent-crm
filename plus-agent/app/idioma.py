@@ -1368,6 +1368,59 @@ CATALOGO: dict[str, dict[str, str]] = {
             "changed nothing.",
     },
     # ------------------------------------------------ la memoria del negocio
+    # Las preguntas que el agente le hace al dueño cuando le falta un dato
+    # del negocio. Viajaban interpoladas SIN TRADUCIR adentro de
+    # `memoria.falta`, que sí estaba traducida: media frase en cada idioma,
+    # el mismo defecto que `AccionError`. El ES es el de `HUECOS`, palabra
+    # por palabra — la tupla lo sigue llevando y es lo que ve el prompt.
+    "memoria.hueco.reparto_costo": {
+        ES: '¿El reparto se lo cobrás aparte al cliente o ya va incluido en el precio?',
+        EN: 'Do you charge delivery separately, or is it already in the price?',
+    },
+    "memoria.hueco.pedido_minimo": {
+        ES: '¿Tenés un mínimo de compra para salir a repartir?',
+        EN: "Do you have a minimum order before you'll make a delivery run?",
+    },
+    "memoria.hueco.formas_de_pago": {
+        ES: '¿Cómo te suelen pagar: efectivo contra entrega, transferencia, cuenta corriente?',
+        EN: 'How do they usually pay you: cash on delivery, transfer, credit account?',
+    },
+    "memoria.hueco.cuenta_corriente": {
+        ES: '¿A quiénes les das cuenta corriente y a cuántos días?',
+        EN: 'Who do you give a credit account to, and on what terms?',
+    },
+    "memoria.hueco.envases": {
+        ES: '¿Los cajones y los envases vuelven, o se los cobrás?',
+        EN: 'Do the crates and containers come back, or do you charge for them?',
+    },
+    "memoria.hueco.horario_corte": {
+        ES: '¿Hasta qué hora te pueden pedir para que salga en el reparto del otro día?',
+        EN: "How late can they order and still make the next day's delivery run?",
+    },
+    "memoria.hueco.producto_clave": {
+        ES: '¿Cuál es el producto que no te puede faltar nunca?',
+        EN: 'Which product can you never afford to run out of?',
+    },
+    "memoria.hueco.faltante": {
+        ES: 'Cuando te falta un producto, ¿qué le ofrecés al cliente en su lugar?',
+        EN: "When you're out of something, what do you offer the customer instead?",
+    },
+    "memoria.hueco.devoluciones": {
+        ES: 'Si a un cliente le llega algo en mal estado, ¿qué hacés?',
+        EN: 'If something arrives damaged, what do you do?',
+    },
+    "memoria.hueco.frio": {
+        ES: 'En verano, ¿qué le contestás al que pregunta cómo le llega la mercadería?',
+        EN: 'In summer, what do you tell someone who asks how the goods stay cold?',
+    },
+    "memoria.hueco.temporada": {
+        ES: '¿Hay alguna época del año en que se te dispare o se te caiga la venta?',
+        EN: 'Is there a time of year when your sales spike or drop off?',
+    },
+    "memoria.hueco.clientes_delicados": {
+        ES: '¿Hay algún cliente al que convenga no dejarle acumular deuda?',
+        EN: "Is there a customer you'd rather not let run up a balance?",
+    },
     "memoria.no_pude_leer": {
         ES: "No pude leer los datos del negocio: {error}.",
         EN: "I could not read your business notes: {error}.",
@@ -1542,6 +1595,13 @@ CATALOGO: dict[str, dict[str, str]] = {
     # La ventana de 24 h de Meta. Se le explica en sus términos —«hace más de
     # un día que no te escribe»— y no con la palabra «ventana», que no
     # significa nada para él.
+    # Cuando la ventana se cierra ENTRE que se propuso y que el dueño aprobó.
+    # No es la misma que `fuera_de_ventana`: acá él ya tocó el botón, así que
+    # lo que hay que decirle es que NO salió, no que no se puede pedir.
+    "salida.se_cerro_la_ventana": {
+        ES: "No salió: se cerró la ventana de 24 h de {cliente} mientras esperaba tu visto bueno. Escribile vos, o esperá a que te escriba y pedímelo de nuevo.",
+        EN: "It did not go out: {cliente}'s 24 h window closed while it was waiting for your approval. Write to them yourself, or wait for them to write and ask me again.",
+    },
     "salida.fuera_de_ventana": {
         ES: "Hace más de un día que {cliente} no te escribe, y WhatsApp no deja "
             "escribirle primero salvo con un mensaje ya aprobado por Meta, que "
@@ -1550,6 +1610,13 @@ CATALOGO: dict[str, dict[str, str]] = {
             "allows starting a conversation with a message Meta approved in "
             "advance, and there is none for this. You would have to write from "
             "your own WhatsApp.",
+    },
+    # Igual que `crm.cliente_ambiguo` pero del lado de MANDAR: acá elegir solo
+    # no le cambia los datos al cliente equivocado, le CUENTA algo al comercio
+    # de al lado.
+    "salida.cliente_ambiguo": {
+        ES: "«{quien}» le queda a más de un cliente: {cuales}. No mandé nada — decime cuál con el código.",
+        EN: "«{quien}» matches more than one customer: {cuales}. I sent nothing — tell me which one, by code.",
     },
     "salida.no_encontre": {
         ES: "No encontré a «{quien}» en el sistema.",
@@ -2262,6 +2329,28 @@ CATALOGO: dict[str, dict[str, str]] = {
     "accion.codigo_vencido": {
         ES: 'ese código ya venció. No cambié nada: pedime la acción de nuevo',
         EN: 'that code has expired. I changed nothing: ask me for the action again',
+    },
+    # Las tres de `_codigo_que_no_abre_nada`, que DEVUELVE la excepción en vez
+    # de levantarla — por eso el barrido de `raise AccionError(` no las vio.
+    "accion.falta_el_motivo": {
+        ES: 'el motivo',
+        EN: 'the reason',
+    },
+    "accion.falta_por_que": {
+        ES: 'por qué',
+        EN: 'why',
+    },
+    "accion.codigo_sin_nada_esperando": {
+        ES: 'no hay ninguna acción esperando confirmación',
+        EN: 'there is no action waiting to be confirmed',
+    },
+    "accion.codigo_racha_agotada": {
+        ES: 'ese código no confirma nada, y van {intentos} seguidos: descarté lo que quedaba esperando ({cuantas}). No cambié nada — pedime de nuevo lo que querías',
+        EN: 'that code confirms nothing, and that is {intentos} in a row: I discarded what was waiting ({cuantas}). I changed nothing — ask me again for what you wanted',
+    },
+    "accion.codigo_no_es_tuyo": {
+        ES: 'ese código no confirma ninguna acción tuya. No cambié nada, y lo que tenías esperando sigue esperando: fijate el mensaje del código y contestá esos seis dígitos',
+        EN: 'that code confirms none of your actions. I changed nothing, and what you had waiting is still waiting: check the message with the code and reply with those six digits',
     },
     "accion.falta_dato": {
         ES: 'falta {que}. «{accion}» se lo dice al cliente, así que no lo invento: preguntale y volvé a pedírmelo',

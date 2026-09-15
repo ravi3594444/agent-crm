@@ -113,6 +113,16 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
             return idioma.t("salida.ya_no_esta", lengua)
         if accion == "nomandar":
             return idioma.t("salida.descartado", lengua)
+        # LA VENTANA SE VUELVE A MIRAR ACÁ, y no alcanza con la de cuando se
+        # propuso: entre una cosa y la otra puede pasar hasta una hora —el TTL
+        # de la salida— y las 24 h de Meta corren igual. Sin esto, el dueño
+        # tocaba el botón después de que la ventana se cerró, el mensaje se
+        # encolaba, se gastaba los ocho reintentos y moría en la cola de
+        # descarte: él leía «lo mandé» y el cliente no recibía nada.
+        from app import outbound_status
+
+        if not outbound_status.window_open(salida.telefono):
+            return idioma.t("salida.se_cerro_la_ventana", lengua, cliente=salida.cliente)
         try:
             from app import avisos
 

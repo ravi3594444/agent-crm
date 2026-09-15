@@ -1,6 +1,7 @@
 """Payload shapes ERPNext v15/v16 actually accepts, verified against a live site."""
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -544,4 +545,7 @@ def test_stock_bajo_le_pide_a_frappe_la_tabla_hija_como_frappe_la_acepta(
     salida = informe.invoke({"que": "stock_bajo"}, config=_config_gerencia())
 
     assert "LECHE-ENT-1L" in salida, salida
-    assert "2" in salida
+    # La cantidad EXACTA y con bordes: `"2" in salida` pasa igual con 12 o 20,
+    # o sea que un informe que dice el número equivocado pasaba el test.
+    renglon = next(r for r in salida.splitlines() if "LECHE-ENT-1L" in r)
+    assert re.search(r"(?<!\d)2(?!\d)", renglon), renglon

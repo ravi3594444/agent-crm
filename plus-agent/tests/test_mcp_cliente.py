@@ -362,3 +362,52 @@ def test_el_bloqueo_por_defecto_saca_modulos_enteros_y_ningun_poder():
         assert not _bloqueada(poder, patrones), (
             f"{poder} es un poder que el dueño pidió y el default se lo comió"
         )
+
+
+# ------------------------------------------- el entorno de un proceso stdio
+
+def test_un_servidor_stdio_no_hereda_nuestras_credenciales(monkeypatch):
+    """Era `env=dict(os.environ)`, o sea todo lo que tenemos.
+
+    Un servidor MCP por stdio es código de otro corriendo como hijo nuestro. Con
+    el entorno entero adentro veía las tres claves de ERPNext, el token de
+    WhatsApp, la del modelo, la URL de Redis y los tokens del panel y de MCP —
+    ninguna de las cuales necesita para hablar el protocolo.
+
+    MUTACIÓN: volver `entorno_para` a `dict(os.environ)`. Cae ésta y sólo ésta.
+    """
+    from app.mcp_cliente import entorno_para
+
+    monkeypatch.setenv("ERPNEXT_API_SECRET", "no-se-comparte")
+    monkeypatch.setenv("WHATSAPP_TOKEN", "tampoco")
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    entorno = entorno_para("erpnext")
+
+    assert "ERPNEXT_API_SECRET" not in entorno
+    assert "WHATSAPP_TOKEN" not in entorno
+    # Y lo mínimo para que un proceso arranque sí está.
+    assert entorno["PATH"] == "/usr/bin"
+
+
+def test_el_dueno_puede_nombrar_lo_que_ese_servidor_sí_necesita(monkeypatch):
+    """Nombres de variable, no valores: el secreto no se escribe dos veces.
+
+    Sin esto el arreglo rompería cualquier servidor stdio que se configure por
+    entorno, que es como se configuran casi todos.
+
+    MUTACIÓN: ignorar `MCP_EXTERNO_ENV_<NOMBRE>`. Cae ésta y sólo ésta.
+    """
+    from app.mcp_cliente import entorno_para
+
+    monkeypatch.setenv("TOKEN_DEL_OTRO", "abc123")
+    monkeypatch.setenv("ERPNEXT_API_SECRET", "no-se-comparte")
+    monkeypatch.setenv("MCP_EXTERNO_ENV_OTRO", "TOKEN_DEL_OTRO")
+
+    entorno = entorno_para("otro")
+
+    assert entorno["TOKEN_DEL_OTRO"] == "abc123"
+    # Nombrar una no abre las demás.
+    assert "ERPNEXT_API_SECRET" not in entorno
+    # Y el permiso es POR SERVIDOR: el de al lado no lo hereda.
+    assert "TOKEN_DEL_OTRO" not in entorno_para("erpnext")
