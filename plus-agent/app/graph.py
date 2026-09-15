@@ -46,6 +46,9 @@ from app.tools.crm import (
     armar_presupuesto,
     editar_borrador,
 )
+from app.tools.entrega import (
+    condiciones_de_entrega,
+)
 from app.tools.gerencia import (
     ejecutar_reporte,
     ficha_cliente,
@@ -79,6 +82,13 @@ TOOLS_CLIENTES = [
     # acepta un teléfono como argumento, así que ningún mensaje puede pedir
     # el alta de otra persona.
     crear_cliente, crear_lead, crear_pedido, escalar_a_humano,
+    # Las condiciones de entrega que configuró el dueño (app/limites.py, grupo
+    # ENTREGA), en una sola herramienta. SÓLO LECTURA y sin un solo dato del
+    # cliente que termine escrito en ninguna parte. Es lo que hace el negocio
+    # EN GENERAL: no promete la entrega de un pedido —eso sigue siendo
+    # `pedir_excepcion_de_entrega` más la decisión de una persona— y un ajuste
+    # que falta sale como faltante, nunca como un «no repartimos».
+    condiciones_de_entrega,
     # Pide una excepción de entrega. NO decide: o el dueño la dejó autorizada
     # de antemano, o abre una solicitud para una persona (app/solicitudes.py).
     pedir_excepcion_de_entrega,

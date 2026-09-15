@@ -2503,6 +2503,163 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: '\n(Asumo el stock del sistema: {supuesto}.)',
         EN: "\n(I am assuming the system's stock figure: {supuesto}.)",
     },
+    # ------------------------------------- las condiciones de entrega, al cliente
+    # Lo que devuelve `app/tools/entrega.py::condiciones_de_entrega`. Son los
+    # doce ajustes del grupo ENTREGA de app/limites.py dichos en el mostrador:
+    # el cliente los pregunta todo el tiempo y hasta ahora el agente no tenía de
+    # dónde sacarlos.
+    #
+    # DOS COSAS QUE SE LEEN JUNTAS Y NO SE PUEDEN SEPARAR: el DATO y la
+    # instrucción de qué se puede hacer con él. Un ajuste que falta sale como
+    # `condiciones.sin_dato` y `condiciones.instruccion` es lo que impide que
+    # eso se convierta en un «no repartimos» — igual que el «No confirmes
+    # disponibilidad.» con el que termina cada rama de `consultar_stock`.
+    "condiciones.titulo": {
+        ES: 'Lo que hacemos EN GENERAL con la entrega (no es una promesa sobre un pedido):',
+        EN: 'What we do IN GENERAL about delivery (this is not a promise about any order):',
+    },
+    "condiciones.sin_dato": {
+        ES: 'no lo tengo configurado',
+        EN: "I don't have it set",
+    },
+    "condiciones.dias": {
+        ES: 'Días de reparto: {valor}',
+        EN: 'Delivery days: {valor}',
+    },
+    "condiciones.hora": {
+        ES: 'Hora del reparto: {valor}',
+        EN: 'Delivery time: {valor}',
+    },
+    "condiciones.localidades": {
+        ES: 'Localidades donde repartimos: {valor}',
+        EN: 'Towns we deliver to: {valor}',
+    },
+    "condiciones.cp": {
+        ES: 'Códigos postales donde repartimos: {valor}',
+        EN: 'Postcodes we deliver to: {valor}',
+    },
+    "condiciones.retiro": {
+        ES: 'Se puede pasar a buscar el pedido por el local: {valor}',
+        EN: 'Orders can be collected at the shop: {valor}',
+    },
+    "condiciones.retiro_dias": {
+        ES: 'Días para pasar a buscarlo: {valor}',
+        EN: 'Days to come and collect it: {valor}',
+    },
+    "condiciones.retiro_hora": {
+        ES: 'Hora para pasar a buscarlo: {valor}',
+        EN: 'Time to come and collect it: {valor}',
+    },
+    "condiciones.fuera_de_dia": {
+        ES: 'Entregamos fuera de los días de reparto: {valor}',
+        EN: 'We deliver outside the delivery days: {valor}',
+    },
+    "condiciones.fuera_de_dia_dias": {
+        ES: 'Días en que se puede entregar fuera de reparto: {valor}',
+        EN: 'Days an off-day delivery can happen: {valor}',
+    },
+    "condiciones.fuera_de_dia_hora": {
+        ES: 'Hora de una entrega fuera de reparto: {valor}',
+        EN: 'Time of an off-day delivery: {valor}',
+    },
+    "condiciones.cargo": {
+        ES: 'Cargo por entregar fuera de los días de reparto: {valor}',
+        EN: 'Charge for delivering outside the delivery days: {valor}',
+    },
+    "condiciones.minimo": {
+        ES: 'Pedido mínimo para entregar fuera de día: {valor}',
+        EN: 'Minimum order for an off-day delivery: {valor}',
+    },
+    "condiciones.zona_dentro": {
+        ES: (
+            '{zona}: entra en la zona de reparto. No se lo prometas para este '
+            'pedido igual: la dirección completa la mira una persona cuando el '
+            'pedido ya está cargado.'
+        ),
+        EN: (
+            '{zona}: that falls inside the delivery area. Do not promise it for '
+            'this order anyway: the full address is checked by a person once the '
+            'order is in.'
+        ),
+    },
+    "condiciones.zona_fuera": {
+        ES: (
+            '{zona}: {frase} Decíselo así y en la misma línea ofrecele lo que sí '
+            'hay: que lo pase a buscar por el local si el retiro está activo, o '
+            'que se lo pasás al encargado.'
+        ),
+        EN: (
+            '{zona}: {frase} Say it like that and in the same line offer what '
+            'there IS: collecting it at the shop if pickup is on, or that you '
+            'are passing it to the manager.'
+        ),
+    },
+    "condiciones.zona_sin_listas": {
+        ES: (
+            '{zona}: no tengo cargadas las zonas de reparto, así que no sé si '
+            'llegamos. No le digas que no: decile que eso te lo confirma el '
+            'encargado.'
+        ),
+        EN: (
+            "{zona}: I don't have the delivery areas loaded, so I don't know "
+            'whether we reach it. Do not tell them no: tell them the manager '
+            'confirms that one.'
+        ),
+    },
+    "condiciones.zona_pedir_cp": {
+        ES: (
+            '{zona}: tengo cargados los códigos postales y no las localidades, '
+            'así que por el nombre no lo puedo comprobar. Pedile el código '
+            'postal; no le digas que no llegamos.'
+        ),
+        EN: (
+            "{zona}: I have the postcodes loaded but not the town names, so I "
+            'cannot check it by name. Ask them for the postcode; do not tell '
+            'them we do not reach it.'
+        ),
+    },
+    "condiciones.zona_pedir_localidad": {
+        ES: (
+            '{zona}: tengo cargadas las localidades y no los códigos postales, '
+            'así que por el número no lo puedo comprobar. Pedile la localidad; '
+            'no le digas que no llegamos.'
+        ),
+        EN: (
+            "{zona}: I have the town names loaded but not the postcodes, so I "
+            'cannot check it by number. Ask them for the town; do not tell them '
+            'we do not reach it.'
+        ),
+    },
+    "condiciones.instruccion": {
+        ES: (
+            'Contestá SÓLO lo que preguntó y con tus palabras: no le leas esta '
+            'lista. Lo que diga «{sin_dato}» no es un no —no lo inventes y no lo '
+            'niegues—: decile que eso te lo confirma el encargado. Y nada de '
+            'esto confirma la entrega de un pedido: el día y la dirección de '
+            'ESTE pedido los decide una persona, y para entregar fuera de los '
+            'días de reparto usá pedir_excepcion_de_entrega.'
+        ),
+        EN: (
+            'Answer ONLY what they asked, in your own words: do not read this '
+            'list back to them. Anything that says «{sin_dato}» is not a no — do '
+            'not invent it and do not deny it: tell them the manager confirms '
+            'that one. And none of this confirms the delivery of an order: the '
+            'day and the address of THIS order are decided by a person, and to '
+            'deliver outside the delivery days use pedir_excepcion_de_entrega.'
+        ),
+    },
+    "condiciones.no_pude": {
+        ES: (
+            'No pude mirar las condiciones de entrega ahora. No inventes días, '
+            'zonas, horarios ni cargos de envío, y no digas que no repartimos: '
+            'decile que eso te lo confirma el encargado.'
+        ),
+        EN: (
+            'I could not look up the delivery terms right now. Do not invent '
+            'days, areas, times or delivery charges, and do not say we do not '
+            'deliver: tell them the manager confirms that one.'
+        ),
+    },
 }
 
 
