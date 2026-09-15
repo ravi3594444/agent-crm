@@ -1,6 +1,10 @@
 const $ = (s, root = document) => root.querySelector(s);
 const escape = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const paths = {
+  sales: '<path d="M4 20V10m6 10V4m6 16v-7m5 7H2M14 5h7v7m0-7-8 8"/>',
+  advice: '<path d="M9 18h6m-5 3h4M8 14a6 6 0 1 1 8 0l-1 2H9zM12 1v1M2 8H1m22 0h-1"/>',
+  moon: '<path d="M20 14A9 9 0 0 1 10 4a9 9 0 1 0 10 10Z"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1 1m12 12 1 1M5 19l1-1M18 6l1-1"/>',
   today: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 11h18m-13 5 3 3 5-5"/>',
   queue: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l4 2M3 3l3 3"/>',
   overview: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
@@ -52,7 +56,7 @@ const products = [
   {id:'YOG-FRUT-190',name:'Strawberry yogurt · 190 g',unit:'units',price:780,stock:500,reserved:115,available:385,warehouse:'Principal'},
   {id:'DDL-400',name:'Dulce de leche · 400 g',unit:'units',price:2450,stock:150,reserved:58,available:92,warehouse:'Principal'},
 ];
-function makeDemo() {
+function makeDemo(range=7) {
   const orders = [];
   [4,6,5,7,6,8,9].forEach((count, day) => {
     for (let i=0;i<count;i++) {
@@ -70,19 +74,31 @@ function makeDemo() {
   const conversations=Object.fromEntries(customers.map((c,i)=>[c.id,{customerId:c.id,customerName:c.name,reachable:i!==3,messages:i===3||i===4?[]:[{role:'customer',text:'Hola, ¿tenés leche entera para mañana?',at:at('11:12')},{role:'note',text:'The agent looked up the catalogue.',at:at('11:13')},{role:'agent',text:'Sí, tenemos leche entera de 1 L. ¿Cuántas unidades necesitás?',at:at('11:14')},{role:'customer',text:i>=6?'Gracias, lo consulto y te aviso.':'Preparame 12 unidades, por favor.',at:at('11:15')},{role:'agent',text:i>=6?'Dale, quedo atento.':'Dejé el pedido en borrador para que lo revise el equipo.',at:at('11:16')}],truncated:i===1,retentionDays:30}]));
   const queue={upcoming:[{id:'demo-delivery',type:'delivery_notice',orderId:orders[3].id,customer:orders[3].customer,dueAt:at('20:00'),what:'Remind the customer their order arrives at 17:00.'},{id:'demo-review',type:'owner_reminder',orderId:orders[0].id,customer:orders[0].customer,dueAt:at('19:00'),what:'Remind the owner that this draft still needs a decision.'}],waitingOnAPerson:orders.filter(o=>o.status==='pending').map(o=>({orderId:o.id,customer:o.customer,since:at('13:00'),what:'The order needs a manager’s review before it can be confirmed.'})),undelivered:{replies:2,notices:1}};
   const operations={redis:'Connected',worker:'Active lease',queuedMessages:0,queuedNotices:2,failedReplies:2,failedNotices:1};
-  return {mode:'demo',company:'Plus Dairy',today,since:dateShift(today,-29),currency:'ARS',generatedAt:new Date().toISOString(),orders,customers,products,activity:validateActivity(activity),conversations,queue:validateQueue(queue),operations,errors:[],truncated:[],limit:250,policies:[{name:'Order ceiling',value:'$ 150.000',note:'Maximum order value for automatic confirmation'},{name:'New customer ceiling',value:'$ 30.000',note:'Separate limit until a customer has order history'},{name:'Stock buffer',value:'20%',note:'Keep a buffer before confirming an order'},{name:'Stock trust window',value:'24 hours',note:'Require a recent confirmed stock count'}],agents:[{id:'sales',name:'Sales agent',role:'Customer conversations & order drafts',model:'Qwen · sales model',status:'Demo'},{id:'manager',name:'Management agent',role:'Business reports & manager assistance',model:'Qwen · management model',status:'Demo'}]};
+  const booked=orders.filter(o=>['confirmed','completed'].includes(o.status));
+  const salesTotal=booked.reduce((sum,o)=>sum+o.total,0);
+  const sales=validateSales({currency:'ARS',since:dateShift(today,-range+1),until:today,total:salesTotal,orders:booked.length,averageOrder:Math.round(salesTotal/booked.length),
+    daily:Array.from({length:range},(_,i)=>{const date=dateShift(today,-range+1+i),rows=booked.filter(o=>o.date===date);return {date,total:rows.reduce((sum,o)=>sum+o.total,0),orders:rows.length};}),
+    topProducts:products.map(p=>{const rows=booked.flatMap(o=>o.items).filter(item=>item.name===p.name);return {id:p.id,name:p.name,quantity:rows.reduce((sum,item)=>sum+item.qty,0),total:rows.reduce((sum,item)=>sum+item.qty*item.rate,0)};}).sort((a,b)=>b.total-a.total),
+    topCustomers:customers.map(c=>{const rows=booked.filter(o=>o.customerId===c.id);return {id:c.id,name:c.name,orders:rows.length,total:rows.reduce((sum,o)=>sum+o.total,0)};}).filter(c=>c.orders).sort((a,b)=>b.total-a.total),errors:[],truncated:[]});
+  const advice=validateAdvice({generatedAt:at('15:50'),enabled:false,currency:'ARS',items:[
+    {id:'demo-dormido',kind:'dormido',title:'A regular has gone quiet',body:'Café Magnolia has not ordered in the last 21 days.',about:'Café Magnolia',weight:0.46,assumption:'Compared with a weekly ordering pattern over the previous eight weeks.',amount:null,customerId:'CUST-008',orderId:null,productId:null,at:at('09:20')},
+    {id:'demo-perdida',kind:'perdida',title:'Sold below cost',body:'Two lines on this order went out below their recorded purchase cost.',about:orders[3].id,weight:0.82,assumption:'Cost taken from the purchase price list; rebates are not included.',amount:-18400,customerId:orders[3].customerId,orderId:orders[3].id,productId:null,at:at('11:02')},
+    {id:'demo-deuda',kind:'deuda',title:'An overdue balance needs a look',body:'Almacén Don Pedro has a balance beyond the usual payment window.',about:'Almacén Don Pedro',weight:0.68,assumption:'A 14-day payment tolerance; recent unallocated payments may change this.',amount:62500,customerId:'CUST-001',orderId:null,productId:null,at:at('10:35')},
+    {id:'demo-quiebre',kind:'quiebre',title:'Creamy cheese may run out',body:'Available stock may not last until the next scheduled delivery.',about:'Creamy cheese · 1 kg',weight:0.94,assumption:'Demand follows the last seven days and the next delivery arrives in two days.',customerId:null,orderId:null,productId:'QUESO-CREM-1K',at:at('12:10')}
+  ],errors:[],truncated:[]});
+  return {sales,advice,mode:'demo',company:'Plus Dairy',today,since:dateShift(today,-29),currency:'ARS',generatedAt:new Date().toISOString(),orders,customers,products,activity:validateActivity(activity),conversations,queue:validateQueue(queue),operations,errors:[],truncated:[],limit:250,policies:[{name:'Order ceiling',value:'$ 150.000',note:'Maximum order value for automatic confirmation'},{name:'New customer ceiling',value:'$ 30.000',note:'Separate limit until a customer has order history'},{name:'Stock buffer',value:'20%',note:'Keep a buffer before confirming an order'},{name:'Stock trust window',value:'24 hours',note:'Require a recent confirmed stock count'}],agents:[{id:'sales',name:'Sales agent',role:'Customer conversations & order drafts',model:'Qwen · sales model',status:'Demo'},{id:'manager',name:'Management agent',role:'Business reports & manager assistance',model:'Qwen · management model',status:'Demo'}]};
 }
 const repoHosted = /\/dashboard(?:\/|$)/.test(location.pathname);
 const demoRequested = new URLSearchParams(location.search).get('demo') === '1';
 function disconnectedData() {
-  return {mode:'disconnected',company:'Plus CRM',today,since:dateShift(today,-29),currency:'',generatedAt:new Date().toISOString(),orders:null,pendingOrders:null,customers:null,products:null,policies:null,agents:[],operations:null,activity:null,queue:null,conversations:null,errors:[],truncated:[],limit:250};
+  return {mode:'disconnected',company:'Plus CRM',today,since:dateShift(today,-29),currency:'',generatedAt:new Date().toISOString(),orders:null,pendingOrders:null,customers:null,products:null,policies:null,agents:[],operations:null,activity:null,queue:null,conversations:null,sales:null,advice:null,errors:[],truncated:[],limit:250};
 }
-function freshReads(){return Object.fromEntries(['activity','queue','operations'].map(key=>[key,{busy:false,error:'',loadedAt:null,pending:null}]));}
+function freshReads(){return Object.fromEntries(['activity','queue','operations','sales','advice'].map(key=>[key,{busy:false,error:'',loadedAt:null,pending:null,range:null}]));}
 let data=demoRequested?makeDemo():disconnectedData();
-const state={view:'today',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,reads:freshReads(),extrasBusy:false,extrasError:'',extrasLoadedAt:null,detailRequest:0,connectRequest:0,configured:null,displayCurrency:'',currencyPreference:readCurrencyPreference(),fx:null,fxLoading:false,fxRequest:0,fxError:'',fxFailedTarget:''};
+const state={theme:readThemePreference(),view:'today',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,reads:freshReads(),extrasBusy:false,extrasError:'',extrasLoadedAt:null,detailRequest:0,connectRequest:0,configured:null,displayCurrency:'',currencyPreference:readCurrencyPreference(),fx:null,fxLoading:false,fxRequest:0,fxError:'',fxFailedTarget:''};
 const currencyNames={ARS:'Argentine peso',INR:'Indian rupee',USD:'US dollar',EUR:'Euro',GBP:'British pound',BRL:'Brazilian real',UYU:'Uruguayan peso',CLP:'Chilean peso',MXN:'Mexican peso',CAD:'Canadian dollar',AUD:'Australian dollar',CHF:'Swiss franc',CNY:'Chinese yuan',JPY:'Japanese yen',AED:'UAE dirham'};
 const fxCache=new Map();
-const nav=[['today','Today'],['overview','Overview'],['queue','Coming up'],['orders','Orders'],['inventory','Inventory'],['customers','Customers'],['agents','AI agents']];
+const nav=[['today','Today'],['overview','Overview'],['sales','Sales'],['advice','Advice'],['queue','Coming up'],['orders','Orders'],['inventory','Inventory'],['customers','Customers'],['agents','AI agents']];
 const labels={pending:'Pending review',confirmed:'Confirmed',completed:'Completed',cancelled:'Cancelled',closed:'Closed','on-hold':'On hold',unknown:'Unknown'};
 const badge=(status)=>`<span class="badge badge-${escape(status)}">${icon(status==='pending'?'clock':status==='confirmed'||status==='completed'?'check':'info')}${escape(labels[status] || status)}</span>`;
 function periodOrders() { const start=dateShift(data.today,-state.range+1); return (data.orders||[]).filter((o)=>o.date>=start && o.date<=data.today); }
@@ -100,7 +116,7 @@ function shell() {
   return `<div class="dashboard ${state.menu?'menu-open':''}">
     <button class="sidebar-shade" data-action="close-menu" aria-label="Close navigation"></button>
     <aside class="sidebar" aria-label="Main navigation">
-      <a class="brand" href="#today" data-view="today"><span class="brand-symbol">+</span><span>plus<span class="brand-period">.</span></span><span class="brand-tag">CRM</span></a>
+      <a class="brand" href="#today" data-view="today">${mateLogo('sidebar')}<span class="brand-wordmark">WhatsApp<span>Mate<span class="brand-period">.</span></span></span></a>
       <div class="workspace"><span class="workspace-icon">${icon('inventory')}</span><div><strong>${escape(data.company)}</strong><span>Operations workspace</span></div></div>
       <div class="nav-label">WORKSPACE</div>
       <nav>${nav.map(([key,label])=>`<a href="#${key}" data-view="${key}" class="nav-item ${state.view===key?'active':''}" ${state.view===key?'aria-current="page"':''}>${icon(key)}<span>${label}</span>${key==='orders'&&pending?`<span class="nav-count">${pending}</span>`:''}${key==='agents'?'<span class="new-tag">AI</span>':''}</a>`).join('')}</nav>
@@ -110,12 +126,12 @@ function shell() {
     </aside>
     <div class="main-wrap">
       <header class="topbar"><div class="breadcrumbs"><button class="icon-button menu-button" data-action="menu" aria-label="Open navigation" aria-expanded="${state.menu}">${icon('menu')}</button><span>Workspace</span><span class="crumb-slash">/</span><strong>${title}</strong></div>
-      <div class="top-actions"><span class="mode-chip ${data.mode==='live'?'live-chip':''}">${icon(data.mode==='demo'?'overview':'link')}${data.mode==='demo'?'Demo workspace':data.mode==='disconnected'?'Not connected':state.stale?'Connection interrupted':'Live data'}</span><button class="icon-button notification-button" data-action="pending" aria-label="View ${pending} orders awaiting review">${icon('bell')}${pending?'<span class="notification-dot"></span>':''}</button><span class="avatar owner small">${escape((data.company||'?').trim().charAt(0).toUpperCase())}</span></div></header>
+      <div class="top-actions"><button class="icon-button theme-toggle" data-action="theme" aria-label="${state.theme==='dark'?'Switch to light mode':'Switch to charcoal night mode'}" title="${state.theme==='dark'?'Light mode':'Charcoal night mode'}" aria-pressed="${state.theme==='dark'}">${icon(state.theme==='dark'?'sun':'moon')}</button><span class="mode-chip ${data.mode==='live'?'live-chip':''}">${icon(data.mode==='demo'?'overview':'link')}${data.mode==='demo'?'Demo workspace':data.mode==='disconnected'?'Not connected':state.stale?'Connection interrupted':'Live data'}</span><button class="icon-button notification-button" data-action="pending" aria-label="View ${pending} orders awaiting review">${icon('bell')}${pending?'<span class="notification-dot"></span>':''}</button><span class="avatar owner small">${escape((data.company||'?').trim().charAt(0).toUpperCase())}</span></div></header>
       <main id="main" tabindex="-1">
         ${state.stale?'<div class="notice error-notice">Connection interrupted. The last snapshot remains visible; refresh to try again.</div>':''}
         ${data.errors.length?`<div class="notice error-notice">Some data could not be read: ${escape(data.errors.join(', '))}. Missing information is shown as unavailable.</div>`:''}
-        <div class="page-heading"><div><div class="eyebrow">YOUR OPERATIONS, CONNECTED</div><h1>${title}</h1><p>${{today:'Who talked to your agent, and what they needed.',queue:'See the work scheduled next and the decisions waiting for you.',overview:'A clear view of your business. Every order, every day.',orders:'Follow each order from received to fulfilled.',inventory:'Know what is on the shelf and already reserved.',customers:'The people and businesses behind your orders.',agents:'Your team behind the conversations.',settings:'Connect your dashboard to the agent service.'}[state.view]}</p></div>
-        <div class="heading-actions">${currencySelector()}${['overview','orders'].includes(state.view)?`<label class="select-wrap">${icon('calendar')}<select id="range" aria-label="Reporting period"><option value="7" ${state.range===7?'selected':''}>Last 7 days</option><option value="30" ${state.range===30?'selected':''}>Last 30 days</option></select></label>`:''}<button class="button ${data.mode!=='live'?'primary':''}" data-action="${data.mode!=='live'?'connect':'refresh'}" ${state.busy?'disabled':''}>${icon(data.mode!=='live'?'link':'refresh')}${state.busy?'Refreshing…':data.mode!=='live'?'Connect live data':'Refresh'}</button></div></div>
+        <div class="page-heading"><div><div class="eyebrow">YOUR OPERATIONS, CONNECTED</div><h1>${title}</h1><p>${{today:'Who talked to your agent, and what they needed.',queue:'See the work scheduled next and the decisions waiting for you.',sales:'See what sells, who buys, and how your business is growing.',advice:'A closer look at the signals that deserve your attention.',overview:'A clear view of your business. Every order, every day.',orders:'Follow each order from received to fulfilled.',inventory:'Know what is on the shelf and already reserved.',customers:'The people and businesses behind your orders.',agents:'Your team behind the conversations.',settings:'Connect your dashboard to the agent service.'}[state.view]}</p></div>
+        <div class="heading-actions">${currencySelector()}${['overview','orders','sales'].includes(state.view)?`<label class="select-wrap">${icon('calendar')}<select id="range" aria-label="Reporting period"><option value="7" ${state.range===7?'selected':''}>Last 7 days</option><option value="30" ${state.range===30?'selected':''}>Last 30 days</option></select></label>`:''}<button class="button ${data.mode!=='live'?'primary':''}" data-action="${data.mode!=='live'?'connect':'refresh'}" ${state.busy?'disabled':''}>${icon(data.mode!=='live'?'link':'refresh')}${state.busy?'Refreshing…':data.mode!=='live'?'Connect live data':'Refresh'}</button></div></div>
         ${currencyNotice()}<div id="view-content">${data.mode==='disconnected'?connectionGate():views[state.view]()}</div>
         <footer class="footer"><span>Plus CRM <span class="footer-dot">·</span> ${data.mode==='disconnected'?'Sign in to read your CRM':data.mode==='demo'?'Sample data for exploring the dashboard':`Snapshot · ${escape(new Date(data.generatedAt).toLocaleString('en-GB'))}`}</span><span>${data.currency?escape(state.displayCurrency||data.currency)+(state.displayCurrency?' display currency · ':' currency · '):''}Read-only workspace</span></footer>
       </main>
@@ -172,6 +188,11 @@ function overview() {
   return `${listLimit('orders','pending orders')}${stats()}<div class="overview-activity">${comingUpCard()}${deliveryHealth()}</div><div class="overview-top">${chart()}${orderMix()}</div>${agentsMini()}<div class="overview-bottom"><section class="card orders-card"><div class="card-heading"><div><h2>Recent orders</h2><p>The latest activity in your business</p></div><button class="text-link" data-view="orders">View all ${icon('arrow')}</button></div>${listLimit('orders')}${orderTable(periodOrders().slice(0,5),true)}</section>${attention()}</div>`;
 }
 function listLimit(...keys) {
+  // Report endpoints own their caps; a capped ranking does not imply a capped total.
+  if(keys[0]&&typeof keys[0]==='object'){
+    const report=keys.shift();
+    return keys.some(key=>report.truncated?.includes(key))?'<p class="list-notice">This list was capped. Some records are not shown.</p>':'';
+  }
   return keys.some(key=>data.truncated.includes(key))?`<p class="list-notice">This list is limited to ${escape(data.limit)} source records per section. Some records are not shown; counts and totals cover loaded records only.</p>`:'';
 }
 function prettyMoment(value) {
@@ -188,6 +209,73 @@ function readButton(key) {
 function readEmpty(key,title) {
   return empty(state.reads[key].busy?'Loading…':title,state.reads[key].busy?'Reading from your agent service.':state.reads[key].error||'Open this view or refresh to read the latest information.');
 }
+// Lightweight vector interpretation of the supplied WhatsApp Mate mark.
+// IDs are scoped because the sidebar and launch reveal can coexist.
+function mateLogo(scope) {
+  return `<svg class="mate-logo" viewBox="0 0 100 100" aria-hidden="true"><defs><linearGradient id="mate-${scope}" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#39e154"/><stop offset=".5" stop-color="#00b678"/><stop offset="1" stop-color="#007478"/></linearGradient></defs><path fill="url(#mate-${scope})" d="M50 3a47 47 0 1 1-24 87L9 95q-6 2-4-5l4-15A47 47 0 0 1 50 3Z"/><g fill="#fff"><circle cx="27" cy="38" r="7"/><circle cx="72" cy="38" r="7"/></g><path class="mate-ribbon" d="m22 53 9 19q5 10 11-1l12-21q5-9 10 1l9 21q4 9 9-3l7-17" fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" transform="translate(-4 0)"/><path d="M50 22v7m-9 0 3 4m15-4-3 4" fill="none" stroke="#fff" stroke-width="2.7" stroke-linecap="round"/></svg>`;
+}
+function readThemePreference() {
+  try{return localStorage.getItem('plus.dashboard.theme')==='dark'?'dark':'light';}catch{return 'light';}
+}
+function revealLogo() {
+  const reveal=document.createElement('div');
+  reveal.className='logo-reveal';reveal.setAttribute('aria-hidden','true');
+  reveal.innerHTML=`<div class="logo-reveal-content">${mateLogo('launch')}<strong>WhatsApp <span>Mate</span></strong><p>Chat smarter. Together.</p><span class="reveal-line"></span></div>`;
+  document.body.append(reveal);
+  // Decoration only: it never owns focus, captures input, or delays a read.
+  setTimeout(()=>reveal.remove(),1400);
+}
+function reportErrors(report) {
+  if(report.errors===null)return '<p class="list-note">Error details unavailable.</p>';
+  return report.errors?.length?`<div class="notice error-notice" role="status">${report.errors.map(error=>`<p>${escape(error)}</p>`).join('')}</div>`:'';
+}
+function reportWarnings(report,known) {
+  if(report.truncated===null)return '<p class="list-note">List completeness unavailable.</p>';
+  const unknown=report.truncated?.filter(key=>!known.includes(key))||[];
+  return unknown.length?`<p class="list-notice">Additional lists were capped: ${escape(unknown.join(', '))}.</p>`:'';
+}
+function salesMoney(value,currency){return value===null||currency===null?'Unavailable':moneyFor(value,currency);}
+function currentSales(){return data.mode==='live'&&state.reads.sales.range!==state.range?null:data.sales;}
+function salesChart(report) {
+  const rows=report.daily;
+  if(rows===null)return empty('Daily sales unavailable','The daily breakdown could not be read. Your other sales figures may still be available.');
+  if(!rows.length)return empty('No daily sales yet','Daily totals will appear here when sales are recorded in this period.');
+  if(report.currency===null)return empty('Sales currency unavailable','The daily amounts cannot be displayed until their currency is available.');
+  const above=Math.max(0,...rows.map(row=>row.total)),below=Math.max(0,...rows.map(row=>-row.total)),extent=Math.max(1,above+below);
+  return `<div class="sales-chart" aria-label="Daily sales"><div class="sales-plot" style="--baseline:${below/extent*100}%">${rows.map((row,i)=>`<div class="sales-column"><button class="sales-day" data-sales-date="${escape(row.date)}" aria-label="${escape(prettyDate(row.date))}: ${escape(moneyFor(row.total,report.currency))}, ${number(row.orders)} orders" title="${escape(prettyDate(row.date))} · ${escape(moneyFor(row.total,report.currency))} · ${number(row.orders)} orders"><span class="sales-bar ${row.total<0?'negative':''}" style="height:${Math.abs(row.total)/extent*100}%;bottom:${(row.total<0?below+row.total:below)/extent*100}%"></span></button><span class="sales-day-label">${rows.length<=10||i%5===0||i===rows.length-1?escape(row.date.slice(8)):''}</span></div>`).join('')}</div></div><p class="list-note">Select a day to see its sales and orders. Only returned dates are shown.</p>`;
+}
+function salesRanking(report,key,label) {
+  const rows=report[key],isCustomer=key==='topCustomers';
+  return `<section class="card sales-ranking"><div class="card-heading"><div><h2>${label}</h2><p>${isCustomer?'The relationships behind your revenue':'Your strongest products by sales'}</p></div><span class="stat-icon ${isCustomer?'blue':'green'}">${icon(isCustomer?'customers':'inventory')}</span></div>${listLimit(report,key)}${rows===null?empty(`${label} unavailable`,'This ranking could not be read. Refresh to try again.'):!rows.length?empty(isCustomer?'No customer sales yet':'No product sales yet','Your ranking will take shape as sales are recorded.'): `<ol class="sales-ranking-list">${rows.map((row,i)=>`<li><span class="rank-number">${String(i+1).padStart(2,'0')}</span>${isCustomer?avatar(row.name,i):`<span class="product-icon">${icon('inventory')}</span>`}<div class="rank-identity">${isCustomer?`<button class="text-link customer-name" data-customer="${escape(row.id)}">${escape(row.name)}</button>`:`<strong>${escape(row.name)}</strong>`}<span>${isCustomer?`${number(row.orders)} orders`:`${number(row.quantity)} sold · ${escape(row.id)}`}</span></div><strong class="rank-total">${escape(salesMoney(row.total,report.currency))}</strong></li>`).join('')}</ol>`}</section>`;
+}
+function salesView() {
+  const report=currentSales();
+  const header=`<div class="card-heading"><div><h2>Sales performance</h2><p>${report?`${report.since===null?'Start date unavailable':escape(prettyDate(report.since,{year:'numeric'}))} — ${report.until===null?'End date unavailable':escape(prettyDate(report.until,{year:'numeric'}))}`:'Revenue, orders, and the people behind them'}</p>${readStatus('sales')}</div>${readButton('sales')}</div>`;
+  if(!report)return `<section class="card sales-report">${header}${readEmpty('sales','Sales are unavailable')}</section>`;
+  const metrics=[['Total sales',salesMoney(report.total,report.currency),'sales','green','Sales reported for this period'],['Orders',report.orders===null?'Unavailable':number(report.orders),'orders','blue','Orders reported for this period'],['Average order',salesMoney(report.averageOrder,report.currency),'receipt','violet','Average value reported by your agent']];
+  return `${reportErrors(report)}${reportWarnings(report,['daily','topProducts','topCustomers'])}<div class="stats-grid sales-stats">${metrics.map(([label,value,ic,color,note])=>`<article class="stat-card"><div class="stat-top"><span>${label}</span><span class="stat-icon ${color}">${icon(ic)}</span></div><div class="stat-value money-value ${value==='Unavailable'?'unavailable-value':''}">${escape(value)}</div><div class="stat-bottom"><span>${note}</span></div></article>`).join('')}</div><section class="card sales-report">${header}${listLimit(report,'daily')}${salesChart(report)}</section><div class="sales-rankings">${salesRanking(report,'topProducts','Top products')}${salesRanking(report,'topCustomers','Top customers')}</div>`;
+}
+const adviceKinds={
+  perdida:{label:'Below cost',icon:'sales',note:'Sales that may have gone out below cost.'},
+  dormido:{label:'Quiet customers',icon:'customers',note:'Regular customers whose ordering pattern has changed.'},
+  deuda:{label:'Overdue debt',icon:'receipt',note:'Balances aging beyond the payment tolerance.'},
+  quiebre:{label:'Stock risk',icon:'inventory',note:'Products that may run out before the next delivery.'}
+};
+function adviceGuide() {
+  return `<section class="card advice-guide"><div class="card-heading"><div><h2>What advice looks for</h2><p>Four useful checks. Every finding explains its assumptions.</p></div></div><div class="advice-guide-grid">${Object.entries(adviceKinds).map(([kind,meta])=>`<div class="advice-kind-${kind}"><span class="advice-kind-icon">${icon(meta.icon)}</span><h3>${meta.label}</h3><p>${meta.note}</p></div>`).join('')}</div></section>`;
+}
+function adviceRow(item,currency) {
+  const meta=adviceKinds[item.kind];
+  return `<article class="advice-row advice-kind-${item.kind}"><div class="advice-row-heading"><span class="advice-kind-icon">${icon(meta.icon)}</span><div><span class="advice-category">${meta.label}</span><h3>${escape(item.title)}</h3></div><span class="advice-amount ${item.amount===null?'amount-unavailable':''}">${item.amount===null?'Amount unavailable':escape(moneyFor(item.amount,currency))}</span></div><p class="advice-body">${escape(item.body)}</p><div class="advice-assumption">${icon('info')}<p><strong>Assumption</strong>${escape(item.assumption)}</p></div><div class="advice-row-footer"><span>${escape(item.about)} · ${escape(prettyMoment(item.at))}</span><div>${item.orderId?`<button class="text-link" data-order="${escape(item.orderId)}">View order ${icon('arrow')}</button>`:''}${item.customerId?`<button class="text-link" data-customer="${escape(item.customerId)}">View customer ${icon('arrow')}</button>`:''}${item.productId?`<span class="advice-product">Product · ${escape(item.productId)}</span>`:''}</div></div></article>`;
+}
+function adviceView() {
+  const report=data.advice;
+  const header=`<div class="card-heading"><div><h2>Business signals</h2><p>${report?'Generated · '+escape(prettyMoment(report.generatedAt)):'The findings worth a closer look'} · ${escape(timeZoneNote())}</p>${readStatus('advice')}</div>${readButton('advice')}</div>`;
+  if(!report)return `<section class="card advice-report">${header}${readEmpty('advice','Advice is unavailable')}</section>${adviceGuide()}`;
+  const rows=report.items.filter(item=>(state.filter==='all'||item.kind===state.filter)&&`${item.title} ${item.body} ${item.about} ${item.assumption}`.toLowerCase().includes(state.search.toLowerCase())).sort((a,b)=>b.weight-a.weight);
+  return `${reportErrors(report)}${reportWarnings(report,['items'])}${!report.enabled?`<section class="advice-off"><span class="advice-off-icon">${icon('advice')}</span><div><span class="advice-off-label">ADVICE IS OFF</span><h2>A little foresight, when you’re ready.</h2><p>Automatic advice is currently switched off. ${data.mode==='demo'?'These sample findings show what you would see.':'Any findings below are from the last available report.'} Each finding includes the assumption behind it, so you can decide what deserves a closer look.</p></div><span class="subtle-pill">${data.mode==='demo'?'Sample preview':'Switched off'}</span></section>`:''}<section class="card advice-report">${header}<div class="advice-toolbar"><div class="filter-tabs" role="group" aria-label="Filter advice">${[['all','All signals'],...Object.entries(adviceKinds).map(([key,meta])=>[key,meta.label])].map(([key,label])=>`<button data-filter="${key}" class="${state.filter===key?'selected':''}" aria-pressed="${state.filter===key}">${label}<span>${report.items.filter(item=>key==='all'||item.kind===key).length}</span></button>`).join('')}</div>${searchField('Search advice…')}</div>${listLimit(report,'items')}<p class="list-note">${number(rows.length)} displayed · Highest urgency first. Findings need your judgment; no action is taken here.</p>${rows.length?`<div class="advice-list">${rows.map(item=>adviceRow(item,report.currency)).join('')}</div>`:empty(report.items.length?'No matching advice':report.enabled?'No advice to review':'No saved findings',report.items.length?'Try another category or search.':report.enabled?'No findings were returned in this report. New signals will appear here when available.':'Advice is off. The checks below explain what this screen can show once it is enabled.')}</section>${!report.enabled||!report.items.length?adviceGuide():''}`;
+}
+
 function activityList(rows) {
   return `<div class="activity-list">${rows.map(row=>`<article class="activity-row ${row.orderId===null?'without-order':''}"><div class="activity-person">${avatar(row.customerName)}<div><button class="text-link customer-name" data-customer="${escape(row.customerId)}">${escape(row.customerName)} ${icon('arrow')}</button><span>${escape(number(row.turns))} turns · ${escape(prettyMoment(row.lastAt))}</span></div>${row.orderId===null?'<span class="no-order-label">No order yet</span>':''}</div><p class="last-line">${escape(row.lastLine||'No message preview available.')}</p><div class="activity-links"><button class="text-link" data-customer="${escape(row.customerId)}">Open customer & conversation ${icon('arrow')}</button>${row.orderId!==null?`<button class="text-link" data-order="${escape(row.orderId)}">View order ${escape(row.orderId)} ${icon('arrow')}</button>`:'<span class="muted">Talked to the agent without placing an order.</span>'}</div></article>`).join('')}</div>`;
 }
@@ -265,9 +353,10 @@ function agentsView() {
 function settingsView() {
   return `<div class="settings-grid"><section class="card connection-card"><span class="stat-icon violet">${icon('link')}</span><h2>${data.mode==='demo'?'Connect your business':'Your CRM connection'}</h2><p>${data.mode==='demo'?'Explore sample orders now, or connect to your deployed Plus Agent for a live view of ERPNext.':'This workspace reads orders, customers, and inventory from your agent service.'}</p><dl><div><dt>Workspace</dt><dd>${escape(data.company)}</dd></div><div><dt>Data source</dt><dd>${data.mode==='demo'?'Sample dataset':'ERPNext via Plus Agent'}</dd></div><div><dt>Access</dt><dd>Read-only</dd></div><div><dt>Connection</dt><dd>${data.mode==='demo'?'Not connected':state.stale?'Interrupted':'Connected'}</dd></div></dl><div class="connection-buttons"><button class="button primary" data-action="connect">${icon('link')}${data.mode==='demo'?'Connect live data':'Change connection'}</button>${data.mode==='live'?'<button class="button" data-action="disconnect">Disconnect</button>':''}</div></section><section class="card setting-notes"><h2>Designed around your workflow</h2><div>${icon('orders')}<section><h3>ERPNext is the source of truth</h3><p>The dashboard reads recent orders, all-date pending orders, and up to 250 records per section. Loaded totals are labeled when a limit is reached.</p></section></div><div>${icon('shield')}<section><h3>Approvals stay protected</h3><p>Confirm orders and change rules through your existing manager workflow. This dashboard does not submit or modify business records.</p></section></div><div>${icon('link')}<section><h3>A connection for this session</h3><p>Your access token stays in memory. Reloading the page signs you out. While you are signed in, visible dashboards refresh every minute.</p></section></div></section></div>`;
 }
-const views={today:todayView,queue:queueView,overview,orders:ordersView,inventory:inventoryView,customers:customersView,agents:agentsView,settings:settingsView};
+const views={today:todayView,queue:queueView,overview,sales:salesView,advice:adviceView,orders:ordersView,inventory:inventoryView,customers:customersView,agents:agentsView,settings:settingsView};
 function render() {
   const focused=document.activeElement, preserve=focused?.id==='search', cursor=preserve?focused.selectionStart:null;
+  document.documentElement.dataset.theme=state.theme;
   $('#app').innerHTML=shell();
   if(preserve&&$('#search')){const input=$('#search');input.focus();try{input.setSelectionRange(cursor,cursor);}catch{}}
 }
@@ -295,7 +384,8 @@ function conversationView(value) {
 }
 async function showCustomer(id) {
   const activity=[...(data.activity?.conversations||[]),...(data.activity?.newCustomers||[])].find(c=>c.customerId===id);
-  const c=(data.customers||[]).find(c=>c.id===id)||(activity?{id:activity.customerId,name:activity.customerName}:null);
+  const ranked=data.sales?.topCustomers?.find(c=>c.id===id),advised=data.advice?.items.find(item=>item.customerId===id);
+  const c=(data.customers||[]).find(c=>c.id===id)||(activity?{id:activity.customerId,name:activity.customerName}:ranked?{id:ranked.id,name:ranked.name}:advised?{id,name:id}:null);
   if(!c)return;
   const connection=state.connection,session=state.session,request=++state.detailRequest;
   if(data.mode==='demo'){renderCustomer(c,conversationView(validateConversation(data.conversations[id],id)));return;}
@@ -304,7 +394,7 @@ async function showCustomer(id) {
   try {
     const value=validateConversation(await apiRead(connection,'/customers/'+encodeURIComponent(id)+'/conversation'),id);
     if(state.session!==session||state.detailRequest!==request||!$('#detail-dialog').open)return;
-    renderCustomer(c,conversationView(value));
+    renderCustomer(c.name===c.id?{...c,name:value.customerName}:c,conversationView(value));
   }catch(error){
     if(state.session!==session)return;
     if(error.status===401){cerrarSesion('Your dashboard access is no longer valid. Sign in again.');return;}
@@ -325,7 +415,7 @@ function validateSnapshot(value) {
   for(const o of [...(value.orders||[]),...(value.pendingOrders||[])])if(typeof o.id!=='string'||typeof o.customer!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(o.date))throw new Error('The service returned an invalid order.');
   if(value.currency){try{new Intl.NumberFormat('en',{style:'currency',currency:value.currency});}catch{throw new Error('The service returned an invalid currency.');}}
   if(!value.orders&&!value.customers&&!value.products)throw new Error('The agent is reachable but its ERPNext data is unavailable. Check the manager connection.');
-  value.policies=null;value.operations=null;value.activity=null;value.queue=null;value.conversations=null;return value;
+  value.policies=null;value.operations=null;value.activity=null;value.queue=null;value.conversations=null;value.sales=null;value.advice=null;return value;
 }
 async function fetchData(connection) {
   const response=await fetch(connection.base+'/api/dashboard/snapshot',{headers:{Authorization:'Bearer '+connection.token},cache:'no-store',credentials:'omit',redirect:'error',signal:AbortSignal.timeout(45000)});
@@ -358,7 +448,7 @@ async function refresh(silent=false) {
   try{
     const snapshot=await fetchData(connection);
     if(state.session!==session)return;
-    data={...snapshot,activity:data.activity,queue:data.queue,operations:data.operations,policies:data.policies};state.stale=false;if(state.displayCurrency&&Date.now()-(state.fx?.fetchedAt||0)>=3600000)setDisplayCurrency(state.displayCurrency);if(!silent)toast('Dashboard refreshed.');
+    data={...snapshot,activity:data.activity,queue:data.queue,operations:data.operations,policies:data.policies,sales:data.sales,advice:data.advice};state.stale=false;if(state.displayCurrency&&Date.now()-(state.fx?.fetchedAt||0)>=3600000)setDisplayCurrency(state.displayCurrency);if(!silent)toast('Dashboard refreshed.');
     if(!silent)await loadViewReads(true);
   }catch(e){
     if(state.session===session){
@@ -389,10 +479,12 @@ document.addEventListener('click',async e=>{
   if(target.dataset.customer)showCustomer(target.dataset.customer);
   if(target.dataset.copy){try{await navigator.clipboard.writeText(target.dataset.copy);toast('Order ID copied.');}catch{toast('Clipboard unavailable. You can select and copy the order ID above.');}}
   if(target.dataset.filter){state.filter=target.dataset.filter;state.page=1;render();}
+  if(target.dataset.salesDate){const report=currentSales(),row=report?.daily?.find(day=>day.date===target.dataset.salesDate);if(row){state.detailRequest++;detail(prettyDate(row.date,{year:'numeric'}),`<dl class="detail-fields"><div><dt>Sales</dt><dd>${escape(salesMoney(row.total,report.currency))}</dd></div><div><dt>Orders</dt><dd>${number(row.orders)}</dd></div></dl>`);}}
   if(target.dataset.chartDate){const d=target.dataset.chartDate,orders=periodOrders().filter(o=>o.date===d);$('#chart-detail').textContent=`${prettyDate(d)} · ${orders.length} orders · ${money(sumSales(orders))} booked sales`;document.querySelectorAll('.bar').forEach(b=>b.classList.toggle('inspected',b===target));}
   const action=target.dataset.action;
   if(action==='connect')openConnection();
-  if(action==='demo'){state.connectRequest++;state.detailRequest++;data=makeDemo();state.session++;state.connection=null;state.stale=false;state.busy=false;state.extrasBusy=false;state.extrasError='';state.extrasLoadedAt=null;state.reads=freshReads();render();restoreDisplayCurrency();}
+  if(action==='theme'){state.theme=state.theme==='dark'?'light':'dark';try{localStorage.setItem('plus.dashboard.theme',state.theme);}catch{}render();}
+  if(action==='demo'){state.connectRequest++;state.detailRequest++;data=makeDemo(state.range);state.session++;state.connection=null;state.stale=false;state.busy=false;state.extrasBusy=false;state.extrasError='';state.extrasLoadedAt=null;state.reads=freshReads();render();restoreDisplayCurrency();}
   if(action==='retry-currency')setDisplayCurrency(state.fxFailedTarget||state.displayCurrency);
   if(action==='retry-extras')loadExtras(true);
   if(target.dataset.read)await loadRead(target.dataset.read,true);
@@ -412,7 +504,7 @@ document.addEventListener('input',e=>{
 });
 document.addEventListener('change',async e=>{
   if(e.target.id==='display-currency')await setDisplayCurrency(e.target.value);
-  if(e.target.id==='range'){state.range=Number(e.target.value);state.page=1;render();}
+  if(e.target.id==='range'&&['7','30'].includes(e.target.value)){state.range=Number(e.target.value);state.page=1;if(data.mode==='demo')data.sales=makeDemo(state.range).sales;render();if(state.view==='sales')await loadRead('sales');}
   if(e.target.id==='stock-filter'){state.stockFilter=e.target.value;render();}
 });
 document.addEventListener('submit',async e=>{
@@ -433,6 +525,7 @@ window.addEventListener('hashchange',()=>{const view=location.hash.slice(1);if(O
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&state.menu){state.menu=false;render();}});
 if(Object.hasOwn(views,location.hash.slice(1)))state.view=location.hash.slice(1);
 render();
+revealLogo();
 if(data.mode!=='disconnected')restoreDisplayCurrency();
 
 function connectionGate() {
@@ -608,6 +701,43 @@ function validateOperations(value) {
   requireValue(value&&isText(value.redis)&&isText(value.worker)&&['queuedMessages','queuedNotices','failedReplies','failedNotices'].every(key=>value[key]===null||isCount(value[key])),'delivery status');
   return {redis:value.redis,worker:value.worker,queuedMessages:value.queuedMessages,queuedNotices:value.queuedNotices,failedReplies:value.failedReplies,failedNotices:value.failedNotices};
 }
+function validateSales(value) {
+  requireValue(value&&typeof value==='object','sales information');
+  requireValue(value.currency===null||isCurrency(value.currency),'sales currency');
+  requireValue((value.since===null||isDay(value.since))&&(value.until===null||isDay(value.until))&&(value.since===null||value.until===null||value.since<=value.until),'sales dates');
+  requireValue((value.total===null||Number.isSafeInteger(value.total))&&(value.averageOrder===null||Number.isSafeInteger(value.averageOrder))&&(value.orders===null||isCount(value.orders)),'sales totals');
+  requireValue(['daily','topProducts','topCustomers','errors','truncated'].every(key=>value[key]===null||Array.isArray(value[key])),'sales lists');
+  const daily=value.daily===null?null:value.daily.map(row=>{
+    requireValue(row&&isDay(row.date)&&Number.isSafeInteger(row.total)&&isCount(row.orders),'daily sales');
+    requireValue((value.since===null||row.date>=value.since)&&(value.until===null||row.date<=value.until),'daily sales period');
+    return {date:row.date,total:row.total,orders:row.orders};
+  }).sort((a,b)=>a.date.localeCompare(b.date));
+  requireValue(daily===null||new Set(daily.map(row=>row.date)).size===daily.length,'duplicate sales dates');
+  const topProducts=value.topProducts===null?null:value.topProducts.map(row=>{
+    requireValue(row&&isId(row.id)&&isText(row.name)&&Number.isFinite(row.quantity)&&row.quantity>=0&&Number.isSafeInteger(row.total),'top products');
+    return {id:row.id,name:row.name,quantity:row.quantity,total:row.total};
+  });
+  const topCustomers=value.topCustomers===null?null:value.topCustomers.map(row=>{
+    requireValue(row&&isId(row.id)&&isText(row.name)&&isCount(row.orders)&&Number.isSafeInteger(row.total),'top customers');
+    return {id:row.id,name:row.name,orders:row.orders,total:row.total};
+  });
+  requireValue(['errors','truncated'].every(key=>value[key]===null||value[key].every(isText)),'sales notices');
+  return {currency:value.currency,since:value.since,until:value.until,total:value.total,orders:value.orders,averageOrder:value.averageOrder,daily,topProducts,topCustomers,errors:value.errors===null?null:[...value.errors],truncated:value.truncated===null?null:[...value.truncated]};
+}
+function isCurrency(value){return isText(value)&&/^[A-Z]{3}$/.test(value);}
+function validateAdvice(value) {
+  requireValue(value&&isMoment(value.generatedAt)&&typeof value.enabled==='boolean'&&isCurrency(value.currency)&&Array.isArray(value.items),'advice information');
+  requireValue(['errors','truncated'].every(key=>Array.isArray(value[key])&&value[key].every(isText)),'advice notices');
+  const items=value.items.map(row=>{
+    requireValue(row&&isId(row.id)&&['perdida','dormido','deuda','quiebre'].includes(row.kind)&&['title','body','about','assumption'].every(key=>isText(row[key])),'advice finding');
+    requireValue(Number.isFinite(row.weight)&&row.weight>=0&&row.weight<=1,'advice weight');
+    requireValue(row.amount===undefined||row.amount===null||Number.isSafeInteger(row.amount),'advice amount');
+    requireValue(['customerId','orderId','productId'].every(key=>row[key]===null||isId(row[key]))&&isMoment(row.at),'advice references');
+    return {id:row.id,kind:row.kind,title:row.title,body:row.body,about:row.about,weight:row.weight,assumption:row.assumption,amount:row.amount??null,customerId:row.customerId,orderId:row.orderId,productId:row.productId,at:row.at};
+  });
+  return {generatedAt:value.generatedAt,enabled:value.enabled,currency:value.currency,items,errors:[...value.errors],truncated:[...value.truncated]};
+}
+
 function readError(error) {
   if(error.status===404||error.status===405)return 'This view is not available on this agent yet, or the record is no longer available. Refresh after the service is updated.';
   if(error.name==='TypeError'||error.name==='TimeoutError')return 'The agent could not be reached. Check your connection and try again.';
@@ -615,28 +745,39 @@ function readError(error) {
 }
 async function loadRead(key,force=false) {
   if(!Object.hasOwn(state.reads,key))return;
-  const contract={activity:['/today',validateActivity],queue:['/queue',validateQueue],operations:['/operations',validateOperations]}[key];
+  const range=key==='sales'?state.range:null;
+  const contract={activity:['/today',validateActivity],queue:['/queue',validateQueue],operations:['/operations',validateOperations],sales:[`/sales?days=${range}`,validateSales],advice:['/advice',validateAdvice]}[key];
   if(!contract||data.mode!=='live')return;
+  // A different period owns a different read. Its late predecessor cannot
+  // replace it, including when the user switches 7 -> 30 -> 7 quickly.
+  if(key==='sales'&&state.reads.sales.range!==range){
+    state.reads.sales={...freshReads().sales,range};data.sales=null;
+  }
   const read=state.reads[key];
   if(read.busy)return read.pending;
   if(!force&&data[key]&&Date.now()-Date.parse(read.loadedAt)<60000)return;
   const connection=state.connection,session=state.session;
+  const current=()=>state.session===session&&state.reads[key]===read;
   read.busy=true;read.error='';render();
   read.pending=(async()=>{
   try {
     const value=contract[1](await apiRead(connection,contract[0]));
     if(state.session!==session)return;
+    if(!current())return;
     data[key]=value;read.loadedAt=new Date().toISOString();
   }catch(error){
     if(state.session!==session)return;
     if(error.status===401){cerrarSesion('Your dashboard access is no longer valid. Sign in again.');return;}
+    if(!current())return;
     data[key]=null;read.error=readError(error);read.loadedAt=null;
-  }finally{if(state.session===session){read.busy=false;read.pending=null;render();}}
+  }finally{if(current()){read.busy=false;read.pending=null;render();}}
   })();
   return read.pending;
 }
 async function loadViewReads(force=false) {
   if(data.mode!=='live')return;
+  if(state.view==='sales')await loadRead('sales',force);
+  if(state.view==='advice')await loadRead('advice',force);
   if(state.view==='today')await loadRead('activity',force);
   if(state.view==='queue')await loadRead('queue',force);
   if(state.view==='overview')await Promise.all([loadRead('queue',force),loadRead('operations',force)]);
