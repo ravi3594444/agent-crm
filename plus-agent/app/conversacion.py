@@ -297,6 +297,17 @@ def prompt_clientes(state, config: RunnableConfig) -> list[BaseMessage]:
         HORARIO=os.getenv("HORARIO_ATENCION", "lunes a viernes de 8 a 17"),
         HOY=business_today(),
         IDIOMA_REGLA=idioma.regla_prompt(guardado),
+        # Lo que el dueño YA contestó y este agente no tenía cómo saber. Va al
+        # final del prompt, debajo de las nueve reglas, porque es un DATO: el
+        # marco que trae adentro dice que no cambia un precio, un stock, un
+        # límite ni una autorización, y «las reglas de arriba» es literal.
+        #
+        # Y es un subconjunto del bloque de gerencia, no el mismo: cruza sólo lo
+        # que está marcado `para_clientes` en `memoria.HUECOS`. Lo que el dueño
+        # anotó sobre a quién no conviene fiarle no es una respuesta para un
+        # cliente. Vacío cuando no hay nada marcado: la sección entera
+        # desaparece en vez de quedar un encabezado sin lista.
+        MEMORIA=_bloque_de_memoria_clientes(),
     )
     return [SystemMessage(content=system), *perfil, *_mensajes(state)]
 
@@ -309,6 +320,46 @@ def _bloque_de_memoria() -> str:
         return memoria.bloque_de_prompt()
     except Exception as exc:
         print(f"[conversacion] memoria no disponible ({type(exc).__name__})")
+        return ""
+
+
+def memoria_de_clientes_encendida() -> bool:
+    """El interruptor de todo el bloque del lado del cliente. Default: SÍ.
+
+    Existe porque esto cambia una decisión que estaba escrita y probada: hasta
+    ahora la memoria del dueño entraba SÓLO en `prompt_gerencia`, y
+    `tests/test_memoria_cableado.py` llama a eso «la mitad que importa». La
+    frontera nueva no borra esa decisión, la mueve —lo privado sigue sin
+    cruzar—, pero moverla es del dueño, y hasta que él la mire tiene que poder
+    apagarla sin tocar código ni revertir un commit.
+
+    Un valor MAL ESCRITO APAGA. Es la única dirección segura para un
+    interruptor de privacidad: `MEMORIA_PARA_CLIENTES=treu` deja de contar
+    cosas, no empieza a contarlas.
+
+    Vive acá y no en `memoria.py` a propósito: ese módulo no lee UNA sola
+    variable de entorno, y lo que este interruptor decide no es qué es la
+    memoria sino DÓNDE entra, que es lo que compone este archivo.
+    """
+    return os.getenv("MEMORIA_PARA_CLIENTES", "true").strip().lower() == "true"
+
+
+def _bloque_de_memoria_clientes() -> str:
+    """Lo mismo para el prompt de clientes, y con MÁS motivo para no levantar.
+
+    Del lado de gerencia una excepción acá deja al dueño sin contestar; de este
+    lado deja a un cliente sin poder hacer un pedido. `memoria` ya falla en
+    silencio hacia adentro; este `except` es el segundo piso, por si el import
+    mismo se rompe.
+    """
+    if not memoria_de_clientes_encendida():
+        return ""
+    try:
+        from app import memoria
+
+        return memoria.bloque_de_prompt_clientes()
+    except Exception as exc:
+        print(f"[conversacion] memoria de clientes no disponible ({type(exc).__name__})")
         return ""
 
 

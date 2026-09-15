@@ -8,9 +8,26 @@ clientes, y que un Redis caído no deje al dueño sin respuesta.
 POR QUÉ LO DEL AGENTE DE CLIENTES ES LO MÁS IMPORTANTE DE ESTE ARCHIVO
 Estos datos son el conocimiento comercial privado del dueño: «a la panadería no
 le fíes», «a éste cobrale antes de cargar». Metidos en el prompt del agente que
-atiende a desconocidos, se los cuenta al primero que pregunte bien. El bloque
-se arma en `prompt_gerencia` y en ninguna otra función, y esto lo afirma sobre
-el texto que sale, no sobre dónde está escrita la llamada.
+atiende a desconocidos, se los cuenta al primero que pregunte bien.
+
+LA FRONTERA SE MOVIÓ, Y NO ES LA MISMA QUE ANTES. Hasta acá era por FUNCIÓN: el
+bloque se armaba en `prompt_gerencia` y en ninguna otra. Ahora es por CLAVE.
+`prompt_clientes` recibe un bloque propio, `memoria.bloque_para_clientes`, que
+cruza sólo las claves marcadas `para_clientes` en `memoria.HUECOS` — las ocho
+que son respuestas de mostrador («¿hasta qué hora te puedo pedir?», «¿los
+cajones vuelven?»), que el dueño contestaba una vez y se quedaban del lado del
+que las escuchó.
+
+Lo que cambió es qué cruza; lo que NO cambió es que las dos frases de arriba no
+cruzan. Es una lista de lo PERMITIDO: las cuatro claves privadas siguen
+afuera, y una nota bajo una clave inventada por el dueño —que es lo que
+`anotar_dato` acepta— tampoco sale, aunque nadie la haya previsto. El test de
+abajo usa justamente una de ésas.
+
+Y se puede apagar entero sin tocar código: `MEMORIA_PARA_CLIENTES=false`.
+
+Todo esto se afirma sobre el texto que sale, no sobre dónde está escrita la
+llamada.
 """
 from __future__ import annotations
 
@@ -62,17 +79,104 @@ def test_lo_anotado_aparece_en_el_prompt_del_dueno(redis_real) -> None:
     assert DATO in sistema, sistema[-800:]
 
 
-def test_lo_anotado_NO_aparece_en_el_prompt_de_un_cliente(redis_real) -> None:
-    """La mitad que importa. Es el conocimiento comercial privado del dueño."""
-    memoria.anotar("pagos", DATO, GERENTE)
-    config = {"configurable": {"thread_id": "customer:t", "actor_scope": "customer",
-                               "customer_code": "CUST-0009", "actor_phone": "549351000",
-                               "inbound_message_id": "w"}}
+def _config_cliente() -> dict:
+    return {"configurable": {"thread_id": "customer:t", "actor_scope": "customer",
+                             "customer_code": "CUST-0009", "actor_phone": "549351000",
+                             "inbound_message_id": "w"}}
 
-    sistema = _sistema(conversacion.prompt_clientes(_estado(), config))
+
+def test_lo_anotado_NO_aparece_en_el_prompt_de_un_cliente(redis_real) -> None:
+    """La mitad que importa. Es el conocimiento comercial privado del dueño.
+
+    `pagos` NO es ninguno de los doce huecos: es una clave que se inventó el
+    dueño, que es exactamente lo que `anotar_dato` acepta desde WhatsApp. Por
+    eso este test sigue siendo el que atrapa la diferencia entre una lista de
+    lo PERMITIDO y una de lo prohibido — una lista de claves vedadas sólo tapa
+    lo que alguien previó, y nadie previó «pagos».
+
+    MEDIDO: cambiar el filtro de `bloque_para_clientes` por
+    `not in {las cuatro claves privadas}` cae éste, con almacén de verdad, y el
+    par de primitivo en tests/test_memoria.py. Ningún otro de los 3314.
+    """
+    memoria.anotar("pagos", DATO, GERENTE)
+
+    sistema = _sistema(conversacion.prompt_clientes(_estado(), _config_cliente()))
 
     assert DATO not in sistema
     assert "San José" not in sistema
+
+
+def test_lo_que_el_dueno_contesto_de_mostrador_SI_llega_al_cliente(redis_real) -> None:
+    """La otra mitad, con el almacén de verdad y el prompt de verdad.
+
+    `horario_corte` es uno de los ocho marcados y es la pregunta que un almacén
+    hace todos los días. Sin esto, el dueño contestaba una vez y el cliente que
+    preguntaba lo mismo recibía un «te averiguo».
+
+    Y es el ÚNICO de la pila que pasa por el almacén de verdad: los otros le
+    ponen un doble a `activos()`, así que la vuelta completa —guardar el HASH,
+    releerlo, pasar el filtro con la clave tal como quedó guardada— sólo se
+    recorre acá. Por eso el texto lleva tilde: es lo que escribe un dueño
+    argentino.
+
+    DE ESTE TEST NO HAY UNA MUTACIÓN QUE LO MATE SOLO, y se dice en vez de
+    inventarle una. Las dos que se corrieron:
+
+      · `json.dumps(..., ensure_ascii=False)` -> `True` en `_linea`: caen TRES
+        —éste y los dos del lado del dueño—, porque los tres llevan una nota con
+        tilde y `_linea` es de los dos lados.
+      · `para_clientes=True` -> `False` en `horario_corte`: cae la pila entera,
+        las cinco pruebas que afirman sobre esa clave permitida.
+
+    Es un test de CAPA, y la regla de CLAUDE.md sobre mutaciones dirigidas
+    existe para que un test no pueda dejar de fallar nunca, no para prohibir
+    que dos capas compartan un defecto. Lo que éste agrega y ninguno de los
+    otros cuatro tiene: si alguien cambia `normalizar_clave` —que corre al
+    GUARDAR y no al leer—, la clave guardada deja de coincidir con
+    `CLAVES_PARA_CLIENTES` y el permiso se apaga en silencio. Con `activos()`
+    doblado eso no se ve.
+    """
+    memoria.anotar("horario_corte", "Hasta las 18 y sale al otro día.", GERENTE)
+
+    sistema = _sistema(conversacion.prompt_clientes(_estado(), _config_cliente()))
+
+    assert "Hasta las 18 y sale al otro día." in sistema
+
+
+def test_el_dueno_puede_apagar_el_bloque_de_clientes_sin_tocar_codigo(
+    redis_real, monkeypatch
+) -> None:
+    """El interruptor, y que apague SÓLO este lado.
+
+    Esto mueve una frontera que estaba escrita, así que tiene que poder
+    volverse atrás sin revertir un commit. Y apagarlo no puede dejar al dueño
+    sin su propia memoria: son dos bloques distintos y el interruptor es de uno.
+
+    La tercera vuelta es la dirección en la que el interruptor falla. Un valor
+    mal escrito APAGA: es lo único seguro para un interruptor de privacidad.
+
+    MUTACIONES: (a) sacar el `if not memoria_de_clientes_encendida(): return ""`
+    -> cae éste y sólo éste; (b) `== "true"` -> `!= "false"`, o sea que el valor
+    mal escrito deje el bloque prendido -> cae éste y sólo éste.
+    """
+    memoria.anotar("horario_corte", "Hasta las 18 y sale al otro día.", GERENTE)
+
+    monkeypatch.setenv("MEMORIA_PARA_CLIENTES", "false")
+    apagado = _sistema(conversacion.prompt_clientes(_estado(), _config_cliente()))
+    assert "Hasta las 18" not in apagado
+    # Y el dueño sigue viendo la suya: el interruptor es de un lado solo.
+    assert "Hasta las 18" in _sistema(conversacion.prompt_gerencia(_estado(), _config()))
+
+    monkeypatch.setenv("MEMORIA_PARA_CLIENTES", "true")
+    assert "Hasta las 18" in _sistema(
+        conversacion.prompt_clientes(_estado(), _config_cliente())
+    )
+
+    # Mal escrito: apaga. Nunca al revés.
+    monkeypatch.setenv("MEMORIA_PARA_CLIENTES", "treu")
+    assert "Hasta las 18" not in _sistema(
+        conversacion.prompt_clientes(_estado(), _config_cliente())
+    )
 
 
 def test_sin_nada_anotado_no_queda_un_encabezado_vacio(redis_real) -> None:

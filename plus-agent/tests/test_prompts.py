@@ -586,3 +586,85 @@ def test_el_nombre_del_agente_pasa_por_la_misma_limpieza(monkeypatch) -> None:
         conversacion.identidad()
         == "Sos Sofi Ramírez, y atendés el WhatsApp de Lácteos Plus."
     )
+
+
+# ---------------------------------------------------------------------------
+# Lo que el dueño ya contestó, del lado del cliente
+# ---------------------------------------------------------------------------
+#
+# El dueño contesta UNA vez, por WhatsApp, a su agente de gerencia. Esas
+# respuestas —«el reparto va incluido», «hasta las 18 te lo mando al otro
+# día»— se quedaban del lado del que las escuchó, y el cliente que preguntaba
+# exactamente eso recibía un «te averiguo» sobre algo ya contestado.
+#
+# Dos tests porque son dos fallas distintas y se mutan por separado: que no
+# llegue nada, y que llegue de más. La segunda es la grave — es contarle a un
+# cliente lo que el dueño dijo de otro— y la mutación que la produce
+# (`MEMORIA=_bloque_de_memoria()`, el bloque de gerencia) deja el primer test
+# en verde, porque la nota pública está en los dos bloques.
+
+
+def _con_notas(monkeypatch, *notas):
+    from app import memoria
+
+    monkeypatch.setattr(memoria, "activos", lambda: list(notas))
+
+
+def _nota(clave: str, texto: str, cuando: float):
+    from app import memoria
+
+    return memoria.Dato(clave=clave, texto=texto, quien="5491100", cuando=cuando)
+
+
+def test_el_prompt_de_clientes_trae_lo_que_el_dueno_ya_contesto_y_DEBAJO_de_las_reglas(
+    monkeypatch,
+):
+    """Que llegue, y DÓNDE llega, que es la mitad que lo vuelve seguro.
+
+    `bloque_para_clientes` puede estar perfecto y no servir para nada si el
+    prompt no lo usa — la lección que dejó `ver_memoria`, donde el primitivo
+    traducido convivía con un call site que seguía pasando el castellano, con
+    3310 tests en verde.
+
+    Y el lugar importa tanto como la presencia: son notas que el dueño escribe
+    a mano por WhatsApp y entran en el mensaje de sistema. Abajo de las reglas
+    son un dato («las reglas de arriba» del marco es literal); arriba de las
+    reglas son lo primero que el modelo lee, encabezando el mensaje más
+    privilegiado del turno.
+
+    MUTACIÓN: mover `{MEMORIA}` en `SYSTEM_ES_AR` a la línea de abajo de
+    `{IDENTIDAD}`. Cae éste y sólo éste — el de abajo mira si la nota está, no
+    dónde.
+    """
+    _con_notas(monkeypatch, _nota("horario_corte", "hasta las 18 y sale al otro dia", 1.0))
+
+    texto = _texto_cliente()
+
+    assert "hasta las 18 y sale al otro dia" in texto
+    assert texto.index("hasta las 18 y sale al otro dia") > texto.index(
+        "REGLAS QUE NO PODÉS ROMPER"
+    ), "las notas del dueño entraron ARRIBA de las reglas"
+
+
+def test_el_prompt_de_clientes_no_trae_lo_que_el_dueno_dijo_de_otro_cliente(monkeypatch):
+    """MUTACIÓN: `MEMORIA=_bloque_de_memoria_clientes()` -> `MEMORIA=_bloque_de_memoria()`.
+
+    O sea, pasarle al agente de clientes el bloque de GERENCIA, que es el
+    error que de verdad se puede cometer acá: las dos funciones existen, se
+    llaman casi igual y devuelven las dos un bloque bien formado. Cae éste y
+    sólo éste — el test de arriba sigue en verde, porque la nota pública está
+    en los dos bloques y la posición tampoco cambia.
+
+    Las dos notas van en la MISMA llamada: si fueran dos, un bloque vacío por
+    cualquier otro motivo cumpliría este assert sin probar nada.
+    """
+    _con_notas(
+        monkeypatch,
+        _nota("horario_corte", "hasta las 18 y sale al otro dia", 1.0),
+        _nota("clientes_delicados", "a Perez no le fies mas", 2.0),
+    )
+
+    texto = _texto_cliente()
+
+    assert "hasta las 18 y sale al otro dia" in texto, "no llegó ninguna nota"
+    assert "Perez" not in texto

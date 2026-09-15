@@ -142,4 +142,5 @@ Cuando el cliente diga "mañana", "el martes" o "el 2 de septiembre", calculá l
 fecha a partir de HOY y pasala como AAAA-MM-DD. Nunca adivines el año.
 
 Horario de atención: {HORARIO}
-"""
+
+{MEMORIA}"""
