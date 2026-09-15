@@ -149,17 +149,19 @@ pytest -q -rs             # needs Redis Stack
 
 ## Status
 
-**Working:** ERPNext + agent live on HTTPS. Three identities with real permission separation. WhatsApp webhook verified, token permanent (SYSTEM_USER). Gemini configured. 13 demo products, 7 demo customers seeded. Customer and management agents both answering. Two staff numbers, two customer numbers registered in Meta.
+**Working:** ERPNext + agent live on HTTPS. Three identities with real permission separation. WhatsApp webhook verified, token permanent (SYSTEM_USER). Gemini configured. 13 demo products, 7 demo customers seeded. Customer and management agents both answering. Two staff numbers, two customer numbers registered in Meta. The customer agent can now answer the delivery questions the owner configures by WhatsApp (`condiciones_de_entrega`, 12 customer tools) and the eight counter-answers he gave the management agent (`MEMORIA_PARA_CLIENTES`).
 
 **Open:**
 1. **Gemini key on free tier** — the cause of rate limits and slowness. Highest priority.
-2. **Sales agent tone** — reads like a form. Fixed strings in `main.py`, `progreso.py`, `idioma.py` bypass the prompt, so prompt-only changes won't fix it.
+2. **Sales agent tone** — partly stale as written, and the diagnosis was wrong. `progreso.py` has no strings at all and `idioma.py` already had a voice pass; what actually made the agent read like a form was that it *couldn't answer*. Two capability gaps are now closed: it can read the ~12 delivery facts the owner configures by WhatsApp (`condiciones_de_entrega`, so «¿puedo pasar a buscarlo?» and «¿llegás a mi barrio?» have a path at last), and it can use the eight counter-answers the owner already gave the management agent (`memoria.bloque_para_clientes`, allowlist, `MEMORIA_PARA_CLIENTES=false` turns it off). What is left of the original item is genuine wording work in the `idioma.py` rows the deterministic router uses — real, but smaller than it looked.
+   **A decision the owner still has to confirm:** the owner's memory used to be injected **only** into `prompt_gerencia`, and `tests/test_memoria_cableado.py` called that "the half that matters". That frontier moved from by-function to by-key. The four private answers (who gets credit, who not to let run up debt, the product that can't run out, seasonality) and anything under a key the owner invents still never cross. Confirm or revert with one variable.
 3. **DuckDNS** — replace with a real domain before client handover. Changing the ERPNext site hostname later needs a `bench` rename, not just DNS.
 4. **Opening stock not loaded** — `417` on Stock Reconciliation; needs the company's inventory accounts set.
 5. **Prices are placeholders** — the seed script says so. Never present them to the client as real.
 6. **Administrator password and the six API keys were exposed in a chat** — rotate before handover.
 7. **CI/CD not wired** — `deploy.yml` exists but isn't installed.
 8. **No email configured** — no password resets, no notifications.
+9. **The lease around `aceptar_cliente` has no ownership check.** The 180 s Redis lease can expire mid-decision and nothing re-asserts it. The *consequence* is fixed — the last read before `submit_doc` goes to the durable record, not the cache — so what is left is the window between that read and the submit, one ERPNext call wide, the same as `decisiones.confirmar`. Closing it needs `app/locks.py` to expose the lock or its token; `distributed_lock` currently `yield`s `None`.
 
 ---
 
