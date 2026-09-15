@@ -39,6 +39,13 @@ from app.tools.configuracion import (
     proponer_limite,
     ver_ajustes,
 )
+from app.tools.crm import (
+    actualizar_cliente,
+    actualizar_producto,
+    anotar_en_ficha,
+    armar_presupuesto,
+    editar_borrador,
+)
 from app.tools.gerencia import (
     ejecutar_reporte,
     ficha_cliente,
@@ -131,6 +138,21 @@ TOOLS_GERENCIA = [
     # the same reason. NEVER in TOOLS_CLIENTES: a customer near these is a
     # customer deciding his own order.
     detalle_de_pedido, proponer_accion,
+    # ...y lo que el dueño puede CAMBIAR (app/tools/crm.py). La línea no es
+    # leer-contra-escribir —era demasiado ancha— sino IRREVERSIBLE × PLATA:
+    # estas cinco se deshacen escribiendo de nuevo y no le cobran un peso a
+    # nadie. Lo irreversible sigue afuera y sigue sin ser alcanzable: emitir usa
+    # la credencial de política, cancelar un emitido no existe como herramienta,
+    # los límites piden su código de cuatro dígitos, y `Item Price` no está en
+    # `erpnext.DOCTYPES_EDITABLES` —la negativa es del cliente HTTP, no de la
+    # buena conducta de un archivo—.
+    #
+    # NINGUNA pone un precio: `LineaSimple` no tiene `rate`, igual que
+    # `pedidos.LineaPedido`. El precio lo resuelve ERPNext y lo verifica
+    # `policy._precio_autorizado`. Una herramienta donde el precio es un
+    # argumento del modelo convierte al modelo en la autoridad de precios.
+    actualizar_cliente, anotar_en_ficha, armar_presupuesto,
+    editar_borrador, actualizar_producto,
 ]
 
 # from_conn_string() is a CONTEXT MANAGER, not a constructor — using it

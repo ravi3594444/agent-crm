@@ -69,6 +69,17 @@ ARGUMENTOS: dict[str, dict] = {
     "ver_avisos_fallidos": {},
     "detalle_de_pedido": {"pedido": "SAL-ORD-2026-00001"},
     "proponer_accion": {"accion": "confirmar", "pedido": "SAL-ORD-2026-00001"},
+    # La superficie de ESCRITURA (app/tools/crm.py). Cada una tiene su guarda y
+    # cada guarda se prueba acá, igual que las de lectura: cinco puertas nuevas
+    # son cinco que se pueden abrir mal.
+    "actualizar_cliente": {"cliente": "Don José", "grupo": "Comercial"},
+    "anotar_en_ficha": {"sobre": "cliente", "cual": "CUST-0009", "nota": "Reclama."},
+    "armar_presupuesto": {
+        "cliente": "Don José",
+        "lineas": [{"item_code": "LECHE-ENT-1L", "cantidad": 2, "unidad": "Unidad"}],
+    },
+    "editar_borrador": {"pedido": "SAL-ORD-2026-00001", "fecha_entrega": "2026-12-01"},
+    "actualizar_producto": {"item_code": "LECHE-ENT-1L", "descripcion": "Leche entera."},
 }
 
 # Cómo se niega cada una. Casi todas comparten SIN_PERMISO; las que ya tenían su
@@ -229,9 +240,10 @@ def test_every_management_only_tool_is_covered_by_this_file() -> None:
     for nombre, ramas in COLAPSADAS.items():
         probadas = {a["que"] for n, a in LLAMADAS if n == nombre}
         assert probadas == set(ramas), f"{nombre}: faltan ramas {set(ramas) - probadas}"
-    # 15 hoy —eran 19, con cinco informes sueltos que ahora son uno. El número
-    # está acá para que un cambio de superficie se note.
-    assert len(SOLO_GERENCIA) == 15
+    # 20 hoy: 15 de lectura —eran 19, con cinco informes sueltos que ahora son
+    # uno— más las 5 de escritura de app/tools/crm.py. El número está acá para
+    # que un cambio de superficie se note, que es justo lo que acaba de pasar.
+    assert len(SOLO_GERENCIA) == 20
 
 
 def test_no_management_tool_accepts_a_phone_or_an_identity_argument() -> None:
