@@ -706,9 +706,19 @@ def perdidas(dia: date) -> list[Consejo]:
             continue
         cabecera = entrada["cabecera"]
         cliente = str(cabecera.get("customer_name") or cabecera.get("customer") or "")
+        lengua = idioma.gerencia()
+        # EL RENGLÓN TAMBIÉN, no sólo la cáscara. «a» y «y cuesta» son prosa, y
+        # se interpolaban adentro de un cuerpo ya traducido: con
+        # IDIOMA_GERENCIA=en el dueño recibía un párrafo en inglés con los seis
+        # renglones en castellano. Mismo defecto que el `exc` de `gestion.py`,
+        # un nivel más adentro.
         detalle = "\n".join(
-            f"· {r['item_name']} — {r['qty']:g} {r['uom']} a {pesos(r['rate'], 2)} "
-            f"y cuesta {pesos(r['costo'], 2)} — {pesos(r['perdida'], 2)}"
+            idioma.t(
+                "consejo.perdida.renglon", lengua,
+                item_name=r["item_name"], qty=f"{r['qty']:g}", uom=r["uom"],
+                rate=pesos(r["rate"], 2), costo=pesos(r["costo"], 2),
+                perdida=pesos(r["perdida"], 2),
+            )
             for r in entrada["renglones"]
         )
         # EL CÓDIGO DE MONEDA DEL PEDIDO, una vez, sobre el total. `pesos` pone
@@ -723,7 +733,6 @@ def perdidas(dia: date) -> list[Consejo]:
         # veces convierte el detalle en ruido.
         moneda_pedido = str(cabecera.get("currency") or "").strip()
         total = f"{pesos(entrada['perdida'], 2)} {moneda_pedido}".strip()
-        lengua = idioma.gerencia()
         cuerpo = idioma.t(
             "consejo.perdida.cuerpo", lengua, pedido=pedido, cliente=cliente,
             perdida=total, lista=lista, detalle=detalle,
@@ -805,6 +814,12 @@ def dormidos(dia: date) -> list[Consejo]:
                 ["company", "=", empresa],
                 ["docstatus", "=", 1],
                 ["transaction_date", ">=", desde],
+                # El mismo borde de arriba que `perdidas`. Acá el guardia de
+                # Python ya descarta las filas futuras (`fecha > dia`), así que
+                # lo que esto evita es OTRA cosa: la página se pide `desc`, así
+                # que sin borde las fechas futuras se llevan los primeros
+                # lugares y empujan afuera la historia de verdad.
+                ["transaction_date", "<=", dia.isoformat()],
             ],
             fields=[
                 "name",
@@ -1198,6 +1213,12 @@ def _demanda_diaria(
             ["company", "=", empresa],
             ["docstatus", "=", 1],
             ["transaction_date", ">=", desde],
+            # Y acá el borde de arriba hace falta DE VERDAD: esta función no
+            # mira la fecha en Python —sólo junta los nombres—, así que una
+            # venta con fecha futura se sumaba a `vendido`, subía la demanda
+            # diaria, bajaba lo proyectado y hacía avisar un quiebre que las
+            # ventas reales no sostienen.
+            ["transaction_date", "<=", dia.isoformat()],
         ],
         fields=["name"],
         limit=MAX_PEDIDOS_HISTORIA + 1,

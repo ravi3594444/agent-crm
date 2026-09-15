@@ -820,11 +820,13 @@ def test_una_fecha_que_no_se_puede_leer_no_se_convierte_en_hoy(
     ponía en el extremo de hoy: el costo salía de la lista vigente HOY y el
     pedido quedaba acusado de vender por debajo de un costo que no era el suyo.
 
-    Los dos pedidos tienen el MISMO renglón. El precio sólo tiene vigencia
-    hasta anteayer, así que con la fecha de hoy no hay costo verificable y con
-    la de hace cinco días sí: si el ilegible se fechara en hoy no aparecería
-    igual, pero el de control prueba que el detector sí funciona sobre esta
-    misma historia, y la mutación lo hace aparecer con el costo de hoy.
+    Los dos pedidos tienen el MISMO renglón y `precio()` deja `valid_from` y
+    `valid_upto` VACÍOS, o sea un precio sin vigencia acotada: vale para
+    cualquier fecha. Eso es justamente lo que expone la mutación — con la
+    fecha ilegible convertida en hoy, `SO-ILEGIBLE` igual consigue un costo,
+    aparece en la salida y rompe la lista exacta. Ponerle `valid_upto` al
+    fixture haría que la fecha forzada se quedara SIN costo y la mutación
+    pasaría sin que nadie se entere.
     """
     erp = servidor_sin_borde_de_arriba
     ilegible = pedido("SO-ILEGIBLE", dia=HOY - timedelta(days=5))
@@ -1472,6 +1474,37 @@ def test_un_lote_que_llena_el_techo_de_renglones_se_dice_en_el_log(
     assert "llenó el techo" not in capsys.readouterr().out
 
 
+def test_una_venta_del_futuro_no_infla_la_demanda_diaria(erp, reparto_semanal, monkeypatch):
+    """MUTACIÓN: sacar `["transaction_date", "<=", dia.isoformat()]` de
+    `_demanda_diaria`. Cae ésta y sólo ésta.
+
+    `perdidas` y `dormidos` descartan la fila futura también del lado de
+    Python; `_demanda_diaria` NO mira la fecha —sólo junta los nombres de los
+    pedidos y suma sus renglones—, así que acá el filtro de la consulta es el
+    único guardia que hay. Y la dirección del error es la peligrosa: una venta
+    que todavía no pasó SUBE la demanda diaria, BAJA lo proyectado y hace
+    avisar un quiebre que las ventas reales no sostienen. El dueño sale a
+    comprar stock por un pedido que puede no existir.
+
+    Dos corridas sobre la misma historia: con la venta futura adentro de la
+    tabla y sin ella. La demanda tiene que ser la MISMA.
+    """
+    inventario_confiable(monkeypatch, maestra=True)
+    poner_stock(erp, "MANTECA-200", hay=6.0, minimo=5.0)
+    poner_venta(erp, "MANTECA-200", qty=3.0, stock_qty=36.0)  # 36/30 = 1,2 por día
+
+    solo_reales = consejos.quiebres(HOY)
+    assert [c.sobre for c in solo_reales] == ["MANTECA-200"]
+    assert solo_reales[0].datos["demanda_diaria"] == pytest.approx(1.2)
+
+    # Y ahora una venta ENORME con fecha de la semana que viene. No cuenta.
+    poner_venta(erp, "MANTECA-200", qty=100.0, stock_qty=1200.0, atras=-7)
+
+    con_futura = consejos.quiebres(HOY)
+    assert [c.sobre for c in con_futura] == ["MANTECA-200"]
+    assert con_futura[0].datos["demanda_diaria"] == pytest.approx(1.2)
+
+
 def test_un_producto_que_no_se_vende_no_es_una_urgencia(erp, reparto_semanal, monkeypatch):
     """MUTACIÓN: borrar el `if por_dia <= 0: continue` de `quiebres`.
 
@@ -1619,3 +1652,40 @@ def test_un_consejo_sale_en_el_idioma_del_dueno(erp, con_lista_de_costo, monkeyp
     # La clave durable tampoco cambia con el idioma: si cambiara, el mismo
     # consejo se mandaría dos veces al cambiar de idioma.
     assert uno_es.clave == uno_en.clave
+
+
+def test_el_renglon_del_detalle_tampoco_queda_en_castellano(
+    erp, con_lista_de_costo, monkeypatch
+):
+    """EL NIVEL DE ADENTRO, que la prueba de arriba no ve.
+
+    El cuerpo ya salía traducido, pero `{detalle}` —las viñetas, una por
+    renglón— se armaba a mano con «a» y «y cuesta» y se interpolaba adentro.
+    Un dueño con IDIOMA_GERENCIA=en recibía un párrafo en inglés con los seis
+    renglones en castellano: media frase en cada idioma, que es el mismo
+    defecto que `gestion.py` tenía con `exc`, un nivel más adentro.
+
+    La de arriba compara `cuerpo != cuerpo` y por eso NO lo agarra: la cáscara
+    ya difería. Ésta mira las palabras del renglón.
+
+    MUTACIÓN: volver `detalle` al f-string castellano. Cae ésta y sólo ésta.
+    """
+    erp.tablas["Sales Order"] = [pedido("SO-1")]
+    erp.tablas["Sales Order Item"] = [renglon("SO-1", "LECHE-1L", qty=10, rate=100.0)]
+    erp.tablas["Item Price"] = [precio()]
+
+    monkeypatch.setenv("IDIOMA_GERENCIA", "es")
+    en_es = consejos.perdidas(HOY)[0].cuerpo
+    monkeypatch.setenv("IDIOMA_GERENCIA", "en")
+    en_en = consejos.perdidas(HOY)[0].cuerpo
+
+    # Las palabras DEL RENGLÓN, escritas acá y no leídas del catálogo.
+    assert "y cuesta" in en_es
+    assert "and costs" in en_en
+    # Y nada del castellano adentro del inglés. Es lo único que la mutación
+    # cambia: el resto del cuerpo ya salía traducido.
+    assert "y cuesta" not in en_en
+    assert "consejo." not in en_en, "salió la clave cruda"
+    # El nombre del producto y la unidad son datos: iguales en los dos.
+    assert "LECHE-1L" in en_es and "LECHE-1L" in en_en
+    assert "Litro" in en_es and "Litro" in en_en

@@ -2463,6 +2463,10 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: 'El pedido {pedido} de {cliente} salió por debajo del costo: {perdida} contra la lista «{lista}».\n{detalle}',
         EN: 'Order {pedido} for {cliente} went out below cost: {perdida} against price list «{lista}».\n{detalle}',
     },
+    "consejo.perdida.renglon": {
+        ES: '· {item_name} — {qty} {uom} a {rate} y cuesta {costo} — {perdida}',
+        EN: '· {item_name} — {qty} {uom} at {rate} and costs {costo} — {perdida}',
+    },
     "consejo.perdida.piso": {
         ES: '\n({sin_costo} de: {faltantes}, así que la pérdida es un piso)',
         EN: '\n({sin_costo} for: {faltantes}, so the loss is a floor)',
