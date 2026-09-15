@@ -1695,7 +1695,7 @@ def nivel_de_memoria(reporte) -> str:
 
 
 def _linea_de_memoria(reporte) -> tuple[str, str, str]:
-    lineas = [l for l in reporte.lineas if l[1] == "Memoria para clientes"]
+    lineas = [fila for fila in reporte.lineas if fila[1] == "Memoria para clientes"]
     assert len(lineas) == 1, f"esperaba UNA línea de memoria, hay {len(lineas)}"
     return lineas[0]
 

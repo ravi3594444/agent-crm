@@ -11,10 +11,9 @@ bounded tail of the conversation.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 import json
 import os
+from collections.abc import Mapping
 
 from langchain_core.messages import (
     BaseMessage,
