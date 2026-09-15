@@ -776,6 +776,24 @@ def _modulos_solo_de_gerencia() -> set[str]:
     return {m.rsplit(".", 1)[-1] for m in de_gerencia - de_clientes if m}
 
 
+def _es_idioma_t(func: ast.expr) -> bool:
+    """¿Esta llamada es `idioma.t(...)`, y no cualquier cosa que se llame `t`?
+
+    Se miraba sólo el nombre final, así que la exclusión tapaba el primer
+    argumento de CUALQUIER `algo.t(...)` y de un `t(...)` suelto. Hoy no hay
+    ninguno en `app/tools/`, o sea que no había un falso negativo — pero la
+    exclusión era más ancha que lo que promete su docstring, y la forma de que
+    un permiso se vuelva un agujero es exactamente ésa: que nadie note que
+    creció. Se exige el receptor, y el receptor es un nombre, no una expresión.
+    """
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == "t"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "idioma"
+    )
+
+
 def _literales_auditables(archivo: pathlib.Path) -> list[tuple[int, str]]:
     """(línea, texto) de cada literal del archivo que el dueño podría leer.
 
@@ -802,7 +820,7 @@ def _literales_auditables(archivo: pathlib.Path) -> list[tuple[int, str]]:
             if nombre == "Field":
                 for kw in nodo.keywords:
                     excluidos.update(id(s) for s in ast.walk(kw.value))
-            elif nombre == "t" and nodo.args:
+            elif _es_idioma_t(nodo.func) and nodo.args:
                 excluidos.update(id(s) for s in ast.walk(nodo.args[0]))
 
     # Las partes literales de una f-string son `ast.Constant` adentro del
@@ -908,3 +926,28 @@ def test_el_permiso_de_los_valores_internos_es_por_literal_entero():
     # permiso no sería lo único que la deja pasar y este test no probaría eso.
     assert restos_en_espanol("No pude leer el pedido",
                              PERMITIDO_EN_SALIDA_INGLESA) != []
+
+
+def test_la_exclusion_de_la_clave_es_solo_para_idioma_t():
+    """Y no para cualquier cosa que se llame `t`. Lo levantó la revisión.
+
+    `_literales_auditables` excluye el primer argumento de `idioma.t(...)`
+    porque es una CLAVE del catálogo y contiene castellano a propósito
+    (`crm.pedido_no_leido`). Mirando sólo el nombre final, esa exclusión tapaba
+    también el primer argumento de un `otro.t(...)` o de un `t(...)` suelto, y
+    ahí el literal dejaba de auditarse sin que nadie lo hubiera decidido.
+
+    MUTACIÓN: volver a `nombre == "t"`. Cae ésta y sólo ésta — hoy no hay
+    ningún `.t(` que no sea `idioma.t(` en `app/tools/`, así que el audit sobre
+    los archivos de verdad no nota la diferencia; por eso se prueba la función
+    contra un árbol escrito acá.
+    """
+    def func_de(fuente: str) -> ast.expr:
+        return ast.parse(fuente, mode="eval").body.func
+
+    assert _es_idioma_t(func_de('idioma.t("crm.x", lengua)'))
+    # Un objeto cualquiera con un método `t`, y una función suelta: ninguno es
+    # el catálogo, así que su primer argumento SÍ se audita.
+    assert not _es_idioma_t(func_de('traductor.t("No pude leer el pedido")'))
+    assert not _es_idioma_t(func_de('t("No pude leer el pedido")'))
+    assert not _es_idioma_t(func_de('self.idioma.t("No pude leer el pedido")'))

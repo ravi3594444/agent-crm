@@ -164,7 +164,7 @@ def _ver_limites(config: RunnableConfig) -> str:
         return _sin_permiso()
     lengua = idioma.gerencia()
     try:
-        filas = [f for f in limites.resumen() if f["nombre"] in limites.LIMITES]
+        filas = [f for f in limites.resumen(lengua) if f["nombre"] in limites.LIMITES]
     except limites.LimiteError as exc:
         # El motivo también, no sólo la frase de alrededor: `limites.motivo` lo
         # resuelve por la clave del LimiteError, y en español devuelve el mismo
@@ -238,7 +238,7 @@ def _ver_reglas_de_entrega(config: RunnableConfig) -> str:
         return _sin_permiso()
     lengua = idioma.gerencia()
     try:
-        filas = [f for f in limites.resumen() if f["nombre"] in limites.ENTREGA]
+        filas = [f for f in limites.resumen(lengua) if f["nombre"] in limites.ENTREGA]
     except limites.LimiteError as exc:
         return idioma.t(
             "ajustes.entrega_ilegible", lengua, motivo=limites.motivo(exc, lengua)
