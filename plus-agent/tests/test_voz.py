@@ -776,3 +776,33 @@ def test_el_agente_le_dice_a_la_pagina_el_nombre_del_negocio(monkeypatch):
     relay()
     monkeypatch.setenv("NOMBRE_NEGOCIO", "Lácteos Plus")
     assert agente.desde_navegador({}).display_name == "Lácteos Plus"
+
+
+def test_la_memoria_del_dueno_respeta_su_interruptor_tambien_por_telefono(monkeypatch):
+    """El interruptor de privacidad vale para los DOS canales o no vale.
+
+    `MEMORIA_PARA_CLIENTES` es del dueño y decide si lo que él anotó le llega a
+    un cliente. Una llamada que igual le cuenta lo que el chat ya dejó de
+    contarle no es una diferencia de canal: es el interruptor apagado que no
+    apagó nada, y se descubre cuando un cliente repite por teléfono algo que se
+    suponía interno.
+
+    Por eso el bloque sale de `conversacion._bloque_de_memoria_clientes`, el
+    mismo que usa WhatsApp, y no de `memoria` directamente — ése no mira el
+    interruptor, y copiar el bloque es cómo los dos canales se separan.
+
+    Mutación: pasar `memoria.bloque_de_prompt_clientes()` en vez del privado
+    de `conversacion` (que es la forma natural de escribirlo si uno no sabe que
+    el interruptor existe) — 1 failed, 56 passed. Es la mitad que el test de
+    «no explota» no dice: con el KeyError arreglado y el interruptor ignorado,
+    todo lo demás queda verde.
+    """
+    monkeypatch.setattr(
+        "app.memoria.bloque_de_prompt_clientes", lambda: "PAGA SIEMPRE TARDE"
+    )
+
+    monkeypatch.setenv("MEMORIA_PARA_CLIENTES", "true")
+    assert "PAGA SIEMPRE TARDE" in prompt_voz.construir()
+
+    monkeypatch.setenv("MEMORIA_PARA_CLIENTES", "false")
+    assert "PAGA SIEMPRE TARDE" not in prompt_voz.construir()

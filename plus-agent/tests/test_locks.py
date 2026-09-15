@@ -1,10 +1,15 @@
-"""El lock distribuido, y lo único que puede decir cuando algo salió mal.
+"""El lock distribuido: lo que dice cuando algo salió mal, y quién sigue siendo su dueño.
 
-`distributed_lock` es un `contextmanager` que hace `yield None`: no expone el
-lock, ni `owned()`, ni el token. O sea que un lease vencido en mitad de una
-sección crítica NO ES OBSERVABLE desde afuera, y el único lugar del programa
-donde se puede ver es adentro de esta función. El comentario decía que lo
-logueaban los llamadores; ninguno lo hacía y ninguno podía.
+`distributed_lock` hacía `yield None`: no exponía el lock, ni `owned()`, ni el
+token. O sea que un lease vencido en mitad de una sección crítica NO ERA
+OBSERVABLE desde afuera —el comentario decía que lo logueaban los llamadores;
+ninguno lo hacía y ninguno podía— y, peor, tampoco era PREGUNTABLE: los dos
+lugares que emiten lo dicen en un comentario y se conforman con mirar si
+alguien decidió mientras tanto, que achica la ventana y no la cierra.
+
+Ahora hace `yield Lease(...)`, que contesta una sola pregunta —«¿sigue siendo
+mío?»— y la contesta **fallando cerrado**: si Redis no contesta, la respuesta
+es que no. Del otro lado de esa pregunta hay el único Submit del sistema.
 """
 from __future__ import annotations
 
@@ -70,3 +75,71 @@ def test_un_lock_que_se_suelta_bien_no_dice_nada(capsys) -> None:
         pass
 
     assert capsys.readouterr().out == ""
+
+
+def test_el_lock_entrega_su_lease_y_adentro_sigue_siendo_mio() -> None:
+    """Lo básico, contra el Redis de verdad: adentro del `with`, es mío."""
+    with locks.distributed_lock("prueba-lease-vivo", lease_seconds=30, wait_seconds=2) as lease:
+        assert isinstance(lease, locks.Lease)
+        assert lease.sigue_mio() is True
+
+
+def test_un_lease_vencido_ya_no_es_mio() -> None:
+    """Es lo que hace redis cuando el lease vence: la llave deja de estar.
+
+    Se borra la llave desde adentro del `with`, igual que hace
+    `test_un_lease_perdido_deja_rastro`, y por el mismo motivo se borra con
+    `_redis()` y no con `conexion()`: `limites_sin_redis` le pone un `FakeRedis`
+    a `conexion`, y `distributed_lock` no pasa por ahí.
+    """
+    nombre = "prueba-lease-vencido"
+    with locks.distributed_lock(nombre, lease_seconds=30, wait_seconds=2) as lease:
+        assert lease.sigue_mio() is True
+        locks._redis().delete(f"plus-agent:business-lock:{nombre}")
+        assert lease.sigue_mio() is False
+
+
+def test_un_lease_de_otro_no_es_mio() -> None:
+    """La llave existe pero con OTRO token: es el caso que de verdad importa.
+
+    Un lease vencido que otro worker ya volvió a tomar deja la llave PUESTA, así
+    que preguntar «¿existe la llave?» contestaría que sí. Lo que hay que
+    comparar es el token, que es lo que hace `owned()`.
+    """
+    nombre = "prueba-lease-de-otro"
+    llave = f"plus-agent:business-lock:{nombre}"
+    try:
+        with locks.distributed_lock(nombre, lease_seconds=30, wait_seconds=2) as lease:
+            # CON `ex`, y el `try/finally` de abajo ADEMÁS. El `finally` de
+            # `distributed_lock` no puede soltar un lease que ya no es suyo, así
+            # que el que limpia es este test — y un test que limpia sólo en su
+            # camino feliz deja la llave PARA SIEMPRE cuando el assert falla.
+            # Pasó: una mutación hizo fallar el assert, la llave quedó sin TTL,
+            # y a partir de ahí TODAS las corridas de este archivo fallaban acá
+            # —incluso con el código sano— porque el lock ya no se podía tomar.
+            # Un test que envenena el Redis compartido cuando falla no falla una
+            # vez: rompe el archivo hasta que alguien lo limpia a mano.
+            locks._redis().set(llave, "el-token-de-otro", ex=30)
+            assert lease.sigue_mio() is False
+    finally:
+        locks._redis().delete(llave)
+
+
+def test_si_redis_no_contesta_el_lease_se_da_por_perdido(capsys) -> None:
+    """FALLA CERRADO. «No pude comprobar» no es «sí, seguís siendo el dueño».
+
+    Del otro lado de esta pregunta hay un Submit que no se deshace. Una
+    comprobación que falla abierta no comprueba nada — la misma regla que el
+    tope diario de `app/precios.py`.
+    """
+    from redis.exceptions import RedisError
+
+    class LockMudo:
+        def owned(self):
+            raise RedisError("se cayó redis")
+
+    lease = locks.Lease(LockMudo(), "prueba-redis-mudo")
+
+    assert lease.sigue_mio() is False
+    # Y deja rastro: si esto pasa todas las noches, tiene que poder verse.
+    assert "prueba-redis-mudo" in capsys.readouterr().out

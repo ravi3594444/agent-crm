@@ -133,7 +133,7 @@ def mundo(monkeypatch: pytest.MonkeyPatch) -> dict:
     @contextmanager
     def lock(nombre, **kwargs):
         locks_tomados.append(nombre)
-        yield
+        yield fakes.LeaseDoble()
 
     monkeypatch.setattr(erpnext, "registrar_comentario", registrar_comentario)
     monkeypatch.setattr(erpnext, "add_comment", registrar_comentario)

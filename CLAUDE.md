@@ -81,7 +81,20 @@ Plain `python` has no frappe; wrong cwd gives `FileNotFoundError: .../logs/datab
 
 **SSH-in-browser mangles multi-line pastes.** Backslash continuations get dropped and the tail runs on the host. Always use single-line commands there.
 
+**LangGraph's default recursion limit is 10007, not 25.** The 25 everyone remembers is `langchain_core`'s; `langgraph._internal._config.DEFAULT_RECURSION_LIMIT` is 10007, and that is what applies when a hand-built config omits `recursion_limit` — which is what `graph._config()` did. At three supersteps per round (a `pre_model_hook` costs one), that is ~3335 model calls for one WhatsApp message. Measured on the real `responder_cliente` path: 121 model calls, 120 tool calls, stopped only because the scripted model ran out. Worse, the two ways LangGraph stops are both wrong for WhatsApp: `recursion_limit = 3n` returns an `AIMessage` reading `"Sorry, need more steps to process this request."` — no exception, no log line, straight to the customer in English — and any other number raises `GraphRecursionError`, which became «tuve un problema técnico» and threw away everything the turn had already found. `app/pasos.py` is the ceiling and the honest close; catch BOTH paths or you have only moved the failure.
+
 **`pytest` needs a real Redis Stack** at `REDIS_URL`, database 0 (RediSearch refuses `FT.CREATE` on any other). `app/graph.py` builds the checkpointer at import. Without it, two modules fail at collection and pytest aborts having run zero tests. CI sets `REDIS_OBLIGATORIO=1` so "no Redis" is a failure, not a silent skip.
+
+**Two test runs at once share Redis and fake a flaky lock test.** `pytest`
+uses the one Redis Stack at `REDIS_URL`, database 0, and the business locks are
+named from *constants* — `test_frontera_decisiones.py` takes
+`solicitud:SAL-ORD-TOMADO-1` for real. Run a second suite concurrently (a
+mutation batch in a worktree is still the same Redis) and whichever run asks
+second gets `CoordinationError` after its 2-second wait, on a test that is
+correct and passes alone. It reads exactly like a flake and it is not one:
+it is two suites, and the second is yours. CI never sees this — each matrix
+cell gets its own `services: redis` container. Run batches one at a time, or
+give one of them its own Redis on another port; do not "fix" the test.
 
 **`LLM_PROVIDER` blank means `qwen`, not gemini.** Always write `LLM_PROVIDER=gemini` explicitly. There is no fallback between providers, by design.
 
@@ -149,18 +162,20 @@ pytest -q -rs             # needs Redis Stack
 
 ## Status
 
-**Working:** ERPNext + agent live on HTTPS. **Canal de voz** (`plus-agent/app/voz/`, `docs/VOZ.md`): el mismo agente de clientes atendiendo el teléfono, con las mismas herramientas y las mismas reglas — navegador hoy, telefonía cuando se conecte un transporte. Three identities with real permission separation. WhatsApp webhook verified, token permanent (SYSTEM_USER). Gemini configured. 13 demo products, 7 demo customers seeded. Customer and management agents both answering. Two staff numbers, two customer numbers registered in Meta.
+**Working:** ERPNext + agent live on HTTPS. **Canal de voz** (`plus-agent/app/voz/`, `docs/VOZ.md`): el mismo agente de clientes atendiendo el teléfono, con las mismas herramientas y las mismas reglas — navegador hoy, telefonía cuando se conecte un transporte. Three identities with real permission separation. WhatsApp webhook verified, token permanent (SYSTEM_USER). Gemini configured. 13 demo products, 7 demo customers seeded. Customer and management agents both answering. Two staff numbers, two customer numbers registered in Meta. The customer agent can now answer the delivery questions the owner configures by WhatsApp (`condiciones_de_entrega`, 12 customer tools) and the eight counter-answers he gave the management agent (`MEMORIA_PARA_CLIENTES`). The owner can also promote ONE note at a time with `anotar_dato(para_clientes=true)` — a second door on the same frontier, floored by the four private keys and checked on both sides.
 
 **Open:**
 1. **Gemini key on free tier** — the cause of rate limits and slowness. Highest priority.
-2. **Sales agent tone** — reads like a form. Fixed strings in `main.py`, `progreso.py`, `idioma.py` bypass the prompt, so prompt-only changes won't fix it.
+2. **Sales agent tone** — partly stale as written, and the diagnosis was wrong. `progreso.py` has no strings at all and `idioma.py` already had a voice pass; what actually made the agent read like a form was that it *couldn't answer*. Two capability gaps are now closed: it can read the ~12 delivery facts the owner configures by WhatsApp (`condiciones_de_entrega`, so «¿puedo pasar a buscarlo?» and «¿llegás a mi barrio?» have a path at last), and it can use the eight counter-answers the owner already gave the management agent (`memoria.bloque_para_clientes`, allowlist, `MEMORIA_PARA_CLIENTES=false` turns it off). The wording half is now measured rather than assumed: the router emits exactly seven `idioma.t` rows, of which four reach a customer (`fallback.problema_tecnico`, `…_avisado`, `fallback.respuesta_vacia`, `progreso.consultando`). All four already read like a person, and their first 24 characters are a CONTRACT with `demo/piloto.py::_es_disculpa` and the hand-written cases in `tests/test_demo.py` — rewrite an opening and the bench stops recognising a broken turn. So there is no wording backlog here; re-open this item only against a specific line someone actually read in a real conversation.
+   **A decision the owner still has to confirm:** the owner's memory used to be injected **only** into `prompt_gerencia`, and `tests/test_memoria_cableado.py` called that "the half that matters". That frontier moved from by-function to by-key. The four private answers (who gets credit, who not to let run up debt, the product that can't run out, seasonality) and anything under a key the owner invents still never cross. Confirm or revert with one variable.
 3. **DuckDNS** — replace with a real domain before client handover. Changing the ERPNext site hostname later needs a `bench` rename, not just DNS.
 4. **Opening stock not loaded** — `417` on Stock Reconciliation; needs the company's inventory accounts set.
 5. **Prices are placeholders** — the seed script says so. Never present them to the client as real.
 6. **Administrator password and the six API keys were exposed in a chat** — rotate before handover.
 7. **CI/CD not wired** — `deploy.yml` exists but isn't installed.
 8. **No email configured** — no password resets, no notifications.
-9. **Voz: sólo navegador** — falta el transporte de telefonía (Telnyx/Twilio). `agente.desde_telefono` ya decide qué significa el `caller_id`; falta quien lo llame. Y `VOZ_CONFIA_EN_CALLER_ID` va apagado hasta que el dueño decida que el número de su operador alcanza: un `caller_id` se falsifica, y entregar el número entrega la cuenta.
+9. ~~The lease around `aceptar_cliente` has no ownership check.~~ **Closed.** `distributed_lock` now yields a `Lease`, and `sigue_mio()` is asked immediately before both of the system's submits (`aprobacion.emitir` and `solicitudes.aceptar_cliente`). It fails closed: if Redis cannot confirm ownership the answer is no, and nothing is emitted. `emitir`'s `lease` is a required keyword argument, so a future caller cannot lose the check by forgetting it.
+10. **Voz: sólo navegador** — falta el transporte de telefonía (Telnyx/Twilio). `agente.desde_telefono` ya decide qué significa el `caller_id`; falta quien lo llame. Y `VOZ_CONFIA_EN_CALLER_ID` va apagado hasta que el dueño decida que el número de su operador alcanza: un `caller_id` se falsifica, y entregar el número entrega la cuenta.
 
 ---
 

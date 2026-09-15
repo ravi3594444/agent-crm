@@ -1,6 +1,7 @@
 """Payload shapes ERPNext v15/v16 actually accepts, verified against a live site."""
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -395,6 +396,53 @@ def _erpnext_con_un_cliente(monkeypatch: pytest.MonkeyPatch) -> list[list]:
     return vistos
 
 
+def test_ficha_cliente_lista_los_pedidos_por_FECHA_no_por_ultima_modificacion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """«Últimos pedidos» eran los últimos MODIFICADOS: Frappe ordena por
+    `modified desc` cuando nadie le pide otra cosa, y a un pedido viejo lo toca
+    cualquier cosa meses después. Acá el efecto es peor que en
+    `pedido_habitual`, porque la respuesta IMPRIME la fecha de cada uno: el
+    dueño leía una lista fechada que no estaba ordenada por fecha.
+
+    El doble ORDENA con el `order_by` que recibe. Si devolviera las filas en el
+    orden en que están escritas acá, el assert no podría estar en desacuerdo con
+    el código, y el bug seguiría invisible.
+    """
+    from app.tools.gerencia import ficha_cliente
+
+    pedidos = [
+        {"name": "SO-VIEJO", "transaction_date": "2026-01-10", "creation": "2026-01-10",
+         "modified": "2026-09-13", "grand_total": 1000.0, "status": "To Deliver"},
+        {"name": "SO-NUEVO", "transaction_date": "2026-09-01", "creation": "2026-09-01",
+         "modified": "2026-09-01", "grand_total": 2000.0, "status": "Completed"},
+    ]
+
+    def get_list(doctype, filters=None, fields=None, limit=None, **kw):
+        if doctype == "Customer":
+            for campo, operador, valor in filters or []:
+                if campo == "name" and operador == "=" and valor == _FICHA["name"]:
+                    return [dict(_FICHA)]
+            return []
+        if doctype != "Sales Order":
+            return []
+        campo, _, sentido = (kw.get("order_by") or "modified desc").split(",")[0].partition(" ")
+        return sorted(pedidos, key=lambda f: f[campo], reverse=sentido.strip() == "desc")
+
+    from app import router, telefono
+
+    monkeypatch.setattr(router, "STAFF", [telefono.normalizar(_GERENTE)])
+    monkeypatch.setattr(erpnext, "get_list", get_list)
+
+    salida = ficha_cliente.invoke(
+        {"nombre_o_codigo": "CUST-0009"}, config=_config_gerencia()
+    )
+
+    # Los dos están, y el nuevo va PRIMERO. Afirmar sólo que aparecen dejaría
+    # sin probar la mitad que importa, que es el orden.
+    assert salida.index("SO-NUEVO") < salida.index("SO-VIEJO"), salida
+
+
 def test_ficha_cliente_encuentra_por_codigo_exacto(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.tools.gerencia import ficha_cliente
 
@@ -456,3 +504,48 @@ def test_ficha_cliente_sigue_pidiendo_gerencia(monkeypatch: pytest.MonkeyPatch) 
 
     assert salida == SIN_PERMISO
     assert vistos == [], "no se consultó ERPNext sin permiso"
+
+
+# ------------------------------- una tabla hija se pide con su padre, o falla
+# `Item Reorder` es una tabla hija de Item. Frappe se niega a listar una tabla
+# hija sin `parent` —lo dice el comentario de `erpnext._list`— y las siete
+# consultas a tablas hijas del repo lo pasaban... menos una, la de `stock_bajo`,
+# o sea que «¿de qué estoy corto?» nunca contestó contra un ERPNext real.
+#
+# El doble se porta como Frappe y SE NIEGA, en vez de mirar qué argumentos le
+# pasaron. Un test que afirmara `get_list.assert_called_with(..., parent="Item")`
+# fijaría la ortografía de la llamada; éste puede estar en desacuerdo con el
+# código sobre si la herramienta CONTESTA.
+
+
+def test_stock_bajo_le_pide_a_frappe_la_tabla_hija_como_frappe_la_acepta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.tools.gerencia import informe
+
+    HIJAS = {"Item Reorder", "Sales Order Item", "Delivery Note Item"}
+
+    def get_list(doctype, filters=None, fields=None, limit=None, parent=None, **kw):
+        if doctype in HIJAS and not parent:
+            raise erpnext.ERPNextError(
+                f"No permitted records found for {doctype}", status_code=403
+            )
+        if doctype == "Item Reorder":
+            return [{"parent": "LECHE-ENT-1L", "warehouse": "Dep",
+                     "warehouse_reorder_level": 10}]
+        if doctype == "Bin":
+            return [{"actual_qty": 2}]
+        return []
+
+    from app import router, telefono
+
+    monkeypatch.setattr(router, "STAFF", [telefono.normalizar(_GERENTE)])
+    monkeypatch.setattr(erpnext, "get_list", get_list)
+
+    salida = informe.invoke({"que": "stock_bajo"}, config=_config_gerencia())
+
+    assert "LECHE-ENT-1L" in salida, salida
+    # La cantidad EXACTA y con bordes: `"2" in salida` pasa igual con 12 o 20,
+    # o sea que un informe que dice el número equivocado pasaba el test.
+    renglon = next(r for r in salida.splitlines() if "LECHE-ENT-1L" in r)
+    assert re.search(r"(?<!\d)2(?!\d)", renglon), renglon

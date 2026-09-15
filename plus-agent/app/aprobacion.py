@@ -98,6 +98,51 @@ def manejar_boton(reply_id: str, telefono: str) -> str:
             nombre, telefono, canal=decisiones.CANAL_WHATSAPP
         )["detalle"]
 
+    if accion in ("mandar", "nomandar"):
+        # El mensaje a un cliente que el dueño acaba de mirar. `consumir` es un
+        # GETDEL: el segundo toque no encuentra nada, así que un dedo impaciente
+        # no le manda dos veces la misma promesa al cliente.
+        from app import idioma, salidas
+
+        lengua = idioma.gerencia()
+        salida = salidas.consumir(nombre)
+        if salida is None:
+            # Venció o ya se usó, y NO se distinguen los dos casos: el remedio
+            # es el mismo —pedirlo de nuevo— y decirle «ya salió» cuando en
+            # realidad venció sería decirle que el cliente fue avisado.
+            return idioma.t("salida.ya_no_esta", lengua)
+        if accion == "nomandar":
+            return idioma.t("salida.descartado", lengua)
+        # LA VENTANA SE VUELVE A MIRAR ACÁ, y no alcanza con la de cuando se
+        # propuso: entre una cosa y la otra puede pasar hasta una hora —el TTL
+        # de la salida— y las 24 h de Meta corren igual. Sin esto, el dueño
+        # tocaba el botón después de que la ventana se cerró, el mensaje se
+        # encolaba, se gastaba los ocho reintentos y moría en la cola de
+        # descarte: él leía «lo mandé» y el cliente no recibía nada.
+        from app import outbound_status
+
+        if not outbound_status.window_open(salida.telefono):
+            return idioma.t("salida.se_cerro_la_ventana", lengua, cliente=salida.cliente)
+        try:
+            from app import avisos
+
+            avisos.encolar(
+                # El id de la salida hace de clave de idempotencia de la cola,
+                # que está indexada por (evento, pedido). No hay pedido acá, y
+                # ese id es justamente lo único irrepetible que tenemos.
+                "mensaje_del_dueno", salida.id, salida.telefono, salida.texto,
+            )
+        except Exception as exc:
+            print(f"[aprobacion] mensaje a cliente no encolado ({type(exc).__name__})")
+            # `consumir` ya la borró, así que sin esto el mismo botón contesta
+            # «ya no está» y el dueño no puede reintentar lo que acaba de
+            # aprobar. Vuelve con su vencimiento original y con el MISMO id, que
+            # es la clave de idempotencia de la cola: si el encolado falló
+            # después de haber encolado, el reintento no manda dos veces.
+            salidas.devolver(salida)
+            return idioma.t("salida.no_salio", lengua)
+        return idioma.t("salida.mandado", lengua, cliente=salida.cliente)
+
     if accion == "contraoferta":
         # "contraoferta:<pedido>:<fecha> <hora> <cargo>"
         from app import decisiones
@@ -241,7 +286,7 @@ class Emision:
     incierto: bool = False
 
 
-def emitir(nombre: str) -> Emision:
+def emitir(nombre: str, *, lease) -> Emision:
     """LA SECCIÓN CRÍTICA Y NADA MÁS: leer el pedido, comprobar su estado, emitirlo.
 
     Esto es lo único que va adentro de `solicitud:{pedido}`. Antes iba la
@@ -267,6 +312,16 @@ def emitir(nombre: str) -> Emision:
     No levanta `ERPNextError`: la convierte en `rechazo`. El llamador tiene el
     lock tomado y no puede permitirse un `except` propio, que sería la misma
     política escrita dos veces y en el peor lugar para que discrepen.
+
+    `lease` ES OBLIGATORIO, y es el lease de ese lock (`app/locks.py`). Las
+    cuatro llamadas a ERPNext de acá abajo tienen `timeout` de 20 y 30 s contra
+    un lease de 60 que nadie renueva: puede vencerse a mitad de camino, y lo que
+    pasa entonces no es que la confirmación falle, es que el pedido se queda sin
+    exclusión mutua mientras el Submit sigue en vuelo. Por eso se pregunta
+    `sigue_mio()` JUSTO ANTES de emitir, y no al entrar: al entrar siempre es
+    que sí. Y por eso es obligatorio y no un parámetro con default — un default
+    convierte «se olvidaron de pasarlo» en «corrió sin la comprobación», en
+    silencio y sobre el único Submit del sistema.
     """
     try:
         actual = _leer_doc("Sales Order", nombre)
@@ -293,6 +348,24 @@ def emitir(nombre: str) -> Emision:
                 ),
             })
         if not ya_estaba:
+            # ¿SIGO TENIENDO EL LOCK? Entre la lectura de arriba y esta línea
+            # pasaron hasta tres llamadas a ERPNext. Si el lease se venció,
+            # `solicitudes.crear` ya pudo tomar la llave libre y abrirle una
+            # solicitud a este borrador: emitir igual es exactamente la carrera
+            # que `decisiones.confirmar` existe para cerrar, reabierta por el
+            # reloj. No se emite, y el pedido queda como estaba —borrador— así
+            # que el encargado vuelve a tocar Confirmar y esta vez entra con el
+            # lease entero.
+            if not lease.sigue_mio():
+                print(f"[approval] {nombre}: perdí el lease antes de emitir, no emito")
+                return Emision(nombre, actual, rechazo={
+                    "ok": False,
+                    "aviso_cliente": False,
+                    "detalle": (
+                        f"No pude confirmar {nombre} ahora mismo y no cambié "
+                        "nada. Probá de nuevo en un momento."
+                    ),
+                })
             try:
                 erpnext.submit_doc("Sales Order", nombre)
             except erpnext.ERPNextError:
@@ -436,7 +509,20 @@ def confirmar_pedido(nombre: str, por: str, *, canal: str) -> dict:
     Devuelve {"ok", "aviso_cliente", "detalle"} — `detalle` es lo que se le
     muestra al encargado.
     """
-    emision = emitir(nombre)
+    # El lock lo toma ACÁ, y no lo tomaba nadie: esta función compone las dos
+    # mitades "para el que NO tiene el lock tomado", y emitía sin ninguno.
+    # `anunciar` queda AFUERA —le habla a una persona, y el teléfono de nadie va
+    # adentro de un lock, que es la regla que este repo ya escribió tres veces—.
+    # El lease sale de `decisiones` y no de un número escrito acá: es el MISMO
+    # lock y la misma sección crítica, y dos duraciones para lo mismo son dos
+    # que se pueden separar.
+    from app.decisiones import LEASE_EMISION
+    from app.locks import distributed_lock
+
+    with distributed_lock(
+        f"solicitud:{nombre}", lease_seconds=LEASE_EMISION, wait_seconds=10
+    ) as lease:
+        emision = emitir(nombre, lease=lease)
     if emision.rechazo is not None:
         return emision.rechazo
     return anunciar(emision, por, canal=canal)

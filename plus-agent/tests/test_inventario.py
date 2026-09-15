@@ -189,6 +189,50 @@ def test_the_master_switch_still_turns_everything_off(
     assert "no confiable" in motivo
 
 
+def test_ignoring_the_posture_skips_the_switch_and_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """La pregunta del modo sombra: «¿pasaría, si el interruptor estuviera puesto?»
+
+    Sin esto el modo sombra no podía contestar NADA. `policy._evaluar` aparta la
+    postura y sigue de largo poniendo `inventario_habilitado = True`, pero
+    después preguntaba acá — y acá se volvía a mirar `maestra_encendida()`. Con
+    `STOCK_CONFIABLE=false` todos los productos volvían "no confiable", así que
+    el informe decía «0 pedidos habrían pasado» pasara lo que pasara: el dueño
+    lo prendía una semana y no se enteraba de nada.
+
+    Las DOS mitades, y la segunda es la que impide que el arreglo se pase de
+    largo: saltea EL INTERRUPTOR y **nada más**. La antigüedad del conteo sigue
+    valiendo, porque un conteo de hace tres semanas no es un dato sobre hoy ni
+    aunque se ignore la postura. Un `ignorar_postura` que devolviera True a secas
+    cumpliría la primera mitad y haría que el informe prometiera stock que nadie
+    contó.
+
+    Mutación dirigida: volver la guarda a `if not maestra_encendida()`. Mata a la
+    primera mitad. Devolver `(True, "")` apenas entra, mata a la segunda.
+    """
+    _conteos(monkeypatch, hace_horas=0.1)
+    monkeypatch.setenv("STOCK_CONFIABLE", "false")
+
+    assert inventario.confiable("LECHE-1L", DEPOSITO)[0] is False
+    assert inventario.confiable("LECHE-1L", DEPOSITO, ignorar_postura=True)[0] is True
+
+
+def test_ignoring_the_posture_does_not_forgive_a_stale_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Un conteo viejo sigue siendo viejo aunque se ignore la postura."""
+    _conteos(monkeypatch, hace_horas=72)
+    monkeypatch.setenv("STOCK_CONFIABLE", "false")
+
+    confiable, motivo = inventario.confiable(
+        "LECHE-1L", DEPOSITO, ignorar_postura=True
+    )
+
+    assert confiable is False
+    assert "72 h" in motivo
+
+
 @pytest.mark.parametrize("horas", ["0", "-5", "muchas", ""])
 def test_a_nonsense_window_authorises_nothing(
     monkeypatch: pytest.MonkeyPatch, horas: str

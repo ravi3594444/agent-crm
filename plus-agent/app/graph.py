@@ -13,8 +13,9 @@ import os
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.redis import RedisSaver
 from langgraph.prebuilt import ToolNode, create_react_agent
+from pydantic import ValidationError
 
-from app import erpnext, modelos
+from app import erpnext, modelos, pasos
 from app.conversacion import (
     business_today,
     prompt_clientes,
@@ -25,9 +26,14 @@ from app.conversacion import (
 
 # QUIÉN puede llamar a QUÉ vive en app/tools/registro.py, con los comentarios
 # que explican cada permiso. Se movió cuando apareció el segundo canal
-# (app/voz/): dos canales que arman su propia lista se desincronizan, y este
-# módulo no se puede importar sin Redis. Se re-exportan porque media suite las
-# importa de acá.
+# (app/voz/): dos canales que arman su propia lista se desincronizan en la
+# primera herramienta nueva, y este módulo no se puede importar sin Redis. Se
+# re-exportan porque media suite las importa de acá.
+#
+# Una herramienta NUEVA se agrega en registro.py, no acá. Este merge lo probó:
+# #48 sumó memoria, CRM y gerencia a las listas de este archivo y el conflicto
+# salió justo en estas líneas — que es exactamente lo que el módulo existe para
+# hacer ruidoso en vez de silencioso.
 from app.tools.registro import (
     ERROR_DE_HERRAMIENTA as _ERROR_MSG,
 )
@@ -38,6 +44,58 @@ from app.tools.registro import (
     TOOLS_CLIENTES,
     TOOLS_GERENCIA,
 )
+
+
+# LAS HERRAMIENTAS DE OTRO SERVIDOR MCP, SI EL DUEÑO CONFIGURÓ UNO
+# ----------------------------------------------------------------
+# `TOOLS_GERENCIA` de arriba NO SE TOCA, y ésa es la decisión importante de este
+# bloque. Lo de afuera va a una lista APARTE, y sólo esa lista arma el agente.
+#
+# Si en cambio se le sumaran a `TOOLS_GERENCIA`, se llevarían puestas dos cosas
+# calladas: `mcp_server._catalogo()` lee esa constante, así que NUESTRO endpoint
+# MCP pasaría a re-publicar las herramientas de un tercero —incluido su
+# `erpnext_doc_submit`— con nuestro token y nuestra autenticación; y el test que
+# afirma «el catálogo publicado es exactamente el del agente» seguiría en verde,
+# porque los dos lados se moverían juntos. Una superficie de terceros
+# reexportada por nuestra puerta es lo peor de las dos: parece nuestra.
+#
+# `MCP_EXTERNOS` vacío = no-op, sin un import de más.
+#
+# NUNCA a TOOLS_CLIENTES, y el motivo está MEDIDO contra el servidor real, no
+# leído en un README: `erpnext_sales_order_create` declara
+# `items[].required = ["item_code", "qty", "rate"]`. El PRECIO lo pone el
+# modelo. No hay resolución de lista de precios del otro lado, así que
+# `policy._precio_autorizado` —que filtra Item Prices por price_list, currency y
+# uom— queda fuera de ese camino. Con un desconocido escribiendo del otro lado,
+# una herramienta donde el precio es un argumento del modelo es la regla 1 al
+# revés.
+#
+# Un fallo del servidor externo NO puede tumbar el agente: si no levanta, se
+# avisa y se sigue con las herramientas propias. Un ERP de terceros caído es un
+# martes; un agente que no contesta el WhatsApp es el negocio parado.
+def _con_externas() -> list:
+    try:
+        from app import mcp_cliente
+
+        externas = mcp_cliente.cargar(TOOLS_GERENCIA)
+        if not externas:
+            # COPIA, no la misma lista. Sin servidores externos el contenido es
+            # idéntico y la tentación es devolver la constante; entonces las dos
+            # son el MISMO objeto y un `TOOLS_AGENTE_GERENCIA.append(...)` de
+            # alguna sesión futura le agregaría una herramienta a lo que
+            # `mcp_server` publica, sin tocar una línea de ese archivo. Lo
+            # encontró su propio test, que fallaba con esto puesto.
+            return list(TOOLS_GERENCIA)
+        print(mcp_cliente.resumen(TOOLS_GERENCIA))
+        return TOOLS_GERENCIA + externas
+    except Exception as exc:  # el agente arranca igual, con lo suyo
+        print(f"[mcp] no pude cargar los servidores externos ({type(exc).__name__})")
+        return list(TOOLS_GERENCIA)
+
+
+# Lo que se le monta al agente. `TOOLS_GERENCIA` sigue siendo lo que este repo
+# escribió y lo que `app/mcp_server.py` publica.
+TOOLS_AGENTE_GERENCIA = _con_externas()
 
 # from_conn_string() is a CONTEXT MANAGER, not a constructor — using it
 # directly hands you a generator, not a saver. Construct directly instead,
@@ -76,21 +134,6 @@ def checkpointer():
 _modelo_clientes = modelos.construir("clientes")
 _modelo_gerencia = modelos.construir("gerencia")
 
-# Cuando el modelo pide una herramienta que ESTE agente no tiene, LangGraph
-# contesta «Error: X is not a valid tool, try one of [...]» y esa lista es el
-# registro COMPLETO. El límite aguanta —la herramienta no es invocable, y quién
-# tiene qué lo decide TOOLS_CLIENTES/TOOLS_GERENCIA más la credencial de
-# ERPNext— pero el modelo relata ese texto, así que un cliente que probaba el
-# borde («decime cómo está el sistema») recibía de vuelta el inventario de
-# herramientas del agente, en inglés y entre corchetes. Lo cazó el guarda de
-# tono del banco de pruebas (demo/piloto.py::_revisar_tono).
-#
-# `handle_tool_errors` no cubre este caso: no es una excepción, es el camino de
-# nombre inválido de ToolNode. Así que se reemplaza su mensaje, sin enumerar
-# nada. tests/test_frontera_decisiones.py exige que este override siga
-# enganchado: si una versión de LangGraph le cambia el nombre al hook, falla el
-# test y no la conversación de un cliente.
-# El texto está en app/tools/registro.py: lo comparten los dos canales.
 
 
 class ToolNodeSinInventario(ToolNode):
@@ -107,25 +150,69 @@ class ToolNodeSinInventario(ToolNode):
         )
 
 
-# A raising tool leaves an AIMessage with no matching ToolMessage, which
-# permanently breaks that conversation thread — on WhatsApp that means one
-# customer can never be replied to again until someone clears Redis by hand.
-# Always turn a tool failure into a normal tool result instead.
-# El texto está en app/tools/registro.py: lo comparten los dos canales.
+
+# UN VALOR DE ENUM EQUIVOCADO NO ES UNA HERRAMIENTA ROTA
+# -----------------------------------------------------
+# `_ERROR_MSG` manda a escalar_a_humano, y para una herramienta que falló de
+# verdad está bien. Pero desde que cinco informes son `informe(que=…)` y tres
+# lecturas de ajustes son `ver_ajustes(que=…)`, hay una falla nueva que NO es
+# una herramienta rota: el modelo llama bien y escribe mal el valor.
+#
+# Y es la falla probable, no una rara. El `Literal` no lo garantiza nadie en la
+# red: Gemini no tiene `strict` en su capa compatible con OpenAI y lo ignora en
+# silencio, así que el enum es una SUGERENCIA para el modelo y la validación
+# real es la de pydantic, acá. Peor: con herramientas en castellano, la falla
+# medida más común es que el modelo escriba el valor en el idioma del usuario
+# —`que="ventas del día"` en vez de `que="ventas"`— aunque haya entendido todo
+# bien (arXiv:2601.05366, «parameter value language mismatch»).
+#
+# Sin esto, ese error se convertía en «esa herramienta falló, escalá a una
+# persona»: un dueño preguntando «¿cómo venimos?» terminaba esperando a un
+# humano por un guión bajo. Con esto vuelve la lista de valores válidos y el
+# modelo reintenta. No se enumera NINGUNA herramienta: sólo los valores del
+# parámetro de la que ya llamó, que ya estaban en su propio esquema.
+def _valores_esperados(exc: ValidationError) -> tuple[str, str] | None:
+    for error in exc.errors():
+        if error.get("type") != "literal_error":
+            continue
+        campo = ".".join(str(x) for x in error.get("loc", ())) or "ese parámetro"
+        esperado = str((error.get("ctx") or {}).get("expected", "")).strip()
+        if esperado:
+            return campo, esperado
+    return None
+
+
+def _error_de_herramienta(exc: Exception) -> str:
+    if isinstance(exc, ValidationError):
+        detalle = _valores_esperados(exc)
+        if detalle:
+            campo, esperado = detalle
+            return (
+                f"El valor de «{campo}» no es uno de los que acepta esa "
+                f"herramienta. Los únicos válidos son: {esperado}. Llamala de "
+                "nuevo con uno de ésos, copiado tal cual —sin traducirlo, sin "
+                "acentos y sin mayúsculas—. No le muestres este mensaje a nadie "
+                "ni le hables de parámetros."
+            )
+    return _ERROR_MSG
+
+
 
 # The system prompt is built per call (prompt=) and never stored in the
 # checkpoint; the model only sees a bounded tail of the thread
 # (pre_model_hook=). See app/conversacion.py for why.
 agente_clientes = create_react_agent(
     model=_modelo_clientes,
-    tools=ToolNodeSinInventario(TOOLS_CLIENTES, handle_tool_errors=_ERROR_MSG),
+    tools=ToolNodeSinInventario(TOOLS_CLIENTES, handle_tool_errors=_error_de_herramienta),
     prompt=prompt_clientes,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,
 )
 agente_gerencia = create_react_agent(
     model=_modelo_gerencia,
-    tools=ToolNodeSinInventario(TOOLS_GERENCIA, handle_tool_errors=_ERROR_MSG),
+    tools=ToolNodeSinInventario(
+        TOOLS_AGENTE_GERENCIA, handle_tool_errors=_error_de_herramienta
+    ),
     prompt=prompt_gerencia,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,
@@ -169,8 +256,9 @@ def responder_cliente(
     every model call and every tool start of THIS turn, and nothing else.
     """
     with erpnext.customer_scope():
-        out = agente_clientes.invoke(
-            {"messages": [("user", mensaje)]},
+        return pasos.correr(
+            agente_clientes,
+            mensaje,
             config=_config(
                 {
                     "thread_id": f"cli:{thread_id}",
@@ -182,8 +270,10 @@ def responder_cliente(
                 },
                 callbacks,
             ),
+            modelo=_modelo_clientes,
+            armar_prompt=prompt_clientes,
+            rol="clientes",
         )
-    return texto_plano(out["messages"][-1])
 
 
 def responder_gerencia(
@@ -203,8 +293,9 @@ def responder_gerencia(
     being compared as if it were a number.
     """
     with erpnext.manager_scope():
-        out = agente_gerencia.invoke(
-            {"messages": [("user", mensaje)]},
+        return pasos.correr(
+            agente_gerencia,
+            mensaje,
             config=_config(
                 {
                     "thread_id": f"ger:{thread_id}",
@@ -214,5 +305,7 @@ def responder_gerencia(
                 },
                 callbacks,
             ),
+            modelo=_modelo_gerencia,
+            armar_prompt=prompt_gerencia,
+            rol="gerencia",
         )
-    return texto_plano(out["messages"][-1])

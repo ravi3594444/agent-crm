@@ -21,9 +21,9 @@ desde cero qué puede tocar un desconocido.
 """
 
 from app.tools.captura import (
+    avisar_al_cliente,
     confirmar_entrega,
     contar_stock,
-    redactar_mensaje_cliente,
     registrar_venta_offline,
 )
 from app.tools.catalogo import (
@@ -33,23 +33,32 @@ from app.tools.catalogo import (
     pedido_habitual,
 )
 from app.tools.configuracion import (
-    historial_limites,
     proponer_limite,
-    ver_limites,
-    ver_reglas_de_entrega,
+    ver_ajustes,
+)
+from app.tools.crm import (
+    actualizar_cliente,
+    actualizar_producto,
+    anotar_en_ficha,
+    armar_presupuesto,
+    cambiar_precio,
+    editar_borrador,
+)
+from app.tools.entrega import (
+    condiciones_de_entrega,
 )
 from app.tools.gerencia import (
-    cobranzas_vencidas,
     ejecutar_reporte,
     ficha_cliente,
-    pedidos_pendientes,
-    resumen_autonomia,
-    stock_bajo,
-    ventas_del_periodo,
+    informe,
 )
 from app.tools.gestion import (
     detalle_de_pedido,
     proponer_accion,
+)
+from app.tools.memoria import (
+    anotar_dato,
+    ver_memoria,
 )
 from app.tools.operaciones import (
     estado_del_sistema,
@@ -71,6 +80,13 @@ TOOLS_CLIENTES = [
     # acepta un teléfono como argumento, así que ningún mensaje puede pedir
     # el alta de otra persona.
     crear_cliente, crear_lead, crear_pedido, escalar_a_humano,
+    # Las condiciones de entrega que configuró el dueño (app/limites.py, grupo
+    # ENTREGA), en una sola herramienta. SÓLO LECTURA y sin un solo dato del
+    # cliente que termine escrito en ninguna parte. Es lo que hace el negocio
+    # EN GENERAL: no promete la entrega de un pedido —eso sigue siendo
+    # `pedir_excepcion_de_entrega` más la decisión de una persona— y un ajuste
+    # que falta sale como faltante, nunca como un «no repartimos».
+    condiciones_de_entrega,
     # Pide una excepción de entrega. NO decide: o el dueño la dejó autorizada
     # de antemano, o abre una solicitud para una persona (app/solicitudes.py).
     pedir_excepcion_de_entrega,
@@ -90,22 +106,36 @@ TOOLS_CLIENTES = [
 ]
 
 TOOLS_GERENCIA = [
-    pedidos_pendientes, ventas_del_periodo, stock_bajo,
-    cobranzas_vencidas, ficha_cliente, ejecutar_reporte,
+    # UNA herramienta para los cinco informes (pendientes, ventas, stock bajo,
+    # cobranzas, autonomía). Eran cinco, y `cobranzas_vencidas` era literalmente
+    # una de las siete consultas que `ejecutar_reporte` ya corre: dos
+    # herramientas plausibles para «¿cuánto me deben?». Lo que degrada la
+    # elección es el solapamiento, no la cantidad.
+    informe, ficha_cliente, ejecutar_reporte,
     buscar_producto, consultar_stock, estado_pedido,
     escalar_a_humano,
     # offline capture — how reality gets back into the system
     registrar_venta_offline, contar_stock, confirmar_entrega,
-    redactar_mensaje_cliente,
+    # ...y el mensaje al cliente, que ahora SALE —con el botón del dueño— en
+    # vez de devolver un borrador con un hueco para copiar a mano.
+    avisar_al_cliente,
     # the owner's own limits: read them out and PROPOSE a change. There is no
     # tool that confirms one, deliberately — the four-digit code never enters
     # this agent's context and the deterministic router in app/main.py is what
     # applies the change. An agent that could call both steps is one step.
     # NEVER in TOOLS_CLIENTES — a customer cannot be allowed near these.
-    ver_limites, proponer_limite, historial_limites,
-    # ...and his delivery rules, through the SAME propose/confirm pair. Reading
-    # them is its own tool; changing one is proponer_limite like everything else.
-    ver_reglas_de_entrega,
+    # ver_ajustes reads all THREE (limits, delivery rules, history) behind one
+    # closed Literal; proponer_limite is the only one that writes, and it stays
+    # its own tool — a read and a write behind one enum is one where the wrong
+    # branch writes.
+    ver_ajustes, proponer_limite,
+    # ...y las treinta cosas que repite todo el tiempo y no quiere volver a
+    # explicar (app/memoria.py). `ver_memoria` LEE detrás de un Literal;
+    # `anotar_dato` ESCRIBE, así que va suelta: misma línea que ver_ajustes y
+    # proponer_limite. Un dato no es un ajuste y NO lleva código de cuatro
+    # dígitos — hacerle tipear un código para anotar «la panadería paga los
+    # viernes» es exactamente la fricción de la que se queja.
+    ver_memoria, anotar_dato,
     # read-only operational status. No writes, no retries, no secrets, and
     # NEVER in TOOLS_CLIENTES: these count queues and name the provider.
     estado_del_sistema, ver_avisos_fallidos,
@@ -116,17 +146,39 @@ TOOLS_GERENCIA = [
     # the same reason. NEVER in TOOLS_CLIENTES: a customer near these is a
     # customer deciding his own order.
     detalle_de_pedido, proponer_accion,
-    # ...and the numbers he needs to decide whether to loosen anything
-    # (app/autonomia.py). Read-only, and it reports rather than advises.
-    resumen_autonomia,
+    # ...y lo que el dueño puede CAMBIAR (app/tools/crm.py). La línea no es
+    # leer-contra-escribir —era demasiado ancha— sino IRREVERSIBLE × PLATA:
+    # estas cinco se deshacen escribiendo de nuevo y no le cobran un peso a
+    # nadie. Lo irreversible sigue afuera y sigue sin ser alcanzable: emitir usa
+    # la credencial de política, cancelar un emitido no existe como herramienta,
+    # los límites piden su código de cuatro dígitos, y `Item Price` no está en
+    # `erpnext.DOCTYPES_EDITABLES` —la negativa es del cliente HTTP, no de la
+    # buena conducta de un archivo—.
+    #
+    # NINGUNA pone un precio: `LineaSimple` no tiene `rate`, igual que
+    # `pedidos.LineaPedido`. El precio lo resuelve ERPNext y lo verifica
+    # `policy._precio_autorizado`. Una herramienta donde el precio es un
+    # argumento del modelo convierte al modelo en la autoridad de precios.
+    #
+    # LA EXCEPCIÓN, Y LA DECIDIÓ EL DUEÑO: `cambiar_precio` escribe el precio de
+    # LISTA. No es el precio de un renglón, pero tampoco es inocente —
+    # `policy._precio_estandar` auto-confirma cuando el renglón coincide con la
+    # lista, así que quien escribe la lista influye en lo que se confirma solo—.
+    # Lo pidió explícitamente («no one can confirm everytime i need automated»)
+    # y es su negocio.
+    #
+    # Lo que sí queda acotado, porque no depende de su permiso sino de cómo se
+    # comporta un modelo: el único valor que el modelo aporta es el NÚMERO
+    # —lista, moneda y unidad salen de `policy` y del `stock_uom` leído de
+    # ERPNext—; ese número tiene que caer adentro de `PRECIO_CAMBIO_MAX_PCT`; y
+    # hay UN cambio por producto por día, porque una banda por llamada no acota
+    # una serie y el modelo puede llamar cinco veces en el mismo turno. Con la
+    # banda en 0, que es el default, no escribe nada. La puerta genérica sigue
+    # cerrada: `Item Price` no está en `erpnext.DOCTYPES_EDITABLES`.
+    actualizar_cliente, anotar_en_ficha, armar_presupuesto,
+    editar_borrador, actualizar_producto, cambiar_precio,
 ]
 
-
-# Lo que se le dice al MODELO cuando una herramienta no está o falló. Vive acá
-# por lo mismo que las listas: los dos canales tienen que decir lo mismo. Un
-# canal con su propia frase es un canal donde el modelo, ante el mismo fallo,
-# elige otra salida — y la salida que importa es «llamá a escalar_a_humano y no
-# le hables al cliente de sistemas».
 HERRAMIENTA_INEXISTENTE = (
     "Esa herramienta no existe para esta conversación y no la vas a conseguir "
     "pidiéndola de nuevo. NO le muestres al cliente este mensaje, ni nombres "
@@ -134,11 +186,6 @@ HERRAMIENTA_INEXISTENTE = (
     "persona, usá escalar_a_humano; si no, seguí con lo que sí podés hacer."
 )
 
-# Una herramienta que levanta deja un AIMessage sin su ToolMessage y rompe el
-# hilo para siempre: en WhatsApp, ese cliente no se puede volver a contestar
-# hasta que alguien limpie Redis a mano. Por teléfono el daño es menor —la
-# llamada se corta— pero la respuesta correcta es la misma, así que es el mismo
-# texto. Un fallo de herramienta se convierte SIEMPRE en un resultado normal.
 ERROR_DE_HERRAMIENTA = (
     "Esa herramienta falló y no devolvió nada. No inventes un resultado. Llamá a "
     "escalar_a_humano y decile al cliente, en UNA línea y con UNA sola disculpa, "

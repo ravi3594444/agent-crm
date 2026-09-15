@@ -215,6 +215,185 @@ def create_doc(doctype: str, payload: dict) -> dict:
     return data
 
 
+# LOS ÚNICOS DOCTYPES QUE ESTE PROCESO PUEDE MODIFICAR
+# ----------------------------------------------------
+# `update_doc` es genérico —un PUT a `/api/resource/{doctype}/{name}`— y un
+# genérico sin lista es la forma exacta del agujero: el servidor MCP de ERPNext
+# de terceros que se evaluó en `docs/MCP.md` expone `doc_update` sobre CUALQUIER
+# doctype, así que una herramienta pensada para corregir la dirección de un
+# cliente alcanza también un `Item Price`.
+#
+# ITEM PRICE NO ESTÁ ACÁ, y es la ausencia más importante de la lista: un precio
+# gobierna en silencio lo que se auto-confirma (`policy._precio_autorizado`
+# filtra por price_list, currency Y uom), así que escribir uno mal no da error en
+# ninguna parte — deja de confirmarse solo y nadie sabe por qué. Tampoco están
+# `Sales Invoice` ni `Delivery Note`: eso es plata que ya salió.
+#
+# La lista es del CLIENTE y no de las herramientas a propósito. Que ninguna
+# herramienta llame a un doctype prohibido es una propiedad de la lista de
+# herramientas de hoy; que el cliente se niegue es una propiedad del proceso.
+DOCTYPES_EDITABLES = frozenset({
+    "Customer", "Address", "Contact", "Item", "Item Reorder",
+    "Quotation", "Sales Order", "ToDo",
+})
+
+# Campos que no se tocan AUNQUE su doctype sea editable.
+#
+# `Customer.mobile_no` es la IDENTIDAD del cliente en este sistema: es como
+# `clientes.buscar_por_telefono` decide de quién es un mensaje entrante, o sea
+# cómo el webhook sabe a qué cuenta atribuir un pedido. Cambiarlo deja los
+# mensajes del número viejo sin dueño — deja a una persona sin poder escribir—,
+# y eso no es reversible en el sentido que importa aunque el campo se pueda
+# reescribir.
+#
+# `actualizar_cliente` ya no lo publica como parámetro, y no alcanza: eso es una
+# propiedad de la firma de UNA herramienta de hoy. Esto es una propiedad del
+# proceso, y sigue valiendo para la herramienta que alguien escriba mañana.
+CAMPOS_PROHIBIDOS: dict[str, frozenset[str]] = {
+    "Customer": frozenset({"mobile_no"}),
+}
+
+
+def update_doc(doctype: str, name: str, payload: dict) -> dict:
+    """Modifica un documento existente. NUNCA emite ni cancela.
+
+    DOS GUARDAS, y las dos son estructurales:
+
+    1. El doctype tiene que estar en `DOCTYPES_EDITABLES`.
+    2. `docstatus` se BORRA del payload. Es el campo que lleva un documento de
+       borrador (0) a emitido (1) o a cancelado (2), así que un PUT que lo
+       acepte es un submit con otro nombre — y es exactamente cómo se cuela en
+       los clientes que reenvían el cuerpo del llamador tal cual. Emitir sigue
+       siendo `submit_doc`, con la credencial de política, que ninguna
+       herramienta alcanza.
+    """
+    if doctype not in DOCTYPES_EDITABLES:
+        raise ERPNextError(f"No se puede modificar {doctype} desde acá")
+    prohibidos = CAMPOS_PROHIBIDOS.get(doctype, frozenset())
+    tocados = prohibidos & set(payload or {})
+    if tocados:
+        raise ERPNextError(
+            f"No se puede modificar {doctype}.{sorted(tocados)[0]} desde acá"
+        )
+    cuerpo = {k: v for k, v in (payload or {}).items() if k != "docstatus"}
+    if not cuerpo:
+        raise ERPNextError(f"No hay nada que cambiar en {doctype}")
+    body = _request(
+        _active_client(),
+        "PUT",
+        _resource_path(doctype, name),
+        operation=f"la modificación de {doctype}",
+        json=cuerpo,
+    )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError(f"ERPNext devolvió datos inválidos al modificar {doctype}")
+    return data
+
+
+def escribir_precio_de_lista(
+    *,
+    item_code: str,
+    price_list: str,
+    currency: str,
+    uom: str,
+    rate: float,
+) -> dict:
+    """Escribe UN Item Price de venta. La puerta angosta, no la genérica.
+
+    POR QUÉ ESTO EXISTE EN VEZ DE AGREGAR «Item Price» A `DOCTYPES_EDITABLES`
+    ------------------------------------------------------------------------
+    Esa lista es del CLIENTE y no de las herramientas a propósito, y el
+    comentario de arriba dice por qué Item Price es la ausencia más importante:
+    `update_doc` es un PUT genérico, así que abrirlo ahí se lo abre también a
+    `actualizar_registro` de app/tools/crm.py y a cualquier herramienta que
+    alguien escriba mañana. Esta función deja esa puerta cerrada y abre una del
+    ancho exacto de un precio.
+
+    LOS TRES CAMPOS QUE ROMPEN EN SILENCIO SON ARGUMENTOS OBLIGATORIOS
+    -----------------------------------------------------------------
+    `policy._precio_estandar` filtra los Item Price por `price_list`, `currency`
+    Y `uom`, y `continue`a por encima de cualquiera al que le falte uno: un
+    precio escrito sin los tres no da error en ninguna parte, simplemente deja
+    de auto-confirmarse y nadie sabe por qué. CLAUDE.md lo tiene anotado como un
+    problema que apareció DOS veces, las dos de costado mientras se arreglaba
+    otra cosa. Acá los tres son `keyword-only` y sin default, así que el llamador
+    que se olvide de uno no escribe un precio inerte: no compila la llamada.
+
+    `selling` va en 1 fijo y no es un parámetro: un Item Price de COMPRA con
+    esta forma no lo mira nadie, y ofrecerlo como opción sólo agrega una manera
+    de escribir algo que no hace nada.
+
+    No emite ni cancela: un Item Price no tiene ciclo de emisión. `docstatus` no
+    viaja nunca, igual que en `update_doc`.
+    """
+    codigo = str(item_code or "").strip()
+    lista = str(price_list or "").strip()
+    moneda = str(currency or "").strip()
+    unidad = str(uom or "").strip()
+    if not codigo or not lista or not moneda or not unidad:
+        raise ERPNextError(
+            "un precio sin producto, lista, moneda y unidad no se puede escribir"
+        )
+    try:
+        valor = float(rate)
+    except (TypeError, ValueError) as exc:
+        raise ERPNextError("ese precio no es un número") from exc
+    if valor <= 0:
+        raise ERPNextError("un precio tiene que ser mayor que cero")
+
+    cuerpo = {
+        "item_code": codigo,
+        "price_list": lista,
+        "currency": moneda,
+        "uom": unidad,
+        "selling": 1,
+        "price_list_rate": valor,
+    }
+    # Uno solo por (producto, lista, moneda, unidad). Si ya hay, se corrige ese
+    # — crear otro dejaría DOS filas que compiten y `_precio_estandar` recorre
+    # hasta cien: cuál gana dependería del orden en que ERPNext los devuelva.
+    existentes = get_list(
+        "Item Price",
+        filters=[
+            ["item_code", "=", codigo],
+            ["price_list", "=", lista],
+            ["currency", "=", moneda],
+            ["uom", "=", unidad],
+            ["selling", "=", 1],
+        ],
+        fields=["name"],
+        limit=2,
+    )
+    nombres = [str(f.get("name") or "").strip() for f in existentes]
+    nombres = [n for n in nombres if n]
+    if len(nombres) > 1:
+        raise ERPNextError(
+            f"{codigo} tiene más de un precio para esa lista y unidad; "
+            "eso se corrige a mano antes de tocarlo desde acá"
+        )
+    if nombres:
+        body = _request(
+            _active_client(),
+            "PUT",
+            _resource_path("Item Price", nombres[0]),
+            operation="la modificación de Item Price",
+            json={k: v for k, v in cuerpo.items() if k != "docstatus"},
+        )
+    else:
+        body = _request(
+            _active_client(),
+            "POST",
+            _resource_path("Item Price"),
+            operation="la creación de Item Price",
+            json=cuerpo,
+        )
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise ERPNextError("ERPNext devolvió datos inválidos al escribir el precio")
+    return data
+
+
 def add_comment(doctype: str, name: str, text: str) -> None:
     """Best-effort audit note; it never changes the known order outcome."""
     try:

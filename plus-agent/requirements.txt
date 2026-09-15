@@ -34,3 +34,16 @@ python-dotenv==1.2.3
 # LLAMADA y no deja estado en el proceso, así que no hay `setlocale` global que
 # se pise entre los hilos de barrido. Es la razón por la que se puede usar acá.
 babel==2.18.0
+
+# `MCP_EXTERNOS` (app/mcp_cliente.py) NO agrega una dependencia, y eso fue una
+# decisión y no una suerte. El primer intento usaba `langchain-mcp-adapters`
+# sobre el SDK `mcp` 1.30.0 —12 paquetes— y NO CONECTABA: el modo HTTP de
+# `@casys/mcp-erpnext` 3.0.4 exige el protocolo 2026-07-28 y le contesta 400 a
+# esa versión del SDK, que habla 2025-06-18. Hablar el protocolo directo con el
+# `httpx` que ya estaba es menos código y menos imagen.
+#
+# LO QUE SE MIDIÓ, dicho con precisión: el `httpx` directo es el único camino
+# que PROBAMOS contra Casys 3.0.4, y anda; el 400 lo medimos con el SDK 1.30.0.
+# No decimos que no haya otro: la v2 del SDK soporta 2026-07-28 y no la
+# evaluamos —cambiar a ella sería volver a traer los 12 paquetes, así que haría
+# falta una razón, no sólo que sea posible—.

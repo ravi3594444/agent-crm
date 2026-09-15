@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 
 from app import idioma
-from app.conversacion import business_today, identidad
+from app.conversacion import _bloque_de_memoria_clientes, business_today, identidad
 from app.prompts import SYSTEM_ES_AR
 
 # Lo que cambia por ser una llamada y no un chat. Va DESPUÉS de las reglas, y
@@ -162,6 +162,18 @@ def construir(*, customer_code: str = "", telefono: str = "") -> str:
         HORARIO=os.getenv("HORARIO_ATENCION", "lunes a viernes de 8 a 17"),
         HOY=business_today(),
         IDIOMA_REGLA=idioma.regla_prompt(idioma.cliente_guardado(telefono)),
+        # LA MEMORIA SALE DEL MISMO LUGAR QUE EN WHATSAPP, y ése es el punto.
+        # `_bloque_de_memoria_clientes` respeta `MEMORIA_PARA_CLIENTES`, que es
+        # el interruptor de privacidad del dueño: apagarlo tiene que apagar los
+        # DOS canales, y una llamada que igual le cuenta al cliente lo que el
+        # chat ya no le cuenta es la deriva que este módulo existe para no
+        # tener. Por eso se importa el privado en vez de copiar el bloque.
+        #
+        # `SYSTEM_ES_AR.format()` pide TODAS sus llaves: cuando #48 agregó
+        # `{MEMORIA}` al texto, este `format` se rompió con `KeyError` sin que
+        # ninguna de las dos ramas estuviera en rojo por su cuenta. Lo cazó la
+        # corrida de la suma contra el baseline de `main`, no CI.
+        MEMORIA=_bloque_de_memoria_clientes(),
     )
     return system + BLOQUE_VOZ
 

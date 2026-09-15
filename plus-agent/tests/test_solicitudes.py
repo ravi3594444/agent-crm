@@ -29,6 +29,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from fakes import LeaseDoble
+
 from app import (
     aprobacion,
     avisos,
@@ -195,12 +197,21 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
         return dict(estado["so"])
 
     monkeypatch.setattr(erpnext, "policy_aplicar_terminos", policy_aplicar_terminos)
-    monkeypatch.setattr(
-        erpnext,
-        "policy_agregar_cargo",
-        lambda name, cuenta, desc, importe: estado["cargos"].append((cuenta, importe))
-        or dict(estado["so"]),
-    )
+    def agregar_cargo(name, cuenta, desc, importe):
+        """El cargo SUBE el `grand_total`, como lo hace ERPNext.
+
+        Devolvía el pedido sin tocar, así que el doble no podía discreparle al
+        código sobre el defecto real de este camino: los límites del dueño
+        mirando un total al que todavía no se le sumó el cargo de la excepción,
+        y dejando pasar un pedido que con el cargo se va por encima del tope.
+        """
+        estado["cargos"].append((cuenta, importe))
+        estado["so"]["grand_total"] = float(
+            estado["so"].get("grand_total") or 0
+        ) + float(importe or 0)
+        return dict(estado["so"])
+
+    monkeypatch.setattr(erpnext, "policy_agregar_cargo", agregar_cargo)
 
     def submit_doc(dt, name):
         estado["submits"].append(name)
@@ -215,10 +226,41 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
         or {"name": f"TD-{len(estado['todos'])}"},
     )
 
+    # EL LEASE VIVE EN `estado`, y no se arma uno nuevo por llamada: así un
+    # test puede vencerlo (`mundo["lease"].vigente = False`) y ver qué hace el
+    # camino de aceptación cuando el lock dejó de ser suyo a mitad de camino.
+    # Con un `LeaseDoble()` anónimo adentro del `yield` ese caso no era
+    # alcanzable desde ningún test.
+    estado["lease"] = LeaseDoble()
+
     @contextmanager
     def lock(nombre, **kwargs):
         estado["locks"].append(nombre)
-        yield
+        yield estado["lease"]
+
+    # Los límites del dueño, anotados. `revalidar` los consulta cuando NADIE
+    # miró el pedido, así que sin un doble acá todo test de aceptación se caería
+    # con «auto-confirmación desactivada» (el tope arranca en 0). Anota el
+    # pedido que recibió —no un booleano— porque lo que un test necesita
+    # afirmar es QUE SE CONSULTÓ, y sobre cuál.
+    estado["evaluados"] = []
+
+    def evaluar(sales_order, *, entrega_acordada=False):
+        # ANOTA EL DOCUMENTO, no un booleano: los dos defectos que este camino
+        # tuvo eran sobre CUÁL documento llegaba acá —uno sin el cargo de la
+        # excepción sumado al total, y otro con la fecha vieja que la oferta
+        # venía a reemplazar—. Un doble que sólo guardara el nombre no puede
+        # discreparle al código sobre ninguno de los dos.
+        estado["evaluados"].append({
+            "pedido": str(sales_order.get("name") or ""),
+            "total": float(sales_order.get("grand_total") or 0),
+            "fecha": str(sales_order.get("delivery_date") or ""),
+            "entrega_acordada": entrega_acordada,
+        })
+        return estado["decision"]
+
+    estado["decision"] = _policy.Decision(True, [])
+    monkeypatch.setattr(_policy, "evaluar", evaluar)
 
     monkeypatch.setattr("app.locks.distributed_lock", lock)
     monkeypatch.setattr(decisiones, "distributed_lock", lock)
@@ -238,7 +280,13 @@ def mundo(monkeypatch: pytest.MonkeyPatch):
 
     # The order is otherwise confirmable: the stock and price rules pass unless
     # a test says they do not.
-    monkeypatch.setattr("app.inventario.confiable", lambda code, wh: (True, ""))
+    # Acepta `ignorar_postura` porque la función de verdad lo tiene: con la
+    # firma vieja, el día que un test dejara correr `policy.evaluar` de verdad
+    # esto reventaba con TypeError en vez de medir algo.
+    monkeypatch.setattr(
+        "app.inventario.confiable",
+        lambda code, wh, *, ignorar_postura=False: (True, ""),
+    )
     monkeypatch.setattr(
         "app.policy.hay_stock_para", lambda *a, **k: bool(estado["stock"])
     )
@@ -1973,6 +2021,321 @@ def test_the_fallback_confirms_nothing_before_the_customer_answers(
     assert mundo["submits"] == []
     assert mundo["aplicados"] == []
     assert solicitudes.leer(SO).estado == solicitudes.ESPERANDO_CLIENTE
+
+
+def test_the_limits_judge_the_document_the_offer_LEFT_not_the_one_before(
+    mundo, monkeypatch, lunes
+) -> None:
+    """Los límites miran el pedido DESPUÉS de aplicar los términos, y releído.
+
+    `_aplicar_terminos` escribe la fecha acordada Y el cargo de la excepción, y
+    el cargo SUBE el `grand_total`. Comprobar los límites sobre el documento de
+    antes se equivoca en las dos puntas: deja pasar el pedido que entra en el
+    tope sin el cargo y se va por encima con él —el dueño puso un techo y el
+    sistema emitía por arriba—, y además lee la fecha VIEJA, la que la oferta
+    viene a reemplazar, que para cuando el cliente contesta ya suele estar
+    vencida: el sistema rechazaba su propia oferta por «fecha de entrega
+    vencida».
+
+    Acá se mide con la fecha, que es la que este camino cambia siempre (el
+    respaldo ofrece el próximo día de reparto normal, sin cargo). El pedido
+    nace el 2026-09-10 y la oferta es MARTES: si los límites vieran el
+    documento de antes, `fecha` sería la vieja.
+
+    Los dos hallazgos —el mío y el de Qodo— eran el mismo defecto de orden.
+
+    Mutación dirigida: mover la llamada a `limites_del_dueno` arriba de
+    `_aplicar_terminos`. Mata a este test y a ningún otro.
+    """
+    _, solicitud = _respaldo(mundo, monkeypatch)
+
+    solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["evaluados"], "los límites tienen que haberse consultado"
+    assert mundo["aplicados"] == [{"fecha": MARTES, "descuento": None}]
+    assert mundo["evaluados"][0]["fecha"] == MARTES
+    assert mundo["evaluados"][0]["fecha"] == solicitud.ofrecido["fecha"]
+
+
+def test_a_pickup_fallback_can_actually_be_accepted(
+    mundo, monkeypatch, lunes
+) -> None:
+    """Un RETIRO no puede caerse por la zona de una entrega que no existe.
+
+    `excepciones.evaluar_respaldo` ofrece retiro en el local justamente cuando
+    la dirección NO está en zona. Correrle `policy.evaluar` entero a esa
+    aceptación la rechaza SIEMPRE, porque `entrega.autorizada` mira la zona: el
+    sistema ofrece el retiro y después se niega a cumplirlo, y el cliente que
+    contestó «acepto» queda esperando a una persona.
+
+    `entrega_acordada=True` apaga ese bloque y sólo ese: el dónde y el cuándo
+    los fijó la oferta. Se afirma la BANDERA, que es lo único que distingue
+    este arreglo de «no comprobar nada».
+
+    Mutación dirigida: pasar `entrega_acordada=False` en `limites_del_dueno`.
+    Mata a este test y a ningún otro.
+    """
+    _respaldo(mundo, monkeypatch)
+
+    solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["evaluados"], "los límites tienen que haberse consultado"
+    assert mundo["evaluados"][0]["entrega_acordada"] is True
+
+
+def test_a_fallback_nobody_looked_at_still_has_to_pass_the_owners_limits(
+    mundo, monkeypatch, lunes
+) -> None:
+    """El respaldo lo decide una REGLA, no una persona — y una regla no ve la plata.
+
+    Era una emisión automática con TODOS los límites del dueño salteados. La
+    cadena: la solicitud original venció sin que nadie contestara, el sistema
+    ofreció el respaldo que el dueño dejó configurado, el cliente aceptó, y acá
+    se emitía el pedido. `revalidar` comprobaba lo que CAMBIÓ desde la oferta
+    —stock, cantidades, total, descuento, fecha— y nada más: ni el tope, ni la
+    deuda vencida, ni el cliente nuevo, ni la cantidad por producto.
+
+    Lo mismo entraba por la otra puerta automática, la excepción de entrega
+    pre-autorizada: `app/excepciones.py` no importa `policy` ni `limites`, así
+    que lo único que miraba era que la excepción estuviera activa y el mínimo.
+    Un pedido de cualquier monto, de un cliente con cualquier deuda, pedía un
+    sábado y se emitía solo. **Pasaba incluso con `AUTO_CONFIRM_MAX=0`**, que es
+    exactamente el dueño diciendo «ningún pedido se emite sin mí».
+
+    Las DOS mitades: que se consulte —anotado en `evaluados`— y que un rechazo
+    FRENE de verdad. Afirmar sólo lo segundo lo cumpliría un código que nunca
+    emite; afirmar sólo lo primero, uno que consulta y tira la respuesta.
+    """
+    from app import policy
+
+    _respaldo(mundo, monkeypatch)
+    mundo["decision"] = policy.Decision(False, ["tiene $80.000 vencidos"])
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert [e["pedido"] for e in mundo["evaluados"]] == [SO]
+    assert mundo["submits"] == []
+    assert "necesito revisarlo con una persona" in respuesta
+    assert solicitudes.leer(SO).estado == solicitudes.REVISION_HUMANA
+
+
+def test_a_decision_that_lands_DURING_the_checks_stops_the_submit(
+    mundo, monkeypatch, lunes
+) -> None:
+    """Si alguien decide mientras se verifica, el que llegó segundo no emite.
+
+    El estado de la solicitud se mira al ENTRAR al lock. Desde ahí hasta el
+    submit pasan una relectura del pedido, `revalidar`, la escritura de los
+    términos y `policy.evaluar` entero —historial, deuda, stock por renglón,
+    precios— contra un ERPNext con `timeout=30`. Contra un ERPNext lento eso se
+    come el lease de 180 s, y un lease vencido es el pedido sin exclusión mutua
+    mientras esta llamada sigue caminando hacia el submit: otra decisión, un
+    rechazo o un vencimiento pueden tomar la misma llave y cambiar la solicitud
+    debajo.
+
+    No se puede preguntar «¿sigo teniendo el lock?» —`distributed_lock` no lo
+    expone, y eso es una pieza aparte— pero sí se puede mirar si la solicitud
+    cambió. Acá el cambio se simula desde adentro de la comprobación lenta, que
+    es exactamente cuándo ocurriría.
+
+    Hallazgo de Qodo sobre este PR, la mitad que sí entra en su alcance.
+
+    Mutación dirigida: borrar la relectura `de_nuevo = leer(pedido)` y su
+    guarda. Mata a este test y a ningún otro.
+    """
+    from app import policy
+
+    _respaldo(mundo, monkeypatch)
+    original = mundo["decision"]
+
+    def decide_otro(sales_order, *, entrega_acordada=False):
+        # Mientras se verifica, otro camino resuelve la solicitud.
+        solicitudes.registrar(
+            solicitudes.leer(SO), "rechazada", estado=solicitudes.RECHAZADA
+        )
+        return original
+
+    monkeypatch.setattr(policy, "evaluar", decide_otro)
+
+    solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["submits"] == []
+
+
+def test_la_ultima_mirada_antes_de_emitir_no_le_pregunta_a_la_cache(
+    mundo, monkeypatch
+) -> None:
+    """La decisión del otro camino está en ERPNext; la caché puede no tenerla.
+
+    El test de arriba deja las dos copias de acuerdo, porque `registrar`
+    escribe en ERPNext y cachea a continuación. Pero `_cachear` se traga los
+    fallos de Redis —a propósito: una decisión durable no se pierde porque la
+    caché no tome— y la entrada vieja vive 30 días. O sea que el otro camino
+    puede dejar `vencida` escrito en el pedido y `esperando_cliente` en la
+    caché, que es justo la copia a la que `leer` le pregunta primero.
+
+    Acá el barrido toma la llave que este worker perdió con el lease y vence la
+    oferta mientras se escriben los términos: ya soltó la reserva y ya le dijo
+    al cliente que se le pasó. Preguntándole a la caché, esta llamada emite
+    igual —una venta cerrada contra una oferta que ya nadie sostiene, sobre
+    stock que se le devolvió a los demás— y el submit no se deshace. Por eso la
+    última mirada es `leer_durable` y no `leer`.
+
+    Hallazgo de CodeRabbit sobre este PR.
+
+    Mutación dirigida: ponerle la caché adelante a `leer_durable`, las tres
+    líneas de `_desde_cache` que tiene `leer_estricto`. Mata a este test y a
+    ningún otro. Y por el SEGUNDO consumidor de esa misma lectura, una mutación
+    aparte: `_sin_oferta(pedido, solicitud, lengua)` en vez de `de_nuevo` —el
+    cliente vuelve a escuchar «no me quedó nada pendiente» sobre una oferta que
+    venció—. También mata a este test y a ningún otro.
+    """
+    _aprobar_y_esperar(mundo)
+    esperando = solicitudes.leer(SO)
+    redis = outbound_status._client
+    aplicar = erpnext.policy_aplicar_terminos
+    del_barrido: list = []
+    en_cache: list[str] = []
+
+    def aplicar_y_vencer(*args, **kwargs):
+        resultado = aplicar(*args, **kwargs)
+        # El barrido cierra la oferta y su caché NO entra: exactamente lo que
+        # `_cachear` se traga cuando Redis parpadea.
+        redis.caido = True
+        try:
+            del_barrido.append(
+                solicitudes.registrar(
+                    esperando,
+                    "vencida",
+                    estado=solicitudes.VENCIDA,
+                    motivo="sin respuesta; el borrador se cerró",
+                )
+            )
+        finally:
+            redis.caido = False
+        en_cache.append(solicitudes.leer(SO).estado)
+        return resultado
+
+    monkeypatch.setattr(erpnext, "policy_aplicar_terminos", aplicar_y_vencer)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    # Las dos mitades del escenario, o el test no estaría midiendo nada: el
+    # vencimiento quedó durable Y la caché se quedó con la foto vieja.
+    assert del_barrido and del_barrido[0] is not None, "el vencimiento no quedó durable"
+    assert en_cache == [solicitudes.ESPERANDO_CLIENTE], "la caché tenía que quedar vieja"
+    assert mundo["submits"] == []
+    # Y lo que escucha el cliente sale del registro durable, no de la caché:
+    # la oferta venció, no es que «no quedó nada pendiente de su parte».
+    assert respuesta == idioma.t("oferta.cerrada", idioma.ES, pedido=SO)
+
+
+def test_si_la_ultima_lectura_no_contesta_el_cliente_no_escucha_que_no_hay_nada(
+    mundo, monkeypatch
+) -> None:
+    """«No sé» no es «no hay», y lo que sigue a esta lectura es el submit.
+
+    Es el mismo motivo por el que existe `LecturaIncierta` y por el que
+    `decisiones.confirmar` lee con `leer_estricto`, un piso más abajo: la
+    lectura que decide si se emite no puede colapsar un ERPNext que no contesta
+    en «no hay ninguna oferta esperando». Acá ese colapso no llega al submit
+    —cualquiera de las dos respuestas frena— pero sí llega al cliente: le
+    cierra la conversación sobre una oferta que sigue viva, y la próxima vez
+    que escriba «acepto» ya no va a escribir.
+
+    La caché no está (un flush, un reinicio) porque lo que este test mide es
+    qué se contesta cuando la única fuente de verdad no contesta.
+
+    Mutación dirigida: en la rama del `except LecturaIncierta`, devolver
+    `_sin_oferta(pedido, None, lengua)` en vez de `oferta.no_verificable` —o
+    sea, volver a leer «no pude» como «no hay»—. Mata a este test y a ningún
+    otro.
+    """
+    _aprobar_y_esperar(mundo)
+    aplicar = erpnext.policy_aplicar_terminos
+
+    def aplicar_y_caerse(*args, **kwargs):
+        resultado = aplicar(*args, **kwargs)
+        _sin_redis()
+
+        def sin_erpnext(*a, **kw):
+            raise RuntimeError("ERPNext no contesta")
+
+        monkeypatch.setattr(erpnext, "policy_get_list", sin_erpnext)
+        return resultado
+
+    monkeypatch.setattr(erpnext, "policy_aplicar_terminos", aplicar_y_caerse)
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["submits"] == []
+    assert respuesta == idioma.t("oferta.no_verificable", idioma.ES)
+
+
+def test_only_a_PHONE_counts_as_a_person_deciding(mundo, monkeypatch, lunes) -> None:
+    """Quién decidió se mide con un teléfono, no con «no es la constante».
+
+    `DECIDE_EL_SISTEMA` es una frase, y además se IMPRIME: `texto_estado` la
+    muestra y el comentario de cierre la escribe en el pedido. Los registros son
+    append-only y se releen durante meses. Si alguien mejora esa redacción —una
+    tilde, una traducción, sacarle el paréntesis—, todos los registros viejos
+    dejan de coincidir con la constante nueva; un predicado que sólo compare
+    contra ella contesta «la decidió una persona» para todos ellos, y los
+    pedidos vuelven a emitirse salteándose los límites del dueño. Sin ningún
+    test en rojo, porque los tests construyen el registro con la misma
+    constante que el código (CLAUDE.md: una constante a los dos lados del
+    assert mueve las dos mitades juntas).
+
+    Por eso acá el registro se firma con una frase INVENTADA, no con la
+    constante: es lo único que distingue «es un teléfono» de «no es esa frase».
+
+    Mutación dirigida: volver el `return` a `bool(quien) and quien !=
+    DECIDE_EL_SISTEMA`. Mata a este test y a ningún otro.
+    """
+    from app import policy
+
+    _, solicitud = _respaldo(mundo, monkeypatch)
+    solicitudes.registrar(
+        solicitud, "respaldo", decidida_por="el sistema, segun una regla del dueno"
+    )
+    mundo["decision"] = policy.Decision(False, ["tiene $80.000 vencidos"])
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["evaluados"], "una frase no es una persona: los límites corren"
+    assert mundo["submits"] == []
+    assert "necesito revisarlo con una persona" in respuesta
+
+
+def test_what_a_person_approved_is_not_re_judged_by_the_limits(
+    mundo, monkeypatch, lunes
+) -> None:
+    """Con una persona detrás, los límites NO se vuelven a correr. Ella decidió.
+
+    La otra mitad de la regla de arriba, y sin ella el arreglo se pasa de largo:
+    si se consultara siempre, un encargado que aprueba a mano una excepción por
+    encima del tope vería su propia decisión rechazada por el tope — y con
+    `AUTO_CONFIRM_MAX=0` la rama de aprobación humana dejaría de funcionar
+    entera, que es el único camino que hoy existe.
+
+    El encargado miró ESTE pedido; la regla del dueño autorizó una FORMA de
+    entrega. `lo_decidio_una_persona` es la única definición de esa diferencia.
+
+    Mutación dirigida: sacarle el `not` al `if not lo_decidio_una_persona(...)`
+    de `revalidar`. Mata a este test y deja verde al de arriba.
+    """
+    from app import policy
+
+    _, solicitud = _respaldo(mundo, monkeypatch)
+    # El mismo respaldo, pero firmado por una persona.
+    solicitudes.registrar(solicitud, "aprobada", decidida_por=STAFF)
+    mundo["decision"] = policy.Decision(False, ["tiene $80.000 vencidos"])
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["evaluados"] == []
+    assert mundo["submits"] == [SO]
+    assert "quedó confirmado" in respuesta
 
 
 def test_stock_that_went_while_the_fallback_waited_stops_the_order(
@@ -4163,3 +4526,40 @@ def test_una_zona_invalida_deja_el_vencimiento_en_el_timeout_configurado(
     ahora = 1_757_000_000.0
     tope = ahora + max(0.5, solicitudes.timeout_horas()) * 3600.0
     assert solicitudes._vence_respaldo(ahora, "2026-09-10", "18:00") == tope
+
+
+def test_un_lease_vencido_a_mitad_de_camino_no_emite_nada(mundo) -> None:
+    """El lease se venció mientras se revalidaba: NO se emite.
+
+    Adentro de esta sección crítica entran una relectura, `revalidar`, la
+    escritura de los términos, `policy.evaluar` entero y la relectura durable
+    de la solicitud, todo contra un ERPNext con `timeout=30`. Eso se puede
+    comer los 180 s del lease, y nadie lo renueva. Un lease vencido no hace
+    fallar la llamada: la deja caminando hacia el submit sin exclusión mutua
+    mientras otro worker toma la llave libre y decide otra cosa sobre el mismo
+    pedido.
+
+    La solicitud queda como estaba —en el índice, con su plazo— así que el
+    barrido vuelve, y el cliente escucha lo mismo que cuando no se pudo
+    coordinar, porque es lo mismo que pasó.
+    """
+    _aprobar_y_esperar(mundo)
+    mundo["lease"].vigente = False
+
+    respuesta = solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["submits"] == [], "emitió sin tener el lock"
+    assert respuesta == idioma.t("oferta.procesando", "es")
+    # Y la comprobación se hizo: un llamador que nunca pregunta y uno que
+    # pregunta y le dan que sí dan el mismo resultado visto desde afuera.
+    assert mundo["lease"].preguntas >= 1
+
+
+def test_con_el_lease_entero_la_aceptacion_emite_igual_que_siempre(mundo) -> None:
+    """La otra mitad: la comprobación no puede frenar el camino normal."""
+    _aprobar_y_esperar(mundo)
+
+    solicitudes.aceptar_cliente(SO, CUSTOMER_PHONE)
+
+    assert mundo["submits"] == [SO]
+    assert mundo["lease"].preguntas >= 1

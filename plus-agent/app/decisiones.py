@@ -226,7 +226,7 @@ def _confirmar_autorizado(nombre: str, por: str, canal: str) -> dict:
 
     emision: Emision | None = None
     # CoordinationError sube hasta `confirmar`, que ya la contesta.
-    with distributed_lock(f"solicitud:{nombre}", lease_seconds=LEASE_EMISION, wait_seconds=10):
+    with distributed_lock(f"solicitud:{nombre}", lease_seconds=LEASE_EMISION, wait_seconds=10) as lease:
         try:
             abierta = solicitud_abierta_estricta(nombre)
         except LecturaIncierta as exc:
@@ -248,7 +248,7 @@ def _confirmar_autorizado(nombre: str, por: str, canal: str) -> dict:
         # todavía tienen que ir al cliente antes de que se emita nada
         # (app/solicitudes.py).
         if abierta is None:
-            emision = emitir(nombre)
+            emision = emitir(nombre, lease=lease)
 
     if emision is None:
         # No se emitió nada: salió una contraoferta y el pedido sigue borrador.

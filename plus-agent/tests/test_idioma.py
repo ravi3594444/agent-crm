@@ -580,3 +580,114 @@ def test_la_regla_de_idioma_no_le_hace_hablar_de_su_configuracion(lengua):
     assert "eligió esta persona" not in regla
     assert "usá la herramienta" not in regla
     assert "use the tool" not in regla
+
+
+# ------------------------------------- el registro con el que se le habla al cliente
+#
+# POR QUÉ ESTE TEST EXISTE, Y QUÉ PROTEGE
+# El punto 2 abierto de CLAUDE.md —«Sales agent tone: reads like a form»— no se
+# arregla en el prompt, porque estas cadenas NO pasan por el modelo: las escribe
+# Python y salen tal cual. Así que la regla de tono tampoco puede vivir sólo en
+# el prompt: ahí no alcanza a gobernarlas. Vive acá.
+#
+# Lo que afirma es COMPORTAMIENTO observable, no gusto: que ninguna frase que
+# lee un CLIENTE esté escrita en el registro de una carta («usted», «Su pedido»,
+# «a la brevedad», «Ha sido registrado») ni le muestre el vocabulario interno
+# que `demo/piloto.py::_JERGA_CLIENTE` ya prohíbe del lado del modelo
+# («borrador», «el sistema», «pendiente de revisión»). El banco de pruebas mira
+# lo que redacta Gemini; esto mira lo que redactó Python, que es la mitad que
+# ningún modelo puede arreglar.
+#
+# LAS DOS LISTAS ESTÁN ESCRITAS ACÁ A MANO, A PROPÓSITO. Salir a buscarlas del
+# catálogo sería el defecto que describe CLAUDE.md: una constante referenciada de
+# los dos lados del assert se mueve entera y no rompe nada.
+
+# Las claves que lee un CLIENTE. Se arma por prefijo para que una clave nueva
+# entre sola, con dos ajustes explícitos:
+#  - `stock.` NO entra entero: `stock.conteo_*` es el conteo físico que el DUEÑO
+#    manda por WhatsApp, y ahí «el sistema decía 40» es su vocabulario de
+#    trabajo y es correcto. Las dos que sí ve un cliente entran por nombre.
+#  - `fallback.sin_permiso` queda afuera: es la respuesta a alguien que quiso
+#    usar una herramienta del equipo, no un cliente pidiendo leche.
+_PREFIJOS_DEL_CLIENTE = (
+    "progreso.", "ack.", "fallback.", "pedido.", "terminos.", "oferta.",
+    "entrega.", "precio.", "idioma.cambiado_cliente",
+)
+_TAMBIEN_DEL_CLIENTE = ("stock.no_confiable", "stock.insuficiente")
+_NO_ES_DEL_CLIENTE = ("fallback.sin_permiso",)
+
+CLAVES_DEL_CLIENTE = tuple(sorted(
+    clave for clave in idioma.CATALOGO
+    if (clave.startswith(_PREFIJOS_DEL_CLIENTE) or clave in _TAMBIEN_DEL_CLIENTE)
+    and clave not in _NO_ES_DEL_CLIENTE
+))
+
+# El registro que no puede aparecer nunca. Cada entrada salió de una frase real
+# del catálogo, no de un diccionario de estilo.
+REGISTRO_PROHIBIDO_ES = (
+    "usted", "ustedes",          # el producto habla de vos y sólo de vos
+    "su pedido",                 # «tu pedido»
+    "estimado", "estimada",      # «Estimado cliente» es de un mail masivo
+    "a la brevedad",             # estaba en tres textos de oferta
+    "le informamos", "le comunicamos", "le informo",
+    "aguarde", "no dude", "procederemos",
+    "ha sido", "han sido",       # la pasiva de formulario: «ha sido registrado»
+    "disponibilidad",            # «No puedo prometer disponibilidad de X»
+    # Y la jerga interna, la misma lista que `demo/piloto.py::_JERGA_CLIENTE`
+    # le exige al modelo. Lo que Python escribe no puede ser peor que eso.
+    "el sistema", "por configuración", "borrador", "pendiente de revisión",
+)
+REGISTRO_PROHIBIDO_EN = (
+    "dear customer", "dear sir", "dear madam",
+    "kindly", "we regret", "please be advised",
+    "at your earliest convenience", "do not hesitate",
+    "has been registered", "the system", "draft", "pending review",
+)
+
+
+def _aparece(frase: str, texto: str) -> bool:
+    """¿Está esa frase en ese texto, como frase entera y no como pedazo?
+
+    Por borde de ficha y no por substring: sin esto «usted» matchearía dentro
+    de otra palabra y «draft» dentro de un nombre propio, y la lista se
+    volvería ruido — que es lo que vuelve inservible a un audit.
+    """
+    return re.search(
+        r"(?<!\w)" + re.escape(frase) + r"(?!\w)", texto.lower()
+    ) is not None
+
+
+@pytest.mark.parametrize("clave", CLAVES_DEL_CLIENTE)
+def test_ningun_texto_del_cliente_esta_escrito_en_registro_de_formulario(clave):
+    """Lo que Python le manda a un cliente se lee como lo diría una persona."""
+    for lengua, prohibidas in (
+        (idioma.ES, REGISTRO_PROHIBIDO_ES),
+        (idioma.EN, REGISTRO_PROHIBIDO_EN),
+    ):
+        texto = idioma.CATALOGO[clave].get(lengua, "")
+        hallados = [frase for frase in prohibidas if _aparece(frase, texto)]
+        assert hallados == [], f"{clave} [{lengua}] {hallados}: {texto!r}"
+
+
+def test_el_audit_de_registro_mira_los_textos_que_de_verdad_lee_un_cliente():
+    """El guard del guard: una lista vacía pasaría los 60 tests de arriba.
+
+    Se afirman las DOS mitades por separado, porque un prefijo mal escrito
+    vacía el conjunto sin que nada más se entere, y una exclusión de más lo
+    vacía de a poco. El piso es flojo a propósito —se agregan claves seguido—;
+    lo que no puede pasar es que caiga al orden de magnitud equivocado.
+    """
+    assert len(CLAVES_DEL_CLIENTE) >= 55
+    # Y están las que de verdad se leen todos los días, nombradas a mano: si
+    # alguna se renombra sin actualizar los prefijos, esto se cae.
+    for imprescindible in (
+        "pedido.pendiente",            # cada pedido que no se auto-confirma
+        "pedido.confirmado_cliente",   # cada pedido confirmado
+        "progreso.consultando",        # cada turno que consulta algo
+        "ack.audio",                   # un almacén manda audios todo el día
+        "stock.insuficiente",
+        "entrega.oferta",
+    ):
+        assert imprescindible in CLAVES_DEL_CLIENTE
+    # Y el conteo del dueño NO entra: ahí «el sistema decía 40» es correcto.
+    assert "stock.conteo_faltan" not in CLAVES_DEL_CLIENTE

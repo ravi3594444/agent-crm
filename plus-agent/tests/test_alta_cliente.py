@@ -20,6 +20,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from fakes import LeaseDoble
+
 from app import clientes, erpnext
 from app.tools import pedidos
 
@@ -115,7 +117,7 @@ def locks_tomados(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     @contextmanager
     def lock(nombre, **kwargs):
         tomados.append(nombre)
-        yield
+        yield LeaseDoble()
 
     monkeypatch.setattr(clientes, "distributed_lock", lock)
     monkeypatch.setattr(pedidos, "distributed_lock", lock)
