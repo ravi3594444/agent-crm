@@ -1949,3 +1949,55 @@ def test_un_MCP_EXTERNOS_ilegible_avisa_y_no_tumba_el_reporte(monkeypatch) -> No
     assert "no tiene «nombre=destino»" in texto
     # Y el informe SIGUE entero: es lo que la excepción se llevaba puesto.
     assert texto.rstrip().endswith(")") and ("LISTO" in texto or "NO LISTO" in texto)
+
+
+def _linea_de_pasos(reporte, clave: str) -> tuple[str, str, str]:
+    lineas = [fila for fila in reporte.lineas if fila[1] == clave]
+    assert len(lineas) == 1, f"esperaba UNA línea de {clave}, hay {len(lineas)}"
+    return lineas[0]
+
+
+def test_el_techo_de_pasos_sale_del_env_CANDIDATO_y_no_del_proceso(monkeypatch) -> None:
+    """El preflight tiene que hablar del `.env` que le pidieron revisar.
+
+    Es el chequeo que se corre ANTES de recrear el contenedor, así que leerlo
+    del proceso informaría sobre el techo VIEJO — el que está por reemplazarse—
+    y en verde. El proceso y el candidato se ponen al revés uno del otro, que es
+    la única forma de que no se puedan confundir.
+
+    MUTACIÓN: `_valor(env, clave)` -> `os.getenv(clave)`. Cae éste y sólo éste.
+    """
+    monkeypatch.setenv("PASOS_MAX_CLIENTES", "3")
+    monkeypatch.setenv("PASOS_MAX_GERENCIA", "3")
+    reporte = readiness.ejecutar(
+        dict(BASE, PASOS_MAX_CLIENTES="9", PASOS_MAX_GERENCIA="21"), con_red=False
+    )
+
+    nivel, _, mensaje = _linea_de_pasos(reporte, "PASOS_MAX_CLIENTES")
+    assert nivel == readiness.OK
+    assert "9 llamadas" in mensaje and "ventas" in mensaje
+    nivel, _, mensaje = _linea_de_pasos(reporte, "PASOS_MAX_GERENCIA")
+    assert "21 llamadas" in mensaje and "gerencia" in mensaje
+
+
+def test_un_techo_de_pasos_sin_poner_se_informa_como_default() -> None:
+    """Un número que nadie escribió y uno que el dueño eligió no son lo mismo.
+
+    Los dos andan; lo que cambia es si mirarlo dos veces vale la pena.
+    """
+    reporte = readiness.ejecutar(dict(BASE), con_red=False)
+
+    nivel, _, mensaje = _linea_de_pasos(reporte, "PASOS_MAX_CLIENTES")
+    assert nivel == readiness.OK
+    assert "default" in mensaje
+
+
+def test_un_techo_de_pasos_invalido_es_un_ERROR_y_no_un_aviso() -> None:
+    """`app/pasos.py` revienta al importar con un techo así, o sea que el
+    contenedor no arranca. Un preflight que lo dijera en amarillo estaría
+    diciendo «se puede salir en vivo» sobre un agente que no levanta."""
+    for malo in ("0", "-2", "ocho"):
+        reporte = readiness.ejecutar(dict(BASE, PASOS_MAX_CLIENTES=malo), con_red=False)
+        nivel, _, mensaje = _linea_de_pasos(reporte, "PASOS_MAX_CLIENTES")
+        assert nivel == readiness.ERROR, f"{malo!r} pasó como {nivel}"
+        assert "no arranca" in mensaje

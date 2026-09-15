@@ -82,6 +82,27 @@ del renglón sea el de la lista autorizada.
 `STOCK_CONFIABLE=false` conviene dejarlo en false hasta que el stock inicial
 esté cargado — si no, promete stock que no está contado.
 
+### Cuánto puede costar UN mensaje
+
+```ini
+# Llamadas al modelo que puede hacer UN mensaje de WhatsApp, como techo.
+PASOS_MAX_CLIENTES=8
+PASOS_MAX_GERENCIA=14
+```
+
+**No hace falta tocarlos**, y están acá porque son lo que acota la cuenta del
+modelo. Sin techo, un modelo que entra en bucle hace miles de llamadas por un
+solo mensaje: el default de LangGraph son 10007 superpasos, y medido contra el
+agente real dio 121 llamadas al modelo en un turno sin que nada lo frenara. Con
+la clave de Gemini en free tier —7 a 34 s por llamada— eso es la cuota del día.
+
+Un pedido bien atendido son tres o cuatro vueltas, así que 8 sobra. Cuando se
+llega al techo el agente NO se disculpa: contesta con lo que alcanzó a
+averiguar. En el log se ve como `[agent] techo de pasos rol=… llamadas=…`.
+
+Si alguna vez ves esa línea seguido, el problema no es el techo: es que el
+modelo está dando vueltas, y subirlo sólo hace más cara la misma vuelta.
+
 **Después de tocar el `.env`:**
 
 ```

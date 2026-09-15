@@ -248,6 +248,29 @@ def chequear_modelos(env: Mapping[str, str], reporte: Reporte) -> None:
         prov.nombre,
         "la conexión real se prueba a mano con `make verificar-modelos` (no en CI)",
     )
+    # EL TECHO DE PASOS, que es lo que acota la cuenta del modelo. Se lee desde
+    # `env` y no desde `pasos.PASOS_*` a propósito: readiness tiene que poder
+    # mirar un `.env` que todavía no es el del proceso — es el chequeo que se
+    # corre ANTES de recrear el contenedor. Un valor inválido no se reporta acá
+    # como aviso: `app/pasos.py` revienta al importar, o sea que el proceso no
+    # arranca, que es más fuerte que una línea en un informe.
+    for clave, por_defecto, quien in (
+        ("PASOS_MAX_CLIENTES", "8", "ventas"),
+        ("PASOS_MAX_GERENCIA", "14", "gerencia"),
+    ):
+        crudo = _valor(env, clave) or por_defecto
+        try:
+            techo = int(crudo)
+            if techo <= 0:
+                raise ValueError
+        except ValueError:
+            reporte.error(clave, f"{crudo!r} no es un entero > 0: el agente no arranca")
+            continue
+        reporte.ok(
+            clave,
+            f"hasta {techo} llamadas al modelo por mensaje de {quien}"
+            + ("" if _valor(env, clave) else " (default)"),
+        )
 
 
 # ------------------------------------------------------------- equipo/zonas
