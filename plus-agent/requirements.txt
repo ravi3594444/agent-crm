@@ -35,10 +35,9 @@ python-dotenv==1.2.3
 # se pise entre los hilos de barrido. Es la razón por la que se puede usar acá.
 babel==2.18.0
 
-# SÓLO para `MCP_EXTERNOS` (app/mcp_cliente.py): hablar con servidores MCP de
-# terceros. El import vive adentro de `cargar()`, así que sin la variable puesta
-# esto no se toca — pero SÍ se instala, y no es gratis: arrastra 12 paquetes
-# (mcp, jsonschema, sse-starlette, pydantic-settings, PyJWT, attrs, …) a la
-# imagen de producción. Ése es el precio de la superficie de un tercero, y está
-# escrito acá para que se vea al leer el archivo y no al medir la imagen.
-langchain-mcp-adapters==0.3.2
+# `MCP_EXTERNOS` (app/mcp_cliente.py) NO agrega una dependencia, y eso fue una
+# decisión y no una suerte. El primer intento usaba `langchain-mcp-adapters`
+# sobre el SDK `mcp` —12 paquetes— y NO CONECTABA: el modo HTTP de
+# `@casys/mcp-erpnext` 3.0.4 exige el protocolo 2026-07-28 y le contesta 400 al
+# SDK, que habla 2025-06-18. Hablar el protocolo directo con el `httpx` que ya
+# estaba es menos código, menos imagen, y encima es lo único que funciona.

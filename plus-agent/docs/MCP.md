@@ -57,12 +57,25 @@ herramienta. La pregunta operativa no es «¿qué herramientas cargué?» sino
 **«¿con qué usuario de ERPNext arrancó ese contenedor?»** — y esa decisión vive
 fuera del alcance de `app/readiness.py`.
 
-**4. Su HTTP pide un protocolo que el SDK de Python todavía no habla.** El modo
-HTTP de Casys 3.0.4 exige `MCP-Protocol-Version: 2026-07-28` y devuelve **400**
-a un cliente que manda `2025-06-18`. El SDK `mcp` 1.30.0 de Python habla el
-viejo. **Por HTTP no conectan**; por **stdio** sí, porque ahí Casys negocia
-hacia abajo. Nuestro servidor habla `2025-06-18`, que es lo que hablan los
-clientes de hoy.
+**4. Su HTTP pide un protocolo que el SDK de Python no habla — resuelto.** El
+modo HTTP de Casys 3.0.4 exige `MCP-Protocol-Version: 2026-07-28` y devuelve
+**400** a un cliente que manda `2025-06-18`, que es lo que habla el SDK `mcp`
+1.30.0. Así que `app/mcp_cliente.py` **no usa el SDK**: habla el protocolo
+directo con el `httpx` que ya estaba. El contrato completo, aprendido
+preguntándole al servidor:
+
+```
+MCP-Protocol-Version: 2026-07-28      en toda petición
+Mcp-Method: <el método del cuerpo>    en toda petición
+Mcp-Name: <params.name>               sólo en tools/call
+params._meta["io.modelcontextprotocol/protocolVersion"]
+```
+
+Se manda el **superconjunto** y no se negocia a mano: un servidor viejo ignora
+los headers y las claves de `_meta` que no conoce —`_meta` está reservado para
+eso— y uno nuevo los exige. Después del `initialize` se usa la versión que el
+servidor devolvió. De paso desaparecen 12 paquetes de la imagen y el bucle de
+eventos en un hilo de fondo.
 
 **5. Los visores no sirven por WhatsApp.** Los nueve visores interactivos
 (kanban, P&L, funnel, KPI) son MCP Apps y se renderizan en un *host* que los
@@ -74,12 +87,27 @@ herramienta de escritorio para el dueño, no una función del producto.
 ## Configuración
 
 ```ini
-# Un servidor por entrada. Un comando = stdio; una URL = streamable_http.
-MCP_EXTERNOS=erpnext=npx -y @casys/mcp-erpnext --categories=sales,inventory,delivery,crm,accounting,analytics
+# Un servidor por entrada. Un comando = stdio; una URL = http.
+MCP_EXTERNOS=erpnext=http://mcp-erpnext:3012/mcp
+MCP_EXTERNO_TOKEN_ERPNEXT=<el MCP_AUTH_TOKEN de ese contenedor>
 
-# Nombres que NO se cargan. Acepta comodines. Vacío = no se bloquea nada.
-MCP_EXTERNOS_BLOQUEAR=*_submit,*_cancel,*_delete,erpnext_method_call
+# VACÍO EN ESTA RAMA, por decisión del dueño: la superficie entera, las 125,
+# precios incluidos. La línea que la volvería reversible, si alguna vez:
+#   MCP_EXTERNOS_BLOQUEAR=*_submit,*_cancel,*_delete,erpnext_method_call
+MCP_EXTERNOS_BLOQUEAR=
 ```
+
+Y el contenedor, en `deploy/mcp-erpnext.compose.yml`:
+
+```bash
+cd /srv/agent-crm/plus-agent
+docker compose -f docker-compose.yml -f ../deploy/mcp-erpnext.compose.yml up -d
+```
+
+**La pregunta que importa no es qué herramientas carga, es con qué usuario.**
+Ese servidor actúa con UNA credencial de ERPNext y no tiene permisos por
+herramienta: lo que puede hacer lo decide `MCP_ERPNEXT_API_KEY` y nada más. Un
+usuario de sólo lectura deja funcionando 90 de las 125 y ninguna que escriba.
 
 `TOOLS_GERENCIA` **no se toca**: lo externo va a `TOOLS_AGENTE_GERENCIA`, que es
 lo único que arma el agente. Si se sumara a la constante, `app/mcp_server.py`
