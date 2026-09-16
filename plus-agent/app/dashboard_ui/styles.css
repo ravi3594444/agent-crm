@@ -108,3 +108,30 @@ dialog{border:1px solid var(--border);padding:0;color:inherit;background:white;m
 @media(max-width:620px){.sales-stats{grid-template-columns:1fr;gap:10px}.sales-stats .stat-card{padding:19px}.sales-stats .stat-value{font-size:1.8rem;margin-top:12px}.sales-stats .stat-bottom{min-height:0}.sales-report,.advice-report{margin-bottom:18px}.sales-chart{margin:14px 23px 20px}.sales-plot{height:145px;gap:4px}.sales-day-label{font-size:12px}.sales-rankings{gap:18px}.sales-ranking-list li{padding:16px;gap:9px}.sales-ranking-list .rank-number{display:none}.rank-total{font-size:12px;max-width:36%}.advice-off{padding:21px;gap:13px;flex-wrap:wrap}.advice-off-icon{width:38px;height:38px}.advice-off>div{flex-basis:100%}.advice-off h2{font-size:22px}.advice-toolbar{padding:0 18px 17px}.advice-toolbar .filter-tabs{order:0;gap:19px}.advice-list{padding:0 16px 18px;gap:13px}.advice-row{padding:17px}.advice-row-heading>div{min-width:130px}.advice-amount{margin-left:52px}.advice-row h3{font-size:15px}.advice-assumption{padding:12px}.advice-guide-grid{padding:6px 20px 23px;gap:25px 20px}.advice-row-footer>div{gap:15px}.theme-toggle{min-width:38px;min-height:38px}.sales-ranking .card-heading{padding-left:17px;padding-right:17px}}
 @media(max-width:360px){.top-actions .mode-chip .icon{display:none}.advice-guide-grid{grid-template-columns:1fr}.sales-ranking-list .avatar,.sales-ranking-list .product-icon{display:none}}
 @media(prefers-reduced-motion:reduce){.logo-reveal{display:none}.logo-reveal-content,.logo-reveal .mate-ribbon,.reveal-line{animation:none}}
+
+/* Los ajustes del negocio. Una fila por ajuste: qué es, cuánto vale hoy y de
+   dónde salió ese valor. `source` se muestra siempre y no sólo cuando algo
+   está mal: un tope en 0 es la postura de fábrica, no un error, y decir de
+   dónde viene es lo que deja mostrarlo sin pintarlo de rojo. */
+.setting-row{display:grid;grid-template-columns:1fr auto auto;gap:12px 18px;align-items:center;padding:14px 0;border-top:1px solid var(--border)}
+.setting-row:first-of-type{border-top:0}
+.setting-what strong{display:block;font-size:.95rem}
+.setting-what small,.setting-value small{display:block;color:var(--muted);font-size:.78rem;margin-top:2px}
+.setting-value{text-align:right}
+.setting-value span{font-weight:600;font-variant-numeric:tabular-nums}
+.setting-problem{grid-column:1/-1;display:flex;gap:8px;align-items:center;margin:0;color:#b07971;font-size:.82rem}
+.setting-problem .icon{width:15px;height:15px;flex-shrink:0}
+.settings-group{margin-bottom:18px}
+.pending-notice{display:flex;gap:10px;align-items:flex-start;margin-bottom:18px}
+@media (max-width:640px){
+  .setting-row{grid-template-columns:1fr auto}
+  .setting-do{grid-column:1/-1}
+  .setting-do .button{width:100%}
+}
+
+/* El modo oscuro va por listas ENUMERADAS (:is(...)), no por herencia de
+   tokens: una clase nueva se queda sin estilo oscuro hasta que se la nombra.
+   Acá sólo hacen falta los dos que fijan color propio. */
+:root[data-theme="dark"] :is(.setting-what small,.setting-value small){color:var(--muted)}
+:root[data-theme="dark"] .setting-row{border-top-color:var(--border)}
+:root[data-theme="dark"] .setting-problem{color:var(--signal-red)}
