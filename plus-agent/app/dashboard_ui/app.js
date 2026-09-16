@@ -86,6 +86,8 @@ function makeDemo(range=7) {
     {id:'demo-deuda',kind:'deuda',title:'An overdue balance needs a look',body:'Almacén Don Pedro has a balance beyond the usual payment window.',about:'Almacén Don Pedro',assumption:'A 14-day payment tolerance; recent unallocated payments may change this.',amount:62500,customerId:'CUST-001',orderId:null,productId:null},
     {id:'demo-quiebre',kind:'quiebre',title:'Creamy cheese may run out',body:'Available stock may not last until the next scheduled delivery.',about:'Creamy cheese · 1 kg',assumption:'Demand follows the last seven days and the next delivery arrives in two days.',customerId:null,orderId:null,productId:'QUESO-CREM-1K'}
   ],errors:[],truncated:[]});
+  const prices=validatePrices({priceList:'Standard Selling',currency:'ARS',bandPct:0,canChange:false,
+    items:products.map(p=>({id:p.id,price:p.price,unit:'Unidad'})),errors:[],truncated:[]});
   const settings=validateSettings({problem:'',pending:null,groups:[
     {id:'negocio',name:'Your business',settings:[
       {id:'NOMBRE_NEGOCIO',name:'nombre del negocio',meaning:'How your business is named in the first line of both agent prompts',unit:'texto',kind:'texto',optional:true,value:'Plus Dairy',display:'Plus Dairy',source:'You set this',configured:true,problem:''},
@@ -97,14 +99,14 @@ function makeDemo(range=7) {
     {id:'limites',name:'Automatic confirmation',settings:[
       {id:'AUTO_CONFIRM_MAX',name:'monto maximo',meaning:'Largest order that can be confirmed without anyone looking at it',unit:'$',kind:'numero',optional:false,value:'0',display:'$ 0',source:'Shipped default',configured:false,problem:''},
       {id:'STOCK_BUFFER_PCT',name:'colchon de stock',meaning:'Stock held back for sales that are not loaded yet',unit:'%',kind:'numero',optional:false,value:'20',display:'20%',source:'Shipped default',configured:false,problem:''}]}]});
-  return {settings,sales,advice,mode:'demo',company:'Plus Dairy',today,since:dateShift(today,-29),currency:'ARS',generatedAt:new Date().toISOString(),orders,customers,products,activity:validateActivity(activity),conversations,queue:validateQueue(queue),operations,errors:[],truncated:[],limit:250,policies:[{name:'Order ceiling',value:'$ 150.000',note:'Maximum order value for automatic confirmation'},{name:'New customer ceiling',value:'$ 30.000',note:'Separate limit until a customer has order history'},{name:'Stock buffer',value:'20%',note:'Keep a buffer before confirming an order'},{name:'Stock trust window',value:'24 hours',note:'Require a recent confirmed stock count'}],agents:[{id:'sales',name:'Sales agent',role:'Customer conversations & order drafts',model:'Qwen · sales model',status:'Demo'},{id:'manager',name:'Management agent',role:'Business reports & manager assistance',model:'Qwen · management model',status:'Demo'}]};
+  return {prices,settings,sales,advice,mode:'demo',company:'Plus Dairy',today,since:dateShift(today,-29),currency:'ARS',generatedAt:new Date().toISOString(),orders,customers,products,activity:validateActivity(activity),conversations,queue:validateQueue(queue),operations,errors:[],truncated:[],limit:250,policies:[{name:'Order ceiling',value:'$ 150.000',note:'Maximum order value for automatic confirmation'},{name:'New customer ceiling',value:'$ 30.000',note:'Separate limit until a customer has order history'},{name:'Stock buffer',value:'20%',note:'Keep a buffer before confirming an order'},{name:'Stock trust window',value:'24 hours',note:'Require a recent confirmed stock count'}],agents:[{id:'sales',name:'Sales agent',role:'Customer conversations & order drafts',model:'Qwen · sales model',status:'Demo'},{id:'manager',name:'Management agent',role:'Business reports & manager assistance',model:'Qwen · management model',status:'Demo'}]};
 }
 const repoHosted = /\/dashboard(?:\/|$)/.test(location.pathname);
 const demoRequested = new URLSearchParams(location.search).get('demo') === '1';
 function disconnectedData() {
-  return {mode:'disconnected',company:'Plus CRM',today,since:dateShift(today,-29),currency:'',generatedAt:new Date().toISOString(),orders:null,pendingOrders:null,customers:null,products:null,policies:null,agents:[],operations:null,activity:null,queue:null,conversations:null,sales:null,advice:null,settings:null,errors:[],truncated:[],limit:250};
+  return {mode:'disconnected',company:'Plus CRM',today,since:dateShift(today,-29),currency:'',generatedAt:new Date().toISOString(),orders:null,pendingOrders:null,customers:null,products:null,policies:null,agents:[],operations:null,activity:null,queue:null,conversations:null,sales:null,advice:null,settings:null,prices:null,errors:[],truncated:[],limit:250};
 }
-function freshReads(){return Object.fromEntries(['activity','queue','operations','sales','advice','settings'].map(key=>[key,{busy:false,error:'',loadedAt:null,pending:null,range:null}]));}
+function freshReads(){return Object.fromEntries(['activity','queue','operations','sales','advice','settings','prices'].map(key=>[key,{busy:false,error:'',loadedAt:null,pending:null,range:null}]));}
 let data=demoRequested?makeDemo():disconnectedData();
 const state={theme:readThemePreference(),view:'today',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,reads:freshReads(),extrasBusy:false,extrasError:'',extrasLoadedAt:null,detailRequest:0,connectRequest:0,configured:null,displayCurrency:'',currencyPreference:readCurrencyPreference(),fx:null,fxLoading:false,fxRequest:0,fxError:'',fxFailedTarget:''};
 const currencyNames={ARS:'Argentine peso',INR:'Indian rupee',USD:'US dollar',EUR:'Euro',GBP:'British pound',BRL:'Brazilian real',UYU:'Uruguayan peso',CLP:'Chilean peso',MXN:'Mexican peso',CAD:'Canadian dollar',AUD:'Australian dollar',CHF:'Swiss franc',CNY:'Chinese yuan',JPY:'Japanese yen',AED:'UAE dirham'};
@@ -327,10 +329,30 @@ function ordersView() {
   const selected=selectedOrders(),maxPage=Math.max(1,Math.ceil(selected.length/10));state.page=Math.min(state.page,maxPage);
   return `${stats()}<section class="card orders-full"><div class="orders-toolbar">${filterTabs()}<button class="button" data-action="export" ${state.filter==='pending'?pendingOrders()===null?'disabled':'':data.orders===null?'disabled':''}>${icon('export')}Export CSV</button></div><div class="search-toolbar">${searchField('Search orders or customers…')}<span>${selected.length} orders${state.filter==='pending'?' · all dates':''}</span></div><div id="orders-results">${listLimit(state.filter==='pending'?'pending orders':'orders')}${orderTable(selected.slice((state.page-1)*10,state.page*10),false,state.filter==='pending'?pendingOrders()===null:data.orders===null)}</div><div class="pagination"><span>Page ${state.page} of ${maxPage}</span><div><button class="button" data-action="prev" ${state.page===1?'disabled':''}>Previous</button><button class="button" data-action="next" ${state.page>=maxPage?'disabled':''}>Next ${icon('arrow')}</button></div></div></section>`;
 }
+// El precio de UN producto, cruzado por `id` contra la lectura de `/prices`.
+// Tres estados y no dos: no se leyó (`—`), se leyó y no tiene precio en esta
+// lista (`Not priced`), y el precio. El del medio importa: un producto sin
+// precio en la lista de auto-confirmación es uno que el agente no puede
+// cotizar, y verlo en blanco lo hace parecer un problema de conexión.
+function priceCell(id) {
+  const report=data.prices;
+  if(!report||report.items===null)return '<span class="muted">—</span>';
+  const row=report.items.find(p=>p.id===id);
+  if(!row)return '<span class="muted">Not priced</span>';
+  const texto=row.price===null?'—':salesMoney(row.price,report.currency);
+  return `<span>${escape(texto)}</span>${report.canChange?`<button class="link-button" data-price="${escape(id)}">Change</button>`:''}`;
+}
+function priceNotice() {
+  const report=data.prices;
+  if(data.mode!=='live'||!report)return '';
+  if(report.errors.includes('priceList'))return `<div class="notice">${icon('info')} This agent has no price list or currency set for automatic confirmation, so list prices cannot be read or changed here.</div>`;
+  if(!report.canChange)return `<div class="notice">${icon('info')} Price changes from this dashboard are off. They turn on by setting a daily band in Settings — «PRECIO_CAMBIO_MAX_PCT», which ships at 0 so nothing changes a price on its own.</div>`;
+  return `<div class="notice">${icon('info')} A price can move up to ${escape(String(report.bandPct))}% per product per day, and that daily cap is the real ceiling.</div>`;
+}
 function inventoryView() {
   const rows=(data.products||[]).filter(p=>`${p.name} ${p.id}`.toLowerCase().includes(state.search.toLowerCase())&&(state.stockFilter!=='low'||p.available!==null&&p.available<=10));
   const low=(data.products||[]).filter(p=>p.available!==null&&p.available<=10).length;
-  return `<div class="inventory-summary"><div><span class="stat-icon blue">${icon('inventory')}</span><div><strong>${data.products===null?'—':data.products.length}</strong><span>Products in the warehouse</span></div></div><div><span class="stat-icon amber">${icon('clock')}</span><div><strong>${data.products===null?'—':low}</strong><span>At or below 10 available units</span></div></div><div class="inventory-definition">${icon('info')}<p>ERP available = physical stock − submitted reservations. Open drafts and safety rules can reduce what an agent may confirm.</p></div></div><section class="card"><div class="search-toolbar">${searchField('Search products or item codes…')}<label class="select-wrap"><select id="stock-filter" aria-label="Filter inventory"><option value="all">All products</option><option value="low" ${state.stockFilter==='low'?'selected':''}>Low stock · 10 or fewer</option></select></label></div>${listLimit('inventory','product names')}${data.products===null?empty('Inventory is unavailable','Refresh the connection to try again.'):rows.length?`<div class="table-scroll"><table><thead><tr><th>Product</th><th>On hand</th><th>Reserved</th><th>ERP available</th><th>Stock position</th><th></th></tr></thead><tbody>${rows.map(p=>`<tr><td><button class="product-cell" data-product="${escape(p.id)}"><span class="product-icon">${icon('inventory')}</span><span><strong>${escape(p.name)}</strong><small>${escape(p.id)}</small></span></button></td><td>${number(p.stock)} <span class="muted">${escape(p.unit)}</span></td><td>${number(p.reserved)}</td><td><strong>${number(p.available)}</strong></td><td><div class="stock-meter"><span style="width:${p.stock?Math.max(0,Math.min(100,p.available/p.stock*100)):0}%" class="${p.available!==null&&p.available<=10?'low':''}"></span></div><span class="cell-note">${p.available===null?'Unknown':p.available<=10?'Low stock':'In stock'}</span></td><td><button class="icon-button" data-product="${escape(p.id)}" aria-label="View ${escape(p.name)}">${icon('arrow')}</button></td></tr>`).join('')}</tbody></table></div>`:empty('No matching products','Try a different search or stock filter.')}</section>`;
+  return `${priceNotice()}<div class="inventory-summary"><div><span class="stat-icon blue">${icon('inventory')}</span><div><strong>${data.products===null?'—':data.products.length}</strong><span>Products in the warehouse</span></div></div><div><span class="stat-icon amber">${icon('clock')}</span><div><strong>${data.products===null?'—':low}</strong><span>At or below 10 available units</span></div></div><div class="inventory-definition">${icon('info')}<p>ERP available = physical stock − submitted reservations. Open drafts and safety rules can reduce what an agent may confirm.</p></div></div><section class="card"><div class="search-toolbar">${searchField('Search products or item codes…')}<label class="select-wrap"><select id="stock-filter" aria-label="Filter inventory"><option value="all">All products</option><option value="low" ${state.stockFilter==='low'?'selected':''}>Low stock · 10 or fewer</option></select></label></div>${listLimit('inventory','product names')}${data.products===null?empty('Inventory is unavailable','Refresh the connection to try again.'):rows.length?`<div class="table-scroll"><table><thead><tr><th>Product</th><th>List price</th><th>On hand</th><th>Reserved</th><th>ERP available</th><th>Stock position</th><th></th></tr></thead><tbody>${rows.map(p=>`<tr><td><button class="product-cell" data-product="${escape(p.id)}"><span class="product-icon">${icon('inventory')}</span><span><strong>${escape(p.name)}</strong><small>${escape(p.id)}</small></span></button></td><td class="price-cell">${priceCell(p.id)}</td><td>${number(p.stock)} <span class="muted">${escape(p.unit)}</span></td><td>${number(p.reserved)}</td><td><strong>${number(p.available)}</strong></td><td><div class="stock-meter"><span style="width:${p.stock?Math.max(0,Math.min(100,p.available/p.stock*100)):0}%" class="${p.available!==null&&p.available<=10?'low':''}"></span></div><span class="cell-note">${p.available===null?'Unknown':p.available<=10?'Low stock':'In stock'}</span></td><td><button class="icon-button" data-product="${escape(p.id)}" aria-label="View ${escape(p.name)}">${icon('arrow')}</button></td></tr>`).join('')}</tbody></table></div>`:empty('No matching products','Try a different search or stock filter.')}</section>`;
 }
 function customersView() {
   const rows=(data.customers||[]).filter(c=>`${c.name} ${c.territory}`.toLowerCase().includes(state.search.toLowerCase()));
@@ -450,6 +472,17 @@ function openSetting(id) {
   dialog.innerHTML=`<div class="detail-head"><span>SETTING</span><button class="icon-button" data-close="setting-dialog" aria-label="Close setting">${icon('close')}</button></div><form id="setting-form" class="connection-form"><h2 id="setting-title">${escape(item.name)}</h2><p>${escape(item.meaning)}</p><input type="hidden" name="setting" value="${escape(item.id)}"><label>New value<input name="value" required maxlength="600" autocomplete="off" value="${escape(item.value)}"></label><p class="field-note">Now: ${escape(item.display||'—')}${item.unit?` · ${escape(item.unit)}`:''} · ${escape(item.source)}</p><div id="setting-error" class="form-error" role="alert"></div><button class="button primary full" type="submit">Send me the code ${icon('arrow')}</button><p class="field-note">Nothing changes yet. The agent sends a four-digit code to your WhatsApp and the change applies when you reply there — on purpose, so the second step is not this same screen.</p></form>`;
   dialog.showModal();
 }
+function openPrice(id) {
+  const report=data.prices;
+  if(!report?.canChange)return;
+  const row=(report.items||[]).find(p=>p.id===id);
+  const producto=(data.products||[]).find(p=>p.id===id);
+  const dialog=$('#price-dialog');
+  // Mismo patrón que `openSetting`: el producto viaja en un campo oculto y el
+  // formulario vive en un <dialog>, que `render()` no toca.
+  dialog.innerHTML=`<div class="detail-head"><span>LIST PRICE</span><button class="icon-button" data-close="price-dialog" aria-label="Close price">${icon('close')}</button></div><form id="price-form" class="connection-form"><h2 id="price-title">${escape(producto?.name||id)}</h2><p>${escape(id)}${row?` · per ${escape(row.unit)}`:''}</p><input type="hidden" name="product" value="${escape(id)}"><label>New list price<input name="value" required inputmode="decimal" autocomplete="off" value="${escape(row&&row.price!==null?String(row.price):'')}"></label><p class="field-note">Now: ${escape(row&&row.price!==null?salesMoney(row.price,report.currency):'—')} · ${escape(report.priceList||'')} · ${escape(report.currency||'')}</p><div id="price-error" class="form-error" role="alert"></div><button class="button primary full" type="submit">Change the price ${icon('arrow')}</button><p class="field-note">This applies right away — there is no confirmation code for a price. It can move up to ${escape(String(report.bandPct))}% per day for this product, and only once a day.</p></form>`;
+  dialog.showModal();
+}
 function validateSnapshot(value) {
   if(!value||value.mode!=='live'||typeof value.company!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value.today)||Number.isNaN(Date.parse(value.generatedAt)))throw new Error('The service returned an invalid dashboard response.');
   for(const key of ['orders','pendingOrders','customers','products']) if(value[key]!==null&&(!Array.isArray(value[key])||value[key].length>250))throw new Error('The service returned invalid records.');
@@ -520,6 +553,7 @@ document.addEventListener('click',async e=>{
   if(target.dataset.product)showProduct(target.dataset.product);
   if(target.dataset.customer)showCustomer(target.dataset.customer);
   if(target.dataset.setting)openSetting(target.dataset.setting);
+  if(target.dataset.price)openPrice(target.dataset.price);
   if(target.dataset.copy){try{await navigator.clipboard.writeText(target.dataset.copy);toast('Order ID copied.');}catch{toast('Clipboard unavailable. You can select and copy the order ID above.');}}
   if(target.dataset.filter){state.filter=target.dataset.filter;state.page=1;render();}
   if(target.dataset.salesDate){const report=currentSales(),row=report?.daily?.find(day=>day.date===target.dataset.salesDate);if(row){state.detailRequest++;detail(prettyDate(row.date,{year:'numeric'}),`<dl class="detail-fields"><div><dt>Sales</dt><dd>${escape(salesMoney(row.total,report.currency))}</dd></div><div><dt>Orders</dt><dd>${number(row.orders)}</dd></div></dl>`);}}
@@ -577,6 +611,30 @@ document.addEventListener('submit',async e=>{
     }
     return;
   }
+  if(e.target.id==='price-form'){
+    e.preventDefault();
+    const form=e.target,button=$('button[type=submit]',form),error=$('#price-error');
+    const fields=new FormData(form),connection=state.connection,session=state.session;
+    if(!connection)return;
+    const producto=String(fields.get('product'));
+    try{
+      button.disabled=true;button.textContent='Changing…';error.textContent='';
+      const answer=await apiWrite(connection,'/products/'+encodeURIComponent(producto)+'/price',{value:String(fields.get('value'))});
+      if(state.session!==session)return;
+      // Igual que en los ajustes: 200 con `ok:false` es el caso normal —fuera
+      // de banda, ya se cambió hoy, sin precio anterior contra el que medir—.
+      if(!answer?.ok){error.textContent=String(answer?.detail||'That price could not be changed.');button.disabled=false;button.textContent='Change the price';return;}
+      $('#price-dialog').close();
+      toast(String(answer.detail||'The list price was changed.'));
+      await loadRead('prices',true);
+    }catch(ex){
+      if(state.session!==session)return;
+      if(ex.status===401){cerrarSesion('Your dashboard access is no longer valid. Sign in again.');return;}
+      error.textContent=ex.name==='TimeoutError'?'The agent took too long to respond. Try again.':ex.message;
+      button.disabled=false;button.textContent='Change the price';
+    }
+    return;
+  }
   if(e.target.id!=='connect-form')return;e.preventDefault();
   const form=e.target,button=$('button[type=submit]',form),error=$('#connection-error'),fields=new FormData(form),attempt=++state.connectRequest;
   try{
@@ -589,7 +647,7 @@ document.addEventListener('submit',async e=>{
     data=snapshot;state.connection=connection;state.session++;state.detailRequest++;state.busy=false;state.stale=false;state.page=1;state.extrasError='';state.extrasBusy=false;state.extrasLoadedAt=null;state.reads=freshReads();$('#detail-dialog').close();$('#connection-dialog').close();form.reset();render();restoreDisplayCurrency();toast('Connected to your live CRM.');loadViewReads();
   }catch(ex){if(attempt!==state.connectRequest||!$('#connection-dialog').open)return;error.textContent=ex.name==='TimeoutError'?'The service took too long to respond. Try again.':ex.message==='Failed to fetch'?'Could not reach the service. Check its address, HTTPS, and allowed dashboard origin.':ex.message;button.disabled=false;button.textContent='Connect workspace';}
 });
-document.querySelectorAll('dialog').forEach(dialog=>{dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}});dialog.addEventListener('close',()=>{if(dialog.id==='connection-dialog'){state.connectRequest++;dialog.innerHTML='';}if(dialog.id==='detail-dialog'){state.detailRequest++;dialog.innerHTML='';}if(dialog.id==='setting-dialog')dialog.innerHTML='';});});
+document.querySelectorAll('dialog').forEach(dialog=>{dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}});dialog.addEventListener('close',()=>{if(dialog.id==='connection-dialog'){state.connectRequest++;dialog.innerHTML='';}if(dialog.id==='detail-dialog'){state.detailRequest++;dialog.innerHTML='';}if(dialog.id==='setting-dialog')dialog.innerHTML='';if(dialog.id==='price-dialog')dialog.innerHTML='';});});
 window.addEventListener('hashchange',()=>{const view=location.hash.slice(1);if(Object.hasOwn(views,view))goto(view);});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&state.menu){state.menu=false;render();}});
 if(Object.hasOwn(views,location.hash.slice(1)))state.view=location.hash.slice(1);
@@ -796,6 +854,21 @@ function validateSettings(value) {
   }
   return {groups,pending,problem:value.problem};
 }
+function validatePrices(value) {
+  requireValue(value&&typeof value.canChange==='boolean'&&isMoney(value.bandPct)&&listaSana(value.errors)&&listaSana(value.truncated),'price information');
+  requireValue(value.priceList===null||isText(value.priceList),'the price list');
+  requireValue(value.currency===null||isText(value.currency),'the price currency');
+  // `items` null es «no se pudo leer», que NO es «no hay precios cargados».
+  let items=null;
+  if(value.items!==null&&value.items!==undefined){
+    requireValue(listaSana(value.items),'the price list rows');
+    items=value.items.map(row=>{
+      requireValue(isId(row?.id)&&isText(row.unit)&&(row.price===null||isMoney(row.price)),'a price');
+      return {id:row.id,price:row.price,unit:row.unit};
+    });
+  }
+  return {priceList:value.priceList,currency:value.currency,bandPct:value.bandPct,canChange:value.canChange,items,errors:[...value.errors],truncated:[...value.truncated]};
+}
 function validateConversation(value,id) {
   requireValue(value?.customerId===id&&isText(value.customerName)&&typeof value.reachable==='boolean'&&typeof value.truncated==='boolean'&&isCount(value.retentionDays)&&Array.isArray(value.messages),'conversation information');
   requireValue(value.reachable||value.messages.length===0,'conversation reachability');
@@ -874,7 +947,7 @@ function readError(error) {
 async function loadRead(key,force=false) {
   if(!Object.hasOwn(state.reads,key))return;
   const range=key==='sales'?state.range:null;
-  const contract={activity:['/today',validateActivity],queue:['/queue',validateQueue],operations:['/operations',validateOperations],sales:[`/sales?days=${range}`,validateSales],advice:['/advice',validateAdvice],settings:['/settings',validateSettings]}[key];
+  const contract={activity:['/today',validateActivity],queue:['/queue',validateQueue],operations:['/operations',validateOperations],sales:[`/sales?days=${range}`,validateSales],advice:['/advice',validateAdvice],settings:['/settings',validateSettings],prices:['/prices',validatePrices]}[key];
   if(!contract||data.mode!=='live')return;
   // A different period owns a different read. Its late predecessor cannot
   // replace it, including when the user switches 7 -> 30 -> 7 quickly.
@@ -910,6 +983,7 @@ async function loadViewReads(force=false) {
   if(state.view==='queue')await loadRead('queue',force);
   if(state.view==='overview')await Promise.all([loadRead('queue',force),loadRead('operations',force)]);
   if(state.view==='settings')await loadRead('settings',force);
+  if(state.view==='inventory')await loadRead('prices',force);
   if(state.view==='agents')await loadExtras(force);
 }
 

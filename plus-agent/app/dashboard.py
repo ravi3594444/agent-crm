@@ -1340,9 +1340,15 @@ class DashboardAPI:
         # ninguna ruta que lo confirme, a propósito — ver `proponer_ajuste`.
         propose_match = path == "/settings/propose"
         settings_match = path == "/settings"
+        # La TERCERA que escribe, y la única que mueve plata sin código: el
+        # dueño lo pidió así. Lo que la acota es `PRECIO_CAMBIO_MAX_PCT`, que
+        # arranca en 0 —ningún precio se escribe— y vive en la pantalla de
+        # ajustes como cualquier otro tope.
+        price_match = re.fullmatch(r"/products/([^/]{1,140})/price", path)
         readers = {
             "/snapshot": snapshot, "/controls": controls, "/operations": operations,
             "/today": today, "/queue": queue, "/sales": sales, "/advice": advice,
+            "/prices": prices,
         }
         if path == "/config" and scope["method"] == "GET":
             # No company, model, origin, or business data is returned before auth.
@@ -1350,7 +1356,8 @@ class DashboardAPI:
                               "configured": hay_acceso_configurado()})
             return
         if (path not in readers and not detail_match and not conversation_match
-                and not confirm_match and not propose_match and not settings_match):
+                and not confirm_match and not propose_match and not settings_match
+                and not price_match):
             await reply(404, {"error": "Not found"})
             return
         if scope["method"] == "OPTIONS":
@@ -1358,7 +1365,7 @@ class DashboardAPI:
             return
         # El panel sigue siendo de sólo lectura salvo en UNA ruta, y se dice así:
         # la excepción se nombra donde está la regla, en vez de aflojar la regla.
-        if confirm_match or propose_match:
+        if confirm_match or propose_match or price_match:
             # ESTA RAMA HAY QUE EXTENDERLA CON CADA RUTA QUE ESCRIBA. El `elif`
             # de abajo contesta 405 «read-only» a todo lo que no caiga acá, así
             # que una ruta de escritura nueva que se olvide de nombrarse acá no
@@ -1386,12 +1393,13 @@ class DashboardAPI:
         # exige `router.es_equipo`, o sea las MISMAS guardas que valen sobre el
         # webhook firmado de Meta; el token no inventa permisos nuevos, sólo es
         # otra forma de probar «soy este teléfono».
-        if (confirm_match or propose_match) and not puede_decidir(mirando):
+        if (confirm_match or propose_match or price_match) and not puede_decidir(mirando):
             # UNA guarda, dos frases. La guarda es una sola a propósito —dos
             # predicados de permiso se separan con el tiempo y entonces el panel
             # y el WhatsApp dejan de estar de acuerdo sobre quién puede actuar—,
             # pero al que la choca hay que decirle qué es lo que no puede.
-            que = "confirm orders" if confirm_match else "change settings"
+            que = ("confirm orders" if confirm_match
+                   else "change prices" if price_match else "change settings")
             await reply(403, {
                 "error": f"This token can read the dashboard but cannot {que}"
             })
@@ -1429,22 +1437,35 @@ class DashboardAPI:
         # de autenticar, un desconocido hace que el proceso junte megabytes;
         # adentro del pool ya no hay loop sobre el que esperar `receive`.
         pedido: dict = {}
-        if propose_match:
+        setting = valor = ""
+        if propose_match or price_match:
             try:
                 pedido = await cuerpo_json(receive)
             except CuerpoInvalido as exc:
                 await reply(400, {"error": str(exc)})
                 return
-            setting = plain_text(pedido.get("setting"))[:140]
             valor = plain_text(pedido.get("value"))[:600]
+        if propose_match:
+            setting = plain_text(pedido.get("setting"))[:140]
             if not setting:
                 await reply(400, {"error": "Tell me which setting to change"})
                 return
+        elif price_match and not valor:
+            await reply(400, {"error": "Tell me the new price"})
+            return
 
         try:
             if propose_match:
                 data = await _en_hilo(
                     proponer_ajuste, setting, valor, mirando, pool=_HILOS_ESCRITURA
+                )
+            elif price_match:
+                producto = unquote(price_match[1])
+                if "/" in producto or "\\" in producto or producto in {".", ".."}:
+                    raise RecordNotFound
+                data = await _en_hilo(
+                    cambiar_precio_desde_el_panel, producto, valor, mirando,
+                    pool=_HILOS_ESCRITURA,
                 )
             elif settings_match:
                 data = await _en_hilo(settings, mirando)
@@ -1479,9 +1500,9 @@ class DashboardAPI:
             # «No pude leer» es una frase de LECTURA, y para una escritura que
             # falló es mentira: el operador lee que hay un problema de conexión
             # y el problema era su valor. Las escrituras contestan lo suyo.
-            if propose_match:
+            if propose_match or price_match:
                 await reply(502, {
-                    "error": "The change could not be prepared. Check the agent service."
+                    "error": "The change could not be completed. Check the agent service."
                 })
                 return
             await reply(502, {"error": "Could not read CRM data. Check the agent service."})
@@ -1726,6 +1747,118 @@ def advice() -> dict:
         "items": items,
         "errors": errors,
         "truncated": [],
+    }
+
+
+# ----------------------------------------------------------------- precios
+
+
+def prices() -> dict:
+    """Los precios de LISTA de lo que vendemos, y si se pueden cambiar hoy.
+
+    Endpoint aparte y no un campo más del snapshot, por dos razones: el
+    snapshot arma los productos desde `Bin` —o sea desde el depósito, que es lo
+    que los acota a esta empresa— y un precio no es una existencia; y la
+    pantalla de inventario ya tiene los productos, así que lo único que falta
+    es el precio para cruzarlo por `id`.
+
+    `canChange` es lo que le deja decir a la pantalla POR QUÉ no hay botón, en
+    vez de no tenerlo y parecer roto. Arranca en false: `PRECIO_CAMBIO_MAX_PCT`
+    viene en 0 —ningún precio se escribe— y ésa es la postura de fábrica, no un
+    error de configuración.
+    """
+    from app import erpnext, limites, precios
+
+    lista, moneda = precios.lista_y_moneda()
+    try:
+        banda = float(limites.vigente("PRECIO_CAMBIO_MAX_PCT") or 0)
+    except Exception:
+        # `vigente()` falla CERRADO —levanta si no puede leer el almacén— y acá
+        # eso se traduce a la banda más angosta que hay. Un tope que no se pudo
+        # leer no puede convertirse en permiso.
+        banda = 0.0
+
+    errors: list[str] = []
+    truncated: list[str] = []
+    filas: list[dict] | None = None
+    if not (lista and moneda):
+        # No es un fallo de lectura: es que esta instalación no tiene lista o
+        # moneda de auto-confirmación, y sin las dos ningún precio que se
+        # escriba lo mira nadie.
+        errors.append("priceList")
+    else:
+        with erpnext.manager_scope():
+            try:
+                crudas = erpnext.get_list(
+                    "Item Price",
+                    filters=[["price_list", "=", lista], ["currency", "=", moneda],
+                             ["selling", "=", 1]],
+                    fields=["item_code", "price_list_rate", "uom"],
+                    order_by="item_code asc", limit=LIMIT + 1,
+                )
+            except Exception:
+                crudas = None
+                errors.append("prices")
+        if crudas is not None:
+            if len(crudas) > LIMIT:
+                truncated.append("prices")
+            filas = [{
+                "id": plain_text(fila.get("item_code")),
+                "price": number(fila.get("price_list_rate")),
+                "unit": plain_text(fila.get("uom")),
+            } for fila in crudas[:LIMIT] if fila.get("item_code")]
+
+    return {
+        "priceList": lista or None, "currency": moneda or None,
+        "bandPct": banda,
+        "canChange": bool(lista and moneda and banda > 0),
+        "items": filas, "errors": errors, "truncated": truncated,
+    }
+
+
+def cambiar_precio_desde_el_panel(item_code: str, valor: str, quien: str) -> dict:
+    """Cambiar UN precio de lista desde el panel, por la misma puerta única.
+
+    NO REIMPLEMENTA NADA. `precios.cambiar` es la definición de qué es cambiar
+    un precio —la banda, el único cambio por producto por día reservado con NX,
+    la unidad leída del producto, la relectura después de escribir y ahora el
+    rastro durable— y acá sólo se le dice por qué canal entró.
+
+    EL `manager_scope` VA ADENTRO DE ESTA FUNCIÓN, y eso no es estilo. El pool
+    corre por `run_in_executor`, que —a diferencia de `asyncio.to_thread`— NO
+    copia el contexto: el `ContextVar` de la credencial vuelve a su default, que
+    es `customer`. Abrir el scope alrededor del `await`, en el router, no llega
+    hasta acá, y el precio se escribiría con la credencial del agente de
+    CLIENTES. Eso es fusionar dos de las tres identidades de la regla dura 2, en
+    silencio y sin fallar: el rol de cliente tiene Create sobre Item Price.
+
+    `ok` NO SE DEDUCE DEL TEXTO. `precios.cambiar` devuelve prosa para sus diez
+    salidas, y parsearla ataría el panel al catálogo de idiomas. Se relee el
+    precio y se compara con el pedido, que es la misma pregunta que el panel
+    necesita contestar y la única que no puede mentir.
+    """
+    from app import erpnext, precios
+
+    codigo = str(item_code or "").strip()
+    try:
+        pedido = float(str(valor).replace(",", "."))
+    except (TypeError, ValueError):
+        pedido = 0.0
+
+    with erpnext.manager_scope():
+        detalle = precios.cambiar(codigo, valor, quien, canal=precios.CANAL_PANEL)
+        quedo = precios.precio_actual(codigo)
+
+    return {
+        "productId": codigo,
+        "ok": bool(pedido > 0 and quedo is not None and abs(quedo - pedido) < 0.01),
+        # `null` es «no se pudo leer», y no es 0: un precio que no se pudo
+        # releer no es un precio de cero.
+        "price": quedo,
+        # Sin traducir, igual que el `detail` de confirmar y de proponer: es la
+        # MISMA frase que sale por WhatsApp, y dos canales que explican el mismo
+        # resultado con palabras distintas terminan discrepando.
+        "detail": plain_text(detalle),
     }
 
 

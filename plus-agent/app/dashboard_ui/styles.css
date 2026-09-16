@@ -135,3 +135,11 @@ dialog{border:1px solid var(--border);padding:0;color:inherit;background:white;m
 :root[data-theme="dark"] :is(.setting-what small,.setting-value small){color:var(--muted)}
 :root[data-theme="dark"] .setting-row{border-top-color:var(--border)}
 :root[data-theme="dark"] .setting-problem{color:var(--signal-red)}
+
+/* El precio de lista, en la tabla de inventario. El botón es un enlace y no un
+   `button` con caja: la fila ya tiene uno al final y dos cajas seguidas leen
+   como dos acciones del mismo peso, y no lo son. */
+.price-cell{white-space:nowrap}
+.price-cell span{font-variant-numeric:tabular-nums}
+.link-button{background:none;border:0;padding:0 0 0 10px;color:#6555db;font-size:.8rem;font-weight:650;text-decoration:underline;text-underline-offset:3px}
+:root[data-theme="dark"] .link-button{color:var(--purple)}

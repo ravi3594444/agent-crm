@@ -33,10 +33,72 @@ Con `PRECIO_CAMBIO_MAX_PCT` en 0 —el default— no se escribe ningún precio.
 """
 from __future__ import annotations
 
-from app import erpnext, idioma
+from app import erpnext, idioma, marcas
+
+MARCA_DURABLE = marcas.texto("precio")
+
+# De dónde vino el cambio. Los mismos dos nombres que usa `app/decisiones.py`
+# para lo mismo, escritos una vez: un rastro que dijera «por WhatsApp» sobre
+# algo que pasó por una pantalla es peor que no tener rastro.
+CANAL_WHATSAPP = "WhatsApp"
+CANAL_PANEL = "el panel"
 
 
-def cambiar(producto: object, precio: object, telefono: str) -> str:
+def lista_y_moneda() -> tuple[str, str]:
+    """La lista de precios y la moneda por las que filtra la auto-confirmación.
+
+    Salen de `policy` y no del entorno acá: son las MISMAS constantes por las
+    que filtra `_precio_estandar`, así que el precio escrito y el precio
+    buscado no pueden discrepar. Un solo lugar que las lea es lo que mantiene
+    esa promesa cuando aparece un segundo llamador —el panel—.
+    """
+    from app import policy
+
+    return (
+        str(getattr(policy, "PRICE_LIST", "") or "").strip(),
+        str(getattr(policy, "CURRENCY", "") or "").strip(),
+    )
+
+
+def precio_actual(producto: object) -> float | None:
+    """El precio de lista vigente de UN producto, o None si no se pudo leer.
+
+    `None` no es 0: 0 sería una afirmación sobre el precio y esto contesta «no
+    sé». Filtra por las MISMAS cuatro columnas que `cambiar` y que
+    `policy._precio_estandar` —lista, moneda, unidad y `selling`—, porque un
+    precio al que le falte una de ellas está escrito y no lo mira nadie.
+    """
+    lista, moneda = lista_y_moneda()
+    codigo = str(producto or "").strip()
+    if not (lista and moneda and codigo):
+        return None
+    try:
+        ficha = erpnext.get_doc("Item", codigo)
+        unidad = str(ficha.get("stock_uom") or "").strip()
+        if not unidad:
+            return None
+        filas = erpnext.get_list(
+            "Item Price",
+            filters=[
+                ["item_code", "=", codigo], ["price_list", "=", lista],
+                ["currency", "=", moneda], ["uom", "=", unidad],
+                ["selling", "=", 1],
+            ],
+            fields=["price_list_rate"], limit=2,
+        )
+    except erpnext.ERPNextError:
+        return None
+    if not filas:
+        return None
+    try:
+        return float(filas[0].get("price_list_rate") or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def cambiar(
+    producto: object, precio: object, telefono: str, canal: str = CANAL_WHATSAPP
+) -> str:
     """Escribe el precio de lista de UN producto. Devuelve qué pasó, en prosa.
 
     El llamador —y hoy es sólo el router de app/main.py— ya comprobó que el
@@ -158,6 +220,25 @@ def cambiar(producto: object, precio: object, telefono: str) -> str:
         leido = 0.0
     if abs(leido - nuevo) >= 0.01:
         return idioma.t("crm.precio_no_verificado", lengua, item_code=codigo)
+
+    # EL RASTRO DURABLE, DESPUÉS DE VERIFICAR. Va acá y no en cada puerta
+    # porque hay UNA definición de qué es cambiar un precio, y dos copias de un
+    # rastro son dos rastros que se desincronizan. Va DESPUÉS de la relectura a
+    # propósito: anotar el PUT que se mandó y no el precio que quedó escribe
+    # historia sobre algo que puede no haber pasado.
+    #
+    # Y a diferencia de `limites.aplicar`, un fallo acá NO deshace el cambio:
+    # el precio ya está escrito y verificado en ERPNext, así que no aplicarlo
+    # no es una opción disponible — lo único que se puede hacer es decirlo.
+    try:
+        erpnext.registrar_comentario(
+            "Item", codigo,
+            f"{MARCA_DURABLE} {anterior:g} -> {leido:g} {moneda} por {unidad}"
+            f" · lo cambió {telefono} desde {canal}",
+        )
+    except erpnext.ERPNextError:
+        print(f"[precios] {codigo}: el precio quedó escrito y sin rastro durable")
+
     return idioma.t(
         "crm.precio_hecho", lengua, item_code=codigo,
         antes=f"{anterior:g}", ahora=f"{leido:g}", unidad=unidad,

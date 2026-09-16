@@ -696,3 +696,124 @@ class AjustesDelPanelTest(unittest.TestCase):
             for ruta in ("/settings/confirm", "/settings/apply", "/settings/4242"):
                 self.assertEqual(
                     request("POST", token=PERSONA, path=ruta)[0], 404, ruta)
+
+
+class PreciosDelPanelTest(unittest.TestCase):
+    def test_the_price_write_runs_as_the_manager_identity_not_the_customer_one(self):
+        """LA REGLA DURA 2, en el único lugar donde se rompería sin fallar.
+
+        `_en_hilo` despacha por `run_in_executor`, que —a diferencia de
+        `asyncio.to_thread`— NO copia el contexto: el `ContextVar` de la
+        credencial vuelve a su default, que es `customer`. Un `manager_scope`
+        abierto en el router, alrededor del `await`, no llega al hilo del pool.
+
+        Y no falla: el rol del agente de CLIENTES tiene Create sobre Item Price,
+        así que el precio se escribiría igual, con la identidad equivocada y sin
+        un solo error. Dos de las tres identidades fusionadas, en silencio.
+
+        MUTACIÓN: sacar el `with erpnext.manager_scope():` de
+        `cambiar_precio_desde_el_panel` (o moverlo al router, que es lo mismo
+        desde acá). Cae ésta y sólo ésta.
+        """
+        from app import erpnext as erp
+        from app import precios as precios_real
+
+        visto = {}
+
+        def espia(producto, precio, telefono, canal=None):
+            visto["scope"] = erp._credential_scope.get()
+            visto["producto"] = producto
+            visto["canal"] = canal
+            return "el precio quedó en 1300"
+
+        entorno, equipo = _con_persona()
+        with entorno, equipo, \
+                patch.object(erp, "_manager_client", object()), \
+                patch.object(precios_real, "cambiar", espia), \
+                patch.object(precios_real, "precio_actual", lambda c: 1300.0):
+            code, _, body = request(
+                "POST", token=PERSONA, path="/products/LECHE-ENT-1L/price",
+                body={"value": "1300"},
+            )
+
+        self.assertEqual(code, 200)
+        self.assertEqual(visto["scope"], "management")
+        self.assertEqual(visto["producto"], "LECHE-ENT-1L")
+        self.assertEqual(visto["canal"], precios_real.CANAL_PANEL)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["price"], 1300.0)
+
+    def test_ok_comes_from_rereading_the_price_and_not_from_the_prose(self):
+        """`precios.cambiar` devuelve prosa para sus diez salidas, y parsearla
+        ataría el panel al catálogo de idiomas. Lo que el panel necesita saber
+        es si el precio QUEDÓ en lo que se pidió, y eso se relee.
+
+        Acá la prosa dice que salió bien y la relectura dice otra cosa: gana la
+        relectura. Es el mismo criterio que `precios.cambiar` aplica adentro.
+
+        MUTACIÓN: que `ok` salga de `bool(detalle)`. Cae ésta y sólo ésta.
+        """
+        from app import erpnext as erp
+        from app import precios as precios_real
+
+        entorno, equipo = _con_persona()
+        with entorno, equipo, \
+                patch.object(erp, "_manager_client", object()), \
+                patch.object(precios_real, "cambiar", lambda *a, **k: "listo, quedó en 1300"), \
+                patch.object(precios_real, "precio_actual", lambda c: 1250.0):
+            code, _, body = request(
+                "POST", token=PERSONA, path="/products/LECHE-ENT-1L/price",
+                body={"value": "1300"},
+            )
+
+        self.assertEqual(code, 200)
+        self.assertIs(body["ok"], False)
+        self.assertEqual(body["price"], 1250.0)
+
+    def test_a_price_that_could_not_be_reread_is_null_and_never_zero(self):
+        """`None` no es 0. Un precio que no se pudo releer no es un precio de
+        cero, y mostrarlo así le diría al dueño que regaló el producto."""
+        from app import erpnext as erp
+        from app import precios as precios_real
+
+        entorno, equipo = _con_persona()
+        with entorno, equipo, \
+                patch.object(erp, "_manager_client", object()), \
+                patch.object(precios_real, "cambiar", lambda *a, **k: "no pude leer"), \
+                patch.object(precios_real, "precio_actual", lambda c: None):
+            _, _, body = request(
+                "POST", token=PERSONA, path="/products/LECHE-ENT-1L/price",
+                body={"value": "1300"},
+            )
+
+        self.assertIsNone(body["price"])
+        self.assertIs(body["ok"], False)
+
+    def test_a_read_only_token_cannot_change_a_price(self):
+        """La misma guarda que los otros dos, y por el mismo motivo: una ruta
+        de escritura que no se nombre ahí queda alcanzable por el token
+        COMPARTIDO — el de sólo lectura."""
+        from app import precios as precios_real
+
+        with patch.dict(os.environ, {"DASHBOARD_API_TOKEN": TOKEN}), \
+                patch.object(precios_real, "cambiar") as cambiar:
+            code, _, body = request(
+                "POST", token=TOKEN, path="/products/LECHE-ENT-1L/price",
+                body={"value": "1300"},
+            )
+        self.assertEqual(code, 403)
+        self.assertIn("cannot change prices", json.dumps(body))
+        cambiar.assert_not_called()
+
+    def test_a_price_post_without_a_value_never_reaches_erpnext(self):
+        from app import precios as precios_real
+
+        entorno, equipo = _con_persona()
+        with entorno, equipo, patch.object(precios_real, "cambiar") as cambiar:
+            code, _, body = request(
+                "POST", token=PERSONA, path="/products/LECHE-ENT-1L/price",
+                body={"other": "1300"},
+            )
+        self.assertEqual(code, 400)
+        self.assertIn("new price", json.dumps(body))
+        cambiar.assert_not_called()

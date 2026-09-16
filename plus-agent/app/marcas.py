@@ -308,6 +308,28 @@ _FILAS = (
             "quién cambió qué, y lo lee una persona en ERPNext."
         ),
     ),
+    # ---------------------------------------------------------------- precios
+    #
+    # El precio de LISTA es la única escritura que mueve plata sin código de
+    # confirmación —el dueño lo pidió así, textual: «no one can confirm
+    # everytime i need automated»— y hasta acá no dejaba ningún rastro propio.
+    # Lo único que quedaba era el `modified_by` del usuario de API de gerencia,
+    # que es el MISMO para el modelo y para el panel: o sea, no se podía saber
+    # quién cambió un precio ni por dónde. Con dos puertas (WhatsApp y el
+    # panel) eso pasa de incómodo a no auditable.
+    Marca(
+        nombre="precio",
+        texto="[precio]",
+        doctype="Item",
+        portador=COMENTARIO,
+        lectura=NO_SE_LEE,
+        techo=0,
+        porque_el_techo=(
+            "Sin techo porque no tiene lector: lo lee una persona en ERPNext, "
+            "al lado del producto. Igual que `[accion]`, y por lo mismo — es "
+            "el único rastro de QUIÉN cambió un precio y por qué puerta."
+        ),
+    ),
     # -------------------------------------------------------------- acciones
     Marca(
         nombre="accion",

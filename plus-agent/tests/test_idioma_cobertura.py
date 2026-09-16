@@ -502,7 +502,7 @@ def test_la_lista_de_intencionalmente_sin_traducir_esta_documentada():
     # la mitad que una fila nueva tiene que hacer decidir a una persona. Lo
     # decidido para `[negocio]`: es un marcador durable como los otros catorce
     # —lo lee una persona en ERPNext, no se traduce— y va al allowlist.
-    assert len(permitido.MARCAS_DURABLES) == 15
+    assert len(permitido.MARCAS_DURABLES) == 16
     assert permitido.ERPNEXT_CANONICO
     assert permitido.COMANDOS_ES
     # Los comandos en inglés se AGREGARON; los de siempre siguen.

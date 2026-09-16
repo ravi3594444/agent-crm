@@ -35,12 +35,12 @@ function workspace(options = {}) {
   }
   // `querySelector` sólo resuelve los ids de esta lista: uno que falte devuelve
   // null y el primer render que lo lea se cae con un mensaje que no dice nada.
-  for (const id of ['app', 'toast', 'detail-dialog', 'connection-dialog', 'setting-dialog', 'search', 'connection-error', 'chart-detail', 'setting-error']) nodes[id] = element(id);
+  for (const id of ['app', 'toast', 'detail-dialog', 'connection-dialog', 'setting-dialog', 'price-dialog', 'search', 'connection-error', 'chart-detail', 'setting-error', 'price-error']) nodes[id] = element(id);
   nodes.search.tagName = 'INPUT';
   // Los TRES diálogos. Esta lista es la que ve `document.querySelectorAll('dialog')`,
   // que es donde se enganchan los listeners de cerrar: uno que no esté acá
   // existe en index.html y no se cierra nunca en los tests.
-  const dialogs = [nodes['detail-dialog'], nodes['connection-dialog'], nodes['setting-dialog']];
+  const dialogs = [nodes['detail-dialog'], nodes['connection-dialog'], nodes['setting-dialog'], nodes['price-dialog']];
   document = {
     activeElement: null, visibilityState: 'visible', documentElement: { dataset: {} },
     body: { append(node) { decorations.push(node); } },
@@ -84,7 +84,10 @@ function workspace(options = {}) {
   const settingForm = (setting, value) => Object.assign(element('setting-form'), {
     fields: { setting, value }, button: element('submit'),
   });
-  return { context, run, click, fixture, live, nodes, copied, downloads, requests, listeners, form, submit, settingForm, preferences, timeouts, decorations };
+  const priceForm = (product, value) => Object.assign(element('price-form'), {
+    fields: { product, value }, button: element('submit'),
+  });
+  return { context, run, click, fixture, live, nodes, copied, downloads, requests, listeners, form, submit, settingForm, priceForm, preferences, timeouts, decorations };
 }
 
 const response = value => ({ ok: true, json: async () => value });
@@ -1170,4 +1173,71 @@ test('A change already waiting is shown, so a second one does not silently repla
   await w.click({ view: 'settings' });
   assert.match(w.nodes.app.innerHTML, /waiting for your four-digit code on WhatsApp/);
   assert.match(w.nodes.app.innerHTML, /0 → 30000/);
+});
+
+// ---------------------------------------------------------------------------
+// Los precios de lista, en la pantalla de inventario.
+// ---------------------------------------------------------------------------
+const pricesFixture = (over = {}) => ({
+  priceList: 'Standard Selling', currency: 'ARS', bandPct: 15, canChange: true,
+  items: [{ id: 'LECHE-ENT-1L', price: 1250, unit: 'Unidad' }],
+  errors: [], truncated: [], ...over,
+});
+
+test('Inventory says why a price cannot be changed instead of hiding the button', async () => {
+  const w = workspace();
+  w.live();
+  // La banda arranca en 0 —ningún precio se escribe solo— y eso es la postura
+  // de fábrica, no un error. Sin el aviso, la pantalla se ve rota.
+  w.context.fetch = async (url) => {
+    w.requests.push([url]);
+    return new Response(JSON.stringify(pricesFixture({ bandPct: 0, canChange: false })), { status: 200 });
+  };
+  await w.click({ view: 'inventory' });
+  assert.match(w.nodes.app.innerHTML, /Price changes from this dashboard are off/);
+  assert.ok(!/data-price=/.test(w.nodes.app.innerHTML));
+});
+
+test('A list price can be changed, and a rejected one says why', async () => {
+  const w = workspace();
+  w.live();
+  let respuesta = { productId: 'LECHE-ENT-1L', ok: true, price: 1300, detail: 'El precio quedó en 1300.' };
+  w.context.fetch = async (url, options) => {
+    w.requests.push([url, options]);
+    if (!options?.method) return new Response(JSON.stringify(pricesFixture()), { status: 200 });
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers['Content-Type'], 'application/json');
+    return new Response(JSON.stringify(respuesta), { status: 200 });
+  };
+  await w.click({ view: 'inventory' });
+  assert.match(w.nodes.app.innerHTML, /data-price="LECHE-ENT-1L"/);
+  assert.match(w.nodes.app.innerHTML, /up to 15% per product per day/);
+
+  await w.run("openPrice('LECHE-ENT-1L')");
+  await w.submit(w.priceForm('LECHE-ENT-1L', '1300'));
+  const post = w.requests.find(([, o]) => o?.method === 'POST');
+  assert.equal(new URL(post[0]).pathname, '/api/dashboard/products/LECHE-ENT-1L/price');
+  assert.deepEqual(JSON.parse(post[1].body), { value: '1300' });
+  assert.equal(w.nodes['price-dialog'].open, false);
+
+  // Fuera de banda: 200 con `ok:false`. El diálogo se queda abierto diciendo
+  // por qué, en vez de cerrarse afirmando que el precio cambió.
+  respuesta = { productId: 'LECHE-ENT-1L', ok: false, price: 1250, detail: 'Ese salto es del 40%, y la banda es 15%.' };
+  await w.run("openPrice('LECHE-ENT-1L')");
+  await w.submit(w.priceForm('LECHE-ENT-1L', '1750'));
+  assert.equal(w.nodes['price-dialog'].open, true);
+  assert.match(w.nodes['price-error'].textContent, /la banda es 15%/);
+});
+
+test('A product with no price in the list reads as unpriced, not as a failed read', async () => {
+  const w = workspace();
+  w.live();
+  w.context.fetch = async (url) => {
+    w.requests.push([url]);
+    return new Response(JSON.stringify(pricesFixture({ items: [] })), { status: 200 });
+  };
+  await w.click({ view: 'inventory' });
+  // Los dos estados son distintos y se dicen distinto: en blanco, el dueño lee
+  // un problema de conexión sobre un producto al que sólo le falta el precio.
+  assert.match(w.nodes.app.innerHTML, /Not priced/);
 });
