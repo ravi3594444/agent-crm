@@ -8,13 +8,20 @@ const source = readFileSync(new URL('../plus-agent/app/dashboard_ui/app.js', imp
 
 function workspace(options = {}) {
   const listeners = {}, nodes = {}, copied = [], downloads = [], requests = [];
-  const preferences = new Map();
+  const preferences = new Map(options.preferences || []), timeouts = new Map(), decorations = [];
+  // MONOTÓNICO, no `timeouts.size + 1`: el tamaño BAJA con cada clearTimeout,
+  // así que el id se reusaba y el registro del timer vivo se pisaba. Pasa en
+  // el camino real de exportar: toast() toma el 1, el cleanup de 1000 ms toma
+  // el 2, toast() borra el 1 y el siguiente vuelve a ser 2.
+  let ultimoTimer = 0;
   let document;
   function element(id) {
     const handlers = {};
     return {
       id, innerHTML: '', textContent: '', open: false, disabled: false, value: '',
       selectionStart: 0, tagName: 'DIV', dataset: {},
+      setAttribute(name, value) { this[name] = value; },
+      remove() { this.removed = true; },
       classList: { add() {}, remove() {}, toggle() {} },
       addEventListener(event, callback) { handlers[event] = callback; },
       showModal() { this.open = true; },
@@ -30,7 +37,8 @@ function workspace(options = {}) {
   nodes.search.tagName = 'INPUT';
   const dialogs = [nodes['detail-dialog'], nodes['connection-dialog']];
   document = {
-    activeElement: null, visibilityState: 'visible',
+    activeElement: null, visibilityState: 'visible', documentElement: { dataset: {} },
+    body: { append(node) { decorations.push(node); } },
     querySelector(selector) { return selector === 'dialog[open]' ? dialogs.find(d => d.open) : nodes[selector.slice(1)] || null; },
     querySelectorAll(selector) { return selector === 'dialog' ? dialogs : selector === 'dialog[open]' ? dialogs.filter(d => d.open) : []; },
     addEventListener(event, callback) { listeners[event] = callback; },
@@ -51,7 +59,7 @@ function workspace(options = {}) {
       removeItem: key => preferences.delete(key),
     },
     FormData: class { constructor(form) { this.fields = form.fields; } get(key) { return this.fields[key]; } },
-    setTimeout() { return 1; }, clearTimeout() {}, setInterval() { return 1; },
+    setTimeout(callback, ms) { const id = ++ultimoTimer; timeouts.set(id, { callback, ms }); return id; }, clearTimeout(id) { timeouts.delete(id); }, setInterval() { return 1; },
     fetch: async (...args) => { requests.push(args); throw new Error('No network fixture configured'); },
   });
   vm.runInContext(source, context);
@@ -67,7 +75,7 @@ function workspace(options = {}) {
     button: element('submit'),
   });
   const submit = target => listeners.submit({ target, preventDefault() {} });
-  return { context, run, click, fixture, live, nodes, copied, downloads, requests, listeners, form, submit, preferences };
+  return { context, run, click, fixture, live, nodes, copied, downloads, requests, listeners, form, submit, preferences, timeouts, decorations };
 }
 
 const response = value => ({ ok: true, json: async () => value });
@@ -685,4 +693,374 @@ test('fresh operations do not disguise old controls when the agents view is reop
   assert.deepEqual(w.requests.map(([url]) => new URL(url).pathname), ['/api/dashboard/controls']);
   assert.match(w.nodes.app.innerHTML, /Updated ceiling/);
   assert.doesNotMatch(w.nodes.app.innerHTML, /Old ceiling/);
+});
+
+// Independent contracts: these numbers do not come from makeDemo or snapshot totals.
+const salesFixture = () => ({
+  currency: 'ARS', since: '2026-09-09', until: '2026-09-15', total: 1234500, orders: 42, averageOrder: 29392,
+  daily: [{ date: '2026-09-10', total: 60000, orders: 2 }, { date: '2026-09-09', total: 120000, orders: 4 }],
+  topProducts: [{ id: 'MILK', name: 'Whole milk', quantity: 320, total: 400000 }],
+  topCustomers: [{ id: 'CUST-RANKED', name: 'Ranked shop', orders: 6, total: 180000 }], errors: [], truncated: [],
+});
+const adviceFixture = () => ({
+  generatedAt: '2026-09-15T13:50:00+00:00', enabled: false, currency: 'ARS',
+  items: [
+    { id: 'sleep', kind: 'dormido', title: 'Quiet account', body: 'A regular stopped ordering.', about: 'Quiet shop', assumption: 'Weekly purchases.', amount: null, customerId: 'CUST-ADVISED', orderId: null, productId: null },
+    { id: 'loss', kind: 'perdida', title: 'Sold below cost', body: 'Two lines were sold below cost.', about: 'ORDER-LOSS', assumption: 'Purchase price list.', amount: -18400, customerId: null, orderId: 'ORDER-LOSS', productId: null },
+    { id: 'debt', kind: 'deuda', title: 'Overdue balance', body: 'Payment is overdue.', about: 'A balance', assumption: 'Fourteen day tolerance.', amount: 0, customerId: null, orderId: null, productId: null },
+    { id: 'stock', kind: 'quiebre', title: 'Stock may run out', body: 'Demand exceeds available stock.', about: 'MILK', assumption: 'Next delivery in two days.', customerId: null, orderId: null, productId: 'MILK' },
+  ], errors: [], truncated: [],
+});
+function reports(w, sales = salesFixture(), advice = adviceFixture()) {
+  w.context.salesPayload = sales; w.context.advicePayload = advice;
+  w.run('data.sales=validateSales(salesPayload);data.advice=validateAdvice(advicePayload);state.reads.sales.range=state.range');
+}
+function reportApi(w, handler) {
+  w.context.fetch = async (url, options) => {
+    w.requests.push([url, options]);
+    assert.equal(options.headers.Authorization, 'Bearer dashboard-fixture-token-at-least-32-characters');
+    assert.equal(options.body, undefined);
+    assert.ok(!options.method || options.method === 'GET');
+    return handler(new URL(url), options);
+  };
+}
+
+test('Sales and Advice demo fixtures work offline for both reporting periods', async () => {
+  const w = workspace({ search: '?demo=1' });
+  for (const view of ['sales', 'advice']) {
+    await w.click({ view });
+    assert.equal(w.run('state.view'), view);
+    assert.match(w.nodes.app.innerHTML, new RegExp(`data-view="${view}" class="nav-item active"`));
+  }
+  assert.equal(w.run('data.advice.items.length'), 4);
+  assert.equal(w.run('data.advice.enabled'), false);
+  assert.equal(w.run('data.advice.items.every(i=>!i.orderId||data.orders.some(o=>o.id===i.orderId))'), true);
+  await w.click({ view: 'sales' });
+  assert.match(w.nodes.app.innerHTML, /id="range"/);
+  await w.listeners.change({ target: { id: 'range', value: '30' } });
+  assert.equal(w.run('data.sales.daily.length'), 30);
+  assert.equal(w.run('data.sales.since'), w.run('dateShift(data.today,-29)'));
+  assert.equal(w.run('data.sales.daily.reduce((sum,row)=>sum+row.total,0)'), w.run('data.sales.total'));
+  await w.listeners.change({ target: { id: 'range', value: '7' } });
+  assert.equal(w.run('data.sales.daily.length'), 7);
+  assert.equal(w.requests.length, 0);
+});
+
+test('Sales distinguishes unavailable fields from zero and intentional empty lists', () => {
+  const w = workspace({ search: '?demo=1' });
+  const unavailable = Object.fromEntries(Object.keys(salesFixture()).map(key => [key, null]));
+  reports(w, unavailable);
+  let html = w.run('salesView()');
+  assert.equal((html.match(/unavailable-value/g) || []).length, 3);
+  for (const text of ['Daily sales unavailable', 'Top products unavailable', 'Top customers unavailable', 'Start date unavailable', 'End date unavailable', 'Error details unavailable', 'List completeness unavailable']) assert.ok(html.includes(text), text);
+  assert.doesNotMatch(html, /ARS|>0<|NaN/);
+  reports(w, { ...salesFixture(), total: 0, orders: 0, averageOrder: 0, daily: [], topProducts: [], topCustomers: [] });
+  html = w.run('salesView()');
+  assert.match(html, /ARS\s*0\.00/);
+  assert.match(html, />0<\/div>/);
+  for (const text of ['No daily sales yet', 'No product sales yet', 'No customer sales yet']) assert.ok(html.includes(text));
+  reports(w, { ...salesFixture(), currency: null });
+  assert.match(w.run('salesView()'), /Sales currency unavailable/);
+  assert.doesNotMatch(w.run('salesView()'), /ARS\s*1,234,500/);
+});
+
+test('Sales rejects malformed numeric, date, ranking, and notice contracts', () => {
+  const w = workspace({ search: '?demo=1' });
+  const bad = [
+    { currency: 'ars' }, { since: '2026-02-30' }, { until: '2026-09-01' }, { total: '1' }, { averageOrder: '0.5' }, { orders: -1 },
+    { daily: false }, { daily: [{ date: '2026-09-08', total: 1, orders: 1 }] }, { daily: [{ date: '2026-09-09', total: Infinity, orders: 1 }] },
+    { daily: [{ date: '2026-09-09', total: 1, orders: 0.5 }] }, { daily: [salesFixture().daily[0], salesFixture().daily[0]] },
+    { topProducts: [{ id: 'MILK', name: 'Milk', quantity: -0.5, total: 1 }] }, { topProducts: [{ id: '', name: 'Milk', quantity: 1, total: 1 }] },
+    { topProducts: [{ id: 'MILK', name: 'Milk', quantity: 1, total: '0.25' }] }, { topCustomers: [{ id: 'C', name: 'Shop', orders: '3', total: 1 }] },
+    { errors: [null] }, { truncated: [{}] }, { total: Number.MAX_SAFE_INTEGER + 1 },
+  ];
+  for (const change of bad) { w.context.bad = { ...salesFixture(), ...change }; assert.throws(() => w.run('validateSales(bad)'), /invalid/); }
+  for (const key of Object.keys(salesFixture())) { w.context.bad = salesFixture(); delete w.context.bad[key]; assert.throws(() => w.run('validateSales(bad)'), /invalid/, key); }
+  w.context.good = { ...salesFixture(), topProducts: [{ id: 'CHEESE', name: 'Cheese', quantity: 0.5, total: -1 }] };
+  assert.equal(w.run('validateSales(good).topProducts[0].quantity'), 0.5);
+  assert.equal(w.run('validateSales(good).daily[0].date'), '2026-09-09');
+});
+
+test('Advice rejects unknown kinds, invalid references, amounts and text', () => {
+  const w = workspace({ search: '?demo=1' });
+  for (const change of [{ kind: 'other' }, { amount: '0.5' }, { amount: Infinity }, { customerId: '' }, { orderId: 42 }, { productId: false }, { assumption: null }, { title: 1 }, { about: null }, { body: [] }, { id: '' }]) {
+    w.context.bad = { ...adviceFixture(), items: [{ ...adviceFixture().items[0], ...change }] };
+    assert.throws(() => w.run('validateAdvice(bad)'), /invalid/);
+  }
+  for (const change of [{ enabled: null }, { currency: 'ars' }, { generatedAt: '2026-02-30T10:00:00Z' }, { items: null }, { errors: null }, { truncated: [1] }]) {
+    w.context.bad = { ...adviceFixture(), ...change }; assert.throws(() => w.run('validateAdvice(bad)'), /invalid/);
+  }
+  w.context.good = adviceFixture();
+  w.context.sinMoneda = { ...adviceFixture(), currency: null };
+  assert.equal(w.run('validateAdvice(sinMoneda).currency'), null);
+  assert.equal(w.run('validateAdvice(good).items[3].amount'), null);
+  assert.equal(w.run('validateAdvice(good).items[1].amount'), -18400);
+});
+
+test('Both report validators project allowlisted fields and their views escape all text', () => {
+  const w = workspace({ search: '?demo=1' });
+  const sales = salesFixture(), advice = adviceFixture();
+  const poison = '<img src=x onerror=alert(1)> & "quoted"';
+  sales.phone = advice.phone = 'PHONE-MUST-NOT-RENDER';
+  for (const row of [...sales.daily, ...sales.topProducts, ...sales.topCustomers, ...advice.items]) row.phone = 'PHONE-MUST-NOT-RENDER';
+  sales.topProducts[0].name = sales.topCustomers[0].name = poison;
+  sales.topProducts[0].id = sales.topCustomers[0].id = poison;
+  advice.items[0] = { ...advice.items[0], title: poison, body: poison, assumption: poison, about: poison, customerId: poison, orderId: poison, productId: poison };
+  sales.errors = advice.errors = [poison];
+  reports(w, sales, advice);
+  assert.doesNotMatch(w.run('JSON.stringify([data.sales,data.advice])'), /PHONE-MUST-NOT-RENDER|"phone"/);
+  const html = w.run('salesView()+adviceView()');
+  assert.doesNotMatch(html, /<img|onerror="|data-customer="<|PHONE-MUST-NOT-RENDER/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt; &amp; &quot;quoted&quot;/);
+  assert.match(html, /data-order="&lt;img/);
+  assert.match(html, /Assumption<\/strong>&lt;img/);
+});
+
+test('Sales reads the selected period, caches for sixty seconds, and refreshes explicitly', async () => {
+  const w = workspace(); w.live();
+  reportApi(w, url => {
+    assert.equal(url.pathname, '/api/dashboard/sales');
+    assert.ok(['7', '30'].includes(url.searchParams.get('days')));
+    return response({ ...salesFixture(), since: url.searchParams.get('days') === '30' ? '2026-08-17' : '2026-09-09' });
+  });
+  await w.click({ view: 'sales' });
+  assert.equal(w.requests.length, 1);
+  await w.click({ view: 'sales' }); assert.equal(w.requests.length, 1);
+  await w.listeners.change({ target: { id: 'range', value: '30' } });
+  assert.equal(w.requests.length, 2);
+  assert.equal(new URL(w.requests[1][0]).searchParams.get('days'), '30');
+  assert.match(w.nodes.app.innerHTML, /17 Aug 2026/);
+  await w.click({ read: 'sales' }); assert.equal(w.requests.length, 3);
+  w.run("state.reads.sales.loadedAt=new Date(Date.now()-61000).toISOString()");
+  await w.click({ view: 'sales' }); assert.equal(w.requests.length, 4);
+  await w.listeners.change({ target: { id: 'range', value: '9' } }); assert.equal(w.requests.length, 4);
+});
+
+test('Sales ignores stale successes and failures during rapid period changes', async () => {
+  const w = workspace(); w.live();
+  const pending = [];
+  reportApi(w, url => { const wait = deferred(); pending.push({ days: url.searchParams.get('days'), wait }); return wait.promise; });
+  w.run("state.view='sales'");
+  const first = w.run("loadRead('sales')");
+  const second = w.run("state.range=30;loadRead('sales')");
+  const third = w.run("state.range=7;loadRead('sales')");
+  assert.deepEqual(pending.map(p => p.days), ['7', '30', '7']);
+  pending[2].wait.resolve(response({ ...salesFixture(), total: 777 })); await third;
+  pending[0].wait.resolve(response({ ...salesFixture(), total: 111 })); await first;
+  assert.equal(w.run('data.sales.total'), 777);
+  pending[1].wait.resolve({ ok: false, status: 503 }); await second;
+  assert.equal(w.run('data.sales.total'), 777);
+  assert.equal(w.run('state.reads.sales.error'), '');
+  assert.equal(w.run('state.reads.sales.busy'), false);
+});
+
+test('Report reads survive snapshot refresh and manual refresh updates only the active report', async () => {
+  const w = workspace(); w.live();
+  reportApi(w, url => {
+    const routes = { '/api/dashboard/sales': salesFixture, '/api/dashboard/advice': adviceFixture, '/api/dashboard/snapshot': w.fixture };
+    assert.ok(routes[url.pathname]); return response(routes[url.pathname]());
+  });
+  await w.click({ view: 'sales' }); await w.click({ view: 'advice' });
+  const cached = w.run('JSON.stringify([data.sales,data.advice,state.reads.sales,state.reads.advice])');
+  w.requests.length = 0; await w.run('refresh(true)');
+  assert.equal(w.run('JSON.stringify([data.sales,data.advice,state.reads.sales,state.reads.advice])'), cached);
+  assert.deepEqual(w.requests.map(([url]) => new URL(url).pathname), ['/api/dashboard/snapshot']);
+  w.requests.length = 0; await w.run('refresh()');
+  assert.deepEqual(w.requests.map(([url]) => new URL(url).pathname), ['/api/dashboard/snapshot', '/api/dashboard/advice']);
+  await w.click({ view: 'advice' }); assert.equal(w.requests.length, 2);
+});
+
+test('Both new reads clear on sign-out, reject late sessions, and sign out on a revoked token', async () => {
+  for (const key of ['sales', 'advice']) {
+    const w = workspace(); w.live(); reports(w);
+    const wait = deferred(); reportApi(w, () => wait.promise);
+    const reading = w.run(`loadRead('${key}',true)`);
+    await w.click({ action: 'disconnect' });
+    assert.equal(w.run('data.sales'), null); assert.equal(w.run('data.advice'), null);
+    wait.resolve(response(key === 'sales' ? salesFixture() : adviceFixture())); await reading;
+    assert.equal(w.run('data.sales'), null); assert.equal(w.run('data.advice'), null);
+    w.live(); reports(w); reportApi(w, () => ({ ok: false, status: 401 }));
+    await w.run(`loadRead('${key}',true)`);
+    assert.equal(w.run('data.mode'), 'disconnected');
+    assert.equal(w.run('data.sales'), null); assert.equal(w.run('data.advice'), null);
+    assert.equal(w.run('state.connection'), null);
+    assert.equal(w.run('Object.values(state.reads).some(r=>r.busy||r.error||r.loadedAt)'), false);
+  }
+});
+
+test('Missing report endpoints show a useful unavailable state and a working retry', async () => {
+  for (const key of ['sales', 'advice']) {
+    const w = workspace(); w.live();
+    reportApi(w, url => { assert.equal(url.pathname, '/api/dashboard/' + key); return { ok: false, status: 404 }; });
+    await w.click({ view: key });
+    assert.match(w.nodes.app.innerHTML, /This view is not available on this agent yet/);
+    assert.equal(w.run(`data.${key}`), null);
+    assert.match(w.nodes.app.innerHTML, new RegExp(`data-read="${key}"`));
+    reportApi(w, () => response(key === 'sales' ? salesFixture() : adviceFixture()));
+    await w.click({ read: key });
+    assert.ok(w.run(`data.${key}`));
+    reportApi(w, () => response({ invalid: true }));
+    await w.click({ read: key });
+    assert.match(w.nodes.app.innerHTML, /The agent returned invalid/);
+    assert.equal(w.run(`data.${key}`), null);
+  }
+});
+
+test('Disabled Advice explains the preview and empty enabled reports make no false claims', () => {
+  const w = workspace({ search: '?demo=1' }); reports(w);
+  assert.match(w.run('adviceView()'), /ADVICE IS OFF/);
+  assert.match(w.run('adviceView()'), /These sample findings show what you would see/);
+  assert.match(w.run('adviceView()'), /Sold below cost/);
+  w.run("data.mode='live';data.advice.items=[]");
+  let html = w.run('adviceView()');
+  assert.match(html, /No saved findings/);
+  assert.match(html, /last available report/);
+  assert.match(html, /What advice looks for/);
+  assert.doesNotMatch(html, /These sample findings|Sold below cost/);
+  w.run('data.advice.enabled=true'); html = w.run('adviceView()');
+  assert.match(html, /No advice to review/);
+  assert.doesNotMatch(html, /ADVICE IS OFF|All clear|No risks/);
+});
+
+test('Advice renders in the order the server sent, without percentages, and distinguishes all four detectors', () => {
+  const w = workspace({ search: '?demo=1' }); reports(w);
+  const html = w.run('adviceView()');
+  // El servidor ordena DENTRO de cada clase y el panel respeta la lista.
+  // Ordenar acá compararía plata contra unidades.
+  const enviados = JSON.parse(w.run('JSON.stringify(data.advice.items.map(i=>i.title))'));
+  const positions = enviados.map(title => html.indexOf('<h3>' + title));
+  assert.ok(positions.every((pos, i) => pos >= 0 && (!i || pos > positions[i - 1])));
+  for (const kind of ['perdida', 'dormido', 'deuda', 'quiebre']) assert.match(html, new RegExp(`advice-row advice-kind-${kind}`));
+  assert.doesNotMatch(html, /82%|20%|100%|confidence/i);
+  assert.match(html, /Assumption<\/strong>Purchase price list/);
+});
+
+test('Advice category and text filters compose, and navigation resets them', async () => {
+  const w = workspace({ search: '?demo=1' }); reports(w);
+  await w.click({ view: 'advice' }); await w.click({ filter: 'perdida' });
+  assert.match(w.nodes.app.innerHTML, /<h3>Sold below cost/);
+  assert.doesNotMatch(w.nodes.app.innerHTML, /<h3>Overdue balance/);
+  await w.click({ filter: 'all' });
+  w.nodes.search.value = 'fourteen day'; w.listeners.input({ target: w.nodes.search });
+  assert.match(w.nodes.app.innerHTML, /<h3>Overdue balance/);
+  assert.doesNotMatch(w.nodes.app.innerHTML, /<h3>Sold below cost/);
+  await w.click({ filter: 'quiebre' }); assert.match(w.nodes.app.innerHTML, /No matching advice/);
+  await w.click({ view: 'sales' }); await w.click({ view: 'advice' });
+  assert.equal(w.run('state.search'), ''); assert.equal(w.run('state.filter'), 'all');
+});
+
+test('Sales and Advice link to existing details even for customers outside the snapshot', async () => {
+  const w = workspace(); w.live(); reports(w);
+  const order = { ...w.fixture().orders[0], id: 'ORDER-LOSS', items: [{ name: 'Detail milk', qty: 1, rate: 10 }] };
+  reportApi(w, url => {
+    if (url.pathname === '/api/dashboard/orders/ORDER-LOSS') return response(order);
+    const match = url.pathname.match(/^\/api\/dashboard\/customers\/([^/]+)\/conversation$/);
+    assert.ok(match); return response(transcriptFixture(decodeURIComponent(match[1])));
+  });
+  assert.match(w.run('salesView()'), /data-customer="CUST-RANKED"/);
+  assert.match(w.run('adviceView()'), /data-customer="CUST-ADVISED"/);
+  assert.match(w.run('adviceView()'), /data-order="ORDER-LOSS"/);
+  await w.run("showCustomer('CUST-RANKED')"); assert.match(w.nodes['detail-dialog'].innerHTML, /Ranked shop/);
+  await w.run("showCustomer('CUST-ADVISED')"); assert.match(w.nodes['detail-dialog'].innerHTML, /CUST-ADVISED/);
+  await w.run("showOrder('ORDER-LOSS')"); assert.match(w.nodes['detail-dialog'].innerHTML, /Detail milk/);
+  assert.equal(w.requests.length, 3);
+});
+
+test('Report errors are surfaced and truncation notices stay next to their own lists', () => {
+  const w = workspace({ search: '?demo=1' });
+  reports(w, { ...salesFixture(), errors: ['Sales partial'], truncated: ['daily', 'topProducts', 'topCustomers'] }, { ...adviceFixture(), errors: ['Advice partial'], truncated: ['items'] });
+  const sales = w.run('salesView()'), advice = w.run('adviceView()');
+  assert.match(sales, /notice error-notice[^>]*>.*Sales partial/);
+  assert.match(advice, /notice error-notice[^>]*>.*Advice partial/);
+  assert.equal((sales.match(/This list was capped/g) || []).length, 3);
+  assert.match(sales, /This list was capped[^]*sales-chart/);
+  assert.match(sales, /Top products[^]*This list was capped[^]*Whole milk/);
+  assert.match(sales, /Top customers[^]*This list was capped[^]*Ranked shop/);
+  assert.match(advice, /This list was capped[^]*advice-list/);
+  assert.doesNotMatch(sales, /totals cover loaded records/);
+});
+
+test('Report money uses its own currency and converts every monetary consumer including negative advice', async () => {
+  const w = workspace({ search: '?demo=1' });
+  reports(w, { ...salesFixture(), currency: 'USD' }, { ...adviceFixture(), currency: 'USD' });
+  assert.match(w.run('salesView()'), /USD\s*1,234,500\.00/);
+  assert.match(w.run('adviceView()'), /-USD\s*18,400\.00/);
+  w.run("state.displayCurrency='INR';state.fx={target:'INR',rates:{USD:0.01,ARS:2}};");
+  const sales = w.run('salesView()'), advice = w.run('adviceView()');
+  for (const amount of ['123,450,000.00', '2,939,200.00', '40,000,000.00', '18,000,000.00', '12,000,000.00']) assert.ok(sales.includes('INR\u00a0' + amount), amount);
+  assert.match(sales, /aria-label="[^"]*: INR\s*12,000,000\.00, 4 orders"/);
+  assert.match(sales, /title="[^"]* · INR\s*12,000,000\.00 · 4 orders"/);
+  assert.match(advice, /-INR\s*1,840,000\.00/);
+  assert.match(advice, /INR\s*0\.00/);
+  assert.equal((advice.match(/Amount unavailable/g) || []).length, 2);
+  await w.click({ salesDate: '2026-09-09' });
+  assert.match(w.nodes['detail-dialog'].innerHTML, /INR\s*12,000,000\.00/);
+  assert.match(w.nodes['detail-dialog'].innerHTML, /<dt>Orders<\/dt><dd>4<\/dd>/);
+  assert.equal(w.run('data.sales.total'), 1234500);
+  assert.equal(w.run('data.advice.items[1].amount'), -18400);
+});
+
+test('The charcoal preference is opt-in, persistent, local, and safe when storage is unavailable', async () => {
+  const w = workspace({ search: '?demo=1' });
+  assert.equal(w.run('document.documentElement.dataset.theme'), 'light');
+  assert.match(w.nodes.app.innerHTML, /Switch to charcoal night mode/);
+  await w.click({ action: 'theme' });
+  assert.equal(w.run('document.documentElement.dataset.theme'), 'dark');
+  assert.match(w.nodes.app.innerHTML, /Switch to light mode/);
+  assert.equal(w.preferences.get('plus.dashboard.theme'), 'dark');
+  const restored = workspace({ preferences: [...w.preferences] });
+  assert.equal(restored.run('document.documentElement.dataset.theme'), 'dark');
+  await w.click({ action: 'theme' }); assert.equal(w.preferences.get('plus.dashboard.theme'), 'light');
+  w.context.localStorage.setItem = () => { throw new Error('Storage blocked'); };
+  await w.click({ action: 'theme' }); assert.equal(w.run('state.theme'), 'dark');
+  assert.equal(workspace({ preferences: [['plus.dashboard.theme', 'untrusted']] }).run('state.theme'), 'light');
+  assert.equal(w.requests.length, 0);
+});
+
+test('The decorative logo reveal cleans up once without delaying dashboard navigation', async () => {
+  const w = workspace({ search: '?demo=1' });
+  assert.equal(w.decorations.length, 1);
+  assert.equal(w.decorations[0]['aria-hidden'], 'true');
+  assert.match(w.decorations[0].innerHTML, /mate-launch/);
+  assert.match(w.nodes.app.innerHTML, /mate-sidebar/);
+  await w.click({ view: 'sales' });
+  assert.equal(w.run('state.view'), 'sales');
+  assert.equal(w.decorations.length, 1);
+  const cleanup = [...w.timeouts.values()].find(timer => timer.ms === 1400);
+  assert.ok(cleanup); cleanup.callback();
+  assert.equal(w.decorations[0].removed, true);
+  assert.equal(w.requests.length, 0);
+});
+
+
+test('Report lists beyond the display cap are rejected instead of rendered', () => {
+  const w = workspace({ search: '?demo=1' });
+  const fila = { date: '2026-09-09', total: 1, orders: 1 };
+  w.context.bad = { ...salesFixture(), daily: Array.from({ length: 501 }, (_, i) => ({ ...fila, date: '2026-09-09' })) };
+  assert.throws(() => w.run('validateSales(bad)'), /invalid/);
+  w.context.bad = { ...adviceFixture(), items: Array.from({ length: 501 }, () => adviceFixture().items[0]) };
+  assert.throws(() => w.run('validateAdvice(bad)'), /invalid/);
+  // El límite se prueba por sus DOS lados: con sólo el rechazo, un tope
+  // accidentalmente más bajo dejaría este test en verde.
+  const dias = Array.from({ length: 500 }, (_, i) => ({
+    date: new Date(Date.UTC(2025, 0, 1 + i)).toISOString().slice(0, 10), total: 1, orders: 1,
+  }));
+  w.context.good = { ...salesFixture(), since: dias[0].date, until: dias[499].date, daily: dias };
+  assert.equal(w.run('validateSales(good).daily.length'), 500);
+});
+
+
+test('The timer mock never reuses an id, so a live timer is not overwritten', () => {
+  // Reproduce la secuencia real: toast() programa el suyo, exportOrders()
+  // programa su limpieza, y el segundo toast() borra el primero. Con
+  // `timeouts.size + 1` el tercer id volvía a ser el del cleanup y le pisaba
+  // el registro: el harness perdía un timer vivo sin que nada fallara.
+  const w = workspace({ search: '?demo=1' });
+  const unoAviso = w.run('setTimeout(()=>{},4000)');
+  const limpieza = w.run('setTimeout(()=>{},1000)');
+  w.run(`clearTimeout(${unoAviso})`);
+  const otroAviso = w.run('setTimeout(()=>{},4000)');
+  assert.notEqual(otroAviso, limpieza);
+  assert.equal(w.timeouts.get(limpieza).ms, 1000);
+  assert.equal(w.timeouts.get(otroAviso).ms, 4000);
 });

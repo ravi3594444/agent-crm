@@ -288,3 +288,271 @@ class DashboardIdentityTest(unittest.TestCase):
             os.environ, {"DASHBOARD_TOKENS": f"  {PERSONAL}  :{STAFF_CANONICAL}"}
         ):
             self.assertEqual(dashboard.quien("Bearer " + PERSONAL), STAFF_CANONICAL)
+
+
+# ------------------------------------------------- ventas y consejos del panel
+ERP_ERROR = type("ERPNextError", (RuntimeError,), {})
+
+
+def _erp_falso(pedidos, renglones=(), llamadas=None):
+    from contextlib import nullcontext
+
+    registro = llamadas if llamadas is not None else []
+
+    class Falso:
+        ERPNextError = ERP_ERROR
+        default_company = staticmethod(lambda: "Lacteos Test SA")
+        manager_scope = staticmethod(nullcontext)
+        get_doc = staticmethod(lambda *a, **k: {"default_currency": "ARS"})
+
+        @staticmethod
+        def get_list(doctype, **kwargs):
+            registro.append((doctype, kwargs))
+            return list(renglones) if doctype == "Sales Order Item" else list(pedidos)
+
+    return Falso
+
+
+_AUSENTE = object()
+
+
+def _con_modulos(modulos, fn):
+    """Sustituye módulos de `app` y los DEVUELVE como estaban, incluso si no
+    estaban.
+
+    La primera versión de esto restauraba sólo cuando el valor viejo no era
+    None, así que la primera vez —cuando `app.erpnext` todavía no era un
+    atributo del paquete— dejaba el DOBLE puesto para siempre. Los tests de
+    este archivo seguían pasando y caían nueve de `test_readiness.py`, que
+    importa `app.dashboard` y se comía el ERPNext falso. Un centinela distingue
+    «estaba en None» de «no estaba», que es justo la diferencia que se perdía.
+    """
+    import sys
+
+    real = {k: sys.modules.get(k, _AUSENTE) for k in modulos}
+    paquete = sys.modules.get("app")
+    previos = {k.split(".")[1]: getattr(paquete, k.split(".")[1], _AUSENTE) for k in modulos}
+    try:
+        for k, v in modulos.items():
+            sys.modules[k] = v
+            if paquete is not None:
+                setattr(paquete, k.split(".")[1], v)
+        return fn()
+    finally:
+        for k, v in real.items():
+            if v is _AUSENTE:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+        if paquete is not None:
+            for nombre, v in previos.items():
+                if v is _AUSENTE:
+                    if hasattr(paquete, nombre):
+                        delattr(paquete, nombre)
+                else:
+                    setattr(paquete, nombre, v)
+
+
+class PolicyFalso:
+    import datetime as _dt
+    _hoy_del_negocio = staticmethod(lambda: __import__("datetime").date(2026, 9, 15))
+
+
+class VentasDelPanelTest(unittest.TestCase):
+    def _correr(self, pedidos, renglones=(), dias=7, llamadas=None):
+        return _con_modulos(
+            {"app.erpnext": _erp_falso(pedidos, renglones, llamadas), "app.policy": PolicyFalso},
+            lambda: dashboard.sales(dias),
+        )
+
+    def test_el_periodo_pedido_es_el_que_se_mide(self):
+        """`?days=` no puede ser decorativo: si el backend lo ignorara, la
+        pantalla diría «últimos 7 días» sobre números de 30, sin que nada falle.
+        Ése es el peor modo de falla posible en una pantalla de ventas."""
+        pedidos = [
+            {"name": "SO-1", "customer": "C1", "customer_name": "Uno",
+             "grand_total": 100, "transaction_date": "2026-09-14"},
+            {"name": "SO-2", "customer": "C2", "customer_name": "Dos",
+             "grand_total": 400, "transaction_date": "2026-09-01"},
+        ]
+        siete = self._correr(pedidos, dias=7)
+        treinta = self._correr(pedidos, dias=30)
+        self.assertEqual(siete["orders"], 1, siete)
+        self.assertEqual(siete["total"], 100, siete)
+        self.assertEqual(siete["since"], "2026-09-09", siete)
+        self.assertEqual(treinta["orders"], 2, treinta)
+        self.assertEqual(treinta["since"], "2026-08-17", treinta)
+
+    def test_el_promedio_sin_pedidos_es_None_y_no_cero(self):
+        salida = self._correr([])
+        self.assertIsNone(salida["averageOrder"], salida)
+        self.assertEqual(salida["orders"], 0)
+
+    def test_la_tabla_hija_se_pide_con_su_doctype_padre(self):
+        """Frappe rechaza una tabla hija sin `parent`: es el bug por el que
+        `informe(que="stock_bajo")` nunca contestó contra un ERPNext real."""
+        llamadas = []
+        self._correr([{"name": "SO-1", "customer": "C1", "customer_name": "Uno",
+                       "grand_total": 100, "transaction_date": "2026-09-14"}],
+                     [], llamadas=llamadas)
+        hija = [k for d, k in llamadas if d == "Sales Order Item"]
+        self.assertEqual(len(hija), 1, llamadas)
+        self.assertEqual(hija[0].get("parent"), "Sales Order", hija)
+
+
+class DiasPedidosTest(unittest.TestCase):
+    """Un entero sin techo del lado del cliente es pedirle a ERPNext que recorra
+    todo. Se acota acá, donde el cliente no llega."""
+
+    def test_se_acota_arriba_y_abajo_y_lo_ilegible_cae_en_el_default(self):
+        self.assertEqual(dashboard.dias_pedidos(b"days=7"), 7)
+        self.assertEqual(dashboard.dias_pedidos(b"days=30"), 30)
+        self.assertEqual(dashboard.dias_pedidos(b"days=99999"), dashboard.DIAS_VENTAS_MAX)
+        self.assertEqual(dashboard.dias_pedidos(b"days=0"), 1)
+        self.assertEqual(dashboard.dias_pedidos(b"days=-5"), 1)
+        self.assertEqual(dashboard.dias_pedidos(b"days=hola"), dashboard.DIAS_VENTAS_DEFECTO)
+        self.assertEqual(dashboard.dias_pedidos(b""), dashboard.DIAS_VENTAS_DEFECTO)
+
+
+class ConsejosDelPanelTest(unittest.TestCase):
+    def _consejo(self, clase, clave, sobre, peso=0.0):
+        c = type("C", (), {})()
+        c.clase, c.clave, c.sobre = clase, clave, sobre
+        c.titulo, c.cuerpo, c.supuesto, c.peso = "T", "B", "S", peso
+        return c
+
+    def _correr(self, *, activo=True, por_clase=None, rompe=()):
+        import datetime as _dt
+        hechos, prueba = por_clase or {}, self
+
+        class ConsejosFalso:
+            PERDIDA, DORMIDO, DEUDA, QUIEBRE = "perdida", "dormido", "deuda", "quiebre"
+            activo = staticmethod(lambda: activo)
+
+            @staticmethod
+            def _d(clase, dia):
+                if clase in rompe:
+                    raise RuntimeError("lectura caída")
+                prueba.assertIsInstance(dia, _dt.date)
+                return list(hechos.get(clase, ()))
+
+            perdidas = staticmethod(lambda dia: ConsejosFalso._d("perdida", dia))
+            dormidos = staticmethod(lambda dia: ConsejosFalso._d("dormido", dia))
+            deudas = staticmethod(lambda dia: ConsejosFalso._d("deuda", dia))
+            quiebres = staticmethod(lambda dia: ConsejosFalso._d("quiebre", dia))
+
+        return _con_modulos(
+            {"app.consejos": ConsejosFalso, "app.erpnext": _erp_falso([]), "app.policy": PolicyFalso},
+            dashboard.advice,
+        )
+
+    def test_apagado_informa_el_interruptor_y_muestra_igual(self):
+        """`activo()` apaga el ENVÍO —Meta cobra por mensaje—, no la lectura."""
+        salida = self._correr(activo=False, por_clase={
+            "perdida": [self._consejo("perdida", "p:1", "SO-1")]})
+        self.assertFalse(salida["enabled"], salida)
+        self.assertEqual(len(salida["items"]), 1, salida)
+
+    def test_el_enlace_es_el_del_tipo_y_los_otros_dos_van_en_null(self):
+        salida = self._correr(por_clase={
+            "perdida": [self._consejo("perdida", "p:1", "SO-1")],
+            "deuda": [self._consejo("deuda", "d:1", "CUST-1")],
+            "quiebre": [self._consejo("quiebre", "q:1", "LECHE")],
+        })
+        por_clase = {i["kind"]: i for i in salida["items"]}
+        self.assertEqual(por_clase["perdida"]["orderId"], "SO-1")
+        self.assertIsNone(por_clase["perdida"]["customerId"])
+        self.assertEqual(por_clase["deuda"]["customerId"], "CUST-1")
+        self.assertIsNone(por_clase["deuda"]["orderId"])
+        self.assertEqual(por_clase["quiebre"]["productId"], "LECHE")
+        self.assertIsNone(por_clase["quiebre"]["orderId"])
+
+    def test_una_clase_caida_no_se_lleva_las_otras_tres(self):
+        salida = self._correr(rompe=("deuda",), por_clase={
+            "perdida": [self._consejo("perdida", "p:1", "SO-1")]})
+        self.assertEqual(salida["errors"], ["deuda"], salida)
+        self.assertEqual([i["id"] for i in salida["items"]], ["p:1"], salida)
+
+    def test_el_peso_ordena_y_no_viaja(self):
+        salida = self._correr(por_clase={"perdida": [
+            self._consejo("perdida", "p:chico", "SO-1", peso=10.0),
+            self._consejo("perdida", "p:grande", "SO-2", peso=900.0),
+        ]})
+        self.assertEqual([i["id"] for i in salida["items"]], ["p:grande", "p:chico"], salida)
+        self.assertNotIn("weight", salida["items"][0])
+
+
+class VentasHallazgosTest(unittest.TestCase):
+    """Lo que la revisión encontró y este archivo no probaba."""
+
+    def _correr(self, pedidos, renglones=(), dias=7, llamadas=None, romper=()):
+        from contextlib import nullcontext
+
+        registro = llamadas if llamadas is not None else []
+
+        class Falso:
+            ERPNextError = ERP_ERROR
+            default_company = staticmethod(lambda: "Lacteos Test SA")
+            manager_scope = staticmethod(nullcontext)
+
+            @staticmethod
+            def get_doc(doctype, name, timeout=None):
+                if "moneda" in romper:
+                    raise ERP_ERROR("sin moneda")
+                return {"default_currency": "ARS"}
+
+            @staticmethod
+            def get_list(doctype, **kwargs):
+                registro.append((doctype, kwargs))
+                if doctype == "Sales Order Item":
+                    if "renglones" in romper:
+                        raise ERP_ERROR("sin renglones")
+                    return list(renglones)
+                return list(pedidos)
+
+        return _con_modulos({"app.erpnext": Falso, "app.policy": PolicyFalso},
+                            lambda: dashboard.sales(dias))
+
+    def test_un_pedido_con_fecha_futura_no_entra(self):
+        """ERPNext deja fechar un Sales Order adelante. Sin tope superior entra
+        en los totales y arma una fila posterior a `until`, y el validador del
+        panel rechaza el informe ENTERO por incoherente."""
+        llamadas = []
+        self._correr([], llamadas=llamadas)
+        filtros = next(k["filters"] for d, k in llamadas if d == "Sales Order")
+        operadores = {(f[0], f[1]) for f in filtros}
+        self.assertIn(("transaction_date", "<="), operadores, filtros)
+        self.assertIn(("transaction_date", ">="), operadores, filtros)
+
+    def test_la_moneda_que_no_se_pudo_leer_es_None_y_no_cadena_vacia(self):
+        """El validador acepta una moneda ISO o `null`. Con `""` tiraba la
+        respuesta entera, incluido el `errors` que explicaba la falla."""
+        salida = self._correr([], romper=("moneda",))
+        self.assertIsNone(salida["currency"], salida)
+        self.assertIn("currency", salida["errors"], salida)
+
+    def test_un_ranking_que_no_se_pudo_leer_es_None_y_no_una_lista_vacia(self):
+        """`[]` dice «no se vendió nada»; `None` dice «no pude mirar». Es la
+        misma distinción que `averageOrder`, un campo más allá."""
+        pedidos = [{"name": "SO-1", "customer": "C1", "customer_name": "Uno",
+                    "grand_total": 100, "transaction_date": "2026-09-14"}]
+        salida = self._correr(pedidos, romper=("renglones",))
+        self.assertIsNone(salida["topProducts"], salida)
+        self.assertIn("products", salida["errors"], salida)
+        # El ranking de clientes sale de los pedidos, que SÍ se leyeron.
+        self.assertEqual(len(salida["topCustomers"]), 1, salida)
+        # Y no se anuncia un recorte que nadie midió.
+        self.assertNotIn("topProducts", salida["truncated"], salida)
+
+    def test_el_recorte_se_anuncia_cuando_el_tope_se_alcanza_de_verdad(self):
+        """El centinela `+1` distingue «llegué al tope» de «esto es todo»."""
+        pedidos = [{"name": "SO-1", "customer": "C1", "customer_name": "Uno",
+                    "grand_total": 100, "transaction_date": "2026-09-14"}]
+        tope = dashboard.LIMIT * 8
+        muchos = [{"parent": "SO-1", "item_code": f"I{i}", "item_name": "x",
+                   "qty": 1, "amount": 1} for i in range(tope + 1)]
+        salida = self._correr(pedidos, muchos)
+        self.assertIn("topProducts", salida["truncated"], salida)
+        justo = muchos[:tope]
+        salida = self._correr(pedidos, justo)
+        self.assertNotIn("topProducts", salida["truncated"], salida)
