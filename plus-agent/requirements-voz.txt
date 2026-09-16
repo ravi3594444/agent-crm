@@ -1,0 +1,22 @@
+# Dependencias del canal de voz (app/voz/). NO van en requirements.txt.
+#
+# POR QUÉ ESTÁN APARTE
+# La imagen del `agente` (Dockerfile) no sirve la voz: el webhook de WhatsApp y
+# los barridos corren ahí, y el relay corre en su propio servicio. Meter esto
+# en requirements.txt le agrega a esa imagen una dependencia que no usa —y que
+# rompe su build, porque `pip install git+...` necesita un `git` que la imagen
+# no tiene y no tiene por qué tener—.
+#
+# El import de `calling_agent` está adentro de `app/voz/agente.py::para_llamada`
+# justamente para esto: sin este archivo instalado, todo lo demás arranca igual.
+
+-r requirements.txt
+
+# El relay del canal de voz (app/voz/). Es una dependencia SÓLO de ese canal:
+# el import está adentro de `app/voz/agente.py::para_llamada`, así que el resto
+# del sistema —WhatsApp, los barridos, los tests— arranca igual sin ella.
+#
+# Pinneado a un commit y no a una rama, por lo mismo que todo lo de arriba: dos
+# builds del mismo mes tienen que dar la misma app. Para actualizarlo, cambiá el
+# sha, corré `make test` y recién entonces commiteá.
+calling-agent @ git+https://github.com/ravi3594444/the-calling-agent@cf6bcc95a28fdcf8ff31b782b1f0b62978242e42

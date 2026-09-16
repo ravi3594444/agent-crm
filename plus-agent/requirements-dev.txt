@@ -8,3 +8,14 @@ ruff==0.15.4
 # BUSINESS_TIMEZONE y no del servidor, y eso necesita UN instante fijo con
 # varias zonas. Faltaba declararla y CI no podía ni colectar (lo agarró Qodo).
 time-machine==3.5.0
+
+# El relay del canal de voz, para que los tests de voz CORRAN en vez de
+# saltearse. 19 de ellos hacen `tests/voz_relay.py::relay()`, que sin el
+# paquete instalado es un skip — y un skip no pone ningún check en rojo, así
+# que CI daba verde sobre la mitad del canal sin haberla probado. La otra mitad
+# del arreglo es `VOZ_OBLIGATORIO=1` en el job de tests: ahí el skip es falla.
+#
+# No va en la imagen de producción del `agente` (requirements.txt): esa sirve
+# el webhook de WhatsApp y los barridos, y el relay corre en su propio
+# servicio, con su propia imagen (Dockerfile.voz).
+-r requirements-voz.txt
