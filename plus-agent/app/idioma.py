@@ -2202,6 +2202,45 @@ CATALOGO: dict[str, dict[str, str]] = {
     # leche», sobre una escritura que ERPNext había rechazado. Las dos mitades
     # que importan son «NO se guardó nada» y el motivo, que es lo único que
     # convierte una disculpa en algo que el dueño puede ir a arreglar.
+    # LO QUE CONTESTA EL BOTÓN DE CONFIRMAR UN CONTEO. Vivían escritas a mano en
+    # `app/decisiones.py`, o sea en castellano para todo el mundo: ese módulo no
+    # es una herramienta —lo llama el router determinista de `app/main.py`— y el
+    # audit que hace fallar el build ante castellano a mano deriva su lista de
+    # módulos de `graph.TOOLS_GERENCIA`. Sin herramienta, sin audit. El dueño lo
+    # vio al tocar el botón: toda la conversación en inglés y la confirmación en
+    # castellano.
+    "conteo.confirmado": {
+        ES: (
+            "Conteo {nombre} confirmado. Desde ahora el bot puede hablar de "
+            "stock de esos productos."
+        ),
+        EN: (
+            "Count {nombre} confirmed. From now on the bot can talk about the "
+            "stock of those products."
+        ),
+    },
+    "conteo.ya_confirmado": {
+        ES: "El conteo {nombre} ya estaba confirmado.",
+        EN: "Count {nombre} was already confirmed.",
+    },
+    "conteo.cancelado": {
+        ES: "El conteo {nombre} está cancelado; cargá uno nuevo.",
+        EN: "Count {nombre} is cancelled; load a new one.",
+    },
+    "conteo.no_pude_abrir": {
+        ES: "No pude abrir el conteo {nombre}. Revisalo en ERPNext.",
+        EN: "I could not open count {nombre}. Check it in ERPNext.",
+    },
+    "conteo.no_pude_confirmar": {
+        ES: (
+            "No pude confirmar el conteo {nombre}. Confirmalo en ERPNext o "
+            "volvé a intentar."
+        ),
+        EN: (
+            "I could not confirm count {nombre}. Confirm it in ERPNext or try "
+            "again."
+        ),
+    },
     "captura.conteo_rechazado": {
         ES: (
             "NO se guardó nada: ERPNext rechazó el conteo de {item_code} en "

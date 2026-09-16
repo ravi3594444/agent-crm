@@ -284,22 +284,28 @@ def confirmar_conteo(nombre: str, por: str) -> dict:
 
     Returns {"ok": bool, "detalle": str}; `detalle` is the text for the manager.
     """
+    # EN EL IDIOMA DEL DUEÑO, que es quien toca el botón. Escritas a mano, estas
+    # cinco salían en castellano dentro de una conversación entera en inglés.
+    lengua = idioma.gerencia()
     try:
         actual = _leer_doc("Stock Reconciliation", nombre)
     except Exception as exc:
         print(f"[decisiones] {nombre}: no pude leer el conteo ({type(exc).__name__})")
         return {
             "ok": False,
-            "detalle": f"No pude abrir el conteo {nombre}. Revisalo en ERPNext.",
+            "detalle": idioma.t("conteo.no_pude_abrir", lengua, nombre=nombre),
         }
 
     estado = int(actual.get("docstatus") or 0)
     if estado == 1:
-        return {"ok": True, "detalle": f"El conteo {nombre} ya estaba confirmado."}
+        return {
+            "ok": True,
+            "detalle": idioma.t("conteo.ya_confirmado", lengua, nombre=nombre),
+        }
     if estado != 0:
         return {
             "ok": False,
-            "detalle": f"El conteo {nombre} está cancelado; cargá uno nuevo.",
+            "detalle": idioma.t("conteo.cancelado", lengua, nombre=nombre),
         }
 
     try:
@@ -315,10 +321,7 @@ def confirmar_conteo(nombre: str, por: str) -> dict:
         if int(actual.get("docstatus") or 0) != 1:
             return {
                 "ok": False,
-                "detalle": (
-                    f"No pude confirmar el conteo {nombre}. Confirmalo en ERPNext "
-                    "o volvé a intentar."
-                ),
+                "detalle": idioma.t("conteo.no_pude_confirmar", lengua, nombre=nombre),
             }
 
     _comentar_conteo(
@@ -326,10 +329,7 @@ def confirmar_conteo(nombre: str, por: str) -> dict:
     )
     return {
         "ok": True,
-        "detalle": (
-            f"Conteo {nombre} confirmado. Desde ahora el bot puede hablar de "
-            "stock de esos productos."
-        ),
+        "detalle": idioma.t("conteo.confirmado", lengua, nombre=nombre),
     }
 
 
