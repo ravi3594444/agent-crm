@@ -9,6 +9,11 @@ const source = readFileSync(new URL('../plus-agent/app/dashboard_ui/app.js', imp
 function workspace(options = {}) {
   const listeners = {}, nodes = {}, copied = [], downloads = [], requests = [];
   const preferences = new Map(options.preferences || []), timeouts = new Map(), decorations = [];
+  // MONOTÓNICO, no `timeouts.size + 1`: el tamaño BAJA con cada clearTimeout,
+  // así que el id se reusaba y el registro del timer vivo se pisaba. Pasa en
+  // el camino real de exportar: toast() toma el 1, el cleanup de 1000 ms toma
+  // el 2, toast() borra el 1 y el siguiente vuelve a ser 2.
+  let ultimoTimer = 0;
   let document;
   function element(id) {
     const handlers = {};
@@ -54,7 +59,7 @@ function workspace(options = {}) {
       removeItem: key => preferences.delete(key),
     },
     FormData: class { constructor(form) { this.fields = form.fields; } get(key) { return this.fields[key]; } },
-    setTimeout(callback, ms) { const id = timeouts.size + 1; timeouts.set(id, { callback, ms }); return id; }, clearTimeout(id) { timeouts.delete(id); }, setInterval() { return 1; },
+    setTimeout(callback, ms) { const id = ++ultimoTimer; timeouts.set(id, { callback, ms }); return id; }, clearTimeout(id) { timeouts.delete(id); }, setInterval() { return 1; },
     fetch: async (...args) => { requests.push(args); throw new Error('No network fixture configured'); },
   });
   vm.runInContext(source, context);
@@ -1035,4 +1040,20 @@ test('Report lists beyond the display cap are rejected instead of rendered', () 
   assert.throws(() => w.run('validateAdvice(bad)'), /invalid/);
   w.context.good = salesFixture();
   assert.ok(w.run('validateSales(good).daily.length') <= 500);
+});
+
+
+test('The timer mock never reuses an id, so a live timer is not overwritten', () => {
+  // Reproduce la secuencia real: toast() programa el suyo, exportOrders()
+  // programa su limpieza, y el segundo toast() borra el primero. Con
+  // `timeouts.size + 1` el tercer id volvía a ser el del cleanup y le pisaba
+  // el registro: el harness perdía un timer vivo sin que nada fallara.
+  const w = workspace({ search: '?demo=1' });
+  const unoAviso = w.run('setTimeout(()=>{},4000)');
+  const limpieza = w.run('setTimeout(()=>{},1000)');
+  w.run(`clearTimeout(${unoAviso})`);
+  const otroAviso = w.run('setTimeout(()=>{},4000)');
+  assert.notEqual(otroAviso, limpieza);
+  assert.equal(w.timeouts.get(limpieza).ms, 1000);
+  assert.equal(w.timeouts.get(otroAviso).ms, 4000);
 });
