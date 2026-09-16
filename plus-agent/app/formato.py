@@ -24,13 +24,14 @@ es UN asterisco, y `**` se muestra tal cual. El cliente ve asteriscos sueltos.
 from __future__ import annotations
 
 import math
-import os
 import re
 from decimal import Decimal, InvalidOperation
 
 from babel import Locale
 from babel.core import UnknownLocaleError
 from babel.numbers import format_currency, get_territory_currencies
+
+from app import pais as _pais
 
 # --- LOCALE: la forma del número, no el idioma de la prosa -----------------
 #
@@ -86,7 +87,9 @@ def locale_configurado() -> str:
     está mal escrito es `readiness`, una vez en el arranque, en vez de este
     módulo cuarenta veces por mensaje.
     """
-    crudo = str(os.getenv("LOCALE", "") or "").strip().replace("-", "_")
+    # `LOCALE` explícito gana; si no está, sale de `PAIS_NEGOCIO`; si no está
+    # ninguna, el de siempre. Un despliegue que ya existe no se entera.
+    crudo = _pais.locale(LOCALE_POR_DEFECTO)
     if not crudo:
         return LOCALE_POR_DEFECTO
     conocido = _NORMALES.get(crudo.lower())

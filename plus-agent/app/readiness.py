@@ -277,9 +277,41 @@ def chequear_modelos(env: Mapping[str, str], reporte: Reporte) -> None:
 
 
 def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
+    from app import pais as _pais_mod
+
+    territorio = str(_valor(env, "PAIS_NEGOCIO")).strip().upper()
+    if not territorio:
+        reporte.aviso(
+            "PAIS_NEGOCIO",
+            "vacío: el país no está declarado, así que el teléfono y los montos "
+            "salen de PAIS_TELEFONO y LOCALE por separado (y pueden contradecirse)",
+        )
+    elif len(territorio) != 2 or not territorio.isalpha():
+        reporte.error(
+            "PAIS_NEGOCIO",
+            f"{territorio!r} no es un código ISO de dos letras (AR, US, IN, BR)",
+        )
+    else:
+        # Se deriva con el MISMO código que usa el runtime, no con una copia:
+        # un informe que calcula el país por su cuenta puede decir «US» sobre
+        # un despliegue que está normalizando teléfonos como argentinos.
+        anterior = os.environ.get("PAIS_NEGOCIO")
+        os.environ["PAIS_NEGOCIO"] = territorio
+        try:
+            derivado = f"+{_pais_mod.codigo_telefono()} · {_pais_mod.locale()}"
+        finally:
+            if anterior is None:
+                os.environ.pop("PAIS_NEGOCIO", None)
+            else:
+                os.environ["PAIS_NEGOCIO"] = anterior
+        reporte.ok("PAIS_NEGOCIO", f"{territorio}: {derivado}")
+
     pais = _valor(env, "PAIS_TELEFONO")
     if not pais:
-        reporte.aviso("PAIS_TELEFONO", "vacío: se asume 54 (Argentina)")
+        reporte.ok(
+            "PAIS_TELEFONO",
+            f"vacío: sale de PAIS_NEGOCIO ({territorio or 'tampoco puesto: 54'})",
+        )
     elif not pais.isdigit():
         reporte.error("PAIS_TELEFONO", "tiene que ser el código de país en dígitos")
     else:

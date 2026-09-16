@@ -35,13 +35,16 @@ LO QUE LA LIBRERÍA NO PUEDE SABER, Y SIGUE ACÁ
 
 from __future__ import annotations
 
-import os
 import re
 
 import phonenumbers
 
-# El código de país del negocio: 54 Argentina, 91 India, 55 Brasil…
-PAIS = os.getenv("PAIS_TELEFONO", "54")
+from app import pais as _pais
+
+# El código de país del negocio: 54 Argentina, 1 Estados Unidos, 91 India…
+# `PAIS_TELEFONO` explícito gana; si no está, sale de `PAIS_NEGOCIO`; si no
+# está ninguna, 54, que es lo que este archivo asumió siempre.
+PAIS = _pais.codigo_telefono()
 
 
 def _region(codigo: str) -> str:
