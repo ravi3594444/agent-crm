@@ -16,6 +16,59 @@ from app import erpnext, idioma, inventario, policy
 from app.formato import pesos
 from app.runtime_context import RuntimeContextError, actor_context, require_customer
 
+# CUÁNTOS PRODUCTOS SE LE MUESTRAN AL MODELO CUANDO LA BÚSQUEDA NO ENCUENTRA
+# NADA. Trece en este negocio; el tope está por el cliente que tenga doscientos.
+MAX_CATALOGO_SUGERIDO = 25
+
+
+def _sin_coincidencia(consulta: str) -> str:
+    """La búsqueda no encontró nada. Eso NO significa que no lo tengamos.
+
+    `item_name` se busca con un LIKE, así que la coincidencia es por
+    subcadena y en el idioma en que está cargado el catálogo. Medido en una
+    conversación real: el cliente escribió «cheese», el catálogo dice «Queso
+    cremoso», no hubo match — y el agente le contestó «we don't have cheese».
+    Era falso, y era además el ÚNICO producto con stock cargado en el sistema.
+
+    El texto viejo —«preguntale cómo lo llama él, u ofrecele lo más cercano»—
+    dejaba la conclusión en manos del modelo, y el modelo concluyó una
+    ausencia. Así que el catálogo viaja ACÁ ADENTRO: con la lista a la vista no
+    tiene que recordar nada ni traducir nada, y la prohibición de decir que no
+    lo tenemos es explícita y no una sugerencia.
+
+    No se nombran precios ni stock: eso sigue saliendo de una búsqueda con
+    coincidencia, que es la única que los mira.
+    """
+    try:
+        catalogo = erpnext.get_list(
+            "Item",
+            filters=[["disabled", "=", 0]],
+            fields=["item_name", "stock_uom"],
+            limit=MAX_CATALOGO_SUGERIDO,
+        )
+    except erpnext.ERPNextError:
+        catalogo = []
+    if not catalogo:
+        return (
+            f"No encontré nada parecido a '{consulta}' en el catálogo. "
+            "Preguntale cómo lo llama él. NO le digas que no lo tenemos: puede "
+            "estar cargado con otro nombre."
+        )
+    lineas = "\n".join(
+        f"- {item['item_name']} (se vende por {item['stock_uom']})"
+        for item in catalogo
+        if item.get("item_name")
+    )
+    return (
+        f"Ninguno de los productos se llama '{consulta}'. ESO NO QUIERE DECIR QUE NO "
+        "LO TENGAMOS: el catálogo está cargado en un idioma y el cliente puede "
+        "haberlo pedido en otro, o con el nombre de la categoría en vez del "
+        "producto. NO le contestes que no tenemos eso.\n"
+        "Esto es todo lo que hay; ofrecele lo que se parezca a lo que pidió, con "
+        "su nombre tal cual figura acá:\n"
+        f"{lineas}"
+    )
+
 
 @tool
 def buscar_producto(
@@ -33,10 +86,7 @@ def buscar_producto(
         limit=8,
     )
     if not items:
-        return (
-            f"No encontré nada parecido a '{consulta}' en el catálogo. "
-            "Preguntale cómo lo llama él, u ofrecele lo más cercano que tengas."
-        )
+        return _sin_coincidencia(consulta)
 
     price_list = os.getenv("AUTO_CONFIRM_PRICE_LIST", "").strip()
     currency = os.getenv("AUTO_CONFIRM_CURRENCY", "").strip()
