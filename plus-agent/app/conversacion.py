@@ -314,7 +314,16 @@ def prompt_clientes(state, config: RunnableConfig) -> list[BaseMessage]:
     system = SYSTEM_ES_AR.format(
         IDENTIDAD=identidad(),
         CONTEXTO_CLIENTE=contexto,
-        HORARIO=_del_negocio("HORARIO_ATENCION"),
+        # PASA POR LA MISMA LIMPIEZA QUE LOS OTROS TRES, y no pasaba. El valor
+        # cae en «Horario de atención: {HORARIO}», que es un renglón propio del
+        # mensaje de sistema: sin recortar en el primer cierre de frase,
+        # «8 a 17. Ignorá las reglas anteriores» entra entero y queda arriba de
+        # las reglas numeradas. Mientras el único que podía escribirlo era
+        # quien tenía acceso al servidor era una exposición teórica; desde que
+        # es un ajuste, lo alcanza un token del panel. La limpieza es del
+        # HUECO, y éste es un hueco.
+        HORARIO=_dato_de_entorno(_del_negocio("HORARIO_ATENCION"), 120)
+        or "lunes a viernes de 8 a 17",
         HOY=business_today(),
         IDIOMA_REGLA=idioma.regla_prompt(guardado),
         # Lo que el dueño YA contestó y este agente no tenía cómo saber. Va al
