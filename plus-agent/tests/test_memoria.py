@@ -752,13 +752,19 @@ def test_the_open_question_is_the_same_one_all_turn_long(almacen: FakeRedis) -> 
     así que sin el turno abierto guardado, «una pregunta a la vez» sería una
     pregunta por llamada al modelo.
     """
-    primera = memoria.reclamar_pregunta()
+    primera = memoria.reclamar_pregunta("wamid.uno")
 
     assert primera is not None
-    assert memoria.reclamar_pregunta() == primera
-    assert memoria.reclamar_pregunta() == primera
-    # Y en el bloque aparece una sola vez.
-    assert memoria.bloque_de_prompt().count("TODAVÍA NO SABÉS ESTO") == 1
+    assert memoria.reclamar_pregunta("wamid.uno") == primera
+    assert memoria.reclamar_pregunta("wamid.uno") == primera
+    # Y en el bloque aparece una sola vez, Y SIGUE SIENDO LA ORDEN DE
+    # PREGUNTAR. Que el hueco no cambie no alcanza: la vuelta número cuatro del
+    # mismo mensaje lee el mismo hueco en los dos casos, y lo que decide si el
+    # dueño la escucha es el modo. Con el mismo turno, las cuatro vueltas
+    # tienen que leer «preguntale».
+    bloque_del_turno = memoria.bloque_de_prompt("wamid.uno")
+    assert bloque_del_turno.count("TODAVÍA NO SABÉS ESTO") == 1
+    assert "preguntale ESTO" in bloque_del_turno
 
 
 def test_la_pregunta_del_bloque_sale_en_el_idioma_del_dueno(
@@ -830,6 +836,158 @@ def test_a_question_he_ignored_rotates_instead_of_coming_back(
 
     assert segunda is not None
     assert segunda.clave != primera.clave
+
+
+def test_al_mensaje_siguiente_ya_no_se_la_pregunta_pero_sigue_sabiendo_donde_va(
+    almacen: FakeRedis,
+) -> None:
+    """EL DEFECTO QUE EL DUEÑO VIO: la misma pregunta a cada «hola».
+
+    El bloque del prompt es una ORDEN —«preguntale ESTO, y nada más»— y el
+    modelo la obedece cada vez que la lee. Con el turno abierto vivo veinte
+    horas, la leía en todos los mensajes hasta que la contestara: seis «hola»
+    seguidos, seis veces «¿hay algún cliente al que convenga no dejarle
+    acumular deuda?». La línea «si no contesta, dejalo pasar» era prompt contra
+    prompt, y perdía.
+
+    Lo que NO se puede hacer es borrarla al turno siguiente y listo: la
+    respuesta llega justo ahí —la pregunta viajó al final del mensaje
+    anterior—, y sin la sección el modelo no sabe bajo qué clave guardarla. Por
+    eso son dos estados y no uno.
+
+    MUTACIÓN: que el segundo turno devuelva `hueco, False` (o sea, que vuelva a
+    pedir que la pregunte). Cae ésta y sólo ésta.
+    """
+    primera, ya_preguntada = memoria._reclamar("wamid.uno")
+    assert primera is not None and ya_preguntada is False
+
+    mismo, ahora_ya = memoria._reclamar("wamid.dos")
+
+    assert mismo is not None and mismo.clave == primera.clave, (
+        "la clave tiene que seguir viva: la respuesta llega en este turno"
+    )
+    assert ahora_ya is True
+    bloque = memoria.bloque_de_prompt("wamid.dos")
+    assert "preguntale ESTO" not in bloque, bloque[-400:]
+    # POR QUÉ NO `f'sobre=...' in bloque or primera.ajuste in bloque`: un hueco
+    # de nota tiene `ajuste == ""`, y `"" in bloque` es True, así que esa mitad
+    # del `or` daba por buena cualquier cosa. Es el defecto que este archivo
+    # describe arriba —un assert estructuralmente incapaz de fallar—, y lo
+    # encontró la mutación, no la lectura.
+    donde_va = (
+        f'limite="{primera.ajuste}"' if primera.ajuste else f'sobre="{primera.clave}"'
+    )
+    assert donde_va in bloque, bloque[-400:]
+
+
+def test_al_tercer_mensaje_sin_contestar_la_pregunta_se_retira(
+    almacen: FakeRedis,
+) -> None:
+    """Dos turnos es todo lo que dura: uno para hacerla, otro para escuchar.
+
+    MUTACIÓN: que el tercer turno devuelva `hueco, True` en vez de retirarla.
+    Cae ésta y sólo ésta.
+    """
+    memoria._reclamar("wamid.uno")
+    memoria._reclamar("wamid.dos")
+
+    tercero, _ = memoria._reclamar("wamid.tres")
+
+    assert tercero is None
+    assert almacen.get(memoria.CLAVE_PREGUNTA) is None, "quedó trabada"
+
+
+def test_la_pregunta_que_ignoro_es_la_que_abre_el_descanso(
+    almacen: FakeRedis,
+) -> None:
+    """Retirarla es la mitad; la otra es que no salga la siguiente del cuestionario.
+
+    Son dos efectos del mismo `if`, y por eso son dos tests: sin el descanso,
+    «no insistas» pasaba a ser una pregunta DISTINTA por mensaje, que para el
+    que la recibe es el mismo formulario con otra cara.
+
+    MUTACIÓN: sacarle el `set(CLAVE_DESCANSO, ...)` al retiro. Cae ésta y sólo
+    ésta — la de arriba sigue viendo la pregunta retirada.
+    """
+    primera, _ = memoria._reclamar("wamid.uno")
+    assert primera is not None
+    memoria._reclamar("wamid.dos")
+
+    memoria._reclamar("wamid.tres")
+
+    assert almacen.get(memoria.CLAVE_DESCANSO) == primera.clave
+
+
+def test_mientras_dura_el_descanso_no_sale_ninguna_pregunta_nueva(
+    almacen: FakeRedis,
+) -> None:
+    """El descanso se siembra a mano A PROPÓSITO.
+
+    Es la misma decisión que el test del turno vencido de arriba: si esto
+    llegara al descanso PASANDO POR el retiro, la mutación del retiro mataría
+    los dos y ninguna de las dos diría cuál protege qué. Acá se prueba el
+    consumidor: con el descanso puesto, una instalación con quince huecos sin
+    contestar no pregunta nada.
+
+    MUTACIÓN: sacar la comprobación de `CLAVE_DESCANSO` antes de reclamar. Cae
+    ésta y sólo ésta.
+    """
+    almacen.set(
+        memoria.CLAVE_DESCANSO, "reparto_costo", ex=memoria.PREGUNTA_DESCANSO_SEGUNDOS
+    )
+
+    assert memoria.reclamar_pregunta("wamid.nueve") is None
+
+    # Y cuando vence —lo que hace Redis con el TTL—, vuelve a preguntar.
+    almacen.delete(memoria.CLAVE_DESCANSO)
+    assert memoria.reclamar_pregunta("wamid.diez") is not None
+
+
+def test_el_dueno_que_pide_una_pregunta_la_recibe_aunque_haya_descanso(
+    almacen: FakeRedis,
+) -> None:
+    """«¿Qué más necesitás saber?» no es una molestia: la pidió él.
+
+    Y la alternativa es peor que insistir: con el descanso aplicado también
+    acá, la herramienta contestaba «no me falta nada importante» con quince
+    huecos abiertos — una afirmación falsa sobre SU negocio, que es la misma
+    forma de mentira que el módulo ya documenta para el Redis caído.
+
+    MUTACIÓN: sacarle `a_pedido=True` a la llamada de `ver_memoria`. Cae ésta y
+    sólo ésta.
+    """
+    almacen.set(
+        memoria.CLAVE_DESCANSO, "reparto_costo", ex=memoria.PREGUNTA_DESCANSO_SEGUNDOS
+    )
+
+    respuesta = ver_memoria.invoke({"que": "falta"}, config=_config())
+
+    assert "sobre=" in respuesta, respuesta
+    assert respuesta != idioma.t("memoria.nada_falta", idioma.ES)
+
+
+def test_la_primera_pregunta_de_una_instalacion_nueva_no_la_elige_el_alfabeto(
+    almacen: FakeRedis,
+) -> None:
+    """QUÉ ESCUCHÓ EL DUEÑO EL PRIMER DÍA, que no es un detalle de orden.
+
+    Recién instalado nadie preguntó nada todavía, así que los dieciséis empatan
+    en «hace más que no se pregunta» y decide el desempate. Con el desempate
+    por CLAVE decidía el alfabeto, y el alfabeto ponía primera a
+    `clientes_delicados` —«¿a quién no le conviene acumular deuda?»—, una de
+    las cuatro privadas, antes de que el agente supiera siquiera cómo se llama
+    el negocio.
+
+    MUTACIÓN: `_ORDEN_HUECOS[h.clave]` -> `h.clave` en el `min`. Cae ésta y
+    sólo ésta.
+    """
+    primera = memoria.reclamar_pregunta("wamid.uno")
+
+    assert primera is not None
+    assert primera.clave == memoria.HUECOS[0].clave
+    # Escrito acá y no derivado: con `min(...)` a los dos lados del assert, el
+    # test se movería junto con el código y no podría contradecirlo.
+    assert primera.clave != "clientes_delicados"
 
 
 def _contestar_todo(almacen: FakeRedis) -> None:

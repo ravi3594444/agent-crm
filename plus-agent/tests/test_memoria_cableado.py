@@ -50,9 +50,24 @@ def redis_real(monkeypatch: pytest.MonkeyPatch):
     """Sin el doble: `memoria` guarda un HASH y el FakeRedis no tiene hdel."""
     monkeypatch.setattr(locks, "conexion", locks._redis)
     cliente = locks._redis()
-    cliente.delete(memoria.CLAVE_DATOS, memoria.CLAVE_PREGUNTA, memoria.CLAVE_PREGUNTADO)
+    _limpiar(cliente)
     yield cliente
-    cliente.delete(memoria.CLAVE_DATOS, memoria.CLAVE_PREGUNTA, memoria.CLAVE_PREGUNTADO)
+    _limpiar(cliente)
+
+
+def _limpiar(cliente) -> None:
+    """Las CUATRO claves. El descanso vive cuatro horas y cruza archivos.
+
+    Es un silencio guardado en Redis: un test que lo deje puesto le apaga las
+    preguntas al que corra después, que se queda sin la mitad del bloque y no
+    tiene cómo saber por qué.
+    """
+    cliente.delete(
+        memoria.CLAVE_DATOS,
+        memoria.CLAVE_PREGUNTA,
+        memoria.CLAVE_PREGUNTADO,
+        memoria.CLAVE_DESCANSO,
+    )
 
 
 def _estado() -> dict:
@@ -61,10 +76,10 @@ def _estado() -> dict:
     return {"messages": [HumanMessage(content="¿cómo venimos?")]}
 
 
-def _config(scope: str = "management") -> dict:
+def _config(scope: str = "management", mensaje: str = "w") -> dict:
     return {"configurable": {"thread_id": f"{scope}:t", "actor_scope": scope,
                              "actor_phone": GERENTE, "customer_code": "",
-                             "inbound_message_id": "w"}}
+                             "inbound_message_id": mensaje}}
 
 
 def _sistema(mensajes) -> str:
@@ -231,3 +246,31 @@ def test_con_redis_caido_el_dueno_igual_recibe_su_prompt(
     sistema = _sistema(conversacion.prompt_gerencia(_estado(), _config()))
 
     assert "Fecha de hoy" in sistema
+
+
+def test_el_segundo_mensaje_del_dueno_ya_no_trae_la_orden_de_preguntar(
+    redis_real,
+) -> None:
+    """EL CABLE DE LA PREGUNTA, que es lo que estaba roto y no el primitivo.
+
+    `memoria` sabía distinguir un turno de otro; `prompt_gerencia` hacía `del
+    config` y no le pasaba cuál era, así que los seis mensajes de una charla
+    entraban como si fueran seis vueltas del mismo react loop. El dueño recibía
+    la misma pregunta seis veces. Probar `_reclamar` sola no lo habría visto:
+    es el mismo punto ciego de «probar el primitivo no es probar el arreglo»
+    que este archivo ya documenta para la memoria de clientes.
+
+    Se afirma sobre el TEXTO DEL PROMPT y con dos ids distintos, que es lo
+    único que se parece a dos mensajes de WhatsApp.
+
+    MUTACIÓN: en `prompt_gerencia`, volver a `turno = ""`. Cae ésta y sólo ésta.
+    """
+    primero = _sistema(conversacion.prompt_gerencia(_estado(), _config(mensaje="w1")))
+    assert "preguntale ESTO" in primero, primero[-600:]
+
+    segundo = _sistema(conversacion.prompt_gerencia(_estado(), _config(mensaje="w2")))
+
+    assert "preguntale ESTO" not in segundo, segundo[-600:]
+    # Pero la clave sigue ahí: la respuesta llega en ESTE mensaje, y sin la
+    # sección el modelo no sabe dónde guardarla.
+    assert "YA SE LO PREGUNTASTE" in segundo, segundo[-600:]

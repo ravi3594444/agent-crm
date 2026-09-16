@@ -134,6 +134,12 @@ CLAVE_PREGUNTA = "plus-agent:memoria:pregunta"
 # más que no se pregunta es el que sale. Sin esto, un hueco que el dueño no
 # quiere contestar vuelve todos los días y eso es acoso, no asistencia.
 CLAVE_PREGUNTADO = "plus-agent:memoria:preguntado"
+# EL DESCANSO: desde cuándo el agente se está quedando callado. Lo escribe la
+# pregunta que el dueño NO contestó, y mientras viva no sale ninguna otra. Es
+# la mitad que faltaba: la rotación ya elegía otro hueco, pero el otro hueco
+# salía en el mensaje siguiente, así que «no insistas» terminaba siendo una
+# pregunta distinta por mensaje — un formulario con otra cara.
+CLAVE_DESCANSO = "plus-agent:memoria:descanso"
 
 # ---------------------------------------------------------------------------
 # Los topes. Son tres y cada uno acota una cosa distinta.
@@ -152,9 +158,16 @@ MAX_CARACTERES = 2400
 # techo es un bloque que siempre está truncado y un dueño que no sabe cuál de
 # sus notas está viendo el agente.
 MAX_ALMACENADOS = 60
-# Cuánto vive una pregunta abierta sin contestar. Un día: si no la contestó
-# hoy, mañana sale OTRA (la rotación), no la misma de nuevo.
+# Cuánto vive una pregunta abierta sin contestar. Es el TECHO, no el ritmo: la
+# pregunta se retira sola después de dos turnos (ver `_reclamar`), y esto es
+# sólo para que un turno que nunca vuelve —el worker que se cayó entre medio—
+# no deje la pregunta trabada hasta que alguien mire.
 PREGUNTA_VENTANA_SEGUNDOS = 20 * 3600
+# CUÁNTO SE QUEDA CALLADO DESPUÉS DE UNA QUE NO CONTESTÓ. Ignorar una pregunta
+# es una respuesta —«ahora no»— y lo que compra es silencio, no la siguiente
+# del cuestionario. Contestarla NO abre descanso: el que está contestando puede
+# seguir, y el que no quiere contestar deja de escuchar preguntas por un rato.
+PREGUNTA_DESCANSO_SEGUNDOS = 4 * 3600
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _NO_CLAVE = re.compile(r"[^a-z0-9]+")
@@ -343,6 +356,14 @@ HUECOS: tuple[Hueco, ...] = (
 AJUSTES_PREGUNTADOS = frozenset(h.ajuste for h in HUECOS if h.ajuste)
 
 _HUECOS_POR_CLAVE = {hueco.clave: hueco for hueco in HUECOS}
+# EL DESEMPATE DE LA ROTACIÓN, Y NO ES DECORATIVO. En una instalación nueva
+# nadie preguntó nada todavía, así que los dieciséis empatan en «hace más que
+# no se pregunta» y decide esto. Con el desempate por CLAVE decidía el
+# alfabeto: la primera pregunta que escuchaba un dueño recién instalado era
+# `clientes_delicados` —«¿a quién no le conviene acumular deuda?»—, una de las
+# cuatro privadas, antes de saber siquiera cómo se llama el negocio. El orden
+# de declaración es el que el comentario de arriba de `HUECOS` ya promete.
+_ORDEN_HUECOS = {hueco.clave: i for i, hueco in enumerate(HUECOS)}
 
 # LO ÚNICO QUE EL AGENTE DE CLIENTES PUEDE CONTAR. Es una lista de lo
 # PERMITIDO y no de lo prohibido, y ésa es la decisión: `anotar_dato` acepta
@@ -643,6 +664,7 @@ def bloque(
     max_datos: int = MAX_DATOS,
     max_caracteres: int = MAX_CARACTERES,
     hueco: Hueco | None = None,
+    ya_preguntada: bool = False,
 ) -> str:
     """Las notas activas como bloque de prompt, acotado. `""` si no hay nada.
 
@@ -656,6 +678,14 @@ def bloque(
     adentro porque el bloque es lo único que se le inyecta a cada turno: una
     pregunta que viva en otro lado es una pregunta que el modelo ve cuando se
     acuerda de llamar a una herramienta.
+
+    `ya_preguntada` cambia la sección entera de orden a recordatorio, y es la
+    diferencia entre un asistente y el agente que el dueño tuvo enfrente: la
+    versión con la orden —«preguntale ESTO»— salía en CADA turno mientras el
+    hueco siguiera abierto, así que a cada «hola» le contestaba la misma
+    pregunta. Lo que sigue haciendo falta un turno más es la CLAVE, porque la
+    respuesta llega en el mensaje siguiente al que la hizo; lo que no puede
+    volver a salir es la orden de preguntarla.
     """
     elegidos = seleccionar(
         list(datos if datos is not None else activos()),
@@ -698,13 +728,24 @@ def bloque(
                 f'sobre="{hueco.clave}" y su respuesta\n'
                 "resumida en una frase."
             )
-        partes.append(
-            "TODAVÍA NO SABÉS ESTO\n"
-            "Cuando termines de contestar lo que te pidió, preguntale ESTO, y nada más:\n"
-            f"«{hueco.texto(idioma.gerencia())}»\n"
-            f"{que_hacer} Si no contesta o cambia de tema, dejalo pasar: no\n"
-            "insistas y no le hagas otra pregunta en el mismo mensaje."
-        )
+        pregunta = hueco.texto(idioma.gerencia())
+        if ya_preguntada:
+            partes.append(
+                "ESTO YA SE LO PREGUNTASTE Y TODAVÍA NO TE CONTESTÓ\n"
+                f"Le preguntaste: «{pregunta}»\n"
+                "NO se lo vuelvas a preguntar y no lo menciones. Está acá por una\n"
+                "sola cosa: si el mensaje que estás contestando resulta ser la\n"
+                "respuesta, ya sabés dónde va.\n"
+                f"{que_hacer}"
+            )
+        else:
+            partes.append(
+                "TODAVÍA NO SABÉS ESTO\n"
+                "Cuando termines de contestar lo que te pidió, preguntale ESTO, y nada más:\n"
+                f"«{pregunta}»\n"
+                f"{que_hacer} Si no contesta o cambia de tema, dejalo pasar: no\n"
+                "insistas y no le hagas otra pregunta en el mismo mensaje."
+            )
     return "\n\n".join(partes)
 
 
@@ -781,24 +822,30 @@ def bloque_de_prompt_clientes() -> str:
     return bloque_para_clientes(datos)
 
 
-def bloque_de_prompt() -> str:
+def bloque_de_prompt(turno: str = "") -> str:
     """Lo que se le inyecta al prompt de gerencia. NUNCA levanta.
 
     Es el único llamador que compone las dos mitades —las notas y la pregunta
     abierta— y falla en silencio a propósito: con Redis caído el dueño tiene
     que seguir pudiendo preguntar cuánto vendió, no recibir un error porque no
     se pudo leer una nota.
+
+    `turno` es el id del mensaje entrante que está contestando el agente, y es
+    lo que hace que una pregunta se haga UNA vez en vez de en cada mensaje: sin
+    él, `_reclamar` no puede distinguir «otra vuelta del mismo turno» de «el
+    dueño volvió a escribir». Vacío se comporta como antes, así que un llamador
+    que se olvide de pasarlo no rompe el turno — sólo pierde el límite.
     """
     try:
         datos = activos()
     except MemoriaError:
         datos = []
     try:
-        hueco = reclamar_pregunta()
+        hueco, ya_preguntada = _reclamar(turno)
     except MemoriaError:
         # El prompt sin pregunta es correcto; el prompt que no sale, no.
-        hueco = None
-    return bloque(datos, hueco=hueco)
+        hueco, ya_preguntada = None, False
+    return bloque(datos, hueco=hueco, ya_preguntada=ya_preguntada)
 
 
 # ---------------------------------------------------------------------------
@@ -833,7 +880,7 @@ def _cerrar_pregunta(clave: str) -> None:
     """Contestado: se libera el turno para que mañana salga otro hueco."""
     try:
         cliente = locks.conexion()
-        if _texto(cliente.get(CLAVE_PREGUNTA)) == clave:
+        if _partir_abierta(_texto(cliente.get(CLAVE_PREGUNTA)))[0] == clave:
             cliente.delete(CLAVE_PREGUNTA)
     except (locks.CoordinationError, RedisError):
         # El turno vence solo. Perderlo cuesta una pregunta de más, nunca un
@@ -841,18 +888,57 @@ def _cerrar_pregunta(clave: str) -> None:
         pass
 
 
-def reclamar_pregunta() -> Hueco | None:
-    """El hueco que toca preguntar, o None si no hay ninguno o Redis no contesta.
+def _partir_abierta(crudo: str) -> tuple[str, str, str]:
+    """`"clave|turno_en_que_se_preguntó|turno_en_que_se_escuchó"`, partido.
 
-    ES UNA SOLA Y ES ESTABLE. El turno abierto se guarda con `SET NX EX`: todas
-    las vueltas del react loop de un mismo turno leen la MISMA pregunta, y
-    mientras no venza tampoco cambia entre turnos. Sin eso, «una pregunta a la
-    vez» sería «una pregunta por llamada al modelo», que es tres por mensaje.
+    Los dos turnos son ids de mensaje entrante de Meta, y están acá y no en dos
+    claves más porque el turno abierto se reclama con un `SET NX` atómico: tres
+    claves que se escriben por separado son tres cosas que pueden quedar
+    desparejas, y la que decide si el dueño ya escuchó esta pregunta no puede.
+    """
+    clave, _, resto = crudo.partition("|")
+    preguntado, _, escuchado = resto.partition("|")
+    return clave, preguntado, escuchado
 
-    CUÁL SALE: el hueco sin contestar que hace más tiempo que no se pregunta.
-    Rotar y no insistir es la diferencia entre un asistente y un formulario: el
-    dueño que no quiere contestar algo lo ignora una vez y recién lo vuelve a
-    ver cuando pasaron los otros once.
+
+def reclamar_pregunta(turno: str = "", *, a_pedido: bool = False) -> Hueco | None:
+    """El hueco que toca preguntar, o None si no hay ninguno o Redis no contesta."""
+    return _reclamar(turno, a_pedido=a_pedido)[0]
+
+
+def _reclamar(turno: str = "", *, a_pedido: bool = False) -> tuple[Hueco | None, bool]:
+    """El hueco y si YA se lo preguntaste. `(None, False)` si no toca ninguno.
+
+    ES UNA SOLA Y ES ESTABLE DENTRO DEL TURNO. El turno abierto se guarda con
+    `SET NX EX`: todas las vueltas del react loop de un mismo mensaje leen la
+    MISMA pregunta. Sin eso, «una pregunta a la vez» sería «una pregunta por
+    llamada al modelo», que son tres por mensaje.
+
+    Y DURA DOS TURNOS, NO VEINTE HORAS. Ésta es la mitad que faltaba y la que
+    el dueño vio rota: la pregunta se le hace en UN turno, y el bloque del
+    prompt es una orden —«preguntale ESTO»— que el modelo obedece cada vez que
+    la lee. Con el turno abierto vivo veinte horas, la misma pregunta salía en
+    CADA mensaje hasta que la contestara; «no insistas» era una línea de prompt
+    contra una orden de prompt, y perdía. Los tres estados, entonces:
+
+      1. el turno en que se reclamó  -> preguntásela (`ya_preguntada=False`);
+      2. el turno siguiente          -> NO la repitas, pero seguí sabiendo bajo
+         qué clave se guarda, porque la respuesta llega justo acá: la pregunta
+         viajó al final de tu mensaje anterior y él contesta en éste;
+      3. cualquier turno posterior   -> se retira y empieza el descanso.
+
+    `turno` es el id del mensaje entrante. Vacío —un llamador que no lo tiene—
+    se comporta como hasta ahora, o sea estado 1 y sin gastar turnos: es la
+    única dirección que no rompe el react loop, que es lo que el cerrojo
+    existe para sostener.
+
+    `a_pedido` es el dueño preguntando ÉL («¿qué más necesitás saber?»). Ahí no
+    hay descanso que valga —no se lo puede molestar con una respuesta que
+    pidió— y la pregunta abierta se le da tal cual, sin gastarle turnos.
+
+    CUÁL SALE: el hueco sin contestar que hace más tiempo que no se pregunta, y
+    entre los que empatan, el primero declarado. Rotar y no insistir es la
+    diferencia entre un asistente y un formulario.
     """
     try:
         cliente = locks.conexion()
@@ -864,7 +950,8 @@ def reclamar_pregunta() -> Hueco | None:
         # ninguna estaba guardando nada.
         abierta = _texto(cliente.get(CLAVE_PREGUNTA))
         if abierta:
-            hueco = _HUECOS_POR_CLAVE.get(abierta)
+            clave_abierta, preguntado, escuchado = _partir_abierta(abierta)
+            hueco = _HUECOS_POR_CLAVE.get(clave_abierta)
             # UN HUECO DE AJUSTE SE PUEDE CONTESTAR POR OTRA PUERTA: el dueño lo
             # pone desde el panel, o por WhatsApp con `proponer_limite`, y la
             # pregunta abierta no se entera. Sin esto seguiría preguntando por
@@ -874,9 +961,34 @@ def reclamar_pregunta() -> Hueco | None:
                 cliente.delete(CLAVE_PREGUNTA)
                 hueco = None
             if hueco is not None:
-                return hueco
+                if a_pedido or not turno or turno == preguntado:
+                    return hueco, False
+                if not escuchado:
+                    # Segundo turno: ya salió por WhatsApp y está esperando la
+                    # respuesta. Se anota ACÁ cuál es ese turno, que es lo que
+                    # hace que el tercero la retire; el `ex` vuelve a ir porque
+                    # un SET pelado le borra el TTL a la clave y el techo de
+                    # veinte horas es lo que la despega si el turno se pierde.
+                    cliente.set(
+                        CLAVE_PREGUNTA,
+                        f"{clave_abierta}|{preguntado}|{turno}",
+                        ex=PREGUNTA_VENTANA_SEGUNDOS,
+                    )
+                    return hueco, True
+                if turno == escuchado:
+                    return hueco, True
+                # Tercer turno distinto: la escuchó, no la contestó, y eso es
+                # una respuesta. Se retira y el agente se calla un rato — NO se
+                # pasa a la siguiente del cuestionario en el mensaje siguiente.
+                cliente.delete(CLAVE_PREGUNTA)
+                cliente.set(
+                    CLAVE_DESCANSO, clave_abierta, ex=PREGUNTA_DESCANSO_SEGUNDOS
+                )
+                return None, False
             if not hueco:
                 cliente.delete(CLAVE_PREGUNTA)
+        if not a_pedido and _texto(cliente.get(CLAVE_DESCANSO)):
+            return None, False
         contestados = {d.clave for d in _todos()}
         puestos = _ajustes_puestos()
         def _sin_contestar(hueco: Hueco) -> bool:
@@ -886,7 +998,7 @@ def reclamar_pregunta() -> Hueco | None:
 
         pendientes = [h for h in HUECOS if _sin_contestar(h)]
         if not pendientes:
-            return None
+            return None, False
         previos = {
             _texto(k): _texto(v) for k, v in (cliente.hgetall(CLAVE_PREGUNTADO) or {}).items()
         }
@@ -897,14 +1009,15 @@ def reclamar_pregunta() -> Hueco | None:
             except ValueError:
                 return 0.0
 
-        elegido = min(pendientes, key=lambda h: (_cuando(h), h.clave))
+        elegido = min(pendientes, key=lambda h: (_cuando(h), _ORDEN_HUECOS[h.clave]))
         if not cliente.set(
-            CLAVE_PREGUNTA, elegido.clave, nx=True, ex=PREGUNTA_VENTANA_SEGUNDOS
+            CLAVE_PREGUNTA, f"{elegido.clave}|{turno}|", nx=True, ex=PREGUNTA_VENTANA_SEGUNDOS
         ):
             # Otro worker reclamó entre medio: la que vale es la suya.
-            return _HUECOS_POR_CLAVE.get(_texto(cliente.get(CLAVE_PREGUNTA)))
+            clave_otro = _partir_abierta(_texto(cliente.get(CLAVE_PREGUNTA)))[0]
+            return _HUECOS_POR_CLAVE.get(clave_otro), False
         cliente.hset(CLAVE_PREGUNTADO, elegido.clave, str(_ahora()))
-        return elegido
+        return elegido, False
     except (locks.CoordinationError, RedisError, MemoriaError) as exc:
         # NO `return None`. `None` ya significa «no queda ninguna por
         # preguntar», y colapsar las dos cosas hacía que un Redis caído le

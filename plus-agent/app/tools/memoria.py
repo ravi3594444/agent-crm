@@ -70,13 +70,19 @@ def ver_memoria(
     - «¿qué más necesitás saber?» / «preguntame algo» -> que=falta
     """
     try:
-        require_management(config)
+        contexto = require_management(config)
     except RuntimeContextError:
         return idioma.t("permiso.sin_autorizacion", idioma.gerencia())
     lengua = idioma.gerencia()
     if que == "falta":
         try:
-            hueco = memoria.reclamar_pregunta()
+            # `a_pedido`: esto es el dueño preguntando ÉL qué falta. El descanso
+            # que abre una pregunta ignorada es para no molestarlo, así que no
+            # puede alcanzar a una respuesta que pidió — y contestarle «no me
+            # falta nada» mientras faltan catorce huecos sería, además, falso.
+            hueco = memoria.reclamar_pregunta(
+                contexto.inbound_message_id, a_pedido=True
+            )
         except memoria.MemoriaError:
             return idioma.t("memoria.no_pude_leer", lengua)
         if hueco is None:

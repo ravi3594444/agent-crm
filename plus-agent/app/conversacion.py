@@ -341,12 +341,19 @@ def prompt_clientes(state, config: RunnableConfig) -> list[BaseMessage]:
     return [SystemMessage(content=system), *perfil, *_mensajes(state)]
 
 
-def _bloque_de_memoria() -> str:
-    """Los datos del negocio para el prompt. Nunca levanta."""
+def _bloque_de_memoria(turno: str = "") -> str:
+    """Los datos del negocio para el prompt. Nunca levanta.
+
+    `turno` es el id del mensaje entrante y viaja hasta acá porque la pregunta
+    abierta se gasta POR TURNO: el bloque se arma una vez por vuelta del react
+    loop, y sin el id las tres vueltas de un mensaje y los tres mensajes de una
+    charla se leen igual. Eso es lo que hacía que el agente contestara la misma
+    pregunta a cada «hola».
+    """
     try:
         from app import memoria
 
-        return memoria.bloque_de_prompt()
+        return memoria.bloque_de_prompt(turno)
     except Exception as exc:
         print(f"[conversacion] memoria no disponible ({type(exc).__name__})")
         return ""
@@ -401,7 +408,12 @@ def _bloque_de_memoria_clientes() -> str:
 
 
 def prompt_gerencia(state, config: RunnableConfig) -> list[BaseMessage]:
-    del config
+    # DE `config` SE USA UNA SOLA COSA, Y NO ES IDENTIDAD: el id del mensaje
+    # entrante, que es lo que le deja a `memoria` distinguir «otra vuelta del
+    # react loop» de «el dueño volvió a escribir». Todo lo demás de este prompt
+    # es del negocio y no del que escribe — el equipo no espeja idioma ni se
+    # presenta distinto según quién sea— y por eso esto se descartaba entero.
+    turno = str(_configurable(config).get("inbound_message_id") or "").strip()
     # El equipo NO espeja: contesta en el idioma que fijó el dueño, y mientras
     # nadie lo fije, en el de por defecto.
     system = SYSTEM_GERENCIA.format(
@@ -418,7 +430,7 @@ def prompt_gerencia(state, config: RunnableConfig) -> list[BaseMessage]:
         # encabezado vacío que el modelo trata como una lista de la que ya
         # habló. Nunca levanta — sin esto, un Redis caído dejaría al agente de
         # gerencia sin contestar en vez de contestar sin memoria.
-        MEMORIA=_bloque_de_memoria(),
+        MEMORIA=_bloque_de_memoria(turno),
     )
     return [SystemMessage(content=system), *_mensajes(state)]
 
