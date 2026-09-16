@@ -214,7 +214,14 @@ def _con_externas() -> list:
         from app import mcp_cliente
 
         externas = mcp_cliente.cargar(TOOLS_GERENCIA)
-        if not externas:
+        if not externas and mcp_cliente.servidores():
+            # HAY SERVIDOR CONFIGURADO Y NO ENTRÓ NADA: el motivo lo guarda
+            # `cargar` y sólo lo imprime `resumen()`, que abajo se llama nada
+            # más que cuando cargó algo. O sea que un servidor caído no dejaba
+            # UNA línea en el log: se veía como si nadie hubiera configurado
+            # nada. Medido el 16/09 — el contenedor de Casys estaba en bucle de
+            # reinicio y hubo que sacarle el motivo con un `python -c` a mano.
+            print(mcp_cliente.resumen(TOOLS_GERENCIA))
             # COPIA, no la misma lista. Sin servidores externos el contenido es
             # idéntico y la tentación es devolver la constante; entonces las dos
             # son el MISMO objeto y un `TOOLS_AGENTE_GERENCIA.append(...)` de

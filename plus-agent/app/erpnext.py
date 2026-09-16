@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -34,11 +35,22 @@ _credential_scope: ContextVar[str] = ContextVar(
 
 
 class ERPNextError(RuntimeError):
-    """A sanitized ERPNext failure safe to pass through internal tool logic."""
+    """A sanitized ERPNext failure safe to pass through internal tool logic.
 
-    def __init__(self, message: str, *, status_code: int | None = None):
+    `motivo` es lo que ERPNext escribió en el cuerpo, y NO va en `str(exc)` a
+    propósito: todo lo que se interpola en un mensaje de herramienta lo termina
+    leyendo el modelo, y ese cuerpo puede traer datos de otros clientes —el
+    agente de clientes tiene lectura ancha—. Vive acá para el LOG y para quien
+    sepa que lo está pidiendo. Cambiar eso es reabrir la decisión que documenta
+    el docstring de `_request`, no un detalle de formato.
+    """
+
+    def __init__(
+        self, message: str, *, status_code: int | None = None, motivo: str = ""
+    ):
         super().__init__(message)
         self.status_code = status_code
+        self.motivo = motivo
 
 
 def _manager() -> httpx.Client:
@@ -89,6 +101,47 @@ def manager_scope() -> Iterator[None]:
         _credential_scope.reset(token)
 
 
+_ETIQUETA_HTML = re.compile(r"<[^>]+>")
+
+
+def _motivo_del_servidor(response: httpx.Response) -> str:
+    """Lo que ERPNext dijo de verdad, aplanado, PARA EL LOG.
+
+    Frappe no contesta 400 con una frase: manda `_server_messages`, que es un
+    JSON con una lista de JSONs adentro, cada uno con su `message` en HTML, y
+    a veces además `exc_type`. Lo que llegaba al que estaba mirando era
+    «(estado 417)» y nada más, así que dos veces hubo que entrar al contenedor
+    con `bench` a reproducir el documento para leer la validación —una de esas
+    veces, semanas después de que el stock dejara de cargarse—.
+
+    Nunca levanta: esto corre DENTRO del manejo de un error, y una excepción
+    acá taparía la que importa.
+    """
+    try:
+        cuerpo = response.json()
+    except ValueError:
+        return " ".join(response.text.split())[:300]
+    if not isinstance(cuerpo, dict):
+        return ""
+    partes: list[str] = []
+    crudo = cuerpo.get("_server_messages")
+    if isinstance(crudo, str) and crudo.strip():
+        try:
+            for mensaje in json.loads(crudo):
+                dato = json.loads(mensaje) if isinstance(mensaje, str) else mensaje
+                texto = dato.get("message") if isinstance(dato, dict) else dato
+                if texto:
+                    partes.append(str(texto))
+        except (ValueError, TypeError):
+            partes.append(crudo)
+    for clave in ("exc_type", "message"):
+        valor = cuerpo.get(clave)
+        if isinstance(valor, str) and valor.strip():
+            partes.append(valor.strip())
+    limpio = _ETIQUETA_HTML.sub(" ", " | ".join(partes))
+    return " ".join(limpio.split())[:300]
+
+
 def _request(
     client: httpx.Client,
     method: str,
@@ -103,9 +156,20 @@ def _request(
     except httpx.HTTPError as exc:
         raise ERPNextError(f"ERPNext no disponible durante {operation}") from exc
     if response.status_code >= 400:
+        motivo = _motivo_del_servidor(response)
+        # AL LOG, NO AL MODELO, y esa distinción es la decisión entera: el
+        # cuerpo se sigue sin pasar a la respuesta de la herramienta —ver el
+        # docstring de arriba—, pero el que está mirando el servidor tiene que
+        # poder leer la validación sin reproducir el documento a mano con
+        # `bench`. `operation` ya dice qué se intentaba.
+        print(
+            f"[erpnext] {operation}: rechazado {response.status_code}"
+            + (f" — {motivo}" if motivo else " (sin motivo en el cuerpo)")
+        )
         raise ERPNextError(
             f"ERPNext rechazó {operation} (estado {response.status_code})",
             status_code=response.status_code,
+            motivo=motivo,
         )
     try:
         body = response.json()
