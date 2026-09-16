@@ -3,6 +3,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -919,3 +920,51 @@ class PreciosQueSeMuestranTest(unittest.TestCase):
         erp.escribir_precio_de_lista.assert_not_called()
         # Y el producto NI SIQUIERA se leyó: se corta en el número.
         erp.get_doc.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# EL PANEL NO PUEDE MENTIR SOBRE LOS COMANDOS QUE EXISTEN.
+#
+# La tarjeta «Typing exactly» enumera lo que `app/main.py` intercepta ANTES del
+# modelo. Esa lista vive en el frontend y las acciones viven en Python, o sea
+# dos archivos que nadie obliga a moverse juntos: agregar un verbo al router y
+# olvidarse de la tarjeta deja al dueño con una pantalla que dice que no existe
+# algo que sí existe —y peor, la tarjeta afirma «cuatro formas y nada más», que
+# es exactamente el tipo de frase que se vuelve falsa sola.
+#
+# Se comprueba contra las ACCIONES y no contra los 36 verbos: los verbos son
+# sinónimos («ok», «confirmar», «apruebo») y listarlos todos en la pantalla
+# sería ruido, pero una acción nueva es una capacidad nueva.
+#
+# MUTACIÓN: agregarle una acción a `_ARG_ACTIONS` en app/main.py, p. ej.
+# "reprogramar": ("reprogramar", True). Cae éste y sólo éste.
+def test_the_dashboard_command_card_names_every_action_the_router_accepts():
+    import ast
+    from pathlib import Path
+
+    raiz = Path(__file__).resolve().parents[1]
+    arbol = ast.parse((raiz / "app" / "main.py").read_text(encoding="utf-8"))
+    acciones: set[str] = set()
+    for nodo in arbol.body:
+        if not isinstance(nodo, ast.Assign):
+            continue
+        nombre = getattr(nodo.targets[0], "id", "")
+        if nombre not in ("_STAFF_ACTIONS", "_ARG_ACTIONS"):
+            continue
+        for valor in ast.literal_eval(nodo.value).values():
+            acciones.add(valor[0] if isinstance(valor, tuple) else valor)
+    assert acciones, "no se encontraron las tablas de acciones en app/main.py"
+
+    fuente = (raiz / "app" / "dashboard_ui" / "app.js").read_text(encoding="utf-8")
+    assert "function commandsCard()" in fuente
+    # Sólo el bloque `filas`: la nota de abajo está escrita en prosa y contiene
+    # palabras sueltas («no repartimos en…») que harían pasar el test sin que la
+    # acción esté realmente nombrada.
+    inicio = fuente.index("const filas=[", fuente.index("function commandsCard()"))
+    tarjeta = fuente[inicio : fuente.index("];", inicio)]
+
+    faltan = sorted(a for a in acciones if not re.search(rf"\b{re.escape(a)}\b", tarjeta))
+    assert not faltan, (
+        "el router acepta acciones que la tarjeta del panel no nombra: "
+        f"{faltan}. Agregalas a commandsCard() en app/dashboard_ui/app.js."
+    )

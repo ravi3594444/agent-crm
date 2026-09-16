@@ -816,6 +816,42 @@ def chequear_erpnext(env: Mapping[str, str], reporte: Reporte, http: Http | None
             reporte.aviso(f"ERPNext {rol}", "no pude leer sus roles")
             continue
         roles = {str(r.get("role")) for r in datos.get("roles") or [] if r.get("role")}
+        # DOS LECTURAS TIENEN QUE HABER SALIDO BIEN PARA PODER DECIR «Submit: no».
+        #
+        # Sin ellas `roles & roles_submit` es vacío ∩ vacío, así que `puede_submit`
+        # sale False por no haber medido nada —no por no tener el permiso—, y las
+        # tres identidades se imprimían como `OK ... 0 rol(es); Submit: no`.
+        # Incluida política, para la que «Submit: no» sería la PEOR configuración
+        # posible del sistema: nada se confirmaría nunca. El `elif` de abajo existe
+        # para cazar exactamente eso y está guardado por `roles_submit`, así que
+        # cuando la lectura falla tampoco corre: el único chequeo de la regla de
+        # las tres identidades quedaba en verde por no haber podido mirar.
+        #
+        # Medido en vivo el 2026-09-15 contra agentcrm4: la credencial de política
+        # tiene un solo rol («Politica IA») y ese rol no lee DocPerm ni System
+        # Settings, así que las dos lecturas daban 403 y el reporte decía OK tres
+        # veces. La separación estaba bien —se verificó a mano con `bench`—, pero
+        # el reporte habría dicho lo mismo si hubiera estado mal.
+        #
+        # Mismo criterio que «ERPNext zona» más abajo: lo que no se pudo mirar es
+        # AVISO con el permiso que falta, nunca FALTA (rojo para siempre) ni un OK
+        # afirmando lo que no se vio.
+        if not roles_submit:
+            reporte.aviso(
+                f"ERPNext {rol}",
+                "no pude comprobar si tiene Submit en Sales Order porque no pude leer "
+                "qué roles lo permiten: dar lectura de DocPerm y Custom DocPerm a la "
+                "credencial de política",
+            )
+            continue
+        if not roles:
+            reporte.aviso(
+                f"ERPNext {rol}",
+                "el User se lee pero sin su tabla de roles, así que no puedo comprobar "
+                "si tiene Submit en Sales Order: dar lectura de User a la credencial "
+                "de política",
+            )
+            continue
         puede_submit = bool(roles & roles_submit) or "System Manager" in roles
         if rol in ROLES_SUBMIT_PROHIBIDOS and puede_submit:
             reporte.error(f"ERPNext {rol}", f"{len(roles)} rol(es), y alguno permite Submit en Sales Order")
@@ -1024,6 +1060,26 @@ def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_l
         nombre = str(fila.get("nombre") or fila.get("alias") or "límite")
         if nombre in _limites.ENTREGA:
             continue  # chequear_entrega reports these, with the fallback line
+        # Las plantillas ya las reporta `chequear_plantillas`, y con el
+        # significado que importa: si está vacía, si el barrido que la dispara
+        # corre fuera de la ventana de 24 h, si Meta la tiene aprobada. Desde
+        # que son ajustes (`limites.PLANTILLAS`) también caen en este bucle, y
+        # el reporte imprimía DOS renglones por plantilla con veredictos
+        # opuestos: `FALTA ..._TEMPLATE: vacía` arriba y `OK ..._TEMPLATE:
+        # válido (default del código)` abajo. Los dos son ciertos —uno habla
+        # del negocio, el otro del tipo— y juntos no se pueden leer.
+        #
+        # Pero el `problema` NO se puede saltear: `_plantillas_del_dueno`
+        # descarta las filas que lo traen y se cae al `.env` en silencio, así
+        # que un nombre mal guardado por el dueño no aparece allá. Este bucle
+        # es el único lugar donde se ve. Por eso la excepción es condicional y
+        # no un `continue` a secas.
+        #
+        # Se filtra contra `PLANTILLAS` (las doce que chequea la otra función),
+        # no contra `limites.PLANTILLAS`, que incluye además
+        # WHATSAPP_TEMPLATE_LANGUAGE — ese no lo reporta nadie más.
+        if nombre in PLANTILLAS and not fila.get("problema"):
+            continue
         origen = {"dueño": "fijado por el dueño", "arranque": "del .env", "default": "default del código"}.get(
             str(fila.get("origen")), str(fila.get("origen"))
         )

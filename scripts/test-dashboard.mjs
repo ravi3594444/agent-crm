@@ -65,7 +65,11 @@ function workspace(options = {}) {
     },
     FormData: class { constructor(form) { this.fields = form.fields; } get(key) { return this.fields[key]; } },
     setTimeout(callback, ms) { const id = ++ultimoTimer; timeouts.set(id, { callback, ms }); return id; }, clearTimeout(id) { timeouts.delete(id); }, setInterval() { return 1; },
-    fetch: async (...args) => { requests.push(args); throw new Error('No network fixture configured'); },
+    // `options.fetch` se instala ANTES de correr el fuente, y hace falta para
+    // una sola cosa: la restauración de sesión arranca sola en la carga, así
+    // que un doble puesto después de `workspace()` llega tarde y el test mide
+    // el camino de error en vez del que quería medir.
+    fetch: options.fetch || (async (...args) => { requests.push(args); throw new Error('No network fixture configured'); }),
   });
   vm.runInContext(source, context);
   const run = code => vm.runInContext(code, context);
@@ -1289,4 +1293,108 @@ test('The silent minute refresh does not wipe the settings and price reports', a
   assert.equal(w.run('String(data.prices?.items?.length)'), '1');
   w.run('render()');
   assert.match(w.nodes.app.innerHTML, /Automatic confirmation/);
+});
+
+// ---------------------------------------------------------------------------
+// LA SESIÓN SOBREVIVE AL REFRESH.
+//
+// Antes el token vivía sólo en memoria y la pantalla lo decía: recargar
+// deslogueaba. El dueño volvía a pegar el token en cada F5, y un panel que te
+// echa al refrescar no se usa.
+//
+// Son CINCO consumidores de la misma conexión guardada, y cada uno se mata con
+// su propia mutación:
+//   A) sacar `rememberConnection(connection)` del connect -> cae sólo el 1º
+//   B) sacar `forgetConnection()` de `cerrarSesion`       -> cae sólo el 2º
+//   C) restaurar sin revalidar el origen                  -> cae sólo el 3º
+//   D) borrar la sesión en CUALQUIER error, no sólo el 401 -> cae sólo el 5º
+//   E) no borrarla nunca                                  -> cae sólo el 4º
+// ---------------------------------------------------------------------------
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const SAVED = JSON.stringify({ base: 'https://agent.example', token: 'dashboard-fixture-token-at-least-32-characters' });
+
+test('connecting saves the session so a reload does not sign you out', async () => {
+  // MUTACIÓN A: sacar `rememberConnection(connection)` del handler del connect.
+  const w = workspace();
+  w.run('openConnection()');
+  w.context.fetch = async () => response(w.fixture());
+  await w.submit(w.form());
+  assert.equal(w.run('data.mode'), 'live');
+  const saved = JSON.parse(w.preferences.get('plus.dashboard.connection'));
+  assert.equal(saved.base, 'https://agent.example');
+  assert.equal(saved.token, 'dashboard-fixture-token-at-least-32-characters');
+});
+
+test('Disconnect is the one exit that forgets the saved session', async () => {
+  // MUTACIÓN B: sacar `forgetConnection()` de `cerrarSesion`. Sin esto, «salir»
+  // deja la sesión guardada y la carga siguiente vuelve a entrar sola: el botón
+  // dice una cosa y el navegador hace otra.
+  // Se siembra el storage a mano en vez de llegar ahí through el connect: si
+  // este test dependiera de que el connect guarda, la mutación A lo mataría
+  // también, y una mutación que mata dos tests no dice cuál de los dos
+  // protege qué.
+  const w = workspace();
+  w.live();
+  w.preferences.set('plus.dashboard.connection', SAVED);
+  await w.click({ action: 'disconnect' });
+  assert.equal(w.run('state.connection'), null);
+  assert.equal(w.preferences.get('plus.dashboard.connection'), undefined);
+});
+
+test('a saved session is revalidated with the same rules as the typed one', async () => {
+  // MUTACIÓN C: devolver `{base:guardada.base,token:guardada.token}` sin pasar
+  // por `new URL` ni por los chequeos. El storage es del navegador y se edita a
+  // mano; lo que sale de ahí tiene que entrar por la misma puerta que lo
+  // tipeado, no por una más ancha. Un `http://` remoto mandaría el token en
+  // claro, que es justo lo que el formulario rechaza.
+  const pedidos = [];
+  const w = workspace({
+    preferences: [['plus.dashboard.connection', JSON.stringify({ base: 'http://agente.remoto.example', token: 'dashboard-fixture-token-at-least-32-characters' })]],
+    fetch: async (...args) => { pedidos.push(args); throw new Error('should never be called'); },
+  });
+  await flush();
+  assert.equal(pedidos.length, 0, 'un origen que el formulario rechaza no se reintenta solo');
+  assert.equal(w.run('state.restoring'), false);
+  assert.equal(w.run('data.mode'), 'disconnected');
+});
+
+test('a saved session that the service rejects is cleared, not retried forever', async () => {
+  // MUTACIÓN E: no borrar nunca. El token revocado quedaría guardado y cada
+  // carga lo reintentaría, con el dueño viendo el mismo error para siempre y
+  // sin forma de llegar al formulario.
+  const w = workspace({
+    preferences: [['plus.dashboard.connection', SAVED]],
+    fetch: async () => ({ ok: false, status: 401, json: async () => ({}) }),
+  });
+  await flush();
+  assert.equal(w.run('data.mode'), 'disconnected');
+  assert.equal(w.preferences.get('plus.dashboard.connection'), undefined);
+});
+
+test('a saved session survives a service that cannot be reached', async () => {
+  // MUTACIÓN D: borrar la sesión en cualquier error. Un corte de wifi le
+  // costaría al dueño volver a pegar el token — exactamente el problema que
+  // esto vino a arreglar, reintroducido por la puerta de al lado.
+  const w = workspace({
+    preferences: [['plus.dashboard.connection', SAVED]],
+    fetch: async () => { throw new Error('Failed to fetch'); },
+  });
+  await flush();
+  assert.equal(w.run('data.mode'), 'disconnected');
+  assert.equal(w.preferences.get('plus.dashboard.connection'), SAVED);
+});
+
+test('the sidebar rail folds to icons and stays folded', async () => {
+  // MUTACIÓN: sacarle el `localStorage.setItem` al handler de 'rail'. El riel
+  // se pliega y se despliega igual, pero se olvida en cada carga — que es la
+  // mitad que importa, porque es una preferencia y no un botón.
+  const w = workspace();
+  await w.click({ action: 'demo' });
+  assert.equal(w.run('state.rail'), false);
+  await w.click({ action: 'rail' });
+  assert.equal(w.run('state.rail'), true);
+  assert.equal(w.preferences.get('plus.dashboard.rail'), '1');
+  assert.match(w.nodes.app.innerHTML, /class="dashboard\s*[^"]*rail"/);
+  const otro = workspace({ preferences: [['plus.dashboard.rail', '1']] });
+  assert.equal(otro.run('state.rail'), true);
 });

@@ -2063,3 +2063,182 @@ def test_the_env_still_decides_when_the_owner_has_not_set_a_template():
 
     assert "el_del_archivo" in consultadas
     assert "el_del_entorno_viejo" not in consultadas
+
+# --------------------------------------------------------------------------
+# Lo que el reporte NO puede afirmar cuando no pudo mirar.
+#
+# EL DEFECTO QUE ESTO FIJA
+# ------------------------
+# `puede_submit = bool(roles & roles_submit) or "System Manager" in roles` da
+# False con los dos conjuntos vacíos. Vacío por 403 y vacío por no tener el rol
+# se leen igual, así que una credencial sin lectura de DocPerm imprimía
+# `OK  ERPNext <rol>: 0 rol(es); Submit: no` en las TRES identidades. La regla
+# de las tres identidades es lo único que impide que el LLM emita, y su único
+# chequeo automático decía OK por no haber podido medir.
+#
+# Peor en política, que es la que SÍ tiene que poder emitir: «Submit: no» ahí
+# significaría que nada se confirma nunca, y salía como OK. El `elif` que existe
+# para cazar ese caso está guardado por `roles_submit`, así que con la lectura
+# rota tampoco corría.
+#
+# Encontrado en vivo (agentcrm4, 2026-09-15): la credencial de política tiene un
+# solo rol y no lee DocPerm ni System Settings. La separación estaba BIEN —se
+# verificó a mano con `bench`— y el reporte habría dicho exactamente lo mismo si
+# hubiera estado mal. Eso es lo que lo hace un defecto y no un detalle.
+def test_sin_leer_DocPerm_no_se_afirma_Submit_en_ninguna_identidad() -> None:
+    """Las dos lecturas de permisos dan 403: nadie puede decir «Submit: no»."""
+
+    def http(url, headers=None, params=None):
+        if "/api/resource/DocPerm" in url or "Custom DocPerm" in url or "Custom%20DocPerm" in url:
+            return 403, {"exc": "PermissionError"}
+        return _http_sano(url, headers, params)
+
+    reporte = _correr(BASE, http=http)
+    texto = reporte.texto()
+
+    # Ninguna de las tres afirma nada sobre Submit.
+    assert "Submit: no" not in texto, texto
+    assert "Submit: sí" not in texto, texto
+    for rol in ("agente", "gerencia", "politica"):
+        assert f"AVISO  ERPNext {rol}: no pude comprobar si tiene Submit" in texto, texto
+    # La mitad que importa: el aviso dice QUÉ permiso falta, o no es accionable
+    # y el que lo lee vuelve a donde estaba.
+    assert "dar lectura de DocPerm y Custom DocPerm a la credencial de política" in texto
+
+    # Y no bloquea: es el criterio que `ERPNext zona` deja escrito doce líneas
+    # más abajo —lo que no se pudo mirar no deja el check en rojo para siempre—.
+    assert reporte.listo, texto
+
+
+def test_un_User_sin_tabla_de_roles_tampoco_afirma_Submit() -> None:
+    """La otra lectura: DocPerm se lee, el User se lee, su tabla de roles no.
+
+    Es el 403 parcial de Frappe: el doc vuelve 200 y la tabla hija viene vacía.
+    Sin este guardia `roles` es vacío y el reporte volvía a decir «Submit: no»
+    con la misma confianza, ahora por la otra mitad.
+    """
+
+    def http(url, headers=None, params=None):
+        if "/api/resource/User/agente@x" in url:
+            return 200, {"data": {"roles": []}}
+        return _http_sano(url, headers, params)
+
+    reporte = _correr(BASE, http=http)
+    texto = reporte.texto()
+
+    assert "AVISO  ERPNext agente: el User se lee pero sin su tabla de roles" in texto, texto
+    assert "dar lectura de User a la credencial de política" in texto
+    assert "ERPNext agente: 0 rol(es)" not in texto, texto
+    # Las otras dos se leyeron bien y siguen midiendo: el guardia es por
+    # identidad, no un apagón del chequeo entero.
+    assert "ERPNext politica: 1 rol(es); Submit: sí" in texto, texto
+    assert "ERPNext gerencia: 1 rol(es); Submit: no" in texto, texto
+    assert reporte.listo, texto
+
+
+# ---------------------------------------------------------------------------
+# UN RENGLÓN POR COSA. La regresión que dejó #51 en el informe que lee el dueño.
+#
+# EL DEFECTO
+# ----------
+# Al entrar `limites.PLANTILLAS` en `limites.TODOS`, las doce plantillas
+# empezaron a caer también en el bucle de `chequear_stock_y_limites`, que ya
+# las reportaba `chequear_plantillas`. Medido en vivo el 2026-09-16 contra
+# crm-agent1, el informe decía las dos cosas sobre la MISMA variable:
+#
+#   FALTA  WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE: vacía, y este aviso lo dispara
+#          un barrido HORAS después del último mensaje del cliente...
+#   OK     WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE: válido (default del código)
+#
+# Las dos son ciertas —una habla del negocio, la otra del tipo— y el dueño no
+# tiene cómo saber cuál manda. Un preflight que se contradice a sí mismo se
+# deja de leer, y es lo único que mira antes de una prueba en vivo.
+#
+# LA MITAD QUE NO SE PUEDE SALTEAR
+# --------------------------------
+# `_plantillas_del_dueno` descarta las filas con `problema` y se cae al `.env`
+# en silencio, así que un nombre mal guardado por el dueño NO aparece en
+# `chequear_plantillas`. El bucle de límites es el único lugar donde se ve. Por
+# eso la excepción es condicional: `nombre in PLANTILLAS and not problema`.
+#
+# TRES CONSUMIDORES, TRES MUTACIONES (una por test, y sólo una):
+#   A) borrar el `continue` entero  -> cae SÓLO el primero (vuelven los dos renglones)
+#   B) sacarle `and not fila.get("problema")` -> cae SÓLO el segundo (se traga el error)
+#   C) filtrar por `_limites.PLANTILLAS` en vez de `PLANTILLAS`
+#                                    -> cae SÓLO el tercero (se come el idioma)
+# ---------------------------------------------------------------------------
+def _resumen_con(*filas_extra):
+    """El resumen sano más las filas que el test quiere medir.
+
+    Deriva de `_limites_ok()` en vez de repetirlo: una fila nueva en el fixture
+    tiene que llegar acá sola, o estos tres tests se quedan mirando un sistema
+    que ya no existe.
+    """
+    def resumen():
+        return [*_limites_ok(), *filas_extra]
+
+    return resumen
+
+
+def test_a_template_name_gets_one_line_not_two_with_opposite_verdicts():
+    """MUTACIÓN A: borrar el `continue` de PLANTILLAS en chequear_stock_y_limites.
+    Vuelven los dos renglones y cae éste solo."""
+    variable = "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE"
+    # Ausente del .env: `chequear_plantillas` la reporta vacía, que es el
+    # renglón que tiene que sobrevivir — el que habla del negocio.
+    resumen = _resumen_con(
+        {"nombre": variable, "alias": "plantilla pedido confirmado",
+         "valor": "", "origen": "default", "problema": ""}
+    )
+
+    reporte = _correr(BASE, limites=resumen)
+
+    renglones = [(n, m) for n, c, m in reporte.lineas if c == variable]
+    assert len(renglones) == 1, renglones
+    nivel, mensaje = renglones[0]
+    # Y es el del negocio, no el del tipo: «válido» sobre una plantilla vacía
+    # es exactamente lo que no se puede decir.
+    assert nivel != readiness.OK, renglones
+    assert "válido" not in mensaje, mensaje
+
+
+def test_a_template_name_the_owner_saved_wrong_still_reaches_the_report():
+    """MUTACIÓN B: sacarle `and not fila.get("problema")` al `continue`.
+    El error desaparece del informe y cae éste solo.
+
+    `_plantillas_del_dueno` ya descartó esta fila y se cayó al `.env`, así que
+    el envío sale con el nombre viejo y andando. Lo que no puede pasar es que
+    el dueño no se entere de que lo que él guardó no se está usando.
+    """
+    variable = "WHATSAPP_CUSTOMER_REJECTED_TEMPLATE"
+    resumen = _resumen_con(
+        {"nombre": variable, "alias": "plantilla pedido rechazado",
+         "valor": "", "origen": "dueño",
+         "problema": "un nombre de plantilla no puede tener espacios"}
+    )
+
+    reporte = _correr({**BASE, variable: "pedido_rechazado"}, limites=resumen)
+
+    errores = [m for n, c, m in reporte.lineas if c == variable and n == readiness.ERROR]
+    assert errores, [linea for linea in reporte.lineas if linea[1] == variable]
+    assert "no puede tener espacios" in errores[0], errores
+
+
+def test_the_template_language_keeps_the_only_line_it_has():
+    """MUTACIÓN C: filtrar por `_limites.PLANTILLAS` en vez de `PLANTILLAS`.
+
+    WHATSAPP_TEMPLATE_LANGUAGE está en el registro de límites pero NO en las
+    doce que chequea `chequear_plantillas`, así que el bucle de límites es su
+    único renglón. Saltearlo con el conjunto equivocado lo borra del informe
+    sin que caiga ninguno de los otros dos tests — que es por qué éste existe.
+    """
+    resumen = _resumen_con(
+        {"nombre": "WHATSAPP_TEMPLATE_LANGUAGE", "alias": "idioma de las plantillas",
+         "valor": "es_AR", "origen": "dueño", "problema": ""}
+    )
+
+    reporte = _correr(BASE, limites=resumen)
+
+    renglones = [(n, m) for n, c, m in reporte.lineas if c == "WHATSAPP_TEMPLATE_LANGUAGE"]
+    assert len(renglones) == 1, renglones
+    assert renglones[0][0] == readiness.OK, renglones
