@@ -81,10 +81,10 @@ function makeDemo(range=7) {
     topProducts:products.map(p=>{const rows=booked.flatMap(o=>o.items).filter(item=>item.name===p.name);return {id:p.id,name:p.name,quantity:rows.reduce((sum,item)=>sum+item.qty,0),total:rows.reduce((sum,item)=>sum+item.qty*item.rate,0)};}).sort((a,b)=>b.total-a.total),
     topCustomers:customers.map(c=>{const rows=booked.filter(o=>o.customerId===c.id);return {id:c.id,name:c.name,orders:rows.length,total:rows.reduce((sum,o)=>sum+o.total,0)};}).filter(c=>c.orders).sort((a,b)=>b.total-a.total),errors:[],truncated:[]});
   const advice=validateAdvice({generatedAt:at('15:50'),enabled:false,currency:'ARS',items:[
-    {id:'demo-dormido',kind:'dormido',title:'A regular has gone quiet',body:'Café Magnolia has not ordered in the last 21 days.',about:'Café Magnolia',weight:0.46,assumption:'Compared with a weekly ordering pattern over the previous eight weeks.',amount:null,customerId:'CUST-008',orderId:null,productId:null,at:at('09:20')},
-    {id:'demo-perdida',kind:'perdida',title:'Sold below cost',body:'Two lines on this order went out below their recorded purchase cost.',about:orders[3].id,weight:0.82,assumption:'Cost taken from the purchase price list; rebates are not included.',amount:-18400,customerId:orders[3].customerId,orderId:orders[3].id,productId:null,at:at('11:02')},
-    {id:'demo-deuda',kind:'deuda',title:'An overdue balance needs a look',body:'Almacén Don Pedro has a balance beyond the usual payment window.',about:'Almacén Don Pedro',weight:0.68,assumption:'A 14-day payment tolerance; recent unallocated payments may change this.',amount:62500,customerId:'CUST-001',orderId:null,productId:null,at:at('10:35')},
-    {id:'demo-quiebre',kind:'quiebre',title:'Creamy cheese may run out',body:'Available stock may not last until the next scheduled delivery.',about:'Creamy cheese · 1 kg',weight:0.94,assumption:'Demand follows the last seven days and the next delivery arrives in two days.',customerId:null,orderId:null,productId:'QUESO-CREM-1K',at:at('12:10')}
+    {id:'demo-dormido',kind:'dormido',title:'A regular has gone quiet',body:'Café Magnolia has not ordered in the last 21 days.',about:'Café Magnolia',assumption:'Compared with a weekly ordering pattern over the previous eight weeks.',amount:null,customerId:'CUST-008',orderId:null,productId:null},
+    {id:'demo-perdida',kind:'perdida',title:'Sold below cost',body:'Two lines on this order went out below their recorded purchase cost.',about:orders[3].id,assumption:'Cost taken from the purchase price list; rebates are not included.',amount:-18400,customerId:orders[3].customerId,orderId:orders[3].id,productId:null},
+    {id:'demo-deuda',kind:'deuda',title:'An overdue balance needs a look',body:'Almacén Don Pedro has a balance beyond the usual payment window.',about:'Almacén Don Pedro',assumption:'A 14-day payment tolerance; recent unallocated payments may change this.',amount:62500,customerId:'CUST-001',orderId:null,productId:null},
+    {id:'demo-quiebre',kind:'quiebre',title:'Creamy cheese may run out',body:'Available stock may not last until the next scheduled delivery.',about:'Creamy cheese · 1 kg',assumption:'Demand follows the last seven days and the next delivery arrives in two days.',customerId:null,orderId:null,productId:'QUESO-CREM-1K'}
   ],errors:[],truncated:[]});
   return {sales,advice,mode:'demo',company:'Plus Dairy',today,since:dateShift(today,-29),currency:'ARS',generatedAt:new Date().toISOString(),orders,customers,products,activity:validateActivity(activity),conversations,queue:validateQueue(queue),operations,errors:[],truncated:[],limit:250,policies:[{name:'Order ceiling',value:'$ 150.000',note:'Maximum order value for automatic confirmation'},{name:'New customer ceiling',value:'$ 30.000',note:'Separate limit until a customer has order history'},{name:'Stock buffer',value:'20%',note:'Keep a buffer before confirming an order'},{name:'Stock trust window',value:'24 hours',note:'Require a recent confirmed stock count'}],agents:[{id:'sales',name:'Sales agent',role:'Customer conversations & order drafts',model:'Qwen · sales model',status:'Demo'},{id:'manager',name:'Management agent',role:'Business reports & manager assistance',model:'Qwen · management model',status:'Demo'}]};
 }
@@ -266,13 +266,13 @@ function adviceGuide() {
 }
 function adviceRow(item,currency) {
   const meta=adviceKinds[item.kind];
-  return `<article class="advice-row advice-kind-${item.kind}"><div class="advice-row-heading"><span class="advice-kind-icon">${icon(meta.icon)}</span><div><span class="advice-category">${meta.label}</span><h3>${escape(item.title)}</h3></div><span class="advice-amount ${item.amount===null?'amount-unavailable':''}">${item.amount===null?'Amount unavailable':escape(moneyFor(item.amount,currency))}</span></div><p class="advice-body">${escape(item.body)}</p><div class="advice-assumption">${icon('info')}<p><strong>Assumption</strong>${escape(item.assumption)}</p></div><div class="advice-row-footer"><span>${escape(item.about)} · ${escape(prettyMoment(item.at))}</span><div>${item.orderId?`<button class="text-link" data-order="${escape(item.orderId)}">View order ${icon('arrow')}</button>`:''}${item.customerId?`<button class="text-link" data-customer="${escape(item.customerId)}">View customer ${icon('arrow')}</button>`:''}${item.productId?`<span class="advice-product">Product · ${escape(item.productId)}</span>`:''}</div></div></article>`;
+  return `<article class="advice-row advice-kind-${item.kind}"><div class="advice-row-heading"><span class="advice-kind-icon">${icon(meta.icon)}</span><div><span class="advice-category">${meta.label}</span><h3>${escape(item.title)}</h3></div><span class="advice-amount ${item.amount===null?'amount-unavailable':''}">${item.amount===null?'Amount unavailable':escape(moneyFor(item.amount,currency))}</span></div><p class="advice-body">${escape(item.body)}</p><div class="advice-assumption">${icon('info')}<p><strong>Assumption</strong>${escape(item.assumption)}</p></div><div class="advice-row-footer"><span>${escape(item.about)}</span><div>${item.orderId?`<button class="text-link" data-order="${escape(item.orderId)}">View order ${icon('arrow')}</button>`:''}${item.customerId?`<button class="text-link" data-customer="${escape(item.customerId)}">View customer ${icon('arrow')}</button>`:''}${item.productId?`<span class="advice-product">Product · ${escape(item.productId)}</span>`:''}</div></div></article>`;
 }
 function adviceView() {
   const report=data.advice;
   const header=`<div class="card-heading"><div><h2>Business signals</h2><p>${report?'Generated · '+escape(prettyMoment(report.generatedAt)):'The findings worth a closer look'} · ${escape(timeZoneNote())}</p>${readStatus('advice')}</div>${readButton('advice')}</div>`;
   if(!report)return `<section class="card advice-report">${header}${readEmpty('advice','Advice is unavailable')}</section>${adviceGuide()}`;
-  const rows=report.items.filter(item=>(state.filter==='all'||item.kind===state.filter)&&`${item.title} ${item.body} ${item.about} ${item.assumption}`.toLowerCase().includes(state.search.toLowerCase())).sort((a,b)=>b.weight-a.weight);
+  const rows=report.items.filter(item=>(state.filter==='all'||item.kind===state.filter)&&`${item.title} ${item.body} ${item.about} ${item.assumption}`.toLowerCase().includes(state.search.toLowerCase()));
   return `${reportErrors(report)}${reportWarnings(report,['items'])}${!report.enabled?`<section class="advice-off"><span class="advice-off-icon">${icon('advice')}</span><div><span class="advice-off-label">ADVICE IS OFF</span><h2>A little foresight, when you’re ready.</h2><p>Automatic advice is currently switched off. ${data.mode==='demo'?'These sample findings show what you would see.':'Any findings below are from the last available report.'} Each finding includes the assumption behind it, so you can decide what deserves a closer look.</p></div><span class="subtle-pill">${data.mode==='demo'?'Sample preview':'Switched off'}</span></section>`:''}<section class="card advice-report">${header}<div class="advice-toolbar"><div class="filter-tabs" role="group" aria-label="Filter advice">${[['all','All signals'],...Object.entries(adviceKinds).map(([key,meta])=>[key,meta.label])].map(([key,label])=>`<button data-filter="${key}" class="${state.filter===key?'selected':''}" aria-pressed="${state.filter===key}">${label}<span>${report.items.filter(item=>key==='all'||item.kind===key).length}</span></button>`).join('')}</div>${searchField('Search advice…')}</div>${listLimit(report,'items')}<p class="list-note">${number(rows.length)} displayed · Highest urgency first. Findings need your judgment; no action is taken here.</p>${rows.length?`<div class="advice-list">${rows.map(item=>adviceRow(item,report.currency)).join('')}</div>`:empty(report.items.length?'No matching advice':report.enabled?'No advice to review':'No saved findings',report.items.length?'Try another category or search.':report.enabled?'No findings were returned in this report. New signals will appear here when available.':'Advice is off. The checks below explain what this screen can show once it is enabled.')}</section>${!report.enabled||!report.items.length?adviceGuide():''}`;
 }
 
@@ -664,6 +664,9 @@ async function apiRead(connection, path) {
 function requireValue(ok,label){if(!ok)throw new Error('The agent returned invalid '+label+'.');}
 function isText(value){return typeof value==='string';}
 function isId(value){return isText(value)&&value.trim().length>0;}
+// Declaración y no `const`: `makeDemo()` corre al cargar el módulo y llama a
+// los validadores, así que una `const` de más abajo caería en su zona muerta.
+function isMoney(v){return Number.isFinite(v)&&Math.abs(v)<=Number.MAX_SAFE_INTEGER;}
 function isCount(value){return Number.isSafeInteger(value)&&value>=0;}
 function isDay(value){return isText(value)&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&!Number.isNaN(Date.parse(value))&&new Date(value).toISOString().slice(0,10)===value;}
 function isMoment(value){return isText(value)&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)&&isDay(value.slice(0,10))&&!Number.isNaN(Date.parse(value));}
@@ -705,20 +708,20 @@ function validateSales(value) {
   requireValue(value&&typeof value==='object','sales information');
   requireValue(value.currency===null||isCurrency(value.currency),'sales currency');
   requireValue((value.since===null||isDay(value.since))&&(value.until===null||isDay(value.until))&&(value.since===null||value.until===null||value.since<=value.until),'sales dates');
-  requireValue((value.total===null||Number.isSafeInteger(value.total))&&(value.averageOrder===null||Number.isSafeInteger(value.averageOrder))&&(value.orders===null||isCount(value.orders)),'sales totals');
+  requireValue((value.total===null||isMoney(value.total))&&(value.averageOrder===null||isMoney(value.averageOrder))&&(value.orders===null||isCount(value.orders)),'sales totals');
   requireValue(['daily','topProducts','topCustomers','errors','truncated'].every(key=>value[key]===null||Array.isArray(value[key])),'sales lists');
   const daily=value.daily===null?null:value.daily.map(row=>{
-    requireValue(row&&isDay(row.date)&&Number.isSafeInteger(row.total)&&isCount(row.orders),'daily sales');
+    requireValue(row&&isDay(row.date)&&isMoney(row.total)&&isCount(row.orders),'daily sales');
     requireValue((value.since===null||row.date>=value.since)&&(value.until===null||row.date<=value.until),'daily sales period');
     return {date:row.date,total:row.total,orders:row.orders};
   }).sort((a,b)=>a.date.localeCompare(b.date));
   requireValue(daily===null||new Set(daily.map(row=>row.date)).size===daily.length,'duplicate sales dates');
   const topProducts=value.topProducts===null?null:value.topProducts.map(row=>{
-    requireValue(row&&isId(row.id)&&isText(row.name)&&Number.isFinite(row.quantity)&&row.quantity>=0&&Number.isSafeInteger(row.total),'top products');
+    requireValue(row&&isId(row.id)&&isText(row.name)&&Number.isFinite(row.quantity)&&row.quantity>=0&&isMoney(row.total),'top products');
     return {id:row.id,name:row.name,quantity:row.quantity,total:row.total};
   });
   const topCustomers=value.topCustomers===null?null:value.topCustomers.map(row=>{
-    requireValue(row&&isId(row.id)&&isText(row.name)&&isCount(row.orders)&&Number.isSafeInteger(row.total),'top customers');
+    requireValue(row&&isId(row.id)&&isText(row.name)&&isCount(row.orders)&&isMoney(row.total),'top customers');
     return {id:row.id,name:row.name,orders:row.orders,total:row.total};
   });
   requireValue(['errors','truncated'].every(key=>value[key]===null||value[key].every(isText)),'sales notices');
@@ -730,10 +733,9 @@ function validateAdvice(value) {
   requireValue(['errors','truncated'].every(key=>Array.isArray(value[key])&&value[key].every(isText)),'advice notices');
   const items=value.items.map(row=>{
     requireValue(row&&isId(row.id)&&['perdida','dormido','deuda','quiebre'].includes(row.kind)&&['title','body','about','assumption'].every(key=>isText(row[key])),'advice finding');
-    requireValue(Number.isFinite(row.weight)&&row.weight>=0&&row.weight<=1,'advice weight');
-    requireValue(row.amount===undefined||row.amount===null||Number.isSafeInteger(row.amount),'advice amount');
-    requireValue(['customerId','orderId','productId'].every(key=>row[key]===null||isId(row[key]))&&isMoment(row.at),'advice references');
-    return {id:row.id,kind:row.kind,title:row.title,body:row.body,about:row.about,weight:row.weight,assumption:row.assumption,amount:row.amount??null,customerId:row.customerId,orderId:row.orderId,productId:row.productId,at:row.at};
+    requireValue(row.amount===undefined||row.amount===null||isMoney(row.amount),'advice amount');
+    requireValue(['customerId','orderId','productId'].every(key=>row[key]===null||isId(row[key])),'advice references');
+    return {id:row.id,kind:row.kind,title:row.title,body:row.body,about:row.about,assumption:row.assumption,amount:row.amount??null,customerId:row.customerId,orderId:row.orderId,productId:row.productId,at:row.at};
   });
   return {generatedAt:value.generatedAt,enabled:value.enabled,currency:value.currency,items,errors:[...value.errors],truncated:[...value.truncated]};
 }

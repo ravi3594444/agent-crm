@@ -700,10 +700,10 @@ const salesFixture = () => ({
 const adviceFixture = () => ({
   generatedAt: '2026-09-15T13:50:00+00:00', enabled: false, currency: 'ARS',
   items: [
-    { id: 'sleep', kind: 'dormido', title: 'Quiet account', body: 'A regular stopped ordering.', about: 'Quiet shop', weight: 0.2, assumption: 'Weekly purchases.', amount: null, customerId: 'CUST-ADVISED', orderId: null, productId: null, at: '2026-09-15T10:00:00Z' },
-    { id: 'loss', kind: 'perdida', title: 'Sold below cost', body: 'Two lines were sold below cost.', about: 'ORDER-LOSS', weight: 0.82, assumption: 'Purchase price list.', amount: -18400, customerId: null, orderId: 'ORDER-LOSS', productId: null, at: '2026-09-15T11:02:00Z' },
-    { id: 'debt', kind: 'deuda', title: 'Overdue balance', body: 'Payment is overdue.', about: 'A balance', weight: 0.5, assumption: 'Fourteen day tolerance.', amount: 0, customerId: null, orderId: null, productId: null, at: '2026-09-15T11:00:00Z' },
-    { id: 'stock', kind: 'quiebre', title: 'Stock may run out', body: 'Demand exceeds available stock.', about: 'MILK', weight: 1, assumption: 'Next delivery in two days.', customerId: null, orderId: null, productId: 'MILK', at: '2026-09-15T12:00:00Z' },
+    { id: 'sleep', kind: 'dormido', title: 'Quiet account', body: 'A regular stopped ordering.', about: 'Quiet shop', assumption: 'Weekly purchases.', amount: null, customerId: 'CUST-ADVISED', orderId: null, productId: null },
+    { id: 'loss', kind: 'perdida', title: 'Sold below cost', body: 'Two lines were sold below cost.', about: 'ORDER-LOSS', assumption: 'Purchase price list.', amount: -18400, customerId: null, orderId: 'ORDER-LOSS', productId: null },
+    { id: 'debt', kind: 'deuda', title: 'Overdue balance', body: 'Payment is overdue.', about: 'A balance', assumption: 'Fourteen day tolerance.', amount: 0, customerId: null, orderId: null, productId: null },
+    { id: 'stock', kind: 'quiebre', title: 'Stock may run out', body: 'Demand exceeds available stock.', about: 'MILK', assumption: 'Next delivery in two days.', customerId: null, orderId: null, productId: 'MILK' },
   ], errors: [], truncated: [],
 });
 function reports(w, sales = salesFixture(), advice = adviceFixture()) {
@@ -762,11 +762,11 @@ test('Sales distinguishes unavailable fields from zero and intentional empty lis
 test('Sales rejects malformed numeric, date, ranking, and notice contracts', () => {
   const w = workspace({ search: '?demo=1' });
   const bad = [
-    { currency: 'ars' }, { since: '2026-02-30' }, { until: '2026-09-01' }, { total: '1' }, { averageOrder: 0.5 }, { orders: -1 },
+    { currency: 'ars' }, { since: '2026-02-30' }, { until: '2026-09-01' }, { total: '1' }, { averageOrder: '0.5' }, { orders: -1 },
     { daily: false }, { daily: [{ date: '2026-09-08', total: 1, orders: 1 }] }, { daily: [{ date: '2026-09-09', total: Infinity, orders: 1 }] },
     { daily: [{ date: '2026-09-09', total: 1, orders: 0.5 }] }, { daily: [salesFixture().daily[0], salesFixture().daily[0]] },
     { topProducts: [{ id: 'MILK', name: 'Milk', quantity: -0.5, total: 1 }] }, { topProducts: [{ id: '', name: 'Milk', quantity: 1, total: 1 }] },
-    { topProducts: [{ id: 'MILK', name: 'Milk', quantity: 1, total: 0.25 }] }, { topCustomers: [{ id: 'C', name: 'Shop', orders: '3', total: 1 }] },
+    { topProducts: [{ id: 'MILK', name: 'Milk', quantity: 1, total: '0.25' }] }, { topCustomers: [{ id: 'C', name: 'Shop', orders: '3', total: 1 }] },
     { errors: [null] }, { truncated: [{}] }, { total: Number.MAX_SAFE_INTEGER + 1 },
   ];
   for (const change of bad) { w.context.bad = { ...salesFixture(), ...change }; assert.throws(() => w.run('validateSales(bad)'), /invalid/); }
@@ -776,9 +776,9 @@ test('Sales rejects malformed numeric, date, ranking, and notice contracts', () 
   assert.equal(w.run('validateSales(good).daily[0].date'), '2026-09-09');
 });
 
-test('Advice rejects unknown kinds, invalid weights, references, amounts, and timestamps', () => {
+test('Advice rejects unknown kinds, invalid references, amounts and text', () => {
   const w = workspace({ search: '?demo=1' });
-  for (const change of [{ kind: 'other' }, { weight: 1.01 }, { weight: -0.1 }, { weight: NaN }, { weight: '0.5' }, { amount: 0.5 }, { amount: Infinity }, { customerId: '' }, { orderId: 42 }, { productId: false }, { at: '2026-09-15' }, { assumption: null }, { title: 1 }, { about: null }, { body: [] }, { id: '' }]) {
+  for (const change of [{ kind: 'other' }, { amount: '0.5' }, { amount: Infinity }, { customerId: '' }, { orderId: 42 }, { productId: false }, { assumption: null }, { title: 1 }, { about: null }, { body: [] }, { id: '' }]) {
     w.context.bad = { ...adviceFixture(), items: [{ ...adviceFixture().items[0], ...change }] };
     assert.throws(() => w.run('validateAdvice(bad)'), /invalid/);
   }
@@ -915,10 +915,13 @@ test('Disabled Advice explains the preview and empty enabled reports make no fal
   assert.doesNotMatch(html, /ADVICE IS OFF|All clear|No risks/);
 });
 
-test('Advice orders by urgency without percentages and distinguishes all four detectors', () => {
+test('Advice renders in the order the server sent, without percentages, and distinguishes all four detectors', () => {
   const w = workspace({ search: '?demo=1' }); reports(w);
   const html = w.run('adviceView()');
-  const positions = ['Stock may run out', 'Sold below cost', 'Overdue balance', 'Quiet account'].map(title => html.indexOf('<h3>' + title));
+  // El servidor ordena DENTRO de cada clase y el panel respeta la lista.
+  // Ordenar acá compararía plata contra unidades.
+  const enviados = JSON.parse(w.run('JSON.stringify(data.advice.items.map(i=>i.title))'));
+  const positions = enviados.map(title => html.indexOf('<h3>' + title));
   assert.ok(positions.every((pos, i) => pos >= 0 && (!i || pos > positions[i - 1])));
   for (const kind of ['perdida', 'dormido', 'deuda', 'quiebre']) assert.match(html, new RegExp(`advice-row advice-kind-${kind}`));
   assert.doesNotMatch(html, /82%|20%|100%|confidence/i);

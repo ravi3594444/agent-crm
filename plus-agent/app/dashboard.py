@@ -1281,7 +1281,7 @@ class DashboardAPI:
         confirm_match = re.fullmatch(r"/orders/([^/]{1,140})/confirm", path)
         readers = {
             "/snapshot": snapshot, "/controls": controls, "/operations": operations,
-            "/today": today, "/queue": queue,
+            "/today": today, "/queue": queue, "/sales": sales, "/advice": advice,
         }
         if path == "/config" and scope["method"] == "GET":
             # No company, model, origin, or business data is returned before auth.
@@ -1372,6 +1372,11 @@ class DashboardAPI:
                 if "/" in customer_id or "\\" in customer_id or customer_id in {".", ".."}:
                     raise RecordNotFound
                 data = await _en_hilo(conversation, customer_id)
+            elif path == "/sales":
+                # La única lectura con parámetro. `scope["path"]` no trae la
+                # query —ASGI la deja en `query_string`—, así que el ruteo de
+                # arriba la encuentra igual y el período se lee acá.
+                data = await _en_hilo(sales, dias_pedidos(scope.get("query_string", b"")))
             else:
                 data = await _en_hilo(readers[path])
         except RecordNotFound:
@@ -1381,6 +1386,236 @@ class DashboardAPI:
             await reply(502, {"error": "Could not read CRM data. Check the agent service."})
             return
         await reply(200, data)
+
+
+
+# ------------------------------------------------------- ventas y consejos
+
+
+# El período lo elige el PANEL y lo acota el servidor. `days` viene del
+# selector 7/30 y se recorta a 1..90: un entero sin techo del lado del cliente
+# es la forma barata de pedirle a ERPNext que recorra todo.
+DIAS_VENTAS_DEFECTO = 7
+DIAS_VENTAS_MAX = 90
+
+
+def dias_pedidos(query: bytes) -> int:
+    """`?days=N` acotado. Cualquier cosa rara cae en el default, no en un error:
+    un período ilegible no es motivo para dejar al dueño sin pantalla."""
+    from urllib.parse import parse_qs
+
+    crudo = (parse_qs(query.decode("latin-1")).get("days") or [""])[0]
+    try:
+        pedido = int(crudo)
+    except (TypeError, ValueError):
+        return DIAS_VENTAS_DEFECTO
+    return max(1, min(DIAS_VENTAS_MAX, pedido))
+
+
+def _monto(valor: object) -> float:
+    try:
+        return float(valor or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _dia_de(pedido: dict):
+    from datetime import date
+
+    crudo = pedido.get("transaction_date")
+    if isinstance(crudo, date):
+        return crudo
+    try:
+        return date.fromisoformat(str(crudo)[:10])
+    except ValueError:
+        return None
+
+
+def sales(dias: int = DIAS_VENTAS_DEFECTO) -> dict:
+    """Ventas CONFIRMADAS (`docstatus=1`) de esta empresa en los últimos `dias`.
+
+    Consulta propia y no `gerencia._ventas_del_periodo`: esa herramienta
+    devuelve PROSA para el modelo —una frase con el total ya pasado por
+    `pesos()`— y de una frase no sale un gráfico. Los filtros son los mismos.
+
+    `company` va en el filtro por lo mismo que en `snapshot`: un ERPNext puede
+    tener varias empresas y este panel es de una.
+    """
+    from datetime import timedelta
+
+    from app import erpnext, policy
+
+    errors: list[str] = []
+    truncated: list[str] = []
+    empresa = erpnext.default_company()
+    hoy = policy._hoy_del_negocio()
+    desde = hoy - timedelta(days=max(0, dias - 1))
+    vacio = {"currency": "", "since": desde.isoformat(), "until": hoy.isoformat(),
+             "total": None, "orders": None, "averageOrder": None, "daily": None,
+             "topProducts": None, "topCustomers": None,
+             "errors": errors, "truncated": truncated}
+
+    with erpnext.manager_scope():
+        try:
+            moneda = str(
+                erpnext.get_doc("Company", empresa, timeout=READ_TIMEOUT).get("default_currency") or ""
+            )
+        except erpnext.ERPNextError:
+            moneda = ""
+            errors.append("currency")
+        try:
+            pedidos = erpnext.get_list(
+                "Sales Order",
+                filters=[["docstatus", "=", 1], ["company", "=", empresa],
+                         ["transaction_date", ">=", desde.isoformat()]],
+                fields=["name", "customer", "customer_name", "grand_total", "transaction_date"],
+                order_by="transaction_date desc", limit=LIMIT, timeout=READ_TIMEOUT,
+            )
+        except erpnext.ERPNextError:
+            errors.append("sales")
+            return {**vacio, "currency": moneda}
+        if len(pedidos) >= LIMIT:
+            truncated.append("sales")
+        renglones: list[dict] = []
+        if pedidos:
+            try:
+                renglones = erpnext.get_list(
+                    "Sales Order Item",
+                    # `parent` es el DOCTYPE padre y NO es opcional en una tabla
+                    # hija: sin él Frappe la rechaza, y ése fue el bug por el que
+                    # `informe(que="stock_bajo")` nunca contestó contra un
+                    # ERPNext real.
+                    parent="Sales Order",
+                    filters=[["parent", "in", [str(x.get("name") or "") for x in pedidos]]],
+                    fields=["parent", "item_code", "item_name", "qty", "amount"],
+                    limit=LIMIT * 8, timeout=READ_TIMEOUT,
+                )
+            except erpnext.ERPNextError:
+                errors.append("products")
+                truncated.append("topProducts")
+
+    dentro = [x for x in pedidos if (_dia_de(x) or hoy) >= desde]
+    total = sum(_monto(x.get("grand_total")) for x in dentro)
+    por_dia: dict[str, dict] = {}
+    por_cliente: dict[str, dict] = {}
+    for x in dentro:
+        dia = _dia_de(x)
+        if dia:
+            fila = por_dia.setdefault(
+                dia.isoformat(), {"date": dia.isoformat(), "total": 0.0, "orders": 0})
+            fila["total"] += _monto(x.get("grand_total"))
+            fila["orders"] += 1
+        cuenta = str(x.get("customer") or "")
+        if cuenta:
+            fila = por_cliente.setdefault(cuenta, {
+                "id": cuenta, "name": str(x.get("customer_name") or cuenta),
+                "orders": 0, "total": 0.0})
+            fila["orders"] += 1
+            fila["total"] += _monto(x.get("grand_total"))
+    por_producto: dict[str, dict] = {}
+    for r in renglones:
+        code = str(r.get("item_code") or "")
+        if not code:
+            continue
+        fila = por_producto.setdefault(code, {
+            "id": code, "name": str(r.get("item_name") or code),
+            "quantity": 0.0, "total": 0.0})
+        fila["quantity"] += _monto(r.get("qty"))
+        fila["total"] += _monto(r.get("amount"))
+    for fila in list(por_dia.values()) + list(por_cliente.values()) + list(por_producto.values()):
+        fila["total"] = round(fila["total"], 2)
+
+    return {
+        "currency": moneda,
+        "since": desde.isoformat(),
+        "until": hoy.isoformat(),
+        "total": round(total, 2),
+        "orders": len(dentro),
+        # Sin pedidos el promedio NO es 0: es «no hay promedio». Un 0 se lee
+        # «vendí y el ticket fue cero», que es una afirmación que nadie midió.
+        "averageOrder": round(total / len(dentro), 2) if dentro else None,
+        "daily": sorted(por_dia.values(), key=lambda f: f["date"]),
+        "topProducts": sorted(por_producto.values(), key=lambda f: -f["total"])[:10],
+        "topCustomers": sorted(por_cliente.values(), key=lambda f: -f["total"])[:10],
+        "errors": errors,
+        "truncated": truncated,
+    }
+
+
+def advice() -> dict:
+    """Lo que el dueño tendría que saber sin haber preguntado.
+
+    `enabled` SE INFORMA Y NO FILTRA. `consejos.activo()` arranca apagado a
+    propósito, pero lo que apaga es el ENVÍO: desde el 1/10/2026 Meta cobra los
+    mensajes de servicio por unidad, y el tope de 3 por día está para eso. Leer
+    los hallazgos en un panel que el dueño abrió él mismo no manda nada ni
+    cuesta nada. Filtrar acá dejaría la pantalla vacía en la configuración de
+    fábrica, o sea justo cuando más falta hace que muestre algo.
+
+    `peso` NO SALE. Para `perdida` es plata y para `quiebre` son unidades: dos
+    números que no se comparan entre sí, y ordenarlos juntos arma un ranking sin
+    sentido. Se ordena acá DENTRO de cada clase —donde sí es comparable— y lo
+    que viaja es el ORDEN de la lista.
+
+    `sobre` es polimórfico, así que sale por duplicado a propósito: `about` es
+    el texto que se muestra y `customerId`/`orderId`/`productId` es el enlace,
+    exactamente uno de los tres, para que el panel no tenga que re-deducir el
+    tipo del `kind`.
+    """
+    from datetime import UTC, datetime
+
+    from app import consejos, erpnext, policy
+
+    dia = policy._hoy_del_negocio()
+    detectores = (
+        (consejos.PERDIDA, "orderId", consejos.perdidas),
+        (consejos.DORMIDO, "customerId", consejos.dormidos),
+        (consejos.DEUDA, "customerId", consejos.deudas),
+        (consejos.QUIEBRE, "productId", consejos.quiebres),
+    )
+    items: list[dict] = []
+    errors: list[str] = []
+    try:
+        with erpnext.manager_scope():
+            moneda = str(erpnext.get_doc(
+                "Company", erpnext.default_company(), timeout=READ_TIMEOUT
+            ).get("default_currency") or "")
+    except erpnext.ERPNextError:
+        moneda = ""
+        errors.append("currency")
+    for clase, campo, detectar in detectores:
+        try:
+            hallados = detectar(dia)
+        # Ningún detector levanta —lo prometen sus docstrings—, pero si un día
+        # uno deja de cumplirlo el panel pierde UNA clase y no las cuatro, y el
+        # nombre de la que se cayó sale en `errors` en vez de desaparecer.
+        except Exception:
+            errors.append(clase)
+            continue
+        for consejo in sorted(hallados, key=lambda c: -_monto(c.peso)):
+            enlaces = {"customerId": None, "orderId": None, "productId": None}
+            enlaces[campo] = str(consejo.sobre)
+            items.append({
+                "id": str(consejo.clave),
+                "kind": str(consejo.clase),
+                "title": str(consejo.titulo),
+                "body": str(consejo.cuerpo),
+                "about": str(consejo.sobre),
+                "assumption": str(consejo.supuesto or ""),
+                # `datos` tiene los números de cada detector, pero sus claves no
+                # están verificadas por clase: prometer un `amount` sin haberlas
+                # mirado sería inventar. El cuerpo ya trae la cifra en prosa.
+                "amount": None,
+                **enlaces,
+            })
+    return {
+        "generatedAt": datetime.now(UTC).isoformat(),
+        "enabled": consejos.activo(),
+        "currency": moneda,
+        "items": items,
+        "errors": errors,
+        "truncated": [],
+    }
 
 
 def install_dashboard(application) -> None:
