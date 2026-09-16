@@ -689,10 +689,18 @@ def pedir_codigo_de_ajuste(telefono: str, texto: str) -> bool:
     person and becomes the same turn as the first. This path is the reason the
     two steps are two.
 
-    He is by definition inside the 24-hour window — he just wrote to ask for the
-    change — so free-form text works and no template is needed. Never raises;
-    False means he was NOT told, and the caller must not leave a change pending
-    on a code nobody can read.
+    EL SUPUESTO DE LA VENTANA TIENE UNA EXCEPCIÓN, Y ES NUEVA. Por WhatsApp está
+    dentro de las 24 h por definición —acaba de escribir para pedir el cambio—,
+    así que el texto libre alcanza y no hace falta plantilla. Desde que el panel
+    también propone (`dashboard.proponer_ajuste`), el pedido puede venir de un
+    navegador con la ventana cerrada: ahí Meta rechaza el envío, esto devuelve
+    False, `ajustes.preparar` descarta la propuesta y contesta
+    `codigo.ajuste_sin_codigo`. Es un estado accionable —«escribime por WhatsApp
+    y volvé a intentar»— y el panel tiene que mostrarlo como tal y no como una
+    falla suya.
+
+    Never raises; False means he was NOT told, and the caller must not leave a
+    change pending on a code nobody can read.
     """
     from app import whatsapp
 

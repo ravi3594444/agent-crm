@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import threading
 from datetime import UTC, date, timedelta
 from pathlib import Path
@@ -1249,3 +1250,109 @@ def test_el_tope_de_clientes_corta_por_recencia_y_no_por_alfabeto(
 
     assert [c["customerId"] for c in cuerpo["conversations"]] == [datos.CLIENTE_MOROSO]
     assert "conversations" in cuerpo["truncated"]
+
+
+# ---------------------------------------------------------------------------
+# Los ajustes del negocio, contra el almacén de verdad.
+# ---------------------------------------------------------------------------
+def _panel_de(monkeypatch, client):
+    """Un token con nombre, ese número en el equipo, y el WhatsApp capturado."""
+    monkeypatch.setenv("DASHBOARD_TOKENS", f"{TOKEN_PERSONA}:{GERENTE}")
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    monkeypatch.setattr(router, "es_equipo", lambda t: t == GERENTE)
+    enviados: list[tuple[str, str]] = []
+    from app import whatsapp
+
+    monkeypatch.setattr(
+        whatsapp, "enviar_mensaje",
+        lambda tel, texto: enviados.append((tel, texto))
+        or {"messages": [{"id": "wamid.x"}]},
+    )
+    client.headers["Authorization"] = f"Bearer {TOKEN_PERSONA}"
+    return enviados
+
+
+def test_el_codigo_sale_por_whatsapp_y_nunca_por_la_respuesta(connected, monkeypatch):
+    """LA REGLA DURA 3, medida donde se rompería.
+
+    `limites.proponer()` devuelve el código adentro de su dict. Un endpoint que
+    devolviera ese dict —o que lo anidara bajo una clave `debug`, o lo logueara—
+    publicaría el segundo factor en el navegador, en cualquier proxy y en
+    cualquier log. Por eso el endpoint llama a `ajustes.preparar`, que devuelve
+    PROSA, y por eso esto se afirma sobre el cuerpo serializado ENTERO y no
+    sobre una clave: `"codigo" not in body` sobreviviría al valor anidado.
+
+    MUTACIÓN: que `proponer_ajuste` devuelva `limites.proponer(...)` en vez de
+    la prosa de `ajustes.preparar(...)`. Cae ésta y sólo ésta.
+    """
+    client, _, _ = connected
+    enviados = _panel_de(monkeypatch, client)
+
+    respuesta = client.post(
+        "/api/dashboard/settings/propose",
+        json={"setting": "plantilla de confirmado", "value": "pedido_confirmado_v3"},
+    )
+
+    assert respuesta.status_code == 200
+    cuerpo = respuesta.json()
+    assert cuerpo["ok"] is True
+    assert cuerpo["setting"] == "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE"
+
+    # El código existe, y existe SÓLO del lado de WhatsApp.
+    assert len(enviados) == 1
+    destino, texto = enviados[0]
+    assert destino == GERENTE
+    codigo = re.search(r"\*(\d{4})\*", texto).group(1)
+    assert codigo not in json.dumps(cuerpo)
+
+
+def test_un_cambio_esperando_se_ve_en_el_panel_y_sin_su_codigo(connected, monkeypatch):
+    """La propuesta es POR TELÉFONO y sólo hay una viva: pedir un segundo cambio
+    pisa el primero. Mostrarla es lo que evita que eso pase sin que se vea."""
+    client, _, _ = connected
+    enviados = _panel_de(monkeypatch, client)
+
+    client.post("/api/dashboard/settings/propose",
+                json={"setting": "rubro", "value": "distribuidora de lácteos"})
+    ajustes = client.get("/api/dashboard/settings").json()
+
+    assert ajustes["pending"] == {
+        "id": "RUBRO_NEGOCIO", "name": "rubro",
+        "from": "-", "to": "distribuidora de lácteos",
+    }
+    codigo = re.search(r"\*(\d{4})\*", enviados[0][1]).group(1)
+    assert codigo not in json.dumps(ajustes)
+
+
+def test_los_ajustes_llegan_agrupados_y_diciendo_de_donde_sale_cada_valor(connected, monkeypatch):
+    """`source` es lo que deja mostrar un tope en 0 sin pintarlo de rojo: dice
+    que el 0 es el default que viene de fábrica y no algo que alguien rompió.
+    Es la regla dura 4 del lado de la pantalla."""
+    client, _, _ = connected
+    _panel_de(monkeypatch, client)
+
+    cuerpo = client.get("/api/dashboard/settings").json()
+
+    grupos = {g["id"]: g for g in cuerpo["groups"]}
+    assert set(grupos) == {"negocio", "plantillas", "entrega", "limites", "idioma"}
+    por_id = {a["id"]: a for g in cuerpo["groups"] for a in g["settings"]}
+    assert por_id["AUTO_CONFIRM_MAX"]["value"] == "0"
+    assert por_id["AUTO_CONFIRM_MAX"]["source"] == "Shipped default"
+    assert por_id["AUTO_CONFIRM_MAX"]["configured"] is False
+    # Y las credenciales NO están, en ningún grupo. La lista es de lo permitido.
+    for prohibido in ("WHATSAPP_TOKEN", "ERPNEXT_API_KEY", "TELEFONOS_EQUIPO",
+                      "TELEFONO_DUENO", "META_APP_SECRET", "STOCK_CONFIABLE"):
+        assert prohibido not in por_id
+
+
+def test_un_ajuste_que_no_existe_no_deja_nada_esperando(connected, monkeypatch):
+    client, _, _ = connected
+    enviados = _panel_de(monkeypatch, client)
+
+    respuesta = client.post("/api/dashboard/settings/propose",
+                            json={"setting": "la clave de meta", "value": "x"})
+
+    assert respuesta.status_code == 200
+    assert respuesta.json()["ok"] is False
+    assert enviados == []
+    assert client.get("/api/dashboard/settings").json()["pending"] is None

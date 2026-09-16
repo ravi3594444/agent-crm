@@ -16,7 +16,16 @@ spec.loader.exec_module(dashboard)
 TOKEN = "dashboard-test-token-with-32-or-more-characters"
 
 
-def request(method="GET", token=None, origin=None, path="/snapshot"):
+def request(method="GET", token=None, origin=None, path="/snapshot", body=None,
+            trozos=None, leidos=None):
+    """Un pedido al panel.
+
+    `body` viaja entero; `trozos` lo manda en pedazos con `more_body`, que es
+    como llega un `Transfer-Encoding: chunked` de verdad — y es la única forma
+    de probar que el techo se mide mientras se junta y no después. `leidos`
+    cuenta cuántas veces se pidió un trozo, que es lo ÚNICO que distingue las
+    dos cosas: las dos terminan en 400, y sólo una deja de leer.
+    """
     async def run():
         headers = [(b"host", b"agent.example")]
         if token is not None:
@@ -28,8 +37,23 @@ def request(method="GET", token=None, origin=None, path="/snapshot"):
         async def send(event):
             events.append(event)
 
-        async def receive():
-            return {"type": "http.request", "body": b""}
+        if trozos is not None:
+            pendientes = list(trozos)
+
+            async def receive():
+                if leidos is not None:
+                    leidos.append(1)
+                if not pendientes:
+                    return {"type": "http.disconnect"}
+                trozo = pendientes.pop(0)
+                return {"type": "http.request", "body": trozo,
+                        "more_body": bool(pendientes)}
+        else:
+            crudo = body if isinstance(body, bytes) else (
+                json.dumps(body).encode() if body is not None else b"")
+
+            async def receive():
+                return {"type": "http.request", "body": crudo}
 
         await dashboard.DashboardAPI()(
             {"type": "http", "method": method, "scheme": "https",
@@ -556,3 +580,119 @@ class VentasHallazgosTest(unittest.TestCase):
         justo = muchos[:tope]
         salida = self._correr(pedidos, justo)
         self.assertNotIn("topProducts", salida["truncated"], salida)
+
+
+# ---------------------------------------------------------------------------
+# Los ajustes del negocio. El panel PROPONE; el código lo confirma WhatsApp.
+# ---------------------------------------------------------------------------
+PERSONA = "dashboard-named-token-with-32-or-more-characters"
+TELEFONO = "5493511111111"
+
+
+def _con_persona():
+    """Un token CON NOMBRE y ese número en el equipo. Los dos hacen falta:
+    `puede_decidir` exige las dos mitades, y con una sola esto mediría la otra."""
+    from app import router
+
+    return (
+        patch.dict(os.environ, {"DASHBOARD_TOKENS": f"{PERSONA}:{TELEFONO}"}),
+        patch.object(router, "es_equipo", lambda t: t == TELEFONO),
+    )
+
+
+class AjustesDelPanelTest(unittest.TestCase):
+    def test_a_read_only_token_can_look_at_settings_and_cannot_propose(self):
+        """LA GUARDA QUE MÁS CARO SALE SI FALTA. El token COMPARTIDO está
+        autenticado y no es nadie en particular, así que puede mirar y nunca
+        decidir — y una ruta de escritura nueva que no se nombre en la guarda
+        del 403 queda alcanzable por él sin que nada se ponga rojo.
+
+        MUTACIÓN: cambiar la guarda a `if confirm_match and not puede_decidir`,
+        o sea volver a la condición de antes de esta ruta. Cae ésta y sólo ésta.
+        """
+        with patch.dict(os.environ, {"DASHBOARD_API_TOKEN": TOKEN}), \
+                patch.object(dashboard, "settings", return_value={"groups": []}), \
+                patch.object(dashboard, "proponer_ajuste") as proponer:
+            self.assertEqual(request(token=TOKEN, path="/settings")[0], 200)
+            code, _, body = request(
+                "POST", token=TOKEN, path="/settings/propose",
+                body={"setting": "tope", "value": "999999"},
+            )
+            self.assertEqual(code, 403)
+            self.assertIn("cannot change settings", json.dumps(body))
+            proponer.assert_not_called()
+
+    def test_proposing_needs_a_post_and_a_setting(self):
+        entorno, equipo = _con_persona()
+        with entorno, equipo, patch.object(dashboard, "proponer_ajuste") as proponer:
+            self.assertEqual(
+                request(token=PERSONA, path="/settings/propose")[0], 405)
+            code, _, body = request(
+                "POST", token=PERSONA, path="/settings/propose", body={"value": "x"})
+            self.assertEqual(code, 400)
+            self.assertIn("which setting", json.dumps(body))
+            proponer.assert_not_called()
+
+    def test_a_body_that_cannot_be_used_never_reaches_the_write_pool(self):
+        entorno, equipo = _con_persona()
+        with entorno, equipo, patch.object(dashboard, "proponer_ajuste") as proponer:
+            for cuerpo in (b"", b"not json", b'"just a string"', b"[1,2]"):
+                code, _, _ = request(
+                    "POST", token=PERSONA, path="/settings/propose", body=cuerpo)
+                self.assertEqual(code, 400, cuerpo)
+            proponer.assert_not_called()
+
+    def test_an_oversized_body_is_cut_while_it_arrives_not_after(self):
+        """El techo se mide ADENTRO del bucle, y el 400 NO lo demuestra.
+
+        Ésa es la parte que casi se me pasa: comprobando el largo después del
+        `while`, un cuerpo de 160 KiB también termina en 400 — sólo que después
+        de que el proceso lo juntó entero, que es exactamente lo que el techo
+        existe para no hacer. Las dos versiones dan el mismo status, así que un
+        test que afirme el status no puede distinguirlas y no está midiendo el
+        techo: está midiendo que hay un techo en alguna parte.
+
+        Lo que las separa es cuántos trozos se llegaron a pedir. Con el corte
+        adentro, se deja de leer apenas se pasa; sin él, se drena hasta el
+        final.
+
+        MUTACIÓN: mover el `if len(crudo) > CUERPO_MAXIMO` afuera del `while`.
+        Cae ésta y sólo ésta.
+        """
+        entorno, equipo = _con_persona()
+        trozo = b"x" * 4096
+        leidos: list[int] = []
+        with entorno, equipo, patch.object(dashboard, "proponer_ajuste") as proponer:
+            code, _, _ = request(
+                "POST", token=PERSONA, path="/settings/propose",
+                trozos=[b'{"setting":"tope","value":"'] + [trozo] * 40,
+                leidos=leidos,
+            )
+            self.assertEqual(code, 400)
+            proponer.assert_not_called()
+        # 8 KiB de techo contra trozos de 4 KiB: se corta en el tercero. El 41
+        # es lo que se leería drenando todo.
+        self.assertLess(len(leidos), 6)
+
+    def test_the_settings_reader_is_told_who_is_looking(self):
+        """`settings` necesita el teléfono para UNA cosa: decir si esa persona
+        tiene un cambio esperando su código. La propuesta es por teléfono, así
+        que pasarle otra cosa muestra la de otro o ninguna."""
+        entorno, equipo = _con_persona()
+        with entorno, equipo, patch.object(
+                dashboard, "settings", return_value={"groups": []}) as leer:
+            self.assertEqual(request(token=PERSONA, path="/settings")[0], 200)
+            leer.assert_called_once_with(TELEFONO)
+
+    def test_there_is_no_route_that_applies_the_code(self):
+        """El segundo paso vive en WhatsApp, y eso es el diseño y no un hueco.
+
+        `limites.aplicar` no tiene contador de intentos: no lo necesita mientras
+        su única puerta sea un webhook firmado por Meta. Publicarla acá dejaría
+        9000 valores con diez minutos de vida contra un endpoint sin límite.
+        """
+        entorno, equipo = _con_persona()
+        with entorno, equipo:
+            for ruta in ("/settings/confirm", "/settings/apply", "/settings/4242"):
+                self.assertEqual(
+                    request("POST", token=PERSONA, path=ruta)[0], 404, ruta)

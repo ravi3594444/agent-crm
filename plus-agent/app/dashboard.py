@@ -1,7 +1,22 @@
-"""Read-only dashboard API. No agent tools or business write operations.
+"""Dashboard API: reads, and TWO named exceptions that are not reads.
 
 An independent ASGI surface keeps its bearer auth and CORS away from the signed
 WhatsApp webhook. The UI is public static content; business data never is.
+
+The rule is still «este panel lee», and the exceptions are named here instead of
+softening it — the same shape the router uses at the branch that allows them:
+
+  * `POST /orders/{id}/confirm` confirms ONE order, through
+    `decisiones.confirmar`, which is the same door the WhatsApp button uses.
+  * `POST /settings/propose` leaves ONE settings change WAITING for the
+    four-digit code. It changes nothing by itself, and there is deliberately no
+    route that applies the code: the owner confirms on WhatsApp, so the second
+    step stays on another device and another channel. That is what hard rule 3
+    asks for, and it is also why `limites.aplicar` — which has no attempt
+    counter, because its only door is a signed webhook — is not published here.
+
+Both are gated by `puede_decidir`, not by `authorized`: reading is enough to
+look, never to act.
 """
 from __future__ import annotations
 
@@ -54,6 +69,47 @@ ORDER_FIELDS = [
     "name", "customer", "customer_name", "transaction_date", "delivery_date",
     "grand_total", "currency", "status", "docstatus",
 ]
+
+
+# Un cuerpo de pedido acotado. 8 KiB es holgadísimo para `{"setting": ...,
+# "value": ...}` y sigue siendo chico para que a nadie le sirva mandarlo.
+CUERPO_MAXIMO = 8 * 1024
+
+
+class CuerpoInvalido(Exception):
+    """El cuerpo del POST no se puede usar. Se le cuenta al cliente, sin detalles."""
+
+
+async def cuerpo_json(receive) -> dict:
+    """El cuerpo de un POST como dict, o CuerpoInvalido.
+
+    EL TECHO SE MIDE ADENTRO DEL BUCLE, y no contra `content-length`: un pedido
+    `chunked` no manda ese header, así que comprobarlo después de juntar todo es
+    comprobarlo cuando ya se buffereó todo — que es justo lo que el techo existe
+    para no hacer.
+
+    El llamador tiene que haber pasado la autenticación ANTES de llamar acá, o
+    un desconocido puede hacer que el proceso junte megabytes.
+    """
+    crudo = b""
+    while True:
+        evento = await receive()
+        if evento.get("type") != "http.request":
+            break
+        crudo += evento.get("body", b"") or b""
+        if len(crudo) > CUERPO_MAXIMO:
+            raise CuerpoInvalido("The request body is too large")
+        if not evento.get("more_body"):
+            break
+    if not crudo.strip():
+        raise CuerpoInvalido("This request needs a JSON body")
+    try:
+        datos = json.loads(crudo.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise CuerpoInvalido("The request body is not valid JSON") from exc
+    if not isinstance(datos, dict):
+        raise CuerpoInvalido("The request body has to be a JSON object")
+    return datos
 
 
 class RecordNotFound(Exception):
@@ -1279,6 +1335,11 @@ class DashboardAPI:
         # La ÚNICA ruta que escribe. `[^/]` la mantiene fuera de `detail_match`,
         # que es `fullmatch` sobre un segmento sin barras.
         confirm_match = re.fullmatch(r"/orders/([^/]{1,140})/confirm", path)
+        # LA SEGUNDA RUTA QUE ESCRIBE, y no escribe un ajuste: deja UNO
+        # esperando el código de cuatro dígitos que sale por WhatsApp. No hay
+        # ninguna ruta que lo confirme, a propósito — ver `proponer_ajuste`.
+        propose_match = path == "/settings/propose"
+        settings_match = path == "/settings"
         readers = {
             "/snapshot": snapshot, "/controls": controls, "/operations": operations,
             "/today": today, "/queue": queue, "/sales": sales, "/advice": advice,
@@ -1289,7 +1350,7 @@ class DashboardAPI:
                               "configured": hay_acceso_configurado()})
             return
         if (path not in readers and not detail_match and not conversation_match
-                and not confirm_match):
+                and not confirm_match and not propose_match and not settings_match):
             await reply(404, {"error": "Not found"})
             return
         if scope["method"] == "OPTIONS":
@@ -1297,9 +1358,14 @@ class DashboardAPI:
             return
         # El panel sigue siendo de sólo lectura salvo en UNA ruta, y se dice así:
         # la excepción se nombra donde está la regla, en vez de aflojar la regla.
-        if confirm_match:
+        if confirm_match or propose_match:
+            # ESTA RAMA HAY QUE EXTENDERLA CON CADA RUTA QUE ESCRIBA. El `elif`
+            # de abajo contesta 405 «read-only» a todo lo que no caiga acá, así
+            # que una ruta de escritura nueva que se olvide de nombrarse acá no
+            # funciona nunca — y la que se olvide en la guarda de abajo funciona
+            # DE MÁS, que es peor.
             if scope["method"] != "POST":
-                await reply(405, {"error": "Confirming an order is a POST"})
+                await reply(405, {"error": "This is a POST"})
                 return
         elif scope["method"] != "GET":
             await reply(405, {"error": "This dashboard is read-only"})
@@ -1320,9 +1386,14 @@ class DashboardAPI:
         # exige `router.es_equipo`, o sea las MISMAS guardas que valen sobre el
         # webhook firmado de Meta; el token no inventa permisos nuevos, sólo es
         # otra forma de probar «soy este teléfono».
-        if confirm_match and not puede_decidir(mirando):
+        if (confirm_match or propose_match) and not puede_decidir(mirando):
+            # UNA guarda, dos frases. La guarda es una sola a propósito —dos
+            # predicados de permiso se separan con el tiempo y entonces el panel
+            # y el WhatsApp dejan de estar de acuerdo sobre quién puede actuar—,
+            # pero al que la choca hay que decirle qué es lo que no puede.
+            que = "confirm orders" if confirm_match else "change settings"
             await reply(403, {
-                "error": "This token can read the dashboard but cannot confirm orders"
+                "error": f"This token can read the dashboard but cannot {que}"
             })
             return
         # Same-origin requests need no CORS. Cross-origin access is explicit.
@@ -1354,8 +1425,30 @@ class DashboardAPI:
         if origin and not same_origin and not cors:
             await reply(403, {"error": "This dashboard origin is not allowed"})
             return
+        # EL CUERPO SE LEE ACÁ: después de las guardas y antes del pool. Antes
+        # de autenticar, un desconocido hace que el proceso junte megabytes;
+        # adentro del pool ya no hay loop sobre el que esperar `receive`.
+        pedido: dict = {}
+        if propose_match:
+            try:
+                pedido = await cuerpo_json(receive)
+            except CuerpoInvalido as exc:
+                await reply(400, {"error": str(exc)})
+                return
+            setting = plain_text(pedido.get("setting"))[:140]
+            valor = plain_text(pedido.get("value"))[:600]
+            if not setting:
+                await reply(400, {"error": "Tell me which setting to change"})
+                return
+
         try:
-            if confirm_match:
+            if propose_match:
+                data = await _en_hilo(
+                    proponer_ajuste, setting, valor, mirando, pool=_HILOS_ESCRITURA
+                )
+            elif settings_match:
+                data = await _en_hilo(settings, mirando)
+            elif confirm_match:
                 order_id = unquote(confirm_match[1])
                 if "/" in order_id or "\\" in order_id or order_id in {".", ".."}:
                     raise RecordNotFound
@@ -1383,6 +1476,14 @@ class DashboardAPI:
             await reply(404, {"error": "Order not found in this workspace"})
             return
         except Exception:
+            # «No pude leer» es una frase de LECTURA, y para una escritura que
+            # falló es mentira: el operador lee que hay un problema de conexión
+            # y el problema era su valor. Las escrituras contestan lo suyo.
+            if propose_match:
+                await reply(502, {
+                    "error": "The change could not be prepared. Check the agent service."
+                })
+                return
             await reply(502, {"error": "Could not read CRM data. Check the agent service."})
             return
         await reply(200, data)
@@ -1625,6 +1726,165 @@ def advice() -> dict:
         "items": items,
         "errors": errors,
         "truncated": [],
+    }
+
+
+# ------------------------------------------------- los ajustes del negocio
+
+
+# CÓMO SE LLAMA CADA GRUPO PARA UNA PERSONA, y en qué orden se muestran. El
+# orden no es cosmético: arriba va lo que el dueño toca durante la instalación
+# —cómo se llama su negocio, cómo se llaman sus plantillas de Meta— y abajo los
+# topes que deciden si se mueve plata. Mezclarlos en una sola lista hace que
+# subir un techo parezca del mismo tamaño que corregir un horario.
+GRUPOS_DEL_PANEL: tuple[tuple[str, str], ...] = (
+    ("negocio", "Your business"),
+    ("plantillas", "WhatsApp templates"),
+    ("entrega", "Delivery and pickup"),
+    ("limites", "Automatic confirmation"),
+    ("idioma", "Language"),
+)
+
+# De dónde salió el valor, dicho para quien lee el panel. `origen` es del
+# dominio y viaja en castellano desde app/limites.py; esto es la etiqueta.
+_ORIGEN = {
+    "dueño": "You set this",
+    "arranque": "From the server file",
+    "default": "Shipped default",
+    "perdido": "Lost from the store",
+}
+
+
+def settings(mirando: str) -> dict:
+    """Todo lo que el dueño puede cambiar, agrupado, y de dónde sale cada valor.
+
+    `mirando` es el teléfono de quien mira, y hace falta para UNA cosa: decir si
+    esa persona ya tiene un cambio esperando su código. La propuesta es por
+    teléfono (`limites._clave_propuesta`), así que es suya y de nadie más — y
+    sin mostrarla, pedir un segundo cambio pisaría el primero sin que se vea.
+
+    NUNCA VIAJA EL CÓDIGO. `limites.pendiente()` lo saca a propósito; acá se
+    usa esa función y no `_propuesta_viva` justamente por eso.
+
+    POR QUÉ SE MUESTRA `source`. Un tope en 0 no es un error de configuración:
+    es la postura de arranque que decidió el dueño (regla dura 4). Diciendo que
+    el 0 viene del default y no de él, el panel puede mostrarlo sin pintarlo de
+    rojo y sin ofrecer un número «recomendado» — que sería subirle un techo de
+    seguridad por su cuenta.
+    """
+    from app import limites
+
+    try:
+        filas = limites.resumen(lengua="en")
+    except Exception:
+        # El almacén ilegible o el fusible armado. Es lo que el dueño MÁS
+        # necesita ver, así que no puede salir como el 502 genérico de lectura.
+        return {"groups": [], "pending": None,
+                "problem": "The saved settings could not be read."}
+
+    por_grupo: dict[str, list] = {clave: [] for clave, _ in GRUPOS_DEL_PANEL}
+    for fila in filas:
+        nombre = fila["nombre"]
+        grupo = limites.grupo(nombre)
+        if grupo not in por_grupo:
+            continue
+        defi = limites.TODOS[nombre]
+        por_grupo[grupo].append({
+            "id": nombre,
+            "name": fila["alias"],
+            "meaning": fila["significado"],
+            "unit": fila["unidad"],
+            "kind": defi.tipo,
+            "optional": bool(defi.opcional),
+            # El valor CRUDO y el mostrado son dos: el primero es lo que hay que
+            # volver a mandar para no cambiar nada, el segundo es prosa.
+            "value": plain_text(fila["valor"]),
+            "display": plain_text(
+                limites.mostrar(nombre, fila["valor"], en_idioma="en")
+            ),
+            "source": _ORIGEN.get(fila["origen"], fila["origen"]),
+            "configured": fila["origen"] == "dueño",
+            "problem": plain_text(fila["problema"]),
+        })
+
+    pendiente = None
+    try:
+        crudo = limites.pendiente(mirando) if mirando else None
+    except Exception:
+        crudo = None
+    if crudo:
+        pendiente = {
+            "id": plain_text(crudo.get("limite")),
+            "name": plain_text(crudo.get("alias")),
+            "from": plain_text(crudo.get("anterior")),
+            "to": plain_text(crudo.get("nuevo")),
+        }
+
+    return {
+        "groups": [
+            {"id": clave, "name": titulo, "settings": por_grupo[clave]}
+            for clave, titulo in GRUPOS_DEL_PANEL
+            if por_grupo[clave]
+        ],
+        "pending": pendiente,
+        "problem": "",
+    }
+
+
+def proponer_ajuste(setting: str, valor: str, quien_pide: str) -> dict:
+    """Deja UN cambio esperando el código de cuatro dígitos. No cambia nada.
+
+    ACÁ NO HAY CONFIRMACIÓN, Y ES EL DISEÑO. No existe ningún endpoint que
+    aplique el código, a propósito: el dueño lo confirma por WhatsApp, o sea en
+    otro aparato y por otro canal. Eso es lo que la regla dura 3 pide de verdad
+    —que el segundo paso sea FUERA DE BANDA—, y un panel que propusiera y
+    confirmara en la misma pantalla lo colapsaría a uno solo: quien tiene el
+    token tendría las dos mitades.
+
+    Y de yapa saca un problema que no habría tenido arreglo barato:
+    `limites.aplicar` no tiene contador de intentos ni bloqueo, y no los
+    necesita mientras la única puerta sea un WhatsApp firmado por Meta desde un
+    número del equipo. Publicarla por HTTP convertía 9000 valores con diez
+    minutos de vida en algo que se rompe a fuerza bruta en segundos.
+
+    NO SE DEVUELVE `limites.proponer()`. Ese dict TRAE el código adentro, y
+    devolverlo lo publica en el navegador, en cualquier proxy y en cualquier
+    log. Lo que se devuelve es la prosa de `ajustes.preparar`, que es la tercera
+    llamadora de la ÚNICA implementación —las otras dos son la herramienta de
+    gerencia y el ruteo determinista— y no re-deriva ni la propuesta, ni la
+    huella, ni el vencimiento, ni el mensaje.
+    """
+    from app import ajustes, idioma, limites
+
+    lengua = idioma.gerencia()
+    try:
+        defi = limites.definicion(setting)
+    except limites.LimiteError as exc:
+        return {"ok": False, "pending": False,
+                "detail": limites.motivo(exc, lengua)}
+
+    texto = ajustes.preparar(defi.nombre, valor, quien_pide)
+
+    # SI QUEDÓ ESPERANDO, SE PREGUNTA; no se deduce del texto. `preparar`
+    # devuelve prosa para las cuatro salidas —preparado, repetido, valor
+    # inválido y «no te pude mandar el código»— y leer cuál es parseando esa
+    # frase sería atar el panel al catálogo de idiomas. El estado real es si hay
+    # una propuesta viva para este teléfono, y eso se pregunta.
+    try:
+        espera = limites.pendiente(quien_pide) or {}
+    except Exception:
+        espera = {}
+    quedo = str(espera.get("limite") or "") == defi.nombre
+    return {
+        "ok": quedo,
+        "pending": quedo,
+        "setting": defi.nombre,
+        "name": defi.alias[0],
+        # Sin traducir, igual que el `detail` de `confirmar_desde_el_panel` y
+        # por el mismo motivo: es LA MISMA frase que le llega por WhatsApp, y
+        # dos canales que explican el mismo resultado con palabras distintas
+        # terminan discrepando justo cuando hay que decidir qué hacer.
+        "detail": plain_text(texto),
     }
 
 
