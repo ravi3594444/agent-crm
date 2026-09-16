@@ -992,8 +992,19 @@ def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_l
     from app import formato as _formato
 
     crudo_locale = _valor(env, "LOCALE")
-    conocidos = {codigo.lower(): codigo for codigo in _formato.LOCALES}
-    normal_locale = conocidos.get(crudo_locale.replace("-", "_").lower())
+    # CUALQUIER LOCALE QUE CONOZCA CLDR, no los dos de la lista: el producto se
+    # despliega fuera de Argentina y `en_IN` o `pt_BR` son configuraciones
+    # legítimas. `formato._babel` es el mismo juez que usa el módulo, así que
+    # el informe no puede decir que algo vale y el formateador tratarlo como
+    # basura. Los dos de `LOCALES` siguen siendo los que tienen moneda escrita
+    # a mano y cobertura de tests, y el aviso lo dice.
+    normal_locale = None
+    if crudo_locale:
+        candidato = crudo_locale.replace("-", "_")
+        conocidos = {codigo.lower(): codigo for codigo in _formato.LOCALES}
+        normal_locale = conocidos.get(candidato.lower()) or (
+            candidato if _formato._babel(candidato) is not None else None
+        )
     if not crudo_locale:
         reporte.ok(
             "LOCALE",
@@ -1003,12 +1014,20 @@ def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_l
     elif normal_locale is None:
         reporte.error(
             "LOCALE",
-            f"{crudo_locale!r} no es ninguno de {', '.join(_formato.LOCALES)}: "
-            f"los montos se van a escribir {_formato.LOCALE_POR_DEFECTO} igual, "
-            "que puede no ser lo que lee este cliente",
+            f"{crudo_locale!r} no es un locale que CLDR reconozca: los montos "
+            f"se van a escribir {_formato.LOCALE_POR_DEFECTO} igual, que puede "
+            "no ser lo que lee este cliente",
         )
-    else:
+    elif normal_locale in _formato.LOCALES:
         reporte.ok("LOCALE", f"montos con forma {normal_locale}")
+    else:
+        reporte.aviso(
+            "LOCALE",
+            f"{normal_locale}: válido, y la moneda sale del territorio según "
+            f"CLDR ({_formato.moneda_del_locale(normal_locale)}). Los que este "
+            f"producto trae probados son {', '.join(_formato.LOCALES)}: mirá un "
+            "monto antes de mostrárselo a un cliente",
+        )
 
     if resumen_limites is None:
         reporte.aviso("Límites", "sin Redis: no se verificaron los límites del dueño")

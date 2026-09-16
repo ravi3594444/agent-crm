@@ -320,10 +320,25 @@ def test_un_LOCALE_mal_escrito_se_dice_en_el_arranque() -> None:
     """`formato.pesos` cae al de por defecto en silencio, a propósito: un monto
     mal formateado no puede dejar un mensaje sin salir. El precio de esa
     decisión es que nadie se entera, así que el chequeo de arranque lo dice."""
-    reporte = _correr({**BASE, "LOCALE": "en-UK"})
+    reporte = _correr({**BASE, "LOCALE": "no-es-un-locale"})
 
     assert not reporte.listo
-    assert "no es ninguno de es_AR, en_US" in reporte.texto()
+    assert "no es un locale que CLDR reconozca" in reporte.texto()
+
+
+def test_un_LOCALE_de_otro_pais_vale_y_se_avisa_que_no_está_probado() -> None:
+    """Desde el 17/09 vale cualquier locale de CLDR, no dos.
+
+    El caso de arriba usaba `en-UK`, que parecía mal escrito y no lo es: CLDR
+    lo resuelve a territorio GB y moneda GBP. Con la lista de dos, un cliente
+    brasileño o indio era un ERROR de arranque; ahora es un AVISO, porque la
+    moneda sale del territorio y nadie miró todavía cómo queda el número.
+    """
+    reporte = _correr({**BASE, "LOCALE": "en_IN"})
+
+    texto = reporte.texto()
+    assert "en_IN" in texto and "INR" in texto, texto
+    assert "no es un locale que CLDR reconozca" not in texto, texto
 
 
 def test_un_LOCALE_valido_se_reporta_con_su_forma_normal() -> None:
