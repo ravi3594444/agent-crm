@@ -214,6 +214,13 @@ class Hueco:
     # PROHIBIDO dejaría pasar todo lo que nadie previó. Ver
     # `CLAVES_PARA_CLIENTES`.
     para_clientes: bool = False
+    # SI ESTE HUECO SE CIERRA CON UN AJUSTE Y NO CON UNA NOTA. Vacío es el caso
+    # normal: la respuesta se guarda como nota, bajo `clave`. Con un nombre de
+    # ajuste, la respuesta va por `proponer_limite` —o sea con su código de
+    # cuatro dígitos— y el hueco se cierra cuando ESE ajuste tiene valor puesto
+    # por el dueño. Ver la regla arriba de HUECOS, que esto no rompe: lo que no
+    # se puede es preguntar por un ajuste y guardarlo como NOTA.
+    ajuste: str = ""
 
     def texto(self, lengua: str | None = None) -> str:
         """La pregunta en el idioma del que la va a leer.
@@ -231,12 +238,20 @@ class Hueco:
 # LOS HUECOS. Uno por línea, en el orden en que se inventaron; el orden en que
 # se PREGUNTAN lo decide la rotación, no esta lista.
 #
-# La regla para agregar uno: tiene que ser algo que NO sea un ajuste. Las zonas
-# de reparto, los días, la hora, el cargo fuera de día y los topes de
-# auto-confirmación ya viven en `limites.TODOS` con su código de cuatro
-# dígitos. Preguntar acá por algo que allá es un número produce una nota que
-# contradice a la configuración, y gana la configuración — o sea, una nota que
-# miente.
+# La regla para agregar uno: si es un AJUSTE, se declara como tal con
+# `ajuste="NOMBRE"`, y la respuesta va por `proponer_limite` con su código de
+# cuatro dígitos. Lo que NO se puede es preguntar por algo que vive en
+# `limites.TODOS` y guardar la respuesta como NOTA: esa nota contradice a la
+# configuración, gana la configuración, y queda una nota que miente. Ése era el
+# defecto que esta regla evitaba prohibiendo la pregunta entera; ahora se evita
+# guardando la respuesta donde corresponde, que además es lo que el dueño
+# pidió — que el agente note lo que le falta configurar y lo pregunte, y que
+# deje de preguntarlo cuando ya está puesto.
+#
+# Lo que sigue afuera, y a propósito: los doce nombres de plantilla de Meta. Un
+# identificador como `pedido_confirmado_v3` no es algo que alguien conteste en
+# una conversación —se copia de la consola de Meta—, y para eso está la
+# pantalla de ajustes.
 HUECOS: tuple[Hueco, ...] = (
     Hueco(
         "reparto_costo",
@@ -294,7 +309,38 @@ HUECOS: tuple[Hueco, ...] = (
         "clientes_delicados",
         "¿Hay algún cliente al que convenga no dejarle acumular deuda?",
     ),
+    # LOS CUATRO QUE SE CIERRAN CON UN AJUSTE. Son lo que el agente necesita
+    # para poder trabajar, no para contestar mejor: sin el nombre del negocio
+    # se presenta como «la empresa», sin rubro se presenta por lo que hace, sin
+    # horario contesta el del `.env.example`, y sin localidades de reparto NO
+    # SE ENTREGA NADA solo — `app/entrega.py` no autoriza una dirección contra
+    # una lista vacía. Los cuatro entran en la MISMA rotación que los otros
+    # doce: uno por vez, y el que hace más que no se pregunta.
+    Hueco(
+        "nombre_del_negocio",
+        "¿Cómo se llama tu negocio, tal cual querés que se lo diga a un cliente?",
+        ajuste="NOMBRE_NEGOCIO",
+    ),
+    Hueco(
+        "rubro_del_negocio",
+        "¿A qué se dedica tu negocio? Con dos o tres palabras alcanza.",
+        ajuste="RUBRO_NEGOCIO",
+    ),
+    Hueco(
+        "horario_de_atencion",
+        "¿En qué horario atendés? Es lo que le voy a contestar al que pregunte.",
+        ajuste="HORARIO_ATENCION",
+    ),
+    Hueco(
+        "localidades_de_reparto",
+        "¿A qué localidades repartís? Sin esa lista no puedo confirmar "
+        "ninguna entrega sola.",
+        ajuste="ZONAS_ENTREGA_LOCALIDADES",
+    ),
 )
+
+# Los ajustes por los que se pregunta, para no recorrer `HUECOS` en cada vuelta.
+AJUSTES_PREGUNTADOS = frozenset(h.ajuste for h in HUECOS if h.ajuste)
 
 _HUECOS_POR_CLAVE = {hueco.clave: hueco for hueco in HUECOS}
 
@@ -634,13 +680,29 @@ def bloque(
         # para desarmar un «preguntá esto textual».
         from app import idioma
 
+        # DÓNDE VA LA RESPUESTA DEPENDE DE QUÉ ES EL HUECO, y ésta es la mitad
+        # que no se puede equivocar: un ajuste contestado como NOTA produce una
+        # nota que contradice a la configuración —y gana la configuración—, o
+        # sea una nota que miente. Con `ajuste`, la respuesta va por
+        # `proponer_limite`, que es la puerta con el código de cuatro dígitos.
+        if hueco.ajuste:
+            que_hacer = (
+                f"Con lo que conteste, llamá a proponer_limite con "
+                f'limite="{hueco.ajuste}" y su\n'
+                "respuesta como valor. NO llames a anotar_dato para esto: es una "
+                "configuración,\nno una nota, y se confirma con su código."
+            )
+        else:
+            que_hacer = (
+                "Con lo que conteste, llamá a anotar_dato con "
+                f'sobre="{hueco.clave}" y su respuesta\n'
+                "resumida en una frase."
+            )
         partes.append(
             "TODAVÍA NO SABÉS ESTO\n"
             "Cuando termines de contestar lo que te pidió, preguntale ESTO, y nada más:\n"
             f"«{hueco.texto(idioma.gerencia())}»\n"
-            "Con lo que conteste, llamá a anotar_dato con "
-            f'sobre="{hueco.clave}" y su respuesta\n'
-            "resumida en una frase. Si no contesta o cambia de tema, dejalo pasar: no\n"
+            f"{que_hacer} Si no contesta o cambia de tema, dejalo pasar: no\n"
             "insistas y no le hagas otra pregunta en el mismo mensaje."
         )
     return "\n\n".join(partes)
@@ -742,6 +804,31 @@ def bloque_de_prompt() -> str:
 # ---------------------------------------------------------------------------
 # La pregunta: cómo el agente nota un hueco y pregunta UNA cosa.
 # ---------------------------------------------------------------------------
+def _ajustes_puestos() -> frozenset[str]:
+    """Los ajustes de la entrevista que el DUEÑO ya fijó.
+
+    «Puesto» es `origen == "dueño"` y no «tiene un valor»: todos tienen uno —el
+    del `.env` o el default del código—, y tratar esos como contestados haría
+    que el agente no preguntara nunca por el nombre del negocio, que es
+    justamente lo que arranca sin configurar.
+
+    Falla hacia «ninguno está puesto» y eso es lo correcto acá: lo peor que
+    pasa es una pregunta de más sobre algo que quizás ya está, y lo contrario
+    —callarse por no poder leer— es la conclusión que `reclamar_pregunta`
+    documenta que no hay que sacar de una falla de infraestructura.
+    """
+    from app import limites
+
+    try:
+        filas = limites.resumen()
+    except Exception:
+        return frozenset()
+    return frozenset(
+        fila["nombre"] for fila in filas
+        if fila["nombre"] in AJUSTES_PREGUNTADOS and fila["origen"] == "dueño"
+    )
+
+
 def _cerrar_pregunta(clave: str) -> None:
     """Contestado: se libera el turno para que mañana salga otro hueco."""
     try:
@@ -778,11 +865,26 @@ def reclamar_pregunta() -> Hueco | None:
         abierta = _texto(cliente.get(CLAVE_PREGUNTA))
         if abierta:
             hueco = _HUECOS_POR_CLAVE.get(abierta)
+            # UN HUECO DE AJUSTE SE PUEDE CONTESTAR POR OTRA PUERTA: el dueño lo
+            # pone desde el panel, o por WhatsApp con `proponer_limite`, y la
+            # pregunta abierta no se entera. Sin esto seguiría preguntando por
+            # algo que ya está puesto hasta veinte horas después, que es
+            # exactamente lo que el dueño pidió que no pasara.
+            if hueco is not None and hueco.ajuste and hueco.ajuste in _ajustes_puestos():
+                cliente.delete(CLAVE_PREGUNTA)
+                hueco = None
             if hueco is not None:
                 return hueco
-            cliente.delete(CLAVE_PREGUNTA)
+            if not hueco:
+                cliente.delete(CLAVE_PREGUNTA)
         contestados = {d.clave for d in _todos()}
-        pendientes = [h for h in HUECOS if h.clave not in contestados]
+        puestos = _ajustes_puestos()
+        def _sin_contestar(hueco: Hueco) -> bool:
+            if hueco.ajuste:
+                return hueco.ajuste not in puestos
+            return hueco.clave not in contestados
+
+        pendientes = [h for h in HUECOS if _sin_contestar(h)]
         if not pendientes:
             return None
         previos = {
