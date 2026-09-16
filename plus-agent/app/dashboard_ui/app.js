@@ -666,6 +666,11 @@ function isText(value){return typeof value==='string';}
 function isId(value){return isText(value)&&value.trim().length>0;}
 // Declaración y no `const`: `makeDemo()` corre al cargar el módulo y llama a
 // los validadores, así que una `const` de más abajo caería en su zona muerta.
+// Un informe de display no trae listas ilimitadas: el servidor ya recorta
+// (10 en los rankings, la ventana en `daily`) y avisa con `truncated`. Una
+// lista enorme sólo puede venir de algo roto, y ordenarla e interpolarla
+// entera congela la pantalla. Declaración, no `const`: ver `isMoney`.
+function listaSana(v){return Array.isArray(v)&&v.length<=500;}
 function isMoney(v){return Number.isFinite(v)&&Math.abs(v)<=Number.MAX_SAFE_INTEGER;}
 function isCount(value){return Number.isSafeInteger(value)&&value>=0;}
 function isDay(value){return isText(value)&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&!Number.isNaN(Date.parse(value))&&new Date(value).toISOString().slice(0,10)===value;}
@@ -709,7 +714,7 @@ function validateSales(value) {
   requireValue(value.currency===null||isCurrency(value.currency),'sales currency');
   requireValue((value.since===null||isDay(value.since))&&(value.until===null||isDay(value.until))&&(value.since===null||value.until===null||value.since<=value.until),'sales dates');
   requireValue((value.total===null||isMoney(value.total))&&(value.averageOrder===null||isMoney(value.averageOrder))&&(value.orders===null||isCount(value.orders)),'sales totals');
-  requireValue(['daily','topProducts','topCustomers','errors','truncated'].every(key=>value[key]===null||Array.isArray(value[key])),'sales lists');
+  requireValue(['daily','topProducts','topCustomers','errors','truncated'].every(key=>value[key]===null||listaSana(value[key])),'sales lists');
   const daily=value.daily===null?null:value.daily.map(row=>{
     requireValue(row&&isDay(row.date)&&isMoney(row.total)&&isCount(row.orders),'daily sales');
     requireValue((value.since===null||row.date>=value.since)&&(value.until===null||row.date<=value.until),'daily sales period');
@@ -729,7 +734,7 @@ function validateSales(value) {
 }
 function isCurrency(value){return isText(value)&&/^[A-Z]{3}$/.test(value);}
 function validateAdvice(value) {
-  requireValue(value&&isMoment(value.generatedAt)&&typeof value.enabled==='boolean'&&isCurrency(value.currency)&&Array.isArray(value.items),'advice information');
+  requireValue(value&&isMoment(value.generatedAt)&&typeof value.enabled==='boolean'&&isCurrency(value.currency)&&listaSana(value.items),'advice information');
   requireValue(['errors','truncated'].every(key=>Array.isArray(value[key])&&value[key].every(isText)),'advice notices');
   const items=value.items.map(row=>{
     requireValue(row&&isId(row.id)&&['perdida','dormido','deuda','quiebre'].includes(row.kind)&&['title','body','about','assumption'].every(key=>isText(row[key])),'advice finding');

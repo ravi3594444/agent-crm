@@ -1024,3 +1024,15 @@ test('The decorative logo reveal cleans up once without delaying dashboard navig
   assert.equal(w.decorations[0].removed, true);
   assert.equal(w.requests.length, 0);
 });
+
+
+test('Report lists beyond the display cap are rejected instead of rendered', () => {
+  const w = workspace({ search: '?demo=1' });
+  const fila = { date: '2026-09-09', total: 1, orders: 1 };
+  w.context.bad = { ...salesFixture(), daily: Array.from({ length: 501 }, (_, i) => ({ ...fila, date: '2026-09-09' })) };
+  assert.throws(() => w.run('validateSales(bad)'), /invalid/);
+  w.context.bad = { ...adviceFixture(), items: Array.from({ length: 501 }, () => adviceFixture().items[0]) };
+  assert.throws(() => w.run('validateAdvice(bad)'), /invalid/);
+  w.context.good = salesFixture();
+  assert.ok(w.run('validateSales(good).daily.length') <= 500);
+});
