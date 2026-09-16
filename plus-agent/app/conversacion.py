@@ -103,6 +103,25 @@ def _dato_de_entorno(crudo: object, limite: int) -> str:
     return " ".join(limpio.split())[:limite].strip(" ,-–—·")
 
 
+def _del_negocio(nombre: str) -> str:
+    """El valor que rige AHORA para un dato del negocio.
+
+    Era `os.getenv` y ahora pasa por `app/limites.py`, que resuelve el almacén
+    del dueño primero y el `.env` después. El `.env` sigue siendo el valor de
+    arranque y sigue funcionando solo; lo que cambia es que el dueño puede
+    corregir el nombre de su negocio desde el panel sin entrar al servidor.
+
+    La LIMPIEZA no se mueve: sigue siendo `_dato_de_entorno`, en el hueco donde
+    el valor cae. Es la misma decisión que ese docstring ya explica —se limpia
+    el HUECO y no la variable, porque lo que decide es dónde cae el texto y no
+    de dónde vino—, y es lo que hace que una fuente NUEVA no necesite una
+    defensa nueva.
+    """
+    from app import limites
+
+    return limites.de_negocio(nombre)
+
+
 def negocio() -> str:
     """El nombre del negocio, limpio, o «la empresa» si nadie lo cargó.
 
@@ -114,7 +133,7 @@ def negocio() -> str:
     prompt entero para abajo: era la misma exposición que el rubro y un escalón
     peor, porque al rubro los blancos ya se le aplastaban.
     """
-    return _dato_de_entorno(os.getenv("NOMBRE_NEGOCIO", ""), 60) or "la empresa"
+    return _dato_de_entorno(_del_negocio("NOMBRE_NEGOCIO"), 60) or "la empresa"
 
 
 def identidad(nombre_negocio: str | None = None) -> str:
@@ -133,7 +152,7 @@ def identidad(nombre_negocio: str | None = None) -> str:
     vino. El punto del final lo escribe esta línea, y es el único del renglón.
     """
     empresa = _dato_de_entorno(nombre_negocio, 60) or negocio()
-    nombre = _dato_de_entorno(os.getenv("NOMBRE_AGENTE", ""), 40)
+    nombre = _dato_de_entorno(_del_negocio("NOMBRE_AGENTE"), 40)
     quien = f"Sos {nombre}, y atendés" if nombre else "Atendés"
     return f"{quien} el WhatsApp de {empresa}{rubro()}."
 
@@ -164,7 +183,7 @@ def rubro() -> str:
     Vacío es un caso normal y no un error — el agente se presenta por lo que
     hace, que es lo mismo que hacía sin nombre.
     """
-    limpio = _dato_de_entorno(os.getenv("RUBRO_NEGOCIO", ""), 60)
+    limpio = _dato_de_entorno(_del_negocio("RUBRO_NEGOCIO"), 60)
     return f", {limpio}" if limpio else ""
 
 
@@ -295,7 +314,7 @@ def prompt_clientes(state, config: RunnableConfig) -> list[BaseMessage]:
     system = SYSTEM_ES_AR.format(
         IDENTIDAD=identidad(),
         CONTEXTO_CLIENTE=contexto,
-        HORARIO=os.getenv("HORARIO_ATENCION", "lunes a viernes de 8 a 17"),
+        HORARIO=_del_negocio("HORARIO_ATENCION"),
         HOY=business_today(),
         IDIOMA_REGLA=idioma.regla_prompt(guardado),
         # Lo que el dueño YA contestó y este agente no tenía cómo saber. Va al

@@ -68,6 +68,7 @@ TEXTOS_DURABLES = {
     "limite": "[limite]",
     "entrega": "[entrega]",
     "idioma": "[idioma]",
+    "negocio": "[negocio]",
     "accion": "[accion]",
     "solicitud": "[solicitud]",
     "sombra": "[sombra]",
@@ -101,7 +102,10 @@ def test_el_registro_no_tiene_filas_de_mas_ni_de_menos():
     entre_corchetes = [m for m in marcas.MARCAS.values() if not m.prosa]
     en_prosa = [m for m in marcas.MARCAS.values() if m.prosa]
     # Doce con #W4: `[baja-por-cliente]`, la baja que pide el propio cliente.
-    assert len(entre_corchetes) == 12
+    # Trece con `[negocio]`: los datos del negocio y los nombres de plantilla de
+    # Meta necesitan marca PROPIA, porque la que les tocaba por descarte era
+    # `[limite]` — la que arma el fusible que frena las ventas. Ver la fila.
+    assert len(entre_corchetes) == 13
     assert len(en_prosa) == 2
     assert all(m.texto.startswith("[") and "]" in m.texto for m in entre_corchetes)
 
@@ -118,6 +122,7 @@ def test_cada_modulo_usa_el_texto_del_registro():
     assert marcas.texto("limite") == limites.MARCA_DURABLE
     assert marcas.texto("entrega") == limites.MARCA_DURABLE_ENTREGA
     assert marcas.texto("idioma") == limites.MARCA_DURABLE_IDIOMA
+    assert marcas.texto("negocio") == limites.MARCA_DURABLE_NEGOCIO
     assert marcas.texto("accion") == acciones.MARCA_DURABLE
     assert marcas.texto("solicitud") == solicitudes.MARCA
     assert marcas.texto("sombra") == sombra.MARCA

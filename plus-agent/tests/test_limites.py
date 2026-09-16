@@ -1595,6 +1595,75 @@ def test_a_limit_change_is_recorded_under_the_limit_marker(
     assert limites.MARCA_DURABLE_ENTREGA not in texto
 
 
+def test_a_business_change_is_recorded_under_its_own_marker(
+    almacen: FakeRedis,
+) -> None:
+    """Un nombre de plantilla no es un límite, y no se anota como si lo fuera."""
+    _proponer("plantilla de confirmado", "pedido_confirmado_v3")
+    _confirmar(_codigo_enviado(almacen))
+
+    texto = limites.erpnext.registrar_comentario.call_args[0][2]
+    assert limites.MARCA_DURABLE_NEGOCIO in texto
+    assert limites.MARCA_DURABLE not in texto
+    assert "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE" in texto
+
+
+def test_a_template_change_does_not_arm_the_auto_confirm_tripwire(
+    almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LO QUE MIDE ESTE TEST, y por qué no alcanza con el de arriba.
+
+    El de arriba afirma QUÉ TEXTO se escribió. Éste afirma la CONSECUENCIA, que
+    es lo que la marca existe para evitar y lo único que le cuesta plata al
+    dueño: `_almacen()` levanta cuando el almacén no tiene límites del dueño Y
+    ERPNext tiene una marca `[limite]`, y con eso deja de auto-confirmarse todo
+    pedido, para siempre, hasta que alguien restaure. Escribir el nombre de una
+    plantilla no puede llevar a ese estado.
+
+    El doble está atado a lo que se le PASA y no a lo que este archivo supone:
+    `policy_get_list` busca dentro de los comentarios que `registrar_comentario`
+    escribió de verdad. Sin ese enganche las dos mitades se moverían juntas y el
+    test no podría contradecir al código — que es el defecto que la regla de
+    CLAUDE.md describe.
+    """
+    comentarios: list[str] = []
+    monkeypatch.setattr(
+        limites.erpnext,
+        "registrar_comentario",
+        lambda doctype, nombre, texto: comentarios.append(texto),
+    )
+
+    def buscar(doctype, filters=None, fields=None, limit=None, **kwargs):
+        patron = next((str(f[2]) for f in (filters or []) if f[1] == "like"), "")
+        aguja = patron.strip("%")
+        return [{"name": "COMMENT-1"} for c in comentarios if aguja in c][:1]
+
+    monkeypatch.setattr(limites.erpnext, "policy_get_list", buscar)
+    # LA CONSULTA DE VERDAD. Un fixture autouse de conftest.py deja
+    # `_hubo_cambios_durables` en `lambda: False` para que ningún test tropiece
+    # con el fusible sin querer — y con eso puesto, este test pasa con la marca
+    # equivocada, que es como lo escribí la primera vez. Instalarla real es lo
+    # que hace que la pregunta se conteste desde el comentario escrito.
+    monkeypatch.setattr(limites, "_hubo_cambios_durables", _CONSULTA_DURABLE_REAL)
+    monkeypatch.setattr(limites, "_durable_cache", None)
+
+    _proponer("plantilla de vencido", "solicitud_vencida_v2")
+    _confirmar(_codigo_enviado(almacen))
+
+    assert comentarios, "el cambio tiene que haber dejado su rastro durable"
+    # EL RESET NO ES HIGIENE, ES EL TEST. `proponer()` ya llamó a `vigente()` ->
+    # `_almacen()` -> `_hubo_cambios_durables()`, que cachea su False sesenta
+    # segundos. Sin vaciar la caché acá, la afirmación de abajo la contesta el
+    # valor cacheado de ANTES del cambio y pasa con la marca equivocada puesta:
+    # lo comprobé mutando la rama, y este test sobrevivía. Un test que no puede
+    # contradecir al código no está midiendo nada.
+    limites._durable_cache = None
+    # El almacén tiene la plantilla y NINGÚN límite del dueño. Ése es el estado
+    # exacto en el que la marca equivocada rompe las ventas.
+    assert not any(almacen.hgetall(limites.CLAVE_VALORES).get(n) for n in limites.LIMITES)
+    limites._almacen()  # no levanta: la marca escrita fue [negocio], no [limite]
+
+
 def test_the_two_durable_questions_ask_erpnext_for_different_markers(
     almacen: FakeRedis, monkeypatch: pytest.MonkeyPatch
 ) -> None:

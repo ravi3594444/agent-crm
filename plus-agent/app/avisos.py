@@ -291,7 +291,7 @@ def _enviar(entrada: dict) -> str:
     first, so their 24-hour window is open when we answer them. Returns '' when
     there was no legitimate channel at all, which the caller retries.
     """
-    from app import whatsapp
+    from app import notificar, whatsapp
 
     telefono = str(entrada.get("telefono") or "")
     if window_open(telefono):
@@ -308,7 +308,7 @@ def _enviar(entrada: dict) -> str:
         whatsapp.enviar_plantilla(
             telefono,
             plantilla,
-            os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR",
+            notificar.idioma_de_plantilla(),
             list(entrada.get("parametros") or []),
         )
     )

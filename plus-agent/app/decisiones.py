@@ -27,7 +27,6 @@ HONESTY RULES
 """
 from __future__ import annotations
 
-import os
 import time
 
 from app import confirmacion, erpnext, idioma, marcas, solicitudes, telefono
@@ -487,9 +486,9 @@ def _avisar_cliente_rechazo(nombre: str, tel: str, razon: str) -> bool:
 
 def _plantilla_rechazo(nombre: str, tel: str, razon: str) -> str:
     """Fallback for a closed 24-hour window. No template configured -> no send."""
-    from app import whatsapp
+    from app import notificar, whatsapp
 
-    plantilla = os.getenv("WHATSAPP_CUSTOMER_REJECTED_TEMPLATE", "").strip()
+    plantilla = notificar.plantilla_vigente("WHATSAPP_CUSTOMER_REJECTED_TEMPLATE")
     if not plantilla:
         print(f"[decisiones] {nombre}: falta WHATSAPP_CUSTOMER_REJECTED_TEMPLATE")
         return ""
@@ -497,7 +496,7 @@ def _plantilla_rechazo(nombre: str, tel: str, razon: str) -> str:
         result = whatsapp.enviar_plantilla(
             tel,
             plantilla,
-            os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR",
+            notificar.idioma_de_plantilla(),
             [nombre, razon or "sin detalle"],
         )
         return _wamid(result)
@@ -1020,7 +1019,7 @@ def _texto_cancelacion(nombre: str, razon: str, lengua: str | None = None) -> st
 def _avisar_cliente_cancelacion(nombre: str, tel: str, razon: str) -> bool:
     """Once per order. Free text inside the customer's window; a template only
     outside it and only if configured; otherwise dead-letter + one ToDo."""
-    from app import whatsapp
+    from app import notificar, whatsapp
 
     try:
         if has_accepted(nombre, _PURPOSE_CANCELACION):
@@ -1034,13 +1033,13 @@ def _avisar_cliente_cancelacion(nombre: str, tel: str, razon: str) -> bool:
         if window_open(tel):
             wamid = _wamid(whatsapp.enviar_mensaje(tel, texto))
         else:
-            plantilla = os.getenv("WHATSAPP_CUSTOMER_CANCELLED_TEMPLATE", "").strip()
+            plantilla = notificar.plantilla_vigente("WHATSAPP_CUSTOMER_CANCELLED_TEMPLATE")
             if plantilla:
                 wamid = _wamid(
                     whatsapp.enviar_plantilla(
                         tel,
                         plantilla,
-                        os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR",
+                        notificar.idioma_de_plantilla(),
                         [nombre, razon],
                     )
                 )

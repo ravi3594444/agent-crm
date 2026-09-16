@@ -129,8 +129,8 @@ def notificar_equipo(
         if auto
         else "WHATSAPP_STAFF_PENDING_TEMPLATE"
     )
-    plantilla = os.getenv(variable, "").strip()
-    locale_plantilla = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"
+    plantilla = plantilla_vigente(variable)
+    locale_plantilla = idioma_de_plantilla()
 
     if not STAFF:
         print(f"[staff-notify] {nombre}: TELEFONOS_EQUIPO vacío")
@@ -269,6 +269,37 @@ def notificar_equipo(
 CONFIRMACION_TTL_SEGUNDOS = 30 * 24 * 60 * 60
 
 
+def plantilla_vigente(variable: str) -> str:
+    """El nombre de plantilla que rige AHORA, o "" si no hay ninguno.
+
+    Era `os.getenv(variable, "").strip()` en seis lugares. Ahora el dueño puede
+    fijarlo desde el panel y el `.env` queda como valor de arranque — el mismo
+    orden que ya tenían los topes. Lo que NO cambia es que vacío sigue
+    significando «no hay plantilla», así que cada `if not plantilla:` de este
+    módulo se lee igual que antes.
+
+    El `except KeyError` no es defensivo por las dudas: `enviar_saliente` lee
+    `saliente.plantilla_env` de una cola DURABLE, o sea que puede traer el
+    nombre que se usaba antes de un renombre. Un aviso encolado no se pierde
+    porque el registro cambió; se resuelve como se resolvía.
+    """
+    from app import limites
+
+    if not variable:
+        return ""
+    try:
+        return limites.de_negocio(variable)
+    except KeyError:
+        return os.getenv(variable, "").strip()
+
+
+def idioma_de_plantilla() -> str:
+    """El idioma en que están registradas las plantillas en Meta."""
+    from app import limites
+
+    return limites.de_negocio("WHATSAPP_TEMPLATE_LANGUAGE") or "es_AR"
+
+
 def _momento_negocio() -> str:
     """El respaldo era `datetime.now()` SIN zona — el reloj del servidor, casi
     siempre UTC— así que una zona mal escrita ponía en el aviso una hora de
@@ -388,8 +419,8 @@ def notificar_confirmacion(so: dict, fuente: str, *, ventana: bool = True) -> bo
 
     momento = _momento_negocio()
     texto = texto_confirmacion(so, fuente, momento, ventana=ventana)
-    plantilla = os.getenv("WHATSAPP_STAFF_CONFIRMED_TEMPLATE", "").strip()
-    locale_plantilla = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"
+    plantilla = plantilla_vigente("WHATSAPP_STAFF_CONFIRMED_TEMPLATE")
+    locale_plantilla = idioma_de_plantilla()
     # LA CLAVE SE RESUELVE EN LAS TRES SALIDAS, no sólo en el texto libre.
     #
     # `fuente` es una clave del catálogo, así que cualquier lugar que la escriba
@@ -591,8 +622,8 @@ def _alertar(
     from app import whatsapp
 
     texto = f"{asunto}\n{cuerpo}".strip()[:3500]
-    locale_plantilla = os.getenv("WHATSAPP_TEMPLATE_LANGUAGE", "es_AR").strip() or "es_AR"
-    plantilla = os.getenv(plantilla_env, "").strip() if plantilla_env else ""
+    locale_plantilla = idioma_de_plantilla()
+    plantilla = plantilla_vigente(plantilla_env)
 
     enviados = 0
     for numero in destinatarios:

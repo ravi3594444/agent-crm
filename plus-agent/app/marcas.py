@@ -280,6 +280,34 @@ _FILAS = (
         techo=1,
         porque_el_techo="Igual que [limite]: una fila contesta «¿hay alguno?».",
     ),
+    # La cuarta, y la única de las de límites que NO SE LEE. Cubre los datos
+    # del negocio y los nombres de plantilla de Meta: cosas que el dueño fija y
+    # que no deciden nada.
+    #
+    # POR QUÉ NECESITA MARCA PROPIA, que es el motivo por el que existe esta
+    # fila y no una rama más en el `else`: `_auditar_en_erpnext` elegía
+    # `[limite]` para todo lo que no fuera entrega ni idioma, así que cambiar
+    # el nombre de una plantilla dejaba escrita la marca que ARMA el fusible de
+    # `_almacen()`. Un flush de Redis después de eso —con el almacén vacío y
+    # una marca `[limite]` en ERPNext— se lee como «se perdieron los límites
+    # del dueño» y `configuracion()` levanta para siempre: ningún pedido se
+    # auto-confirma, y la causa es que alguien escribió el nombre de una
+    # plantilla. La marca separada es lo que mantiene esas dos cosas separadas.
+    Marca(
+        nombre="negocio",
+        texto="[negocio]",
+        doctype="Company",
+        portador=COMENTARIO,
+        lectura=NO_SE_LEE,
+        techo=0,
+        porque_el_techo=(
+            "No tiene techo porque no tiene lector, y no tenerlo es la mitad "
+            "del punto: ninguno de estos ajustes arma un fusible, así que "
+            "perderlos del almacén cae al .env y eso es lo correcto. Se "
+            "escribe por lo mismo que `[accion]`: es el rastro durable de "
+            "quién cambió qué, y lo lee una persona en ERPNext."
+        ),
+    ),
     # -------------------------------------------------------------- acciones
     Marca(
         nombre="accion",

@@ -1058,6 +1058,34 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "«{ajuste}» sólo puede ser español o inglés, no {valor}",
         EN: "«{ajuste}» can only be Spanish or English, not {valor}",
     },
+    "limite.texto_vacio": {
+        ES: "«{ajuste}» no puede quedar vacío",
+        EN: "«{ajuste}» cannot be left empty",
+    },
+    "limite.texto_largo": {
+        ES: "«{ajuste}» entra en {tope} caracteres y escribiste {largo}",
+        EN: "«{ajuste}» fits in {tope} characters and you wrote {largo}",
+    },
+    "limite.plantilla_invalida": {
+        ES: (
+            "«{ajuste}» tiene que ser el nombre de una plantilla de Meta "
+            "—minúsculas, números y guión bajo—, no {valor}"
+        ),
+        EN: (
+            "«{ajuste}» has to be the name of a Meta template —lowercase, "
+            "digits and underscores—, not {valor}"
+        ),
+    },
+    "limite.idioma_plantilla_invalido": {
+        ES: (
+            "«{ajuste}» es el idioma en que registraste la plantilla en Meta, "
+            "como «es_AR» o «en_US», no {valor}"
+        ),
+        EN: (
+            "«{ajuste}» is the language you registered the template in on Meta, "
+            "like «es_AR» or «en_US», not {valor}"
+        ),
+    },
     "limite.cual": {
         ES: "no me dijiste qué límite",
         EN: "you didn't tell me which limit",
