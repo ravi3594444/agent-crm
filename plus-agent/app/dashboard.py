@@ -1753,6 +1753,48 @@ def advice() -> dict:
 # ----------------------------------------------------------------- precios
 
 
+def _rige_hoy(fila: dict) -> bool:
+    """Si ese Item Price aplica HOY y a cualquier cliente.
+
+    Las tres condiciones son las de `policy._precio_estandar`: sin cliente, sin
+    lote, y con el día del negocio dentro de su vigencia. Una fila ilegible se
+    descarta —fallar cerrado acá es no mostrar un precio, que es mucho más
+    barato que mostrar el equivocado al lado de un botón que escribe.
+    """
+    from datetime import date
+
+    from app import policy
+
+    if fila.get("customer") or fila.get("batch_no"):
+        return False
+    try:
+        desde = (date.fromisoformat(str(fila["valid_from"]))
+                 if fila.get("valid_from") else date.min)
+        hasta = (date.fromisoformat(str(fila["valid_upto"]))
+                 if fila.get("valid_upto") else date.max)
+    except ValueError:
+        return False
+    return desde <= policy._hoy_del_negocio() <= hasta
+
+
+def _unidades_de_stock(codigos: list[str]) -> dict[str, str] | None:
+    """`{item_code: stock_uom}`, o None si no se pudo leer. Vacío es un caso."""
+    from app import erpnext
+
+    if not codigos:
+        return {}
+    try:
+        with erpnext.manager_scope():
+            filas = erpnext.get_list(
+                "Item", filters=[["name", "in", codigos]],
+                fields=["name", "stock_uom"], limit=len(codigos) + 1,
+                timeout=READ_TIMEOUT,
+            )
+    except Exception:
+        return None
+    return {str(f.get("name") or ""): str(f.get("stock_uom") or "") for f in filas or []}
+
+
 def prices() -> dict:
     """Los precios de LISTA de lo que vendemos, y si se pueden cambiar hoy.
 
@@ -1789,24 +1831,58 @@ def prices() -> dict:
     else:
         with erpnext.manager_scope():
             try:
+                # LAS MISMAS CUATRO COLUMNAS POR LAS QUE FILTRA
+                # `policy._precio_estandar`, y por eso se piden las de
+                # calificación además de la tarifa. Filtrando sólo por lista,
+                # moneda y `selling`, un Item Price de OTRA unidad, de un
+                # cliente puntual, de un lote o vencido entraba como si fuera
+                # el precio de lista general — y el panel lo mostraba como el
+                # precio que el agente va a cotizar, que es otra cosa. Peor
+                # todavía con el botón al lado: `precios.cambiar` escribe
+                # SIEMPRE contra el `stock_uom`, así que el dueño cambiaba una
+                # fila distinta de la que estaba mirando.
                 crudas = erpnext.get_list(
                     "Item Price",
                     filters=[["price_list", "=", lista], ["currency", "=", moneda],
                              ["selling", "=", 1]],
-                    fields=["item_code", "price_list_rate", "uom"],
-                    order_by="item_code asc", limit=LIMIT + 1,
+                    fields=["item_code", "price_list_rate", "uom", "customer",
+                            "batch_no", "valid_from", "valid_upto"],
+                    # Se pide de más porque el descarte es de este lado: las
+                    # filas de cliente, de lote y vencidas salen del techo
+                    # antes de que se cuente. El centinela mide el recorte.
+                    order_by="item_code asc", limit=LIMIT * 4 + 1,
+                    # El de LECTURA (3 s) y no el default del cliente de
+                    # gerencia (30 s): esto corre en el pool de cuatro hilos
+                    # del panel, así que cuatro llamadas lentas lo ocupan
+                    # entero y el resto de las pantallas espera detrás.
+                    timeout=READ_TIMEOUT,
                 )
             except Exception:
                 crudas = None
                 errors.append("prices")
         if crudas is not None:
-            if len(crudas) > LIMIT:
+            recortado = len(crudas) > LIMIT * 4
+            aplicables = [f for f in crudas[: LIMIT * 4]
+                          if f.get("item_code") and _rige_hoy(f)]
+            unidades = _unidades_de_stock(
+                sorted({str(f["item_code"]) for f in aplicables})
+            )
+            if unidades is None:
+                errors.append("prices")
+                aplicables = []
+            else:
+                # La unidad del precio tiene que ser la de STOCK del producto:
+                # `_precio_estandar` descarta el renglón si difieren, así que
+                # un precio en otra unidad no cotiza nada.
+                aplicables = [f for f in aplicables
+                              if str(f.get("uom") or "") == unidades.get(str(f["item_code"]))]
+            if recortado or len(aplicables) > LIMIT:
                 truncated.append("prices")
             filas = [{
                 "id": plain_text(fila.get("item_code")),
                 "price": number(fila.get("price_list_rate")),
                 "unit": plain_text(fila.get("uom")),
-            } for fila in crudas[:LIMIT] if fila.get("item_code")]
+            } for fila in aplicables[:LIMIT]] if unidades is not None else None
 
     return {
         "priceList": lista or None, "currency": moneda or None,

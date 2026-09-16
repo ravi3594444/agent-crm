@@ -2501,3 +2501,26 @@ def test_cada_raise_de_limites_dice_su_clave() -> None:
             sin_clave.append(nodo.lineno)
 
     assert sin_clave == [], f"raise sin clave en las líneas {sin_clave}"
+
+
+def test_a_template_name_with_a_space_inside_is_refused_not_glued(
+    almacen: FakeRedis,
+) -> None:
+    """CodeRabbit. Aplastando TODOS los blancos, «pedido confirmado_v3» se
+    guardaba como «pedidoconfirmado_v3»: pasa el regex, y en Meta o no existe o
+    es OTRA plantilla — o sea, el aviso deja de salir y el `.env` dice que está
+    todo bien. Un espacio de más tiene que fallar cuando se teclea.
+
+    La otra mitad: las PUNTAS se siguen recortando, porque un espacio pegado al
+    pegar desde la consola de Meta no es un error del dueño.
+
+    MUTACIÓN: volver a `"".join(str(crudo or "").split()).lower()`. Cae ésta y
+    sólo ésta.
+    """
+    with pytest.raises(limites.LimiteError) as roto:
+        limites.validar("WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE", "pedido confirmado_v3")
+    assert roto.value.clave == "limite.plantilla_invalida"
+
+    assert limites.validar(
+        "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE", "  Pedido_Confirmado_v3  "
+    ) == "pedido_confirmado_v3"

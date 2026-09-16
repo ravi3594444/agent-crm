@@ -506,3 +506,38 @@ def test_without_a_template_the_sweep_notice_dies_and_nobody_is_told(
     assert canal["enviados"] == []
     assert canal["plantillas"] == []
     assert any("NO entregado" in c for c in canal["comentarios"])
+
+
+def test_a_renamed_template_reaches_the_queued_notice(canal, monkeypatch) -> None:
+    """Qodo 4. EL NOMBRE Y EL IDIOMA SALÍAN DE DOS LUGARES DISTINTOS.
+
+    `_enviar` resolvía el idioma con el ajuste del dueño y el NOMBRE con
+    `os.getenv`, a tres líneas de distancia. Así, un dueño que renombraba la
+    plantilla desde el panel seguía mandando el aviso con el nombre del `.env`
+    — y este aviso en particular sale HORAS después del último mensaje del
+    cliente, o sea con la ventana de 24 h cerrada, que es justo cuando la
+    plantilla es lo único que hay.
+
+    MUTACIÓN: volver a `os.getenv(str(entrada.get("plantilla_env") or ""), "")`.
+    Cae éste y sólo éste.
+    """
+    from app import limites
+
+    variable = "WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE"
+    _sin_ventana(canal, monkeypatch)
+    monkeypatch.setenv(variable, "el_nombre_viejo_del_archivo")
+    # Lo que el dueño fijó, por la misma puerta que usa el panel.
+    monkeypatch.setattr(
+        limites, "de_negocio",
+        lambda nombre: "el_nombre_nuevo" if nombre == variable else "es_AR",
+    )
+
+    assert avisos.encolar(
+        "solicitud_vencida", "SAL-ORD-2026-00042", CUSTOMER_PHONE, "texto libre",
+        plantilla_env=variable, parametros=["SAL-ORD-2026-00042"],
+    )
+    avisos.procesar()
+
+    assert len(canal["plantillas"]) == 1
+    _telefono, nombre, _lengua, _parametros = canal["plantillas"][0]
+    assert nombre == "el_nombre_nuevo"

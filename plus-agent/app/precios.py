@@ -33,6 +33,8 @@ Con `PRECIO_CAMBIO_MAX_PCT` en 0 —el default— no se escribe ningún precio.
 """
 from __future__ import annotations
 
+import math
+
 from app import erpnext, idioma, marcas
 
 MARCA_DURABLE = marcas.texto("precio")
@@ -132,7 +134,13 @@ def cambiar(
         nuevo = float(str(precio).replace(",", "."))
     except (TypeError, ValueError):
         return idioma.t("crm.precio_sin_producto", lengua)
-    if nuevo <= 0:
+    # `isfinite` Y NO SÓLO `> 0`: `float("nan")` PARSEA. Y `nan <= 0` es False,
+    # y `movimiento > banda` también es False, así que un «nan» se colaba por
+    # las dos guardas, se reservaba el candado de veinticuatro horas del
+    # producto y llegaba a escribir en ERPNext. El camino de error de esa
+    # escritura no suelta la reserva, así que un valor basura dejaba al
+    # producto sin poder cambiar de precio hasta el día siguiente.
+    if not math.isfinite(nuevo) or nuevo <= 0:
         return idioma.t("crm.precio_sin_producto", lengua)
 
     try:

@@ -1168,15 +1168,24 @@ def _almacen() -> dict[str, str]:
     return valores
 
 
+# De dónde salió un valor. Constantes y no literales sueltos porque hay un
+# segundo lector fuera de este módulo —`readiness` distingue lo que fijó el
+# dueño de lo que dice el `.env` candidato— y dos copias de una palabra son dos
+# vocabularios que se separan sin que nada se ponga rojo.
+ORIGEN_DUENO = "dueño"
+ORIGEN_ARRANQUE = "arranque"
+ORIGEN_DEFAULT = "default"
+
+
 def _resolver(nombre: str, almacen: dict[str, str]) -> tuple[str, str]:
     """(valor, origen). origen: 'dueño' | 'arranque' | 'default'."""
     fijado = almacen.get(nombre, "").strip()
     if fijado:
-        return fijado, "dueño"
+        return fijado, ORIGEN_DUENO
     del_entorno = os.getenv(nombre, "").strip()
     if del_entorno:
-        return del_entorno, "arranque"
-    return TODOS[nombre].default, "default"
+        return del_entorno, ORIGEN_ARRANQUE
+    return TODOS[nombre].default, ORIGEN_DEFAULT
 
 
 # "1.500" is fifteen hundred pesos to an Argentine owner and one-and-a-half to
@@ -1476,7 +1485,11 @@ def _plantilla(defi: Definicion, crudo: str) -> str:
     Eso es una llamada a Graph y vive en app/readiness.py. Acá sólo se descarta
     lo que Meta no podría haber creado nunca.
     """
-    texto = "".join(str(crudo or "").split()).lower()
+    # SÓLO LAS PUNTAS. Aplastando TODOS los blancos, «pedido confirmado_v3» se
+    # guardaba como «pedidoconfirmado_v3»: un nombre distinto, válido para el
+    # regex, y que en Meta o no existe o es otra plantilla. Un espacio de más
+    # tiene que fallar al teclearse, no convertirse en silencio en otra cosa.
+    texto = str(crudo or "").strip().lower()
     if not _NOMBRE_PLANTILLA.match(texto):
         raise LimiteError(
             f"«{defi.alias[0]}» tiene que ser el nombre de una plantilla de Meta "

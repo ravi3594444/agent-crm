@@ -338,16 +338,25 @@ function priceCell(id) {
   const report=data.prices;
   if(!report||report.items===null)return '<span class="muted">—</span>';
   const row=report.items.find(p=>p.id===id);
-  if(!row)return '<span class="muted">Not priced</span>';
+  // TRES estados, y el recorte es el tercero. El servidor devuelve como mucho
+  // 250 filas de precio y lo avisa en `truncated`; el inventario se carga
+  // aparte, así que un producto de la pantalla puede no estar entre esas 250.
+  // Sin mirar `truncated`, «no vino en la respuesta» se leía como «no tiene
+  // precio» —una afirmación sobre el catálogo sacada de un límite de
+  // paginación— y encima le sacaba el botón de cambiarlo.
+  if(!row)return report.truncated.includes('prices')
+    ?'<span class="muted">—</span>'
+    :'<span class="muted">Not priced</span>';
   const texto=row.price===null?'—':salesMoney(row.price,report.currency);
   return `<span>${escape(texto)}</span>${report.canChange?`<button class="link-button" data-price="${escape(id)}">Change</button>`:''}`;
 }
 function priceNotice() {
   const report=data.prices;
   if(data.mode!=='live'||!report)return '';
+  const recortado=report.truncated.includes('prices')?` Only the first ${data.limit||250} prices were read, so products past that show no price yet.`:'';
   if(report.errors.includes('priceList'))return `<div class="notice">${icon('info')} This agent has no price list or currency set for automatic confirmation, so list prices cannot be read or changed here.</div>`;
-  if(!report.canChange)return `<div class="notice">${icon('info')} Price changes from this dashboard are off. They turn on by setting a daily band in Settings — «PRECIO_CAMBIO_MAX_PCT», which ships at 0 so nothing changes a price on its own.</div>`;
-  return `<div class="notice">${icon('info')} A price can move up to ${escape(String(report.bandPct))}% per product per day, and that daily cap is the real ceiling.</div>`;
+  if(!report.canChange)return `<div class="notice">${icon('info')} Price changes from this dashboard are off. They turn on by setting a daily band in Settings — «PRECIO_CAMBIO_MAX_PCT», which ships at 0 so nothing changes a price on its own.${escape(recortado)}</div>`;
+  return `<div class="notice">${icon('info')} A price can move up to ${escape(String(report.bandPct))}% per product per day, and that daily cap is the real ceiling.${escape(recortado)}</div>`;
 }
 function inventoryView() {
   const rows=(data.products||[]).filter(p=>`${p.name} ${p.id}`.toLowerCase().includes(state.search.toLowerCase())&&(state.stockFilter!=='low'||p.available!==null&&p.available<=10));
@@ -523,7 +532,7 @@ async function refresh(silent=false) {
   try{
     const snapshot=await fetchData(connection);
     if(state.session!==session)return;
-    data={...snapshot,activity:data.activity,queue:data.queue,operations:data.operations,policies:data.policies,sales:data.sales,advice:data.advice};state.stale=false;if(state.displayCurrency&&Date.now()-(state.fx?.fetchedAt||0)>=3600000)setDisplayCurrency(state.displayCurrency);if(!silent)toast('Dashboard refreshed.');
+    data={...snapshot,activity:data.activity,queue:data.queue,operations:data.operations,policies:data.policies,sales:data.sales,advice:data.advice,settings:data.settings,prices:data.prices};state.stale=false;if(state.displayCurrency&&Date.now()-(state.fx?.fetchedAt||0)>=3600000)setDisplayCurrency(state.displayCurrency);if(!silent)toast('Dashboard refreshed.');
     if(!silent)await loadViewReads(true);
   }catch(e){
     if(state.session===session){

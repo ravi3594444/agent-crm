@@ -297,7 +297,13 @@ def _enviar(entrada: dict) -> str:
     if window_open(telefono):
         return _wamid(whatsapp.enviar_mensaje(telefono, str(entrada.get("texto") or "")))
 
-    plantilla = os.getenv(str(entrada.get("plantilla_env") or ""), "").strip()
+    # POR EL MISMO RESOLVEDOR QUE EL IDIOMA DE ABAJO. Estaban a tres líneas y
+    # no coincidían: el idioma salía del ajuste del dueño y el NOMBRE del
+    # `.env`, así que un dueño que renombraba la plantilla desde el panel
+    # seguía mandando el aviso de entrega con el nombre viejo — y ese aviso
+    # sale horas antes de la entrega, o sea casi siempre con la ventana de 24 h
+    # cerrada, que es justo cuando la plantilla es lo único que hay.
+    plantilla = notificar.plantilla_vigente(str(entrada.get("plantilla_env") or ""))
     if not plantilla:
         print(
             f"[avisos] {entrada.get('pedido')}: ventana cerrada y sin "

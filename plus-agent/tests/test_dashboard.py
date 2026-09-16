@@ -5,7 +5,7 @@ import json
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location(
     "dashboard_under_test", Path(__file__).parents[1] / "app" / "dashboard.py"
@@ -817,3 +817,105 @@ class PreciosDelPanelTest(unittest.TestCase):
         self.assertEqual(code, 400)
         self.assertIn("new price", json.dumps(body))
         cambiar.assert_not_called()
+
+
+class PreciosQueSeMuestranTest(unittest.TestCase):
+    """Qodo 2 y 5: lo que se muestra al lado del botón, y lo que no se escribe."""
+
+    def _leer(self, filas, items=None):
+        from app import erpnext as erp
+        from app import limites, precios
+
+        def lista(doctype, **kwargs):
+            if doctype == "Item Price":
+                return list(filas)
+            return list(items if items is not None else
+                        [{"name": "LECHE-ENT-1L", "stock_uom": "Unidad"}])
+
+        with patch.object(erp, "_manager_client", object()), \
+                patch.object(erp, "get_list", lista), \
+                patch.object(precios, "lista_y_moneda",
+                             lambda: ("Standard Selling", "ARS")), \
+                patch.object(limites, "vigente", lambda n: "15"):
+            return dashboard.prices()
+
+    def test_only_rows_the_policy_would_actually_use_are_shown(self):
+        """LO QUE SE MUESTRA TIENE QUE SER LO QUE EL AGENTE VA A COTIZAR.
+
+        `policy._precio_estandar` descarta el renglón si la unidad no es el
+        `stock_uom`, si el precio es de un cliente o de un lote, o si está fuera
+        de vigencia. Filtrando sólo por lista, moneda y `selling`, cualquiera de
+        esos cuatro se mostraba como «el precio de lista» — y con el botón de
+        cambiar al lado, que escribe SIEMPRE contra el `stock_uom`: el dueño
+        editaba una fila distinta de la que estaba mirando.
+
+        MUTACIÓN: sacar `_rige_hoy` del filtro (o la comparación de unidad).
+        Cae éste y sólo éste.
+        """
+        cuerpo = self._leer([
+            {"item_code": "LECHE-ENT-1L", "price_list_rate": 1250, "uom": "Unidad"},
+            {"item_code": "LECHE-ENT-1L", "price_list_rate": 1100, "uom": "Caja"},
+            {"item_code": "LECHE-ENT-1L", "price_list_rate": 900, "uom": "Unidad",
+             "customer": "Almacén Don Pedro"},
+            {"item_code": "LECHE-ENT-1L", "price_list_rate": 800, "uom": "Unidad",
+             "batch_no": "L-2026-01"},
+            {"item_code": "LECHE-ENT-1L", "price_list_rate": 700, "uom": "Unidad",
+             "valid_upto": "2020-01-01"},
+        ])
+
+        self.assertEqual(cuerpo["items"], [
+            {"id": "LECHE-ENT-1L", "price": 1250.0, "unit": "Unidad"},
+        ])
+
+    def test_a_price_that_cannot_be_matched_to_its_unit_is_not_invented(self):
+        """Sin poder leer el `stock_uom` no se sabe qué fila rige: `null`, que
+        es «no se pudo leer», y NO una lista vacía —que diría que el negocio no
+        tiene ningún precio cargado—."""
+        cuerpo = self._leer(
+            [{"item_code": "LECHE-ENT-1L", "price_list_rate": 1250, "uom": "Unidad"}],
+            items=None,
+        )
+        self.assertEqual(len(cuerpo["items"]), 1)
+
+        from app import erpnext as erp
+        from app import limites, precios
+
+        def lista(doctype, **kwargs):
+            if doctype == "Item Price":
+                return [{"item_code": "X", "price_list_rate": 1, "uom": "Unidad"}]
+            raise RuntimeError("ERPNext no contesta por los productos")
+
+        with patch.object(erp, "_manager_client", object()), \
+                patch.object(erp, "get_list", lista), \
+                patch.object(precios, "lista_y_moneda", lambda: ("L", "ARS")), \
+                patch.object(limites, "vigente", lambda n: "15"):
+            roto = dashboard.prices()
+        self.assertIsNone(roto["items"])
+        self.assertIn("prices", roto["errors"])
+
+    def test_a_non_finite_price_never_reserves_the_day(self):
+        """Qodo 5. `float("nan")` PARSEA, y `nan <= 0` es False, así que un
+        «nan» pasaba las dos guardas, se quedaba con el candado de 24 h del
+        producto —que el camino de error de ERPNext no suelta— y dejaba al
+        producto sin poder cambiar de precio hasta el día siguiente.
+
+        MUTACIÓN: volver a `if nuevo <= 0`. Cae éste y sólo éste.
+        """
+        from app import limites, locks, policy, precios
+
+        cliente = Mock()
+        # LA BANDA TIENE QUE ESTAR ABIERTA, y ésta es la mitad que casi me
+        # come: con `PRECIO_CAMBIO_MAX_PCT` en su default de 0, `cambiar` sale
+        # por «banda cerrada» ANTES de mirar el número, así que el test pasaba
+        # con la guarda sacada — no medía nada. Lo comprobé mutando.
+        with patch.object(precios, "erpnext") as erp, \
+                patch.object(policy, "PRICE_LIST", "Standard Selling"), \
+                patch.object(policy, "CURRENCY", "ARS"), \
+                patch.object(limites, "vigente", lambda n: "15"), \
+                patch.object(locks, "conexion", lambda: cliente):
+            for crudo in ("nan", "NaN", "inf", "-inf"):
+                precios.cambiar("LECHE-ENT-1L", crudo, "5493511111111")
+        cliente.set.assert_not_called()
+        erp.escribir_precio_de_lista.assert_not_called()
+        # Y el producto NI SIQUIERA se leyó: se corta en el número.
+        erp.get_doc.assert_not_called()

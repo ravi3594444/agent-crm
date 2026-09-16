@@ -1241,3 +1241,52 @@ test('A product with no price in the list reads as unpriced, not as a failed rea
   // un problema de conexión sobre un producto al que sólo le falta el precio.
   assert.match(w.nodes.app.innerHTML, /Not priced/);
 });
+
+test('A truncated price list reads as unknown, not as an unpriced product', async () => {
+  const w = workspace();
+  w.live();
+  // El servidor devuelve como mucho 250 filas de precio y lo avisa. El
+  // inventario se carga aparte, así que un producto de la pantalla puede no
+  // estar entre esas 250: eso es «no lo sé», no «no tiene precio» — y decir lo
+  // segundo es una afirmación sobre el catálogo sacada de un límite de página.
+  w.context.fetch = async (url) => {
+    w.requests.push([url]);
+    return new Response(JSON.stringify(pricesFixture({ items: [], truncated: ['prices'] })), { status: 200 });
+  };
+  await w.click({ view: 'inventory' });
+  assert.ok(!/Not priced/.test(w.nodes.app.innerHTML));
+  assert.match(w.nodes.app.innerHTML, /Only the first 250 prices were read/);
+});
+
+test('The silent minute refresh does not wipe the settings and price reports', async () => {
+  const w = workspace();
+  w.live();
+  w.context.fetch = async (url) => {
+    w.requests.push([url]);
+    const path = new URL(url).pathname;
+    if (path === '/api/dashboard/settings') return new Response(JSON.stringify(settingsFixture()), { status: 200 });
+    if (path === '/api/dashboard/prices') return new Response(JSON.stringify(pricesFixture()), { status: 200 });
+    return new Response(JSON.stringify(w.fixture()), { status: 200 });
+  };
+  // Las DOS pantallas, porque cada una carga lo suyo: sin pasar por inventario,
+  // `data.prices` sigue siendo el fixture de demo y la afirmación de abajo no
+  // mediría que el informe LEÍDO sobrevive al refresco.
+  await w.click({ view: 'inventory' });
+  await w.click({ view: 'settings' });
+  assert.match(w.nodes.app.innerHTML, /Automatic confirmation/);
+
+  // `refresh(true)` es lo que dispara el temporizador cada minuto, y su rama
+  // silenciosa NO vuelve a leer la vista: reconstruye `data` desde el snapshot
+  // preservando los informes auxiliares. Los dos nuevos no estaban en esa
+  // lista, así que la pantalla quedaba en blanco hasta navegar y volver.
+  await w.run('refresh(true)');
+  // SE AFIRMA SOBRE `data` Y CON UNA FORMA, no con `!== 'null'`: al caerse del
+  // spread el campo queda `undefined`, y `JSON.stringify(undefined)` devuelve
+  // `undefined` —no la cadena 'null'—, así que la comparación pasaba con el
+  // bug puesto. Y la rama silenciosa NO vuelve a renderizar, así que mirar el
+  // innerHTML de antes tampoco medía nada: hay que renderizar de nuevo.
+  assert.equal(w.run('String(data.settings?.groups?.length)'), '2');
+  assert.equal(w.run('String(data.prices?.items?.length)'), '1');
+  w.run('render()');
+  assert.match(w.nodes.app.innerHTML, /Automatic confirmation/);
+});
