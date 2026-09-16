@@ -2001,3 +2001,65 @@ def test_un_techo_de_pasos_invalido_es_un_ERROR_y_no_un_aviso() -> None:
         nivel, _, mensaje = _linea_de_pasos(reporte, "PASOS_MAX_CLIENTES")
         assert nivel == readiness.ERROR, f"{malo!r} pasó como {nivel}"
         assert "no arranca" in mensaje
+
+
+# ---------------------------------------------------------------------------
+# Qodo 3: las plantillas son ajustes, así que el preflight no puede mirar sólo
+# el archivo.
+# ---------------------------------------------------------------------------
+def test_readiness_checks_the_template_name_the_send_will_actually_use():
+    """EL PREFLIGHT TIENE QUE CONTESTAR SOBRE LA CONFIGURACIÓN QUE RIGE.
+
+    Desde que las plantillas son ajustes, `notificar.plantilla_vigente` resuelve
+    el almacén del dueño ANTES que el `.env`. Leyendo sólo el archivo, readiness
+    verificaba en Meta un nombre distinto del que se manda: contestaba «no
+    existe» sobre la plantilla vieja mientras el envío usaba la nueva, o
+    «aprobada» sobre una que el dueño ya había reemplazado.
+
+    Es el mismo defecto que documenta `limites.idioma_gerencia_guardado`: un
+    preflight que contesta sobre otra configuración es peor que no tenerlo.
+
+    MUTACIÓN: volver a `configuradas = {p: _valor(env, p) for p in PLANTILLAS}`.
+    Cae éste y sólo éste.
+    """
+    variable = "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE"
+    env = {**BASE, variable: "el_nombre_viejo_del_archivo"}
+
+    def resumen():
+        return [{"nombre": variable, "valor": "el_nombre_nuevo_del_dueno",
+                 "origen": limites.ORIGEN_DUENO, "problema": ""}]
+
+    consultadas = []
+
+    def http(url, headers=None, params=None):
+        consultadas.append((params or {}).get("name"))
+        return 200, {"data": [{"name": (params or {}).get("name"), "status": "APPROVED"}]}
+
+    reporte = readiness.Reporte()
+    readiness.chequear_plantillas(env, reporte, http, "WABA-1", resumen)
+
+    assert "el_nombre_nuevo_del_dueno" in consultadas
+    assert "el_nombre_viejo_del_archivo" not in consultadas
+
+
+def test_the_env_still_decides_when_the_owner_has_not_set_a_template():
+    """La otra mitad: el `.env` sigue siendo el valor de arranque, y `origen`
+    distinto de `dueño` no puede pisarlo — el archivo que readiness valida es el
+    CANDIDATO, y el del almacén es el del proceso que corre el chequeo."""
+    variable = "WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE"
+    env = {**BASE, variable: "el_del_archivo"}
+
+    def resumen():
+        return [{"nombre": variable, "valor": "el_del_entorno_viejo",
+                 "origen": limites.ORIGEN_ARRANQUE, "problema": ""}]
+
+    consultadas = []
+
+    def http(url, headers=None, params=None):
+        consultadas.append((params or {}).get("name"))
+        return 200, {"data": [{"name": (params or {}).get("name"), "status": "APPROVED"}]}
+
+    readiness.chequear_plantillas(env, readiness.Reporte(), http, "WABA-1", resumen)
+
+    assert "el_del_archivo" in consultadas
+    assert "el_del_entorno_viejo" not in consultadas

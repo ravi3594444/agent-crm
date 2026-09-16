@@ -86,14 +86,27 @@ function makeDemo(range=7) {
     {id:'demo-deuda',kind:'deuda',title:'An overdue balance needs a look',body:'Almacén Don Pedro has a balance beyond the usual payment window.',about:'Almacén Don Pedro',assumption:'A 14-day payment tolerance; recent unallocated payments may change this.',amount:62500,customerId:'CUST-001',orderId:null,productId:null},
     {id:'demo-quiebre',kind:'quiebre',title:'Creamy cheese may run out',body:'Available stock may not last until the next scheduled delivery.',about:'Creamy cheese · 1 kg',assumption:'Demand follows the last seven days and the next delivery arrives in two days.',customerId:null,orderId:null,productId:'QUESO-CREM-1K'}
   ],errors:[],truncated:[]});
-  return {sales,advice,mode:'demo',company:'Plus Dairy',today,since:dateShift(today,-29),currency:'ARS',generatedAt:new Date().toISOString(),orders,customers,products,activity:validateActivity(activity),conversations,queue:validateQueue(queue),operations,errors:[],truncated:[],limit:250,policies:[{name:'Order ceiling',value:'$ 150.000',note:'Maximum order value for automatic confirmation'},{name:'New customer ceiling',value:'$ 30.000',note:'Separate limit until a customer has order history'},{name:'Stock buffer',value:'20%',note:'Keep a buffer before confirming an order'},{name:'Stock trust window',value:'24 hours',note:'Require a recent confirmed stock count'}],agents:[{id:'sales',name:'Sales agent',role:'Customer conversations & order drafts',model:'Qwen · sales model',status:'Demo'},{id:'manager',name:'Management agent',role:'Business reports & manager assistance',model:'Qwen · management model',status:'Demo'}]};
+  const prices=validatePrices({priceList:'Standard Selling',currency:'ARS',bandPct:0,canChange:false,
+    items:products.map(p=>({id:p.id,price:p.price,unit:'Unidad'})),errors:[],truncated:[]});
+  const settings=validateSettings({problem:'',pending:null,groups:[
+    {id:'negocio',name:'Your business',settings:[
+      {id:'NOMBRE_NEGOCIO',name:'nombre del negocio',meaning:'How your business is named in the first line of both agent prompts',unit:'texto',kind:'texto',optional:true,value:'Plus Dairy',display:'Plus Dairy',source:'You set this',configured:true,problem:''},
+      {id:'RUBRO_NEGOCIO',name:'rubro',meaning:'What the business does, in a few words',unit:'texto',kind:'texto',optional:true,value:'-',display:'-',source:'Shipped default',configured:false,problem:''},
+      {id:'HORARIO_ATENCION',name:'horario de atencion',meaning:'The hours you tell a customer you are open',unit:'texto',kind:'texto',optional:false,value:'lunes a viernes de 8 a 17',display:'lunes a viernes de 8 a 17',source:'From the server file',configured:false,problem:''}]},
+    {id:'plantillas',name:'WhatsApp templates',settings:[
+      {id:'WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE',name:'plantilla de confirmado',meaning:'Tells the customer their order was confirmed',unit:'plantilla de Meta',kind:'plantilla',optional:true,value:'pedido_confirmado',display:'pedido_confirmado',source:'You set this',configured:true,problem:''},
+      {id:'WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE',name:'plantilla de vencido',meaning:'Tells the customer their request expired with no answer',unit:'plantilla de Meta',kind:'plantilla',optional:true,value:'-',display:'-',source:'Shipped default',configured:false,problem:''}]},
+    {id:'limites',name:'Automatic confirmation',settings:[
+      {id:'AUTO_CONFIRM_MAX',name:'monto maximo',meaning:'Largest order that can be confirmed without anyone looking at it',unit:'$',kind:'numero',optional:false,value:'0',display:'$ 0',source:'Shipped default',configured:false,problem:''},
+      {id:'STOCK_BUFFER_PCT',name:'colchon de stock',meaning:'Stock held back for sales that are not loaded yet',unit:'%',kind:'numero',optional:false,value:'20',display:'20%',source:'Shipped default',configured:false,problem:''}]}]});
+  return {prices,settings,sales,advice,mode:'demo',company:'Plus Dairy',today,since:dateShift(today,-29),currency:'ARS',generatedAt:new Date().toISOString(),orders,customers,products,activity:validateActivity(activity),conversations,queue:validateQueue(queue),operations,errors:[],truncated:[],limit:250,policies:[{name:'Order ceiling',value:'$ 150.000',note:'Maximum order value for automatic confirmation'},{name:'New customer ceiling',value:'$ 30.000',note:'Separate limit until a customer has order history'},{name:'Stock buffer',value:'20%',note:'Keep a buffer before confirming an order'},{name:'Stock trust window',value:'24 hours',note:'Require a recent confirmed stock count'}],agents:[{id:'sales',name:'Sales agent',role:'Customer conversations & order drafts',model:'Qwen · sales model',status:'Demo'},{id:'manager',name:'Management agent',role:'Business reports & manager assistance',model:'Qwen · management model',status:'Demo'}]};
 }
 const repoHosted = /\/dashboard(?:\/|$)/.test(location.pathname);
 const demoRequested = new URLSearchParams(location.search).get('demo') === '1';
 function disconnectedData() {
-  return {mode:'disconnected',company:'Plus CRM',today,since:dateShift(today,-29),currency:'',generatedAt:new Date().toISOString(),orders:null,pendingOrders:null,customers:null,products:null,policies:null,agents:[],operations:null,activity:null,queue:null,conversations:null,sales:null,advice:null,errors:[],truncated:[],limit:250};
+  return {mode:'disconnected',company:'Plus CRM',today,since:dateShift(today,-29),currency:'',generatedAt:new Date().toISOString(),orders:null,pendingOrders:null,customers:null,products:null,policies:null,agents:[],operations:null,activity:null,queue:null,conversations:null,sales:null,advice:null,settings:null,prices:null,errors:[],truncated:[],limit:250};
 }
-function freshReads(){return Object.fromEntries(['activity','queue','operations','sales','advice'].map(key=>[key,{busy:false,error:'',loadedAt:null,pending:null,range:null}]));}
+function freshReads(){return Object.fromEntries(['activity','queue','operations','sales','advice','settings','prices'].map(key=>[key,{busy:false,error:'',loadedAt:null,pending:null,range:null}]));}
 let data=demoRequested?makeDemo():disconnectedData();
 const state={theme:readThemePreference(),view:'today',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,reads:freshReads(),extrasBusy:false,extrasError:'',extrasLoadedAt:null,detailRequest:0,connectRequest:0,configured:null,displayCurrency:'',currencyPreference:readCurrencyPreference(),fx:null,fxLoading:false,fxRequest:0,fxError:'',fxFailedTarget:''};
 const currencyNames={ARS:'Argentine peso',INR:'Indian rupee',USD:'US dollar',EUR:'Euro',GBP:'British pound',BRL:'Brazilian real',UYU:'Uruguayan peso',CLP:'Chilean peso',MXN:'Mexican peso',CAD:'Canadian dollar',AUD:'Australian dollar',CHF:'Swiss franc',CNY:'Chinese yuan',JPY:'Japanese yen',AED:'UAE dirham'};
@@ -316,10 +329,39 @@ function ordersView() {
   const selected=selectedOrders(),maxPage=Math.max(1,Math.ceil(selected.length/10));state.page=Math.min(state.page,maxPage);
   return `${stats()}<section class="card orders-full"><div class="orders-toolbar">${filterTabs()}<button class="button" data-action="export" ${state.filter==='pending'?pendingOrders()===null?'disabled':'':data.orders===null?'disabled':''}>${icon('export')}Export CSV</button></div><div class="search-toolbar">${searchField('Search orders or customers…')}<span>${selected.length} orders${state.filter==='pending'?' · all dates':''}</span></div><div id="orders-results">${listLimit(state.filter==='pending'?'pending orders':'orders')}${orderTable(selected.slice((state.page-1)*10,state.page*10),false,state.filter==='pending'?pendingOrders()===null:data.orders===null)}</div><div class="pagination"><span>Page ${state.page} of ${maxPage}</span><div><button class="button" data-action="prev" ${state.page===1?'disabled':''}>Previous</button><button class="button" data-action="next" ${state.page>=maxPage?'disabled':''}>Next ${icon('arrow')}</button></div></div></section>`;
 }
+// El precio de UN producto, cruzado por `id` contra la lectura de `/prices`.
+// Tres estados y no dos: no se leyó (`—`), se leyó y no tiene precio en esta
+// lista (`Not priced`), y el precio. El del medio importa: un producto sin
+// precio en la lista de auto-confirmación es uno que el agente no puede
+// cotizar, y verlo en blanco lo hace parecer un problema de conexión.
+function priceCell(id) {
+  const report=data.prices;
+  if(!report||report.items===null)return '<span class="muted">—</span>';
+  const row=report.items.find(p=>p.id===id);
+  // TRES estados, y el recorte es el tercero. El servidor devuelve como mucho
+  // 250 filas de precio y lo avisa en `truncated`; el inventario se carga
+  // aparte, así que un producto de la pantalla puede no estar entre esas 250.
+  // Sin mirar `truncated`, «no vino en la respuesta» se leía como «no tiene
+  // precio» —una afirmación sobre el catálogo sacada de un límite de
+  // paginación— y encima le sacaba el botón de cambiarlo.
+  if(!row)return report.truncated.includes('prices')
+    ?'<span class="muted">—</span>'
+    :'<span class="muted">Not priced</span>';
+  const texto=row.price===null?'—':salesMoney(row.price,report.currency);
+  return `<span>${escape(texto)}</span>${report.canChange?`<button class="link-button" data-price="${escape(id)}">Change</button>`:''}`;
+}
+function priceNotice() {
+  const report=data.prices;
+  if(data.mode!=='live'||!report)return '';
+  const recortado=report.truncated.includes('prices')?` Only the first ${data.limit||250} prices were read, so products past that show no price yet.`:'';
+  if(report.errors.includes('priceList'))return `<div class="notice">${icon('info')} This agent has no price list or currency set for automatic confirmation, so list prices cannot be read or changed here.</div>`;
+  if(!report.canChange)return `<div class="notice">${icon('info')} Price changes from this dashboard are off. They turn on by setting a daily band in Settings — «PRECIO_CAMBIO_MAX_PCT», which ships at 0 so nothing changes a price on its own.${escape(recortado)}</div>`;
+  return `<div class="notice">${icon('info')} A price can move up to ${escape(String(report.bandPct))}% per product per day, and that daily cap is the real ceiling.${escape(recortado)}</div>`;
+}
 function inventoryView() {
   const rows=(data.products||[]).filter(p=>`${p.name} ${p.id}`.toLowerCase().includes(state.search.toLowerCase())&&(state.stockFilter!=='low'||p.available!==null&&p.available<=10));
   const low=(data.products||[]).filter(p=>p.available!==null&&p.available<=10).length;
-  return `<div class="inventory-summary"><div><span class="stat-icon blue">${icon('inventory')}</span><div><strong>${data.products===null?'—':data.products.length}</strong><span>Products in the warehouse</span></div></div><div><span class="stat-icon amber">${icon('clock')}</span><div><strong>${data.products===null?'—':low}</strong><span>At or below 10 available units</span></div></div><div class="inventory-definition">${icon('info')}<p>ERP available = physical stock − submitted reservations. Open drafts and safety rules can reduce what an agent may confirm.</p></div></div><section class="card"><div class="search-toolbar">${searchField('Search products or item codes…')}<label class="select-wrap"><select id="stock-filter" aria-label="Filter inventory"><option value="all">All products</option><option value="low" ${state.stockFilter==='low'?'selected':''}>Low stock · 10 or fewer</option></select></label></div>${listLimit('inventory','product names')}${data.products===null?empty('Inventory is unavailable','Refresh the connection to try again.'):rows.length?`<div class="table-scroll"><table><thead><tr><th>Product</th><th>On hand</th><th>Reserved</th><th>ERP available</th><th>Stock position</th><th></th></tr></thead><tbody>${rows.map(p=>`<tr><td><button class="product-cell" data-product="${escape(p.id)}"><span class="product-icon">${icon('inventory')}</span><span><strong>${escape(p.name)}</strong><small>${escape(p.id)}</small></span></button></td><td>${number(p.stock)} <span class="muted">${escape(p.unit)}</span></td><td>${number(p.reserved)}</td><td><strong>${number(p.available)}</strong></td><td><div class="stock-meter"><span style="width:${p.stock?Math.max(0,Math.min(100,p.available/p.stock*100)):0}%" class="${p.available!==null&&p.available<=10?'low':''}"></span></div><span class="cell-note">${p.available===null?'Unknown':p.available<=10?'Low stock':'In stock'}</span></td><td><button class="icon-button" data-product="${escape(p.id)}" aria-label="View ${escape(p.name)}">${icon('arrow')}</button></td></tr>`).join('')}</tbody></table></div>`:empty('No matching products','Try a different search or stock filter.')}</section>`;
+  return `${priceNotice()}<div class="inventory-summary"><div><span class="stat-icon blue">${icon('inventory')}</span><div><strong>${data.products===null?'—':data.products.length}</strong><span>Products in the warehouse</span></div></div><div><span class="stat-icon amber">${icon('clock')}</span><div><strong>${data.products===null?'—':low}</strong><span>At or below 10 available units</span></div></div><div class="inventory-definition">${icon('info')}<p>ERP available = physical stock − submitted reservations. Open drafts and safety rules can reduce what an agent may confirm.</p></div></div><section class="card"><div class="search-toolbar">${searchField('Search products or item codes…')}<label class="select-wrap"><select id="stock-filter" aria-label="Filter inventory"><option value="all">All products</option><option value="low" ${state.stockFilter==='low'?'selected':''}>Low stock · 10 or fewer</option></select></label></div>${listLimit('inventory','product names')}${data.products===null?empty('Inventory is unavailable','Refresh the connection to try again.'):rows.length?`<div class="table-scroll"><table><thead><tr><th>Product</th><th>List price</th><th>On hand</th><th>Reserved</th><th>ERP available</th><th>Stock position</th><th></th></tr></thead><tbody>${rows.map(p=>`<tr><td><button class="product-cell" data-product="${escape(p.id)}"><span class="product-icon">${icon('inventory')}</span><span><strong>${escape(p.name)}</strong><small>${escape(p.id)}</small></span></button></td><td class="price-cell">${priceCell(p.id)}</td><td>${number(p.stock)} <span class="muted">${escape(p.unit)}</span></td><td>${number(p.reserved)}</td><td><strong>${number(p.available)}</strong></td><td><div class="stock-meter"><span style="width:${p.stock?Math.max(0,Math.min(100,p.available/p.stock*100)):0}%" class="${p.available!==null&&p.available<=10?'low':''}"></span></div><span class="cell-note">${p.available===null?'Unknown':p.available<=10?'Low stock':'In stock'}</span></td><td><button class="icon-button" data-product="${escape(p.id)}" aria-label="View ${escape(p.name)}">${icon('arrow')}</button></td></tr>`).join('')}</tbody></table></div>`:empty('No matching products','Try a different search or stock filter.')}</section>`;
 }
 function customersView() {
   const rows=(data.customers||[]).filter(c=>`${c.name} ${c.territory}`.toLowerCase().includes(state.search.toLowerCase()));
@@ -348,10 +390,30 @@ function agentsView() {
     <div class="agent-boundary">${icon('shield')}${a.id==='sales'?'Customer-scoped access · draft-only writes':'Management-scoped access · approved actions only'}</div></section>`).join('')}</div>
     <section class="card policy-card"><div class="card-heading"><div><h2>Automation controls</h2><p>Saved limits in their original units. The policy checks every order.</p>${state.extrasLoadedAt?`<span class="read-status">Last read · ${escape(prettyMoment(state.extrasLoadedAt))}</span>`:''}</div><span class="subtle-pill">${data.mode==='demo'?'Example settings':'Current agent settings'}</span></div>
     ${data.policies?`<div class="policy-grid">${data.policies.map(p=>`<div class="${p.valid===false?'invalid-policy':''}"><span>${escape(p.name)}</span><strong>${escape(p.value)}${p.unit?` <small>${escape(p.unit)}</small>`:''}</strong><p>${escape(p.note)}</p>${p.source?`<small>Source: ${escape(p.source)}</small>`:''}</div>`).join('')}</div>`:`<div class="policy-explanation"><p>${state.extrasBusy?'Reading current limits from the agent…':'Current limits are unavailable. The manager can still check them through the authorized WhatsApp workflow.'}</p></div>`}
-    <div class="policy-footer">${icon('shield')}<span>Changing limits still requires the manager’s existing confirmation code. This dashboard reads the same guarded settings store.</span></div></section>`;
+    <div class="policy-footer">${icon('shield')}<span>Changing a limit still takes the four-digit code the agent sends you on WhatsApp. Settings can be proposed from the Settings screen; nothing here applies one.</span></div></section>`;
+}
+function settingRow(item) {
+  return `<div class="setting-row">
+    <div class="setting-what"><strong>${escape(item.name)}</strong><small>${escape(item.meaning)}</small></div>
+    <div class="setting-value"><span>${escape(item.display||'—')}</span><small>${escape(item.source)}</small></div>
+    <div class="setting-do">${data.mode==='live'?`<button class="button" data-setting="${escape(item.id)}">Change</button>`:''}</div>
+    ${item.problem?`<p class="setting-problem">${icon('info')}${escape(item.problem)}</p>`:''}
+  </div>`;
+}
+function settingsList() {
+  const read=state.reads.settings, report=data.settings;
+  if(data.mode==='disconnected')return '';
+  if(read.busy&&!report)return `<section class="card"><div class="card-heading"><h2>Business settings</h2></div><p class="policy-explanation">Reading your settings…</p></section>`;
+  if(!report)return `<section class="card"><div class="card-heading"><h2>Business settings</h2></div>${empty('Settings are unavailable',read.error||'Refresh the connection to try again.')}<button class="button" data-read="settings">Try again</button></section>`;
+  if(report.problem)return `<section class="card"><div class="card-heading"><h2>Business settings</h2></div><div class="notice error-notice">${escape(report.problem)}</div></section>`;
+  // EL CAMBIO QUE ESPERA VA ARRIBA DE TODO, y no es decoración: sólo hay UNA
+  // propuesta viva por teléfono, así que pedir un segundo cambio pisa el
+  // primero. Verlo es lo que evita que eso pase sin que nadie se entere.
+  const esperando=report.pending?`<div class="notice pending-notice">${icon('clock')}<span><strong>${escape(report.pending.name)}</strong> is waiting for your four-digit code on WhatsApp: ${escape(report.pending.from||'—')} → ${escape(report.pending.to||'—')}. Reply there to apply it, or propose another change to replace it.</span></div>`:'';
+  return `${esperando}${report.groups.map(group=>`<section class="card settings-group"><div class="card-heading"><div><h2>${escape(group.name)}</h2></div><span class="subtle-pill">${group.settings.length} settings</span></div>${group.settings.map(settingRow).join('')}</section>`).join('')}`;
 }
 function settingsView() {
-  return `<div class="settings-grid"><section class="card connection-card"><span class="stat-icon violet">${icon('link')}</span><h2>${data.mode==='demo'?'Connect your business':'Your CRM connection'}</h2><p>${data.mode==='demo'?'Explore sample orders now, or connect to your deployed Plus Agent for a live view of ERPNext.':'This workspace reads orders, customers, and inventory from your agent service.'}</p><dl><div><dt>Workspace</dt><dd>${escape(data.company)}</dd></div><div><dt>Data source</dt><dd>${data.mode==='demo'?'Sample dataset':'ERPNext via Plus Agent'}</dd></div><div><dt>Access</dt><dd>Read-only</dd></div><div><dt>Connection</dt><dd>${data.mode==='demo'?'Not connected':state.stale?'Interrupted':'Connected'}</dd></div></dl><div class="connection-buttons"><button class="button primary" data-action="connect">${icon('link')}${data.mode==='demo'?'Connect live data':'Change connection'}</button>${data.mode==='live'?'<button class="button" data-action="disconnect">Disconnect</button>':''}</div></section><section class="card setting-notes"><h2>Designed around your workflow</h2><div>${icon('orders')}<section><h3>ERPNext is the source of truth</h3><p>The dashboard reads recent orders, all-date pending orders, and up to 250 records per section. Loaded totals are labeled when a limit is reached.</p></section></div><div>${icon('shield')}<section><h3>Approvals stay protected</h3><p>Confirm orders and change rules through your existing manager workflow. This dashboard does not submit or modify business records.</p></section></div><div>${icon('link')}<section><h3>A connection for this session</h3><p>Your access token stays in memory. Reloading the page signs you out. While you are signed in, visible dashboards refresh every minute.</p></section></div></section></div>`;
+  return `${settingsList()}<div class="settings-grid"><section class="card connection-card"><span class="stat-icon violet">${icon('link')}</span><h2>${data.mode==='demo'?'Connect your business':'Your CRM connection'}</h2><p>${data.mode==='demo'?'Explore sample orders now, or connect to your deployed Plus Agent for a live view of ERPNext.':'This workspace reads orders, customers, and inventory from your agent service.'}</p><dl><div><dt>Workspace</dt><dd>${escape(data.company)}</dd></div><div><dt>Data source</dt><dd>${data.mode==='demo'?'Sample dataset':'ERPNext via Plus Agent'}</dd></div><div><dt>Access</dt><dd>Read, confirm orders, propose settings</dd></div><div><dt>Connection</dt><dd>${data.mode==='demo'?'Not connected':state.stale?'Interrupted':'Connected'}</dd></div></dl><div class="connection-buttons"><button class="button primary" data-action="connect">${icon('link')}${data.mode==='demo'?'Connect live data':'Change connection'}</button>${data.mode==='live'?'<button class="button" data-action="disconnect">Disconnect</button>':''}</div></section><section class="card setting-notes"><h2>Designed around your workflow</h2><div>${icon('orders')}<section><h3>ERPNext is the source of truth</h3><p>The dashboard reads recent orders, all-date pending orders, and up to 250 records per section. Loaded totals are labeled when a limit is reached.</p></section></div><div>${icon('shield')}<section><h3>Approvals stay protected</h3><p>You can confirm an order here, and propose a settings change. A settings change is never applied from this screen: the agent texts you a four-digit code, and you reply to it on WhatsApp. That second step stays on another device on purpose.</p></section></div><div>${icon('link')}<section><h3>A connection for this session</h3><p>Your access token stays in memory. Reloading the page signs you out. While you are signed in, visible dashboards refresh every minute.</p></section></div></section></div>`;
 }
 const views={today:todayView,queue:queueView,overview,sales:salesView,advice:adviceView,orders:ordersView,inventory:inventoryView,customers:customersView,agents:agentsView,settings:settingsView};
 function render() {
@@ -408,6 +470,28 @@ function openConnection() {
   dialog.innerHTML=`<div class="detail-head"><span>LIVE WORKSPACE</span><button class="icon-button" data-close="connection-dialog" aria-label="Close connection">${icon('close')}</button></div><form id="connect-form" class="connection-form"><span class="stat-icon violet">${icon('link')}</span><h2 id="connection-title">Connect to Plus Agent</h2><p>Use the address of your deployed agent service and its dashboard access token.</p><label ${repoHosted?'hidden':''}>Agent service URL<input name="url" type="url" required placeholder="https://agent.your-business.com" value="${escape(state.connection?.base || (repoHosted?location.origin:''))}" autocomplete="url"></label><label>Dashboard access token<input name="token" type="password" required minlength="32" autocomplete="off" placeholder="Enter your dashboard token"></label><p class="field-note">This is a dedicated dashboard token, not your ERPNext, WhatsApp, or model API key. It is kept only for this session.</p><div id="connection-error" class="form-error" role="alert"></div><button class="button primary full" type="submit">Connect workspace ${icon('arrow')}</button><p class="field-note">The dashboard API must be enabled on your agent service. A remote service must allow this dashboard’s origin.</p></form>`;
   dialog.showModal();
 }
+function openSetting(id) {
+  const item=(data.settings?.groups||[]).flatMap(g=>g.settings).find(s=>s.id===id);
+  if(!item)return;
+  const dialog=$('#setting-dialog');
+  // El ajuste viaja en un campo oculto y no en `state`: el formulario vive en
+  // un <dialog>, que `render()` no toca, así que no hay nada que preservar ni
+  // que limpiar en `goto`, en `cerrarSesion` ni en el botón de demo. Un estado
+  // de pantalla que sobrevive a la navegación reaparece donde no va.
+  dialog.innerHTML=`<div class="detail-head"><span>SETTING</span><button class="icon-button" data-close="setting-dialog" aria-label="Close setting">${icon('close')}</button></div><form id="setting-form" class="connection-form"><h2 id="setting-title">${escape(item.name)}</h2><p>${escape(item.meaning)}</p><input type="hidden" name="setting" value="${escape(item.id)}"><label>New value<input name="value" required maxlength="600" autocomplete="off" value="${escape(item.value)}"></label><p class="field-note">Now: ${escape(item.display||'—')}${item.unit?` · ${escape(item.unit)}`:''} · ${escape(item.source)}</p><div id="setting-error" class="form-error" role="alert"></div><button class="button primary full" type="submit">Send me the code ${icon('arrow')}</button><p class="field-note">Nothing changes yet. The agent sends a four-digit code to your WhatsApp and the change applies when you reply there — on purpose, so the second step is not this same screen.</p></form>`;
+  dialog.showModal();
+}
+function openPrice(id) {
+  const report=data.prices;
+  if(!report?.canChange)return;
+  const row=(report.items||[]).find(p=>p.id===id);
+  const producto=(data.products||[]).find(p=>p.id===id);
+  const dialog=$('#price-dialog');
+  // Mismo patrón que `openSetting`: el producto viaja en un campo oculto y el
+  // formulario vive en un <dialog>, que `render()` no toca.
+  dialog.innerHTML=`<div class="detail-head"><span>LIST PRICE</span><button class="icon-button" data-close="price-dialog" aria-label="Close price">${icon('close')}</button></div><form id="price-form" class="connection-form"><h2 id="price-title">${escape(producto?.name||id)}</h2><p>${escape(id)}${row?` · per ${escape(row.unit)}`:''}</p><input type="hidden" name="product" value="${escape(id)}"><label>New list price<input name="value" required inputmode="decimal" autocomplete="off" value="${escape(row&&row.price!==null?String(row.price):'')}"></label><p class="field-note">Now: ${escape(row&&row.price!==null?salesMoney(row.price,report.currency):'—')} · ${escape(report.priceList||'')} · ${escape(report.currency||'')}</p><div id="price-error" class="form-error" role="alert"></div><button class="button primary full" type="submit">Change the price ${icon('arrow')}</button><p class="field-note">This applies right away — there is no confirmation code for a price. It can move up to ${escape(String(report.bandPct))}% per day for this product, and only once a day.</p></form>`;
+  dialog.showModal();
+}
 function validateSnapshot(value) {
   if(!value||value.mode!=='live'||typeof value.company!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value.today)||Number.isNaN(Date.parse(value.generatedAt)))throw new Error('The service returned an invalid dashboard response.');
   for(const key of ['orders','pendingOrders','customers','products']) if(value[key]!==null&&(!Array.isArray(value[key])||value[key].length>250))throw new Error('The service returned invalid records.');
@@ -448,7 +532,7 @@ async function refresh(silent=false) {
   try{
     const snapshot=await fetchData(connection);
     if(state.session!==session)return;
-    data={...snapshot,activity:data.activity,queue:data.queue,operations:data.operations,policies:data.policies,sales:data.sales,advice:data.advice};state.stale=false;if(state.displayCurrency&&Date.now()-(state.fx?.fetchedAt||0)>=3600000)setDisplayCurrency(state.displayCurrency);if(!silent)toast('Dashboard refreshed.');
+    data={...snapshot,activity:data.activity,queue:data.queue,operations:data.operations,policies:data.policies,sales:data.sales,advice:data.advice,settings:data.settings,prices:data.prices};state.stale=false;if(state.displayCurrency&&Date.now()-(state.fx?.fetchedAt||0)>=3600000)setDisplayCurrency(state.displayCurrency);if(!silent)toast('Dashboard refreshed.');
     if(!silent)await loadViewReads(true);
   }catch(e){
     if(state.session===session){
@@ -477,6 +561,8 @@ document.addEventListener('click',async e=>{
   if(target.dataset.order)showOrder(target.dataset.order);
   if(target.dataset.product)showProduct(target.dataset.product);
   if(target.dataset.customer)showCustomer(target.dataset.customer);
+  if(target.dataset.setting)openSetting(target.dataset.setting);
+  if(target.dataset.price)openPrice(target.dataset.price);
   if(target.dataset.copy){try{await navigator.clipboard.writeText(target.dataset.copy);toast('Order ID copied.');}catch{toast('Clipboard unavailable. You can select and copy the order ID above.');}}
   if(target.dataset.filter){state.filter=target.dataset.filter;state.page=1;render();}
   if(target.dataset.salesDate){const report=currentSales(),row=report?.daily?.find(day=>day.date===target.dataset.salesDate);if(row){state.detailRequest++;detail(prettyDate(row.date,{year:'numeric'}),`<dl class="detail-fields"><div><dt>Sales</dt><dd>${escape(salesMoney(row.total,report.currency))}</dd></div><div><dt>Orders</dt><dd>${number(row.orders)}</dd></div></dl>`);}}
@@ -508,6 +594,56 @@ document.addEventListener('change',async e=>{
   if(e.target.id==='stock-filter'){state.stockFilter=e.target.value;render();}
 });
 document.addEventListener('submit',async e=>{
+  if(e.target.id==='setting-form'){
+    e.preventDefault();
+    const form=e.target,button=$('button[type=submit]',form),error=$('#setting-error');
+    const fields=new FormData(form),connection=state.connection,session=state.session;
+    if(!connection)return;
+    try{
+      button.disabled=true;button.textContent='Preparing…';error.textContent='';
+      const answer=await apiWrite(connection,'/settings/propose',{
+        setting:String(fields.get('setting')),value:String(fields.get('value')),
+      });
+      if(state.session!==session)return;
+      // 200 CON `ok:false` ES EL CASO NORMAL de un valor que no sirve: el
+      // servidor contesta la prosa que explica por qué y no cambia nada.
+      // Tratar todo 200 como éxito cerraba el diálogo diciendo que salió bien.
+      if(!answer?.ok){error.textContent=String(answer?.detail||'That change could not be prepared.');button.disabled=false;button.textContent='Send me the code';return;}
+      $('#setting-dialog').close();
+      toast(String(answer.detail||'Check WhatsApp for your four-digit code.'));
+      await loadRead('settings',true);
+    }catch(ex){
+      if(state.session!==session)return;
+      if(ex.status===401){cerrarSesion('Your dashboard access is no longer valid. Sign in again.');return;}
+      error.textContent=ex.name==='TimeoutError'?'The agent took too long to respond. Try again.':ex.message;
+      button.disabled=false;button.textContent='Send me the code';
+    }
+    return;
+  }
+  if(e.target.id==='price-form'){
+    e.preventDefault();
+    const form=e.target,button=$('button[type=submit]',form),error=$('#price-error');
+    const fields=new FormData(form),connection=state.connection,session=state.session;
+    if(!connection)return;
+    const producto=String(fields.get('product'));
+    try{
+      button.disabled=true;button.textContent='Changing…';error.textContent='';
+      const answer=await apiWrite(connection,'/products/'+encodeURIComponent(producto)+'/price',{value:String(fields.get('value'))});
+      if(state.session!==session)return;
+      // Igual que en los ajustes: 200 con `ok:false` es el caso normal —fuera
+      // de banda, ya se cambió hoy, sin precio anterior contra el que medir—.
+      if(!answer?.ok){error.textContent=String(answer?.detail||'That price could not be changed.');button.disabled=false;button.textContent='Change the price';return;}
+      $('#price-dialog').close();
+      toast(String(answer.detail||'The list price was changed.'));
+      await loadRead('prices',true);
+    }catch(ex){
+      if(state.session!==session)return;
+      if(ex.status===401){cerrarSesion('Your dashboard access is no longer valid. Sign in again.');return;}
+      error.textContent=ex.name==='TimeoutError'?'The agent took too long to respond. Try again.':ex.message;
+      button.disabled=false;button.textContent='Change the price';
+    }
+    return;
+  }
   if(e.target.id!=='connect-form')return;e.preventDefault();
   const form=e.target,button=$('button[type=submit]',form),error=$('#connection-error'),fields=new FormData(form),attempt=++state.connectRequest;
   try{
@@ -520,7 +656,7 @@ document.addEventListener('submit',async e=>{
     data=snapshot;state.connection=connection;state.session++;state.detailRequest++;state.busy=false;state.stale=false;state.page=1;state.extrasError='';state.extrasBusy=false;state.extrasLoadedAt=null;state.reads=freshReads();$('#detail-dialog').close();$('#connection-dialog').close();form.reset();render();restoreDisplayCurrency();toast('Connected to your live CRM.');loadViewReads();
   }catch(ex){if(attempt!==state.connectRequest||!$('#connection-dialog').open)return;error.textContent=ex.name==='TimeoutError'?'The service took too long to respond. Try again.':ex.message==='Failed to fetch'?'Could not reach the service. Check its address, HTTPS, and allowed dashboard origin.':ex.message;button.disabled=false;button.textContent='Connect workspace';}
 });
-document.querySelectorAll('dialog').forEach(dialog=>{dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}});dialog.addEventListener('close',()=>{if(dialog.id==='connection-dialog'){state.connectRequest++;dialog.innerHTML='';}if(dialog.id==='detail-dialog'){state.detailRequest++;dialog.innerHTML='';}});});
+document.querySelectorAll('dialog').forEach(dialog=>{dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}});dialog.addEventListener('close',()=>{if(dialog.id==='connection-dialog'){state.connectRequest++;dialog.innerHTML='';}if(dialog.id==='detail-dialog'){state.detailRequest++;dialog.innerHTML='';}if(dialog.id==='setting-dialog')dialog.innerHTML='';if(dialog.id==='price-dialog')dialog.innerHTML='';});});
 window.addEventListener('hashchange',()=>{const view=location.hash.slice(1);if(Object.hasOwn(views,view))goto(view);});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&state.menu){state.menu=false;render();}});
 if(Object.hasOwn(views,location.hash.slice(1)))state.view=location.hash.slice(1);
@@ -659,6 +795,36 @@ async function apiRead(connection, path) {
   return response.json();
 }
 
+// LA PRIMERA ESCRITURA DE ESTA PANTALLA. `apiRead` no sirve: un POST con
+// cuerpo necesita `Content-Type`, que NO está en la lista segura de CORS —el
+// servidor ya lo permite en `access-control-allow-headers`, y si no lo hiciera
+// el navegador rechazaría el preflight y no saldría ningún pedido, sin log en
+// ninguna parte («el botón no hace nada»).
+//
+// El cuerpo de error del servidor SE USA cuando viene: `{"error": ...}` dice
+// cuál fue el problema —el ajuste no existe, el cuerpo no es JSON— y taparlo
+// con una frase genérica deja al dueño adivinando.
+async function apiWrite(connection, path, body) {
+  const response=await fetch(connection.base+'/api/dashboard'+path,{
+    method:'POST',
+    headers:{Authorization:'Bearer '+connection.token,'Content-Type':'application/json'},
+    body:JSON.stringify(body),cache:'no-store',credentials:'omit',
+    redirect:'error',signal:AbortSignal.timeout(45000),
+  });
+  let payload=null;
+  try{payload=await response.json();}catch{}
+  if(!response.ok){
+    const error=new Error(payload?.error||({
+      401:'Your dashboard token was not accepted. Sign in again.',
+      403:'This token can read the dashboard but cannot change settings.',
+      404:'This agent does not have the settings endpoint yet. Update the service.',
+      503:'Enable dashboard access on the agent first.',
+    })[response.status]||'The agent could not prepare this change.');
+    error.status=response.status;throw error;
+  }
+  return payload;
+}
+
 // Each read has its own contract. Project only display fields: no phone,
 // checkpoint metadata, system messages, tool names or arguments enter the view.
 function requireValue(ok,label){if(!ok)throw new Error('The agent returned invalid '+label+'.');}
@@ -675,6 +841,43 @@ function isMoney(v){return Number.isFinite(v)&&Math.abs(v)<=Number.MAX_SAFE_INTE
 function isCount(value){return Number.isSafeInteger(value)&&value>=0;}
 function isDay(value){return isText(value)&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&!Number.isNaN(Date.parse(value))&&new Date(value).toISOString().slice(0,10)===value;}
 function isMoment(value){return isText(value)&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)&&isDay(value.slice(0,10))&&!Number.isNaN(Date.parse(value));}
+// Declaración y no `const`: `makeDemo()` corre al cargar el módulo y llama a
+// este validador, así que una `const` caería en su zona muerta. Ver `isMoney`.
+function validateSetting(s) {
+  requireValue(isId(s?.id)&&isText(s.name)&&isText(s.meaning)&&isText(s.unit)&&isText(s.kind)&&typeof s.optional==='boolean'&&isText(s.value)&&isText(s.display)&&isText(s.source)&&typeof s.configured==='boolean'&&isText(s.problem),'a setting');
+  return {id:s.id,name:s.name,meaning:s.meaning,unit:s.unit,kind:s.kind,optional:s.optional,value:s.value,display:s.display,source:s.source,configured:s.configured,problem:s.problem};
+}
+function validateSettings(value) {
+  requireValue(value&&listaSana(value.groups)&&isText(value.problem),'settings');
+  const groups=value.groups.map(g=>{
+    requireValue(isId(g?.id)&&isText(g.name)&&listaSana(g.settings),'a settings group');
+    return {id:g.id,name:g.name,settings:g.settings.map(validateSetting)};
+  });
+  // `pending` es null o el cambio que ESTA persona dejó esperando su código.
+  // Nunca trae el código: el servidor usa `limites.pendiente()`, que lo saca.
+  let pending=null;
+  if(value.pending!=null){
+    const p=value.pending;
+    requireValue(isId(p.id)&&isText(p.name)&&isText(p.from)&&isText(p.to),'the pending change');
+    pending={id:p.id,name:p.name,from:p.from,to:p.to};
+  }
+  return {groups,pending,problem:value.problem};
+}
+function validatePrices(value) {
+  requireValue(value&&typeof value.canChange==='boolean'&&isMoney(value.bandPct)&&listaSana(value.errors)&&listaSana(value.truncated),'price information');
+  requireValue(value.priceList===null||isText(value.priceList),'the price list');
+  requireValue(value.currency===null||isText(value.currency),'the price currency');
+  // `items` null es «no se pudo leer», que NO es «no hay precios cargados».
+  let items=null;
+  if(value.items!==null&&value.items!==undefined){
+    requireValue(listaSana(value.items),'the price list rows');
+    items=value.items.map(row=>{
+      requireValue(isId(row?.id)&&isText(row.unit)&&(row.price===null||isMoney(row.price)),'a price');
+      return {id:row.id,price:row.price,unit:row.unit};
+    });
+  }
+  return {priceList:value.priceList,currency:value.currency,bandPct:value.bandPct,canChange:value.canChange,items,errors:[...value.errors],truncated:[...value.truncated]};
+}
 function validateConversation(value,id) {
   requireValue(value?.customerId===id&&isText(value.customerName)&&typeof value.reachable==='boolean'&&typeof value.truncated==='boolean'&&isCount(value.retentionDays)&&Array.isArray(value.messages),'conversation information');
   requireValue(value.reachable||value.messages.length===0,'conversation reachability');
@@ -753,7 +956,7 @@ function readError(error) {
 async function loadRead(key,force=false) {
   if(!Object.hasOwn(state.reads,key))return;
   const range=key==='sales'?state.range:null;
-  const contract={activity:['/today',validateActivity],queue:['/queue',validateQueue],operations:['/operations',validateOperations],sales:[`/sales?days=${range}`,validateSales],advice:['/advice',validateAdvice]}[key];
+  const contract={activity:['/today',validateActivity],queue:['/queue',validateQueue],operations:['/operations',validateOperations],sales:[`/sales?days=${range}`,validateSales],advice:['/advice',validateAdvice],settings:['/settings',validateSettings],prices:['/prices',validatePrices]}[key];
   if(!contract||data.mode!=='live')return;
   // A different period owns a different read. Its late predecessor cannot
   // replace it, including when the user switches 7 -> 30 -> 7 quickly.
@@ -788,6 +991,8 @@ async function loadViewReads(force=false) {
   if(state.view==='today')await loadRead('activity',force);
   if(state.view==='queue')await loadRead('queue',force);
   if(state.view==='overview')await Promise.all([loadRead('queue',force),loadRead('operations',force)]);
+  if(state.view==='settings')await loadRead('settings',force);
+  if(state.view==='inventory')await loadRead('prices',force);
   if(state.view==='agents')await loadExtras(force);
 }
 

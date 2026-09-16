@@ -832,12 +832,82 @@ def test_a_question_he_ignored_rotates_instead_of_coming_back(
     assert segunda.clave != primera.clave
 
 
-def test_with_every_gap_answered_the_agent_stops_asking(almacen: FakeRedis) -> None:
+def _contestar_todo(almacen: FakeRedis) -> None:
+    """Contesta los dieciséis huecos, cada uno POR SU PUERTA.
+
+    Los de nota, con una nota. Los de ajuste, poniendo el ajuste — que es la
+    única cosa que los cierra, y la razón por la que este helper existe en vez
+    de un `for` sobre `HUECOS`.
+    """
+    from app import limites
+
     for i, hueco in enumerate(memoria.HUECOS):
-        memoria.anotar(hueco.clave, f"contestado numero {i}", GERENTE)
+        if hueco.ajuste:
+            almacen.hset(limites.CLAVE_VALORES, hueco.ajuste,
+                         limites.validar(hueco.ajuste, "cordoba,villa allende"
+                                         if "ZONAS" in hueco.ajuste else "un valor"))
+        else:
+            memoria.anotar(hueco.clave, f"contestado numero {i}", GERENTE)
+
+
+def test_with_every_gap_answered_the_agent_stops_asking(almacen: FakeRedis) -> None:
+    _contestar_todo(almacen)
 
     assert memoria.reclamar_pregunta() is None
     assert "TODAVÍA NO SABÉS ESTO" not in memoria.bloque_de_prompt()
+
+
+def test_a_note_does_not_close_a_gap_that_is_a_setting(almacen: FakeRedis) -> None:
+    """LA MITAD QUE HACE QUE LA PREGUNTA NO MIENTA.
+
+    Un hueco de ajuste contestado como NOTA deja una nota que contradice a la
+    configuración —y gana la configuración—, o sea una nota que miente. Era el
+    motivo por el que `HUECOS` tenía prohibido preguntar por un ajuste; ahora
+    se puede preguntar, y lo que lo sostiene es que la nota NO lo cierra.
+
+    MUTACIÓN: que `_sin_contestar` mire `contestados` también para los huecos
+    con `ajuste`. Cae ésta y sólo ésta.
+    """
+    # TODOS los dieciséis, contestados con una nota. Los doce de nota quedan
+    # cerrados; los cuatro de ajuste no, porque una nota no es un ajuste.
+    for i, hueco in enumerate(memoria.HUECOS):
+        memoria.anotar(hueco.clave, f"una nota numero {i}", GERENTE)
+
+    pendiente = memoria.reclamar_pregunta()
+    assert pendiente is not None, "una nota no puede cerrar un hueco de ajuste"
+    assert pendiente.ajuste, "lo que queda pendiente tiene que ser un AJUSTE"
+
+
+def test_a_setting_put_from_anywhere_closes_its_open_question(
+    almacen: FakeRedis,
+) -> None:
+    """El dueño lo pone desde el panel, y la pregunta abierta no se entera.
+
+    El turno abierto se guarda veinte horas con `SET NX EX`, así que sin mirar
+    el ajuste de nuevo el agente seguiría preguntando por algo que ya está
+    puesto durante casi un día — que es exactamente lo que el dueño pidió que
+    no pasara.
+
+    MUTACIÓN: sacar la comprobación de `_ajustes_puestos()` sobre la pregunta
+    ABIERTA (la de arriba, no la del filtro). Cae ésta y sólo ésta.
+    """
+    from app import limites
+
+    # Se deja abierta una pregunta de ajuste, sea cual sea la que toque.
+    for _ in range(len(memoria.HUECOS)):
+        abierta = memoria.reclamar_pregunta()
+        if abierta is not None and abierta.ajuste:
+            break
+        if abierta is not None:
+            memoria.anotar(abierta.clave, "contestado", GERENTE)
+    assert abierta is not None and abierta.ajuste
+
+    almacen.hset(limites.CLAVE_VALORES, abierta.ajuste,
+                 limites.validar(abierta.ajuste, "cordoba,villa allende"
+                                 if "ZONAS" in abierta.ajuste else "un valor"))
+
+    de_nuevo = memoria.reclamar_pregunta()
+    assert de_nuevo is None or de_nuevo.clave != abierta.clave
 
 
 def test_the_owner_can_ask_the_agent_what_it_still_needs_to_know(

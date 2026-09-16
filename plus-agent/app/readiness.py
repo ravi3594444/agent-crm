@@ -610,6 +610,36 @@ def _limite_encendido(
     return str(fila.get("valor") or "") not in ("", limites.NINGUNO)
 
 
+def _plantillas_del_dueno(
+    resumen_limites: Callable[[], list[dict]] | None,
+) -> dict[str, str]:
+    """Los nombres de plantilla que FIJÓ el dueño. Vacío si no se pudo leer.
+
+    Sólo `origen == dueño`: lo que viene del `.env` o del default del código no
+    entra, porque el `.env` que importa acá es el CANDIDATO que se está
+    validando y no el del proceso que corre el chequeo. `NINGUNO` se mapea a ""
+    —el dueño la borró— y eso tiene que ganarle al archivo igual que un nombre.
+    """
+    if resumen_limites is None:
+        return {}
+    from app import limites
+
+    try:
+        filas = resumen_limites()
+    except Exception:
+        return {}
+    puestas = {}
+    for fila in filas:
+        nombre = str(fila.get("nombre") or "")
+        if nombre not in PLANTILLAS or fila.get("problema"):
+            continue
+        if str(fila.get("origen")) != limites.ORIGEN_DUENO:
+            continue
+        valor = str(fila.get("valor") or "")
+        puestas[nombre] = "" if valor == limites.NINGUNO else valor
+    return puestas
+
+
 def chequear_plantillas(
     env: Mapping[str, str],
     reporte: Reporte,
@@ -623,7 +653,20 @@ def chequear_plantillas(
         "libre posible, y el aviso se aparca sin que el cliente se entere. "
         "Registrá la plantilla en Meta"
     )
-    configuradas = {p: _valor(env, p) for p in PLANTILLAS}
+    # EL NOMBRE QUE VA A USAR EL ENVÍO, no el que dice el archivo. Desde que las
+    # plantillas son ajustes, `notificar.plantilla_vigente` resuelve el almacén
+    # del dueño ANTES que el `.env`; leer sólo el archivo acá dejaba a readiness
+    # verificando en Meta un nombre distinto del que se manda — y contestando
+    # «falta» sobre una plantilla que el dueño cargó desde el panel, o «aprobada»
+    # sobre una que reemplazó. Es el mismo defecto que documenta
+    # `limites.idioma_gerencia_guardado`: un preflight que contesta sobre otra
+    # configuración es peor que no tenerlo.
+    #
+    # Se usa `resumen_limites`, que YA está inyectado para los límites, así que
+    # `--sin-red` y los tests siguen pudiendo no pasarlo: sin él manda el `.env`,
+    # que es exactamente lo que pasaba antes.
+    guardadas = _plantillas_del_dueno(resumen_limites)
+    configuradas = {p: guardadas.get(p) or _valor(env, p) for p in PLANTILLAS}
     for variable, nombre in configuradas.items():
         if nombre:
             continue

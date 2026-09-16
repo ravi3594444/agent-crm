@@ -1058,6 +1058,34 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "«{ajuste}» sólo puede ser español o inglés, no {valor}",
         EN: "«{ajuste}» can only be Spanish or English, not {valor}",
     },
+    "limite.texto_vacio": {
+        ES: "«{ajuste}» no puede quedar vacío",
+        EN: "«{ajuste}» cannot be left empty",
+    },
+    "limite.texto_largo": {
+        ES: "«{ajuste}» entra en {tope} caracteres y escribiste {largo}",
+        EN: "«{ajuste}» fits in {tope} characters and you wrote {largo}",
+    },
+    "limite.plantilla_invalida": {
+        ES: (
+            "«{ajuste}» tiene que ser el nombre de una plantilla de Meta "
+            "—minúsculas, números y guión bajo—, no {valor}"
+        ),
+        EN: (
+            "«{ajuste}» has to be the name of a Meta template —lowercase, "
+            "digits and underscores—, not {valor}"
+        ),
+    },
+    "limite.idioma_plantilla_invalido": {
+        ES: (
+            "«{ajuste}» es el idioma en que registraste la plantilla en Meta, "
+            "como «es_AR» o «en_US», no {valor}"
+        ),
+        EN: (
+            "«{ajuste}» is the language you registered the template in on Meta, "
+            "like «es_AR» or «en_US», not {valor}"
+        ),
+    },
     "limite.cual": {
         ES: "no me dijiste qué límite",
         EN: "you didn't tell me which limit",
@@ -1420,6 +1448,30 @@ CATALOGO: dict[str, dict[str, str]] = {
     "memoria.hueco.clientes_delicados": {
         ES: '¿Hay algún cliente al que convenga no dejarle acumular deuda?',
         EN: "Is there a customer you'd rather not let run up a balance?",
+    },
+    # Los cuatro que se cierran con un AJUSTE y no con una nota. El ES es el de
+    # `HUECOS`, palabra por palabra, como los doce de arriba.
+    "memoria.hueco.nombre_del_negocio": {
+        ES: "¿Cómo se llama tu negocio, tal cual querés que se lo diga a un cliente?",
+        EN: "What is your business called, exactly as you want a customer to hear it?",
+    },
+    "memoria.hueco.rubro_del_negocio": {
+        ES: "¿A qué se dedica tu negocio? Con dos o tres palabras alcanza.",
+        EN: "What does your business do? Two or three words is enough.",
+    },
+    "memoria.hueco.horario_de_atencion": {
+        ES: "¿En qué horario atendés? Es lo que le voy a contestar al que pregunte.",
+        EN: "What are your opening hours? That is what I will tell anyone who asks.",
+    },
+    "memoria.hueco.localidades_de_reparto": {
+        ES: (
+            "¿A qué localidades repartís? Sin esa lista no puedo confirmar "
+            "ninguna entrega sola."
+        ),
+        EN: (
+            "Which towns do you deliver to? Without that list I cannot confirm "
+            "any delivery on my own."
+        ),
     },
     "memoria.no_pude_leer": {
         ES: "No pude leer los datos del negocio: {error}.",

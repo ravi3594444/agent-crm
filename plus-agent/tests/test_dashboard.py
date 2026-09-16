@@ -5,7 +5,7 @@ import json
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location(
     "dashboard_under_test", Path(__file__).parents[1] / "app" / "dashboard.py"
@@ -16,7 +16,16 @@ spec.loader.exec_module(dashboard)
 TOKEN = "dashboard-test-token-with-32-or-more-characters"
 
 
-def request(method="GET", token=None, origin=None, path="/snapshot"):
+def request(method="GET", token=None, origin=None, path="/snapshot", body=None,
+            trozos=None, leidos=None):
+    """Un pedido al panel.
+
+    `body` viaja entero; `trozos` lo manda en pedazos con `more_body`, que es
+    como llega un `Transfer-Encoding: chunked` de verdad — y es la única forma
+    de probar que el techo se mide mientras se junta y no después. `leidos`
+    cuenta cuántas veces se pidió un trozo, que es lo ÚNICO que distingue las
+    dos cosas: las dos terminan en 400, y sólo una deja de leer.
+    """
     async def run():
         headers = [(b"host", b"agent.example")]
         if token is not None:
@@ -28,8 +37,23 @@ def request(method="GET", token=None, origin=None, path="/snapshot"):
         async def send(event):
             events.append(event)
 
-        async def receive():
-            return {"type": "http.request", "body": b""}
+        if trozos is not None:
+            pendientes = list(trozos)
+
+            async def receive():
+                if leidos is not None:
+                    leidos.append(1)
+                if not pendientes:
+                    return {"type": "http.disconnect"}
+                trozo = pendientes.pop(0)
+                return {"type": "http.request", "body": trozo,
+                        "more_body": bool(pendientes)}
+        else:
+            crudo = body if isinstance(body, bytes) else (
+                json.dumps(body).encode() if body is not None else b"")
+
+            async def receive():
+                return {"type": "http.request", "body": crudo}
 
         await dashboard.DashboardAPI()(
             {"type": "http", "method": method, "scheme": "https",
@@ -556,3 +580,342 @@ class VentasHallazgosTest(unittest.TestCase):
         justo = muchos[:tope]
         salida = self._correr(pedidos, justo)
         self.assertNotIn("topProducts", salida["truncated"], salida)
+
+
+# ---------------------------------------------------------------------------
+# Los ajustes del negocio. El panel PROPONE; el código lo confirma WhatsApp.
+# ---------------------------------------------------------------------------
+PERSONA = "dashboard-named-token-with-32-or-more-characters"
+TELEFONO = "5493511111111"
+
+
+def _con_persona():
+    """Un token CON NOMBRE y ese número en el equipo. Los dos hacen falta:
+    `puede_decidir` exige las dos mitades, y con una sola esto mediría la otra."""
+    from app import router
+
+    return (
+        patch.dict(os.environ, {"DASHBOARD_TOKENS": f"{PERSONA}:{TELEFONO}"}),
+        patch.object(router, "es_equipo", lambda t: t == TELEFONO),
+    )
+
+
+class AjustesDelPanelTest(unittest.TestCase):
+    def test_a_read_only_token_can_look_at_settings_and_cannot_propose(self):
+        """LA GUARDA QUE MÁS CARO SALE SI FALTA. El token COMPARTIDO está
+        autenticado y no es nadie en particular, así que puede mirar y nunca
+        decidir — y una ruta de escritura nueva que no se nombre en la guarda
+        del 403 queda alcanzable por él sin que nada se ponga rojo.
+
+        MUTACIÓN: cambiar la guarda a `if confirm_match and not puede_decidir`,
+        o sea volver a la condición de antes de esta ruta. Cae ésta y sólo ésta.
+        """
+        with patch.dict(os.environ, {"DASHBOARD_API_TOKEN": TOKEN}), \
+                patch.object(dashboard, "settings", return_value={"groups": []}), \
+                patch.object(dashboard, "proponer_ajuste") as proponer:
+            self.assertEqual(request(token=TOKEN, path="/settings")[0], 200)
+            code, _, body = request(
+                "POST", token=TOKEN, path="/settings/propose",
+                body={"setting": "tope", "value": "999999"},
+            )
+            self.assertEqual(code, 403)
+            self.assertIn("cannot change settings", json.dumps(body))
+            proponer.assert_not_called()
+
+    def test_proposing_needs_a_post_and_a_setting(self):
+        entorno, equipo = _con_persona()
+        with entorno, equipo, patch.object(dashboard, "proponer_ajuste") as proponer:
+            self.assertEqual(
+                request(token=PERSONA, path="/settings/propose")[0], 405)
+            code, _, body = request(
+                "POST", token=PERSONA, path="/settings/propose", body={"value": "x"})
+            self.assertEqual(code, 400)
+            self.assertIn("which setting", json.dumps(body))
+            proponer.assert_not_called()
+
+    def test_a_body_that_cannot_be_used_never_reaches_the_write_pool(self):
+        entorno, equipo = _con_persona()
+        with entorno, equipo, patch.object(dashboard, "proponer_ajuste") as proponer:
+            for cuerpo in (b"", b"not json", b'"just a string"', b"[1,2]"):
+                code, _, _ = request(
+                    "POST", token=PERSONA, path="/settings/propose", body=cuerpo)
+                self.assertEqual(code, 400, cuerpo)
+            proponer.assert_not_called()
+
+    def test_an_oversized_body_is_cut_while_it_arrives_not_after(self):
+        """El techo se mide ADENTRO del bucle, y el 400 NO lo demuestra.
+
+        Ésa es la parte que casi se me pasa: comprobando el largo después del
+        `while`, un cuerpo de 160 KiB también termina en 400 — sólo que después
+        de que el proceso lo juntó entero, que es exactamente lo que el techo
+        existe para no hacer. Las dos versiones dan el mismo status, así que un
+        test que afirme el status no puede distinguirlas y no está midiendo el
+        techo: está midiendo que hay un techo en alguna parte.
+
+        Lo que las separa es cuántos trozos se llegaron a pedir. Con el corte
+        adentro, se deja de leer apenas se pasa; sin él, se drena hasta el
+        final.
+
+        MUTACIÓN: mover el `if len(crudo) > CUERPO_MAXIMO` afuera del `while`.
+        Cae ésta y sólo ésta.
+        """
+        entorno, equipo = _con_persona()
+        trozo = b"x" * 4096
+        leidos: list[int] = []
+        with entorno, equipo, patch.object(dashboard, "proponer_ajuste") as proponer:
+            code, _, _ = request(
+                "POST", token=PERSONA, path="/settings/propose",
+                trozos=[b'{"setting":"tope","value":"'] + [trozo] * 40,
+                leidos=leidos,
+            )
+            self.assertEqual(code, 400)
+            proponer.assert_not_called()
+        # 8 KiB de techo contra trozos de 4 KiB: se corta en el tercero. El 41
+        # es lo que se leería drenando todo.
+        self.assertLess(len(leidos), 6)
+
+    def test_the_settings_reader_is_told_who_is_looking(self):
+        """`settings` necesita el teléfono para UNA cosa: decir si esa persona
+        tiene un cambio esperando su código. La propuesta es por teléfono, así
+        que pasarle otra cosa muestra la de otro o ninguna."""
+        entorno, equipo = _con_persona()
+        with entorno, equipo, patch.object(
+                dashboard, "settings", return_value={"groups": []}) as leer:
+            self.assertEqual(request(token=PERSONA, path="/settings")[0], 200)
+            leer.assert_called_once_with(TELEFONO)
+
+    def test_there_is_no_route_that_applies_the_code(self):
+        """El segundo paso vive en WhatsApp, y eso es el diseño y no un hueco.
+
+        `limites.aplicar` no tiene contador de intentos: no lo necesita mientras
+        su única puerta sea un webhook firmado por Meta. Publicarla acá dejaría
+        9000 valores con diez minutos de vida contra un endpoint sin límite.
+        """
+        entorno, equipo = _con_persona()
+        with entorno, equipo:
+            for ruta in ("/settings/confirm", "/settings/apply", "/settings/4242"):
+                self.assertEqual(
+                    request("POST", token=PERSONA, path=ruta)[0], 404, ruta)
+
+
+class PreciosDelPanelTest(unittest.TestCase):
+    def test_the_price_write_runs_as_the_manager_identity_not_the_customer_one(self):
+        """LA REGLA DURA 2, en el único lugar donde se rompería sin fallar.
+
+        `_en_hilo` despacha por `run_in_executor`, que —a diferencia de
+        `asyncio.to_thread`— NO copia el contexto: el `ContextVar` de la
+        credencial vuelve a su default, que es `customer`. Un `manager_scope`
+        abierto en el router, alrededor del `await`, no llega al hilo del pool.
+
+        Y no falla: el rol del agente de CLIENTES tiene Create sobre Item Price,
+        así que el precio se escribiría igual, con la identidad equivocada y sin
+        un solo error. Dos de las tres identidades fusionadas, en silencio.
+
+        MUTACIÓN: sacar el `with erpnext.manager_scope():` de
+        `cambiar_precio_desde_el_panel` (o moverlo al router, que es lo mismo
+        desde acá). Cae ésta y sólo ésta.
+        """
+        from app import erpnext as erp
+        from app import precios as precios_real
+
+        visto = {}
+
+        def espia(producto, precio, telefono, canal=None):
+            visto["scope"] = erp._credential_scope.get()
+            visto["producto"] = producto
+            visto["canal"] = canal
+            return "el precio quedó en 1300"
+
+        entorno, equipo = _con_persona()
+        with entorno, equipo, \
+                patch.object(erp, "_manager_client", object()), \
+                patch.object(precios_real, "cambiar", espia), \
+                patch.object(precios_real, "precio_actual", lambda c: 1300.0):
+            code, _, body = request(
+                "POST", token=PERSONA, path="/products/LECHE-ENT-1L/price",
+                body={"value": "1300"},
+            )
+
+        self.assertEqual(code, 200)
+        self.assertEqual(visto["scope"], "management")
+        self.assertEqual(visto["producto"], "LECHE-ENT-1L")
+        self.assertEqual(visto["canal"], precios_real.CANAL_PANEL)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["price"], 1300.0)
+
+    def test_ok_comes_from_rereading_the_price_and_not_from_the_prose(self):
+        """`precios.cambiar` devuelve prosa para sus diez salidas, y parsearla
+        ataría el panel al catálogo de idiomas. Lo que el panel necesita saber
+        es si el precio QUEDÓ en lo que se pidió, y eso se relee.
+
+        Acá la prosa dice que salió bien y la relectura dice otra cosa: gana la
+        relectura. Es el mismo criterio que `precios.cambiar` aplica adentro.
+
+        MUTACIÓN: que `ok` salga de `bool(detalle)`. Cae ésta y sólo ésta.
+        """
+        from app import erpnext as erp
+        from app import precios as precios_real
+
+        entorno, equipo = _con_persona()
+        with entorno, equipo, \
+                patch.object(erp, "_manager_client", object()), \
+                patch.object(precios_real, "cambiar", lambda *a, **k: "listo, quedó en 1300"), \
+                patch.object(precios_real, "precio_actual", lambda c: 1250.0):
+            code, _, body = request(
+                "POST", token=PERSONA, path="/products/LECHE-ENT-1L/price",
+                body={"value": "1300"},
+            )
+
+        self.assertEqual(code, 200)
+        self.assertIs(body["ok"], False)
+        self.assertEqual(body["price"], 1250.0)
+
+    def test_a_price_that_could_not_be_reread_is_null_and_never_zero(self):
+        """`None` no es 0. Un precio que no se pudo releer no es un precio de
+        cero, y mostrarlo así le diría al dueño que regaló el producto."""
+        from app import erpnext as erp
+        from app import precios as precios_real
+
+        entorno, equipo = _con_persona()
+        with entorno, equipo, \
+                patch.object(erp, "_manager_client", object()), \
+                patch.object(precios_real, "cambiar", lambda *a, **k: "no pude leer"), \
+                patch.object(precios_real, "precio_actual", lambda c: None):
+            _, _, body = request(
+                "POST", token=PERSONA, path="/products/LECHE-ENT-1L/price",
+                body={"value": "1300"},
+            )
+
+        self.assertIsNone(body["price"])
+        self.assertIs(body["ok"], False)
+
+    def test_a_read_only_token_cannot_change_a_price(self):
+        """La misma guarda que los otros dos, y por el mismo motivo: una ruta
+        de escritura que no se nombre ahí queda alcanzable por el token
+        COMPARTIDO — el de sólo lectura."""
+        from app import precios as precios_real
+
+        with patch.dict(os.environ, {"DASHBOARD_API_TOKEN": TOKEN}), \
+                patch.object(precios_real, "cambiar") as cambiar:
+            code, _, body = request(
+                "POST", token=TOKEN, path="/products/LECHE-ENT-1L/price",
+                body={"value": "1300"},
+            )
+        self.assertEqual(code, 403)
+        self.assertIn("cannot change prices", json.dumps(body))
+        cambiar.assert_not_called()
+
+    def test_a_price_post_without_a_value_never_reaches_erpnext(self):
+        from app import precios as precios_real
+
+        entorno, equipo = _con_persona()
+        with entorno, equipo, patch.object(precios_real, "cambiar") as cambiar:
+            code, _, body = request(
+                "POST", token=PERSONA, path="/products/LECHE-ENT-1L/price",
+                body={"other": "1300"},
+            )
+        self.assertEqual(code, 400)
+        self.assertIn("new price", json.dumps(body))
+        cambiar.assert_not_called()
+
+
+class PreciosQueSeMuestranTest(unittest.TestCase):
+    """Qodo 2 y 5: lo que se muestra al lado del botón, y lo que no se escribe."""
+
+    def _leer(self, filas, items=None):
+        from app import erpnext as erp
+        from app import limites, precios
+
+        def lista(doctype, **kwargs):
+            if doctype == "Item Price":
+                return list(filas)
+            return list(items if items is not None else
+                        [{"name": "LECHE-ENT-1L", "stock_uom": "Unidad"}])
+
+        with patch.object(erp, "_manager_client", object()), \
+                patch.object(erp, "get_list", lista), \
+                patch.object(precios, "lista_y_moneda",
+                             lambda: ("Standard Selling", "ARS")), \
+                patch.object(limites, "vigente", lambda n: "15"):
+            return dashboard.prices()
+
+    def test_only_rows_the_policy_would_actually_use_are_shown(self):
+        """LO QUE SE MUESTRA TIENE QUE SER LO QUE EL AGENTE VA A COTIZAR.
+
+        `policy._precio_estandar` descarta el renglón si la unidad no es el
+        `stock_uom`, si el precio es de un cliente o de un lote, o si está fuera
+        de vigencia. Filtrando sólo por lista, moneda y `selling`, cualquiera de
+        esos cuatro se mostraba como «el precio de lista» — y con el botón de
+        cambiar al lado, que escribe SIEMPRE contra el `stock_uom`: el dueño
+        editaba una fila distinta de la que estaba mirando.
+
+        MUTACIÓN: sacar `_rige_hoy` del filtro (o la comparación de unidad).
+        Cae éste y sólo éste.
+        """
+        cuerpo = self._leer([
+            {"item_code": "LECHE-ENT-1L", "price_list_rate": 1250, "uom": "Unidad"},
+            {"item_code": "LECHE-ENT-1L", "price_list_rate": 1100, "uom": "Caja"},
+            {"item_code": "LECHE-ENT-1L", "price_list_rate": 900, "uom": "Unidad",
+             "customer": "Almacén Don Pedro"},
+            {"item_code": "LECHE-ENT-1L", "price_list_rate": 800, "uom": "Unidad",
+             "batch_no": "L-2026-01"},
+            {"item_code": "LECHE-ENT-1L", "price_list_rate": 700, "uom": "Unidad",
+             "valid_upto": "2020-01-01"},
+        ])
+
+        self.assertEqual(cuerpo["items"], [
+            {"id": "LECHE-ENT-1L", "price": 1250.0, "unit": "Unidad"},
+        ])
+
+    def test_a_price_that_cannot_be_matched_to_its_unit_is_not_invented(self):
+        """Sin poder leer el `stock_uom` no se sabe qué fila rige: `null`, que
+        es «no se pudo leer», y NO una lista vacía —que diría que el negocio no
+        tiene ningún precio cargado—."""
+        cuerpo = self._leer(
+            [{"item_code": "LECHE-ENT-1L", "price_list_rate": 1250, "uom": "Unidad"}],
+            items=None,
+        )
+        self.assertEqual(len(cuerpo["items"]), 1)
+
+        from app import erpnext as erp
+        from app import limites, precios
+
+        def lista(doctype, **kwargs):
+            if doctype == "Item Price":
+                return [{"item_code": "X", "price_list_rate": 1, "uom": "Unidad"}]
+            raise RuntimeError("ERPNext no contesta por los productos")
+
+        with patch.object(erp, "_manager_client", object()), \
+                patch.object(erp, "get_list", lista), \
+                patch.object(precios, "lista_y_moneda", lambda: ("L", "ARS")), \
+                patch.object(limites, "vigente", lambda n: "15"):
+            roto = dashboard.prices()
+        self.assertIsNone(roto["items"])
+        self.assertIn("prices", roto["errors"])
+
+    def test_a_non_finite_price_never_reserves_the_day(self):
+        """Qodo 5. `float("nan")` PARSEA, y `nan <= 0` es False, así que un
+        «nan» pasaba las dos guardas, se quedaba con el candado de 24 h del
+        producto —que el camino de error de ERPNext no suelta— y dejaba al
+        producto sin poder cambiar de precio hasta el día siguiente.
+
+        MUTACIÓN: volver a `if nuevo <= 0`. Cae éste y sólo éste.
+        """
+        from app import limites, locks, policy, precios
+
+        cliente = Mock()
+        # LA BANDA TIENE QUE ESTAR ABIERTA, y ésta es la mitad que casi me
+        # come: con `PRECIO_CAMBIO_MAX_PCT` en su default de 0, `cambiar` sale
+        # por «banda cerrada» ANTES de mirar el número, así que el test pasaba
+        # con la guarda sacada — no medía nada. Lo comprobé mutando.
+        with patch.object(precios, "erpnext") as erp, \
+                patch.object(policy, "PRICE_LIST", "Standard Selling"), \
+                patch.object(policy, "CURRENCY", "ARS"), \
+                patch.object(limites, "vigente", lambda n: "15"), \
+                patch.object(locks, "conexion", lambda: cliente):
+            for crudo in ("nan", "NaN", "inf", "-inf"):
+                precios.cambiar("LECHE-ENT-1L", crudo, "5493511111111")
+        cliente.set.assert_not_called()
+        erp.escribir_precio_de_lista.assert_not_called()
+        # Y el producto NI SIQUIERA se leyó: se corta en el número.
+        erp.get_doc.assert_not_called()

@@ -60,6 +60,11 @@ MARCA_DURABLE_ENTREGA = marcas.texto("entrega")
 # idioma. Perder el idioma cuesta una respuesta en el otro idioma; perder un
 # límite cuesta un pedido que se confirma solo. No se comparte la marca.
 MARCA_DURABLE_IDIOMA = marcas.texto("idioma")
+# Los datos del negocio y las plantillas de Meta. Marca propia y NO la de
+# límites: ver la fila `negocio` de app/marcas.py, que explica el fusible que
+# esto evita armar. No tiene lector ni caché porque no gatea nada — se escribe
+# para que el cambio quede anotado donde vive la contabilidad del dueño.
+MARCA_DURABLE_NEGOCIO = marcas.texto("negocio")
 DURABLE_CACHE_SEGUNDOS = 60.0
 
 CLAVE_VALORES = "plus-agent:limites"
@@ -129,6 +134,25 @@ CODIGOS_POSTALES = "codigos_postales"
 # Un idioma. Sólo dos valores posibles y los valida app/idioma.py, que es el
 # único lugar donde se decide qué texto significa qué idioma.
 IDIOMA = "idioma"
+# Un dato del negocio escrito en prosa por el dueño: cómo se llama, a qué se
+# dedica, en qué horario atiende. No es un número, no es una lista y no decide
+# nada — entra en una frase del prompt y se lee en el panel.
+#
+# LO QUE ESTA VALIDACIÓN NO ES. El texto que termina EN el prompt lo limpia
+# `app/conversacion.py::_dato_de_entorno`, y sigue limpiándolo ahí: esa
+# limpieza es del HUECO y no de la variable, así que un valor que ahora puede
+# llegar del panel pasa por exactamente la misma puerta que el que llegaba del
+# `.env`. Acá se valida lo que se GUARDA —un renglón, acotado, sin caracteres
+# de control—, que es otra pregunta: que el dueño lea de vuelta lo que escribió.
+TEXTO = "texto"
+# El nombre de una plantilla de Meta. Meta las acepta en minúsculas, dígitos y
+# guiones bajos, y un nombre que no existe no falla al guardarse: falla horas
+# después, cuando el aviso no sale y el cliente no se entera de nada.
+PLANTILLA = "plantilla"
+# El idioma en que la plantilla está REGISTRADA en Meta ("es_AR", "en_US"). Es
+# distinto de IDIOMA —que es en qué idioma le hablamos al dueño— y tiene que
+# coincidir con el registro o Meta contesta que la plantilla no existe.
+IDIOMA_PLANTILLA = "idioma_plantilla"
 
 # The normal form for "nothing configured". An EMPTY string cannot mean that:
 # _resolver treats "" in the store as "unset" and falls through to the
@@ -174,6 +198,12 @@ class Definicion:
     # Only a setting marked opcional may hold NINGUNO. A ceiling cannot be
     # "none"; a list of delivery days can.
     opcional: bool = False
+    # Cuántos caracteres puede tener un TEXTO. Campo propio y no `maximo`
+    # reutilizado: `maximo` es el techo de un NÚMERO y lo lee `_numero` para
+    # decidir que el valor es un error de tipeo. Dos preguntas distintas en un
+    # solo campo es cómo se escribe un bug que nadie ve hasta que un nombre de
+    # sesenta caracteres se guarda contra un techo pensado para pesos.
+    largo: int = 0
 
     @property
     def booleano(self) -> bool:
@@ -650,9 +680,189 @@ IDIOMAS: dict[str, Definicion] = {
     ),
 }
 
+# ---------------------------------------------------------------------------
+# EL NEGOCIO: cómo se llama, a qué se dedica, cuándo atiende.
+# ---------------------------------------------------------------------------
+#
+# POR QUÉ ESTOS CUATRO Y NO EL `.env` ENTERO. La lista es de lo PERMITIDO y no
+# de lo prohibido, que es la misma decisión que toma `memoria.CLAVES_PARA_
+# CLIENTES` y por la misma razón: lo que nadie clasificó no se puede tocar, y
+# ése es el único default que no se equivoca en la dirección peligrosa. Lo que
+# queda afuera a propósito, con el motivo:
+#
+#   * las credenciales —las tres de ERPNext, la de Meta, la del modelo—: quien
+#     las puede cambiar puede reemplazar el sistema entero, y el panel se
+#     entra con un token que puede robarse;
+#   * TELEFONOS_EQUIPO y TELEFONO_DUENO: son la frontera de AUTORIZACIÓN. Un
+#     número agregado ahí es un agente de gerencia nuevo, o sea que un ajuste
+#     se convertiría en una forma de darse permisos;
+#   * BUSINESS_TIMEZONE, LOCALE, AUTO_CONFIRM_PRICE_LIST y AUTO_CONFIRM_
+#     CURRENCY: se fijan en la instalación y los leen módulos que los toman una
+#     sola vez al importarse (`app/policy.py`), así que cambiarlos en caliente
+#     diría que cambiaron sin que cambie nada;
+#   * ERPNEXT_COMPANY y ERPNEXT_WAREHOUSE: nombran registros de ERPNext que
+#     tienen que existir, y nadie puede verificar acá que existan.
+#
+# Los cuatro de acá no deciden nada: entran en una frase. Por eso el registro
+# es propio y no alimenta configuracion() — un nombre de negocio mal escrito no
+# puede frenar un pedido, igual que un día de reparto no puede (ver ENTREGA).
+NEGOCIO: dict[str, Definicion] = {
+    "NOMBRE_NEGOCIO": Definicion(
+        nombre="NOMBRE_NEGOCIO",
+        alias=("nombre del negocio", "nombre de la empresa", "business name"),
+        significado="Cómo se llama el negocio. Es la primera línea de los dos prompts",
+        unidad="texto",
+        # Opcional con default NINGUNO y no `default=""`: sin nombre cargado,
+        # `conversacion.negocio()` contesta «la empresa» desde antes de esto, y
+        # un ajuste nuevo no puede cambiar lo que ve un cliente. "" en el
+        # almacén significa «no fijado» para `_resolver`, así que el sentinela
+        # es la única forma de que borrarlo no reviva el valor del `.env`.
+        default="-",
+        opcional=True,
+        tipo=TEXTO,
+        # 60, igual que el recorte de `conversacion._dato_de_entorno`: guardar
+        # más de lo que esa función va a dejar pasar le muestra al dueño un
+        # nombre y le hace usar otro al agente.
+        largo=60,
+    ),
+    "NOMBRE_AGENTE": Definicion(
+        nombre="NOMBRE_AGENTE",
+        alias=("nombre del agente", "nombre del asistente", "agent name"),
+        significado=(
+            "Con qué nombre se presenta el que atiende el WhatsApp. Vacío, se "
+            "presenta por lo que hace y no se inventa ninguno"
+        ),
+        unidad="texto",
+        default="-",
+        tipo=TEXTO,
+        largo=40,
+        opcional=True,
+    ),
+    "RUBRO_NEGOCIO": Definicion(
+        nombre="RUBRO_NEGOCIO",
+        alias=("rubro", "rubro del negocio", "line of business"),
+        significado="A qué se dedica el negocio, en pocas palabras",
+        unidad="texto",
+        default="-",
+        tipo=TEXTO,
+        largo=60,
+        opcional=True,
+    ),
+    "HORARIO_ATENCION": Definicion(
+        nombre="HORARIO_ATENCION",
+        alias=(
+            "horario de atencion",
+            "horario de atención",
+            "opening hours",
+            "business hours",
+        ),
+        significado="En qué horario atiende el negocio, como se lo contás a un cliente",
+        unidad="texto",
+        default="lunes a viernes de 8 a 17",
+        tipo=TEXTO,
+        largo=120,
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# LAS PLANTILLAS DE META. Registro aparte, y el motivo no es el mismo que el de
+# ENTREGA.
+# ---------------------------------------------------------------------------
+#
+# Una plantilla no es una regla del negocio: es el NOMBRE con el que Meta
+# conoce un mensaje que ya aprobó. Cambiarla no cambia lo que el sistema
+# decide, cambia si el aviso sale o no sale. Por eso están acá y no en
+# LIMITES, y por eso el panel las muestra en su propio grupo: son la
+# configuración que más veces se toca al instalar —una por una, a medida que
+# Meta va aprobando— y la que peor se toca por `.env`, porque cada cambio
+# pedía editar el archivo en el servidor y recrear el contenedor.
+#
+# TODAS OPCIONALES, y no es flojera: vacía significa «esta plantilla todavía no
+# está registrada», que es el estado normal durante media instalación.
+# app/readiness.py es el que decide cuál de esas ausencias es un AVISO y cuál
+# es un FALTA, y sigue decidiéndolo él.
+PLANTILLAS: dict[str, Definicion] = {
+    "WHATSAPP_TEMPLATE_LANGUAGE": Definicion(
+        nombre="WHATSAPP_TEMPLATE_LANGUAGE",
+        alias=("idioma de las plantillas", "template language"),
+        significado=(
+            "En qué idioma registraste las plantillas en Meta. Si no coincide "
+            "con el registro, Meta contesta que la plantilla no existe"
+        ),
+        unidad="idioma de Meta",
+        default="es_AR",
+        tipo=IDIOMA_PLANTILLA,
+    ),
+}
+
+# Las doce plantillas, en una sola forma. Escribir doce `Definicion` a mano era
+# doce oportunidades de que una quedara sin `tipo=PLANTILLA` —y un tipo que no
+# se nombra en `validar` se valida como NÚMERO, que es el bug que el comentario
+# de ahí arriba describe—. Acá el tipo es uno solo y lo pone el bucle.
+_PLANTILLAS: tuple[tuple[str, tuple[str, ...], str], ...] = (
+    ("WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE", ("plantilla de confirmado",),
+     "Le avisa al cliente que su pedido quedó confirmado"),
+    ("WHATSAPP_CUSTOMER_REJECTED_TEMPLATE", ("plantilla de rechazado",),
+     "Le avisa al cliente que su pedido no se pudo tomar"),
+    ("WHATSAPP_CUSTOMER_CANCELLED_TEMPLATE", ("plantilla de cancelado",),
+     "Le avisa al cliente que su pedido se canceló"),
+    ("WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE", ("plantilla de vencido",),
+     "Le avisa al cliente que su solicitud venció sin respuesta"),
+    ("WHATSAPP_CUSTOMER_FALLBACK_TEMPLATE", ("plantilla de respaldo",),
+     "El aviso al cliente cuando ningún otro texto aplica"),
+    ("WHATSAPP_CUSTOMER_REVIEW_EXPIRED_TEMPLATE", ("plantilla de revision vencida",),
+     "Le avisa al cliente que venció el plazo de revisión de su pedido"),
+    ("WHATSAPP_CUSTOMER_PENDING_TEMPLATE", ("plantilla de pendiente",),
+     "Le recuerda al cliente que su pedido sigue esperando una decisión"),
+    ("WHATSAPP_CUSTOMER_PENDING_CLOSED_TEMPLATE", ("plantilla de pendiente cerrado",),
+     "Le avisa al cliente que su pedido pendiente se cerró"),
+    ("WHATSAPP_CUSTOMER_DELIVERY_LEAD_TEMPLATE", ("plantilla de aviso de entrega",),
+     "Le avisa al cliente unas horas antes de que le llegue el reparto"),
+    ("WHATSAPP_STAFF_PENDING_TEMPLATE", ("plantilla de pendiente al equipo",),
+     "Le avisa al equipo que hay un pedido esperando que alguien lo mire"),
+    ("WHATSAPP_STAFF_CONFIRMED_TEMPLATE", ("plantilla de confirmado al equipo",),
+     "Le avisa al equipo que un pedido quedó confirmado"),
+    ("WHATSAPP_STAFF_ALERT_TEMPLATE", ("plantilla de alerta al equipo",),
+     "El aviso al equipo cuando algo necesita atención ahora"),
+)
+for _nombre, _alias, _significado in _PLANTILLAS:
+    PLANTILLAS[_nombre] = Definicion(
+        nombre=_nombre,
+        alias=_alias,
+        significado=_significado,
+        unidad="plantilla de Meta",
+        default="-",
+        tipo=PLANTILLA,
+        opcional=True,
+    )
+del _nombre, _alias, _significado
+
 # Everything the owner can set, in one mapping. LIMITES stays separate above
 # because only it feeds configuracion().
-TODOS: dict[str, Definicion] = {**LIMITES, **ENTREGA, **IDIOMAS}
+TODOS: dict[str, Definicion] = {**LIMITES, **ENTREGA, **IDIOMAS, **NEGOCIO, **PLANTILLAS}
+
+
+# Para qué pantalla es cada ajuste. Se deriva de EN QUÉ REGISTRO está y no de
+# un campo nuevo, así que no hay forma de que un ajuste diga que pertenece a un
+# grupo y esté en otro: la membresía es la única fuente.
+GRUPO_LIMITES = "limites"
+GRUPO_ENTREGA = "entrega"
+GRUPO_IDIOMA = "idioma"
+GRUPO_NEGOCIO = "negocio"
+GRUPO_PLANTILLAS = "plantillas"
+
+
+def grupo(nombre: str) -> str:
+    """En qué grupo cae un ajuste. Lo usa el panel para agruparlos."""
+    if nombre in LIMITES:
+        return GRUPO_LIMITES
+    if nombre in ENTREGA:
+        return GRUPO_ENTREGA
+    if nombre in IDIOMAS:
+        return GRUPO_IDIOMA
+    if nombre in NEGOCIO:
+        return GRUPO_NEGOCIO
+    return GRUPO_PLANTILLAS
 
 # La cuenta contable NO se toca por WhatsApp. Es un account head real de
 # ERPNext: escribir el nombre equivocado no rompe el bot, desbalancea la
@@ -958,15 +1168,24 @@ def _almacen() -> dict[str, str]:
     return valores
 
 
+# De dónde salió un valor. Constantes y no literales sueltos porque hay un
+# segundo lector fuera de este módulo —`readiness` distingue lo que fijó el
+# dueño de lo que dice el `.env` candidato— y dos copias de una palabra son dos
+# vocabularios que se separan sin que nada se ponga rojo.
+ORIGEN_DUENO = "dueño"
+ORIGEN_ARRANQUE = "arranque"
+ORIGEN_DEFAULT = "default"
+
+
 def _resolver(nombre: str, almacen: dict[str, str]) -> tuple[str, str]:
     """(valor, origen). origen: 'dueño' | 'arranque' | 'default'."""
     fijado = almacen.get(nombre, "").strip()
     if fijado:
-        return fijado, "dueño"
+        return fijado, ORIGEN_DUENO
     del_entorno = os.getenv(nombre, "").strip()
     if del_entorno:
-        return del_entorno, "arranque"
-    return TODOS[nombre].default, "default"
+        return del_entorno, ORIGEN_ARRANQUE
+    return TODOS[nombre].default, ORIGEN_DEFAULT
 
 
 # "1.500" is fifteen hundred pesos to an Argentine owner and one-and-a-half to
@@ -1196,6 +1415,113 @@ def _idioma(defi: Definicion, crudo: str) -> str:
     return elegido
 
 
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Meta las crea en minúsculas, dígitos y guión bajo. No es nuestra regla: es la
+# de ellos, y escribirla acá hace que un nombre imposible se rechace cuando el
+# dueño lo tipea y no seis horas después, cuando el aviso no sale.
+_NOMBRE_PLANTILLA = re.compile(r"^[a-z0-9_]{1,512}$")
+# "es", "es_AR", "en_US", "pt_BR". El idioma en dos o tres letras y la región
+# —si está— en dos, que es como Meta las registra.
+_IDIOMA_DE_PLANTILLA = re.compile(r"^[a-z]{2,3}(_[A-Z]{2})?$")
+
+
+def _texto_normal(defi: Definicion, crudo: str) -> str:
+    """Un renglón sin caracteres de control. SIN recortar y sin levantar.
+
+    Separado de `_texto_libre` porque las dos preguntas que se le hacen a un
+    texto demasiado largo tienen respuestas distintas, y confundirlas costó una
+    regresión: TECLEARLO tiene que fallar —el dueño necesita enterarse de que
+    no entra—, pero LEERLO no puede fallar, porque un `.env` con un rubro largo
+    ya existía y se venía recortando en `conversacion._dato_de_entorno`. Con una
+    sola respuesta, ese rubro pasó de recortarse a desaparecer, y el agente dejó
+    de decir a qué se dedica el negocio. Se ve en
+    `test_un_rubro_hostil_se_queda_del_lado_de_adentro_de_la_frase`.
+    """
+    return " ".join(_CONTROL.sub("", str(crudo or "")).split())
+
+
+def _texto_libre(defi: Definicion, crudo: str) -> str:
+    """Un renglón, acotado y sin caracteres de control. O LimiteError.
+
+    QUÉ PROTEGE ESTO Y QUÉ NO. No protege al prompt: de eso se sigue ocupando
+    `app/conversacion.py::_dato_de_entorno`, en el hueco donde el valor cae,
+    porque ahí es donde se sabe que está entrando en una frase. Un valor que
+    pasa por acá y va al panel no necesita esa limpieza, y uno que va al prompt
+    la sigue necesitando aunque haya pasado por acá; por eso son dos y no una.
+
+    Lo que sí protege: que lo guardado sea lo que el dueño va a leer de vuelta.
+    Un salto de línea en el medio de un nombre se ve igual en el panel y
+    distinto en todos los renglones que arma el sistema, y un carácter de
+    control no se ve en ninguno de los dos — que es peor, porque el valor que
+    el dueño cree haber corregido sigue teniendo lo que no ve.
+    """
+    texto = _texto_normal(defi, crudo)
+    if not texto:
+        raise LimiteError(
+            f"«{defi.alias[0]}» no puede quedar vacío",
+            clave="limite.texto_vacio",
+            datos={"ajuste": defi.alias[0]},
+        )
+    tope = defi.largo or 120
+    if len(texto) > tope:
+        raise LimiteError(
+            f"«{defi.alias[0]}» entra en {tope} caracteres y escribiste {len(texto)}",
+            clave="limite.texto_largo",
+            datos={"ajuste": defi.alias[0], "tope": str(tope), "largo": str(len(texto))},
+        )
+    return texto
+
+
+def _plantilla(defi: Definicion, crudo: str) -> str:
+    """El nombre de una plantilla de Meta, o LimiteError.
+
+    Se pasa a minúsculas ANTES de validar y no después, y eso es una decisión:
+    Meta sólo crea plantillas en minúsculas, así que «Pedido_Confirmado» no es
+    un nombre distinto sino el mismo mal tipeado, y rechazarlo le haría creer
+    al dueño que su plantilla no sirve. Bajar mayúsculas es idempotente, que es
+    lo que `validar(tecleado=False)` necesita para releer lo ya guardado.
+
+    LO QUE ESTO NO COMPRUEBA: que la plantilla EXISTA en Meta y esté aprobada.
+    Eso es una llamada a Graph y vive en app/readiness.py. Acá sólo se descarta
+    lo que Meta no podría haber creado nunca.
+    """
+    # SÓLO LAS PUNTAS. Aplastando TODOS los blancos, «pedido confirmado_v3» se
+    # guardaba como «pedidoconfirmado_v3»: un nombre distinto, válido para el
+    # regex, y que en Meta o no existe o es otra plantilla. Un espacio de más
+    # tiene que fallar al teclearse, no convertirse en silencio en otra cosa.
+    texto = str(crudo or "").strip().lower()
+    if not _NOMBRE_PLANTILLA.match(texto):
+        raise LimiteError(
+            f"«{defi.alias[0]}» tiene que ser el nombre de una plantilla de Meta "
+            f"—minúsculas, números y guión bajo—, no {crudo!r}",
+            clave="limite.plantilla_invalida",
+            datos={"ajuste": defi.alias[0], "valor": repr(crudo)},
+        )
+    return texto
+
+
+def _idioma_de_plantilla(defi: Definicion, crudo: str) -> str:
+    """"es_AR", "en_US"… el idioma en que la plantilla está REGISTRADA.
+
+    La forma normal es la de Meta: idioma en minúsculas, región en mayúsculas.
+    Normalizar acá evita el caso que más caro sale de todos los de plantillas:
+    el nombre existe, el idioma no coincide con el registro, y Meta contesta
+    que la plantilla no existe — o sea, el mismo error que un nombre mal
+    escrito, con el nombre bien escrito.
+    """
+    texto = "".join(str(crudo or "").split()).replace("-", "_")
+    partes = texto.split("_")
+    texto = partes[0].lower() + ("_" + partes[1].upper() if len(partes) == 2 else "")
+    if len(partes) > 2 or not _IDIOMA_DE_PLANTILLA.match(texto):
+        raise LimiteError(
+            f"«{defi.alias[0]}» es el idioma en que registraste la plantilla en "
+            f"Meta, como «es_AR» o «en_US», no {crudo!r}",
+            clave="limite.idioma_plantilla_invalido",
+            datos={"ajuste": defi.alias[0], "valor": repr(crudo)},
+        )
+    return texto
+
+
 def mostrar(nombre: str, valor: object, en_idioma: str | None = None) -> str:
     """Cómo se le MUESTRA al dueño el valor de un ajuste, en su idioma.
 
@@ -1257,6 +1583,18 @@ def validar(nombre: str, crudo: str, *, tecleado: bool = True) -> str:
         return _codigos_postales(defi, crudo)
     if defi.tipo == IDIOMA:
         return _idioma(defi, crudo)
+    # LOS TRES DE ABAJO TIENEN QUE DESPACHARSE ACÁ, Y NO ES DECORATIVO: lo que
+    # sigue es un `return _numero(...)` sin `if`, o sea que cualquier tipo que
+    # no se nombre en esta cadena se valida como si fuera un número. Un ajuste
+    # de texto que se olvide de su renglón no falla al agregarse: falla la
+    # primera vez que el dueño escribe el nombre de su negocio y el sistema le
+    # contesta que «Lácteos Plus» no es un número.
+    if defi.tipo == TEXTO:
+        return _texto_libre(defi, crudo)
+    if defi.tipo == PLANTILLA:
+        return _plantilla(defi, crudo)
+    if defi.tipo == IDIOMA_PLANTILLA:
+        return _idioma_de_plantilla(defi, crudo)
     # 12 significant digits, not the default 6: at :g an owner who sets a
     # 1234567 ceiling gets "1.23457e+06" stored, shown back to him and audited,
     # and reads back as 1234570. Every money limit here reaches seven digits.
@@ -1590,6 +1928,71 @@ def vigente(nombre: str) -> str:
         return crudo
 
 
+def de_negocio(nombre: str) -> str:
+    """Un dato del negocio o una plantilla: lo del dueño, si no el `.env`.
+
+    POR QUÉ ESTO NO ES `vigente()`, que es la pregunta importante de este
+    módulo. `vigente()` pasa por `_almacen()`, que FALLA CERRADO: si Redis no
+    contesta, levanta en vez de caer al entorno. Para un tope eso es lo único
+    correcto — caer al `.env` convertiría una caída de Redis en un límite más
+    flojo que el que el dueño apretó, y sin que nadie se entere.
+
+    Acá no hay flojo. El nombre de una plantilla de Meta no tiene una dirección
+    peligrosa: el `.env` no dice un nombre «más permisivo», dice el mismo
+    nombre de antes. Lo que sí es peligroso es lo otro, y es lo que esta
+    función existe para no hacer: que una caída de Redis deje al cliente sin el
+    aviso de que su pedido venció, porque no se pudo leer cómo se llama la
+    plantilla. Antes de este módulo eso lo resolvía un `os.getenv` que no podía
+    fallar, y hacer settable un valor no puede volver frágil lo que era firme.
+
+    Devuelve "" —y no el sentinela— cuando no hay nada configurado, así que
+    todos los `if not plantilla:` que ya existían siguen leyéndose igual.
+    """
+    return varios_de_negocio(nombre)[nombre]
+
+
+def varios_de_negocio(*nombres: str) -> dict[str, str]:
+    """Lo mismo que `de_negocio`, con UNA sola lectura del almacén.
+
+    Existe por el camino caliente: `app/conversacion.py` arma la primera línea
+    del prompt con cuatro de estos valores en cada mensaje, y cuatro `hgetall`
+    donde alcanza uno es la clase de costo que se paga por turno y nadie mira.
+    """
+    faltantes = [n for n in nombres if n not in TODOS]
+    if faltantes:
+        raise KeyError(faltantes[0])
+    try:
+        almacen = _almacen()
+    except LimiteError:
+        # Con el almacén ilegible el `.env` es la mejor respuesta que hay, y
+        # sigue siendo mejor que ninguna. Se deja dicho en el log: un valor que
+        # el dueño cambió por el panel y no está rigiendo tiene que poder verse.
+        print("[limites] no pude leer el almacén, uso el entorno para el negocio")
+        almacen = {}
+    resuelto = {}
+    for nombre in nombres:
+        crudo, origen = _resolver(nombre, almacen)
+        try:
+            valor = validar(nombre, crudo, tecleado=origen != "dueño")
+        except LimiteError:
+            defi = TODOS[nombre]
+            if defi.tipo == TEXTO:
+                # Un texto que no valida es, casi siempre, uno que no entra en
+                # el tope — y el valor de arranque del `.env` se venía
+                # recortando, no tirando. Se sigue recortando: perder el nombre
+                # del negocio es peor que mostrarlo corto. Teclear uno largo
+                # sigue fallando, que es donde el aviso sirve de algo.
+                valor = _texto_normal(defi, crudo)[: defi.largo or 120]
+            else:
+                # Lo demás no tiene recorte que lo salve: una plantilla a medias
+                # no existe en Meta. Vacío es lo que ya significaba «esto no
+                # está configurado» en cada llamador.
+                print(f"[limites] {nombre}: el valor guardado no es válido, lo ignoro")
+                valor = ""
+        resuelto[nombre] = "" if valor == NINGUNO else valor
+    return resuelto
+
+
 def _tag(telefono: str) -> str:
     """Hash corto, para el log. El número entero no va a stdout."""
     return hashlib.sha256(str(telefono or "").encode()).hexdigest()[:10]
@@ -1862,10 +2265,17 @@ def _auditar_en_erpnext(entrada: dict) -> None:
     global _durable_cache, _durable_cache_entrega, _durable_cache_idioma
     entrega_cambio = entrada["limite"] in ENTREGA
     idioma_cambio = entrada["limite"] in IDIOMAS
+    # El `else` de abajo era de `[limite]`, y por eso esta rama tiene que estar
+    # ANTES: cambiar el nombre de una plantilla caía en él y dejaba escrita la
+    # marca que arma el fusible de `_almacen()`. Ver la fila `negocio` de
+    # app/marcas.py — es el camino que rompe las ventas sin tocar un límite.
+    negocio_cambio = entrada["limite"] in NEGOCIO or entrada["limite"] in PLANTILLAS
     if idioma_cambio:
         marca = MARCA_DURABLE_IDIOMA
     elif entrega_cambio:
         marca = MARCA_DURABLE_ENTREGA
+    elif negocio_cambio:
+        marca = MARCA_DURABLE_NEGOCIO
     else:
         marca = MARCA_DURABLE
     texto = (
@@ -1886,6 +2296,9 @@ def _auditar_en_erpnext(entrada: dict) -> None:
         _durable_cache_idioma = None
     elif entrega_cambio:
         _durable_cache_entrega = None
+    elif negocio_cambio:
+        # A propósito no hay caché que invalidar: `[negocio]` no tiene lector.
+        pass
     else:
         _durable_cache = None
 

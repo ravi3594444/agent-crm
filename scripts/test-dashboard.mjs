@@ -33,9 +33,14 @@ function workspace(options = {}) {
       reset() { this.fields = {}; },
     };
   }
-  for (const id of ['app', 'toast', 'detail-dialog', 'connection-dialog', 'search', 'connection-error', 'chart-detail']) nodes[id] = element(id);
+  // `querySelector` sólo resuelve los ids de esta lista: uno que falte devuelve
+  // null y el primer render que lo lea se cae con un mensaje que no dice nada.
+  for (const id of ['app', 'toast', 'detail-dialog', 'connection-dialog', 'setting-dialog', 'price-dialog', 'search', 'connection-error', 'chart-detail', 'setting-error', 'price-error']) nodes[id] = element(id);
   nodes.search.tagName = 'INPUT';
-  const dialogs = [nodes['detail-dialog'], nodes['connection-dialog']];
+  // Los TRES diálogos. Esta lista es la que ve `document.querySelectorAll('dialog')`,
+  // que es donde se enganchan los listeners de cerrar: uno que no esté acá
+  // existe en index.html y no se cierra nunca en los tests.
+  const dialogs = [nodes['detail-dialog'], nodes['connection-dialog'], nodes['setting-dialog'], nodes['price-dialog']];
   document = {
     activeElement: null, visibilityState: 'visible', documentElement: { dataset: {} },
     body: { append(node) { decorations.push(node); } },
@@ -75,7 +80,14 @@ function workspace(options = {}) {
     button: element('submit'),
   });
   const submit = target => listeners.submit({ target, preventDefault() {} });
-  return { context, run, click, fixture, live, nodes, copied, downloads, requests, listeners, form, submit, preferences, timeouts, decorations };
+  // El formulario de un ajuste. `fields` es lo que lee el `FormData` de arriba.
+  const settingForm = (setting, value) => Object.assign(element('setting-form'), {
+    fields: { setting, value }, button: element('submit'),
+  });
+  const priceForm = (product, value) => Object.assign(element('price-form'), {
+    fields: { product, value }, button: element('submit'),
+  });
+  return { context, run, click, fixture, live, nodes, copied, downloads, requests, listeners, form, submit, settingForm, priceForm, preferences, timeouts, decorations };
 }
 
 const response = value => ({ ok: true, json: async () => value });
@@ -1063,4 +1075,218 @@ test('The timer mock never reuses an id, so a live timer is not overwritten', ()
   assert.notEqual(otroAviso, limpieza);
   assert.equal(w.timeouts.get(limpieza).ms, 1000);
   assert.equal(w.timeouts.get(otroAviso).ms, 4000);
+});
+
+// ---------------------------------------------------------------------------
+// Los ajustes del negocio. El panel PROPONE; el código lo confirma WhatsApp.
+// ---------------------------------------------------------------------------
+const settingsFixture = () => ({
+  problem: '',
+  pending: null,
+  groups: [
+    {
+      id: 'negocio', name: 'Your business', settings: [
+        { id: 'NOMBRE_NEGOCIO', name: 'nombre del negocio', meaning: 'How your business is named', unit: 'texto', kind: 'texto', optional: true, value: 'Plus Dairy', display: 'Plus Dairy', source: 'You set this', configured: true, problem: '' },
+      ],
+    },
+    {
+      id: 'limites', name: 'Automatic confirmation', settings: [
+        { id: 'AUTO_CONFIRM_MAX', name: 'monto maximo', meaning: 'Largest order confirmed without a person', unit: '$', kind: 'numero', optional: false, value: '0', display: '$ 0', source: 'Shipped default', configured: false, problem: '' },
+      ],
+    },
+  ],
+});
+
+// Un doble PROPIO para las escrituras: `apiFixture` afirma `options.body ===
+// undefined`, que es correcto para las lecturas y hace imposible probar un POST.
+function writeFixture(w, respuesta, status = 200) {
+  w.context.fetch = async (url, options) => {
+    w.requests.push([url, options]);
+    const path = new URL(url).pathname;
+    if (path === '/api/dashboard/settings') return new Response(JSON.stringify(settingsFixture()), { status: 200 });
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers['Content-Type'], 'application/json');
+    assert.equal(options.credentials, 'omit');
+    assert.equal(options.redirect, 'error');
+    return new Response(JSON.stringify(respuesta), { status });
+  };
+}
+
+test('Settings show where every value came from, and demo mode offers no Change button', async () => {
+  const w = workspace({ search: '?demo=1' });
+  await w.click({ view: 'settings' });
+  assert.match(w.nodes.app.innerHTML, /Your business/);
+  assert.match(w.nodes.app.innerHTML, /Automatic confirmation/);
+  // `source` es lo que deja mostrar un tope en 0 sin pintarlo de rojo: dice
+  // que el 0 viene de fábrica y no de alguien que rompió algo.
+  assert.match(w.nodes.app.innerHTML, /Shipped default/);
+  // Sin conexión no hay nada que proponer, y no se ofrece.
+  assert.ok(!/data-setting=/.test(w.nodes.app.innerHTML));
+  assert.equal(w.requests.length, 0);
+});
+
+test('Proposing a setting sends a POST and never shows a code', async () => {
+  const w = workspace();
+  w.live();
+  writeFixture(w, { ok: true, setting: 'AUTO_CONFIRM_MAX', name: 'monto maximo', detail: 'Te mandé el código por WhatsApp.' });
+  await w.click({ view: 'settings' });
+  await w.run("openSetting('AUTO_CONFIRM_MAX')");
+  assert.match(w.nodes['setting-dialog'].innerHTML, /monto maximo/);
+  // El valor actual se refleja en un atributo, así que pasa por `escape()`.
+  assert.match(w.nodes['setting-dialog'].innerHTML, /value="0"/);
+
+  await w.submit(w.settingForm('AUTO_CONFIRM_MAX', '30000'));
+
+  const post = w.requests.find(([, o]) => o.method === 'POST');
+  assert.ok(post, 'tiene que haber salido un POST');
+  assert.equal(new URL(post[0]).pathname, '/api/dashboard/settings/propose');
+  assert.deepEqual(JSON.parse(post[1].body), { setting: 'AUTO_CONFIRM_MAX', value: '30000' });
+  assert.equal(w.nodes['setting-dialog'].open, false);
+  assert.match(w.nodes.toast.textContent, /código/);
+  // No hay ninguna pantalla que aplique el código, y no se inventa una.
+  assert.ok(!/four-digit code<\/label>|name="code"/.test(w.nodes['setting-dialog'].innerHTML));
+});
+
+test('A rejected value keeps the dialog open and says why', async () => {
+  const w = workspace();
+  w.live();
+  // 200 con `ok:false` es el caso NORMAL de un valor que no sirve. Tratar todo
+  // 200 como éxito cerraba el diálogo diciendo que el cambio quedó pedido.
+  writeFixture(w, { ok: false, pending: false, detail: '«monto maximo» no es un número: «mucho»' });
+  await w.click({ view: 'settings' });
+  await w.run("openSetting('AUTO_CONFIRM_MAX')");
+  await w.submit(w.settingForm('AUTO_CONFIRM_MAX', 'mucho'));
+
+  assert.equal(w.nodes['setting-dialog'].open, true);
+  assert.match(w.nodes['setting-error'].textContent, /no es un número/);
+});
+
+test('A change already waiting is shown, so a second one does not silently replace it', async () => {
+  const w = workspace();
+  w.live();
+  w.context.fetch = async (url) => {
+    w.requests.push([url]);
+    const esperando = settingsFixture();
+    esperando.pending = { id: 'AUTO_CONFIRM_MAX', name: 'monto maximo', from: '0', to: '30000' };
+    return new Response(JSON.stringify(esperando), { status: 200 });
+  };
+  await w.click({ view: 'settings' });
+  assert.match(w.nodes.app.innerHTML, /waiting for your four-digit code on WhatsApp/);
+  assert.match(w.nodes.app.innerHTML, /0 → 30000/);
+});
+
+// ---------------------------------------------------------------------------
+// Los precios de lista, en la pantalla de inventario.
+// ---------------------------------------------------------------------------
+const pricesFixture = (over = {}) => ({
+  priceList: 'Standard Selling', currency: 'ARS', bandPct: 15, canChange: true,
+  items: [{ id: 'LECHE-ENT-1L', price: 1250, unit: 'Unidad' }],
+  errors: [], truncated: [], ...over,
+});
+
+test('Inventory says why a price cannot be changed instead of hiding the button', async () => {
+  const w = workspace();
+  w.live();
+  // La banda arranca en 0 —ningún precio se escribe solo— y eso es la postura
+  // de fábrica, no un error. Sin el aviso, la pantalla se ve rota.
+  w.context.fetch = async (url) => {
+    w.requests.push([url]);
+    return new Response(JSON.stringify(pricesFixture({ bandPct: 0, canChange: false })), { status: 200 });
+  };
+  await w.click({ view: 'inventory' });
+  assert.match(w.nodes.app.innerHTML, /Price changes from this dashboard are off/);
+  assert.ok(!/data-price=/.test(w.nodes.app.innerHTML));
+});
+
+test('A list price can be changed, and a rejected one says why', async () => {
+  const w = workspace();
+  w.live();
+  let respuesta = { productId: 'LECHE-ENT-1L', ok: true, price: 1300, detail: 'El precio quedó en 1300.' };
+  w.context.fetch = async (url, options) => {
+    w.requests.push([url, options]);
+    if (!options?.method) return new Response(JSON.stringify(pricesFixture()), { status: 200 });
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers['Content-Type'], 'application/json');
+    return new Response(JSON.stringify(respuesta), { status: 200 });
+  };
+  await w.click({ view: 'inventory' });
+  assert.match(w.nodes.app.innerHTML, /data-price="LECHE-ENT-1L"/);
+  assert.match(w.nodes.app.innerHTML, /up to 15% per product per day/);
+
+  await w.run("openPrice('LECHE-ENT-1L')");
+  await w.submit(w.priceForm('LECHE-ENT-1L', '1300'));
+  const post = w.requests.find(([, o]) => o?.method === 'POST');
+  assert.equal(new URL(post[0]).pathname, '/api/dashboard/products/LECHE-ENT-1L/price');
+  assert.deepEqual(JSON.parse(post[1].body), { value: '1300' });
+  assert.equal(w.nodes['price-dialog'].open, false);
+
+  // Fuera de banda: 200 con `ok:false`. El diálogo se queda abierto diciendo
+  // por qué, en vez de cerrarse afirmando que el precio cambió.
+  respuesta = { productId: 'LECHE-ENT-1L', ok: false, price: 1250, detail: 'Ese salto es del 40%, y la banda es 15%.' };
+  await w.run("openPrice('LECHE-ENT-1L')");
+  await w.submit(w.priceForm('LECHE-ENT-1L', '1750'));
+  assert.equal(w.nodes['price-dialog'].open, true);
+  assert.match(w.nodes['price-error'].textContent, /la banda es 15%/);
+});
+
+test('A product with no price in the list reads as unpriced, not as a failed read', async () => {
+  const w = workspace();
+  w.live();
+  w.context.fetch = async (url) => {
+    w.requests.push([url]);
+    return new Response(JSON.stringify(pricesFixture({ items: [] })), { status: 200 });
+  };
+  await w.click({ view: 'inventory' });
+  // Los dos estados son distintos y se dicen distinto: en blanco, el dueño lee
+  // un problema de conexión sobre un producto al que sólo le falta el precio.
+  assert.match(w.nodes.app.innerHTML, /Not priced/);
+});
+
+test('A truncated price list reads as unknown, not as an unpriced product', async () => {
+  const w = workspace();
+  w.live();
+  // El servidor devuelve como mucho 250 filas de precio y lo avisa. El
+  // inventario se carga aparte, así que un producto de la pantalla puede no
+  // estar entre esas 250: eso es «no lo sé», no «no tiene precio» — y decir lo
+  // segundo es una afirmación sobre el catálogo sacada de un límite de página.
+  w.context.fetch = async (url) => {
+    w.requests.push([url]);
+    return new Response(JSON.stringify(pricesFixture({ items: [], truncated: ['prices'] })), { status: 200 });
+  };
+  await w.click({ view: 'inventory' });
+  assert.ok(!/Not priced/.test(w.nodes.app.innerHTML));
+  assert.match(w.nodes.app.innerHTML, /Only the first 250 prices were read/);
+});
+
+test('The silent minute refresh does not wipe the settings and price reports', async () => {
+  const w = workspace();
+  w.live();
+  w.context.fetch = async (url) => {
+    w.requests.push([url]);
+    const path = new URL(url).pathname;
+    if (path === '/api/dashboard/settings') return new Response(JSON.stringify(settingsFixture()), { status: 200 });
+    if (path === '/api/dashboard/prices') return new Response(JSON.stringify(pricesFixture()), { status: 200 });
+    return new Response(JSON.stringify(w.fixture()), { status: 200 });
+  };
+  // Las DOS pantallas, porque cada una carga lo suyo: sin pasar por inventario,
+  // `data.prices` sigue siendo el fixture de demo y la afirmación de abajo no
+  // mediría que el informe LEÍDO sobrevive al refresco.
+  await w.click({ view: 'inventory' });
+  await w.click({ view: 'settings' });
+  assert.match(w.nodes.app.innerHTML, /Automatic confirmation/);
+
+  // `refresh(true)` es lo que dispara el temporizador cada minuto, y su rama
+  // silenciosa NO vuelve a leer la vista: reconstruye `data` desde el snapshot
+  // preservando los informes auxiliares. Los dos nuevos no estaban en esa
+  // lista, así que la pantalla quedaba en blanco hasta navegar y volver.
+  await w.run('refresh(true)');
+  // SE AFIRMA SOBRE `data` Y CON UNA FORMA, no con `!== 'null'`: al caerse del
+  // spread el campo queda `undefined`, y `JSON.stringify(undefined)` devuelve
+  // `undefined` —no la cadena 'null'—, así que la comparación pasaba con el
+  // bug puesto. Y la rama silenciosa NO vuelve a renderizar, así que mirar el
+  // innerHTML de antes tampoco medía nada: hay que renderizar de nuevo.
+  assert.equal(w.run('String(data.settings?.groups?.length)'), '2');
+  assert.equal(w.run('String(data.prices?.items?.length)'), '1');
+  w.run('render()');
+  assert.match(w.nodes.app.innerHTML, /Automatic confirmation/);
 });
