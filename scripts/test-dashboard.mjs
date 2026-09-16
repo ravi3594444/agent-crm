@@ -787,10 +787,12 @@ test('Advice rejects unknown kinds, invalid references, amounts and text', () =>
     w.context.bad = { ...adviceFixture(), items: [{ ...adviceFixture().items[0], ...change }] };
     assert.throws(() => w.run('validateAdvice(bad)'), /invalid/);
   }
-  for (const change of [{ enabled: null }, { currency: null }, { generatedAt: '2026-02-30T10:00:00Z' }, { items: null }, { errors: null }, { truncated: [1] }]) {
+  for (const change of [{ enabled: null }, { currency: 'ars' }, { generatedAt: '2026-02-30T10:00:00Z' }, { items: null }, { errors: null }, { truncated: [1] }]) {
     w.context.bad = { ...adviceFixture(), ...change }; assert.throws(() => w.run('validateAdvice(bad)'), /invalid/);
   }
   w.context.good = adviceFixture();
+  w.context.sinMoneda = { ...adviceFixture(), currency: null };
+  assert.equal(w.run('validateAdvice(sinMoneda).currency'), null);
   assert.equal(w.run('validateAdvice(good).items[3].amount'), null);
   assert.equal(w.run('validateAdvice(good).items[1].amount'), -18400);
 });
@@ -1038,8 +1040,13 @@ test('Report lists beyond the display cap are rejected instead of rendered', () 
   assert.throws(() => w.run('validateSales(bad)'), /invalid/);
   w.context.bad = { ...adviceFixture(), items: Array.from({ length: 501 }, () => adviceFixture().items[0]) };
   assert.throws(() => w.run('validateAdvice(bad)'), /invalid/);
-  w.context.good = salesFixture();
-  assert.ok(w.run('validateSales(good).daily.length') <= 500);
+  // El límite se prueba por sus DOS lados: con sólo el rechazo, un tope
+  // accidentalmente más bajo dejaría este test en verde.
+  const dias = Array.from({ length: 500 }, (_, i) => ({
+    date: new Date(Date.UTC(2025, 0, 1 + i)).toISOString().slice(0, 10), total: 1, orders: 1,
+  }));
+  w.context.good = { ...salesFixture(), since: dias[0].date, until: dias[499].date, daily: dias };
+  assert.equal(w.run('validateSales(good).daily.length'), 500);
 });
 
 

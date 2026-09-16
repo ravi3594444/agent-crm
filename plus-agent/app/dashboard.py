@@ -1450,7 +1450,7 @@ def sales(dias: int = DIAS_VENTAS_DEFECTO) -> dict:
     empresa = erpnext.default_company()
     hoy = policy._hoy_del_negocio()
     desde = hoy - timedelta(days=max(0, dias - 1))
-    vacio = {"currency": "", "since": desde.isoformat(), "until": hoy.isoformat(),
+    vacio = {"currency": None, "since": desde.isoformat(), "until": hoy.isoformat(),
              "total": None, "orders": None, "averageOrder": None, "daily": None,
              "topProducts": None, "topCustomers": None,
              "errors": errors, "truncated": truncated}
@@ -1461,13 +1461,15 @@ def sales(dias: int = DIAS_VENTAS_DEFECTO) -> dict:
                 erpnext.get_doc("Company", empresa, timeout=READ_TIMEOUT).get("default_currency") or ""
             )
         except erpnext.ERPNextError:
-            moneda = ""
+            # None y no "": el panel distingue «no disponible» de un valor.
+            moneda = None
             errors.append("currency")
         try:
             pedidos = erpnext.get_list(
                 "Sales Order",
                 filters=[["docstatus", "=", 1], ["company", "=", empresa],
-                         ["transaction_date", ">=", desde.isoformat()]],
+                         ["transaction_date", ">=", desde.isoformat()],
+                         ["transaction_date", "<=", hoy.isoformat()]],
                 fields=["name", "customer", "customer_name", "grand_total", "transaction_date"],
                 order_by="transaction_date desc", limit=LIMIT, timeout=READ_TIMEOUT,
             )
@@ -1476,7 +1478,7 @@ def sales(dias: int = DIAS_VENTAS_DEFECTO) -> dict:
             return {**vacio, "currency": moneda}
         if len(pedidos) >= LIMIT:
             truncated.append("sales")
-        renglones: list[dict] = []
+        renglones: list[dict] | None = []
         if pedidos:
             try:
                 renglones = erpnext.get_list(
@@ -1488,11 +1490,15 @@ def sales(dias: int = DIAS_VENTAS_DEFECTO) -> dict:
                     parent="Sales Order",
                     filters=[["parent", "in", [str(x.get("name") or "") for x in pedidos]]],
                     fields=["parent", "item_code", "item_name", "qty", "amount"],
-                    limit=LIMIT * 8, timeout=READ_TIMEOUT,
+                    # +1 es el centinela: con él se sabe si el tope se
+                    # ALCANZÓ de verdad, en vez de suponerlo.
+                    limit=LIMIT * 8 + 1, timeout=READ_TIMEOUT,
                 )
             except erpnext.ERPNextError:
+                # No es un ranking vacío: es un ranking que no se pudo leer. Es
+                # la misma distinción que `averageOrder`, un campo más allá.
                 errors.append("products")
-                truncated.append("topProducts")
+                renglones = None
 
     dentro = [x for x in pedidos if (_dia_de(x) or hoy) >= desde]
     total = sum(_monto(x.get("grand_total")) for x in dentro)
@@ -1512,8 +1518,11 @@ def sales(dias: int = DIAS_VENTAS_DEFECTO) -> dict:
                 "orders": 0, "total": 0.0})
             fila["orders"] += 1
             fila["total"] += _monto(x.get("grand_total"))
-    por_producto: dict[str, dict] = {}
-    for r in renglones:
+    if renglones is not None and len(renglones) > LIMIT * 8:
+        truncated.append("topProducts")
+        renglones = renglones[:LIMIT * 8]
+    por_producto: dict[str, dict] | None = None if renglones is None else {}
+    for r in renglones or ():
         code = str(r.get("item_code") or "")
         if not code:
             continue
@@ -1522,7 +1531,7 @@ def sales(dias: int = DIAS_VENTAS_DEFECTO) -> dict:
             "quantity": 0.0, "total": 0.0})
         fila["quantity"] += _monto(r.get("qty"))
         fila["total"] += _monto(r.get("amount"))
-    for fila in list(por_dia.values()) + list(por_cliente.values()) + list(por_producto.values()):
+    for fila in list(por_dia.values()) + list(por_cliente.values()) + list((por_producto or {}).values()):
         fila["total"] = round(fila["total"], 2)
 
     return {
@@ -1535,7 +1544,8 @@ def sales(dias: int = DIAS_VENTAS_DEFECTO) -> dict:
         # «vendí y el ticket fue cero», que es una afirmación que nadie midió.
         "averageOrder": round(total / len(dentro), 2) if dentro else None,
         "daily": sorted(por_dia.values(), key=lambda f: f["date"]),
-        "topProducts": sorted(por_producto.values(), key=lambda f: -f["total"])[:10],
+        "topProducts": None if por_producto is None
+        else sorted(por_producto.values(), key=lambda f: -f["total"])[:10],
         "topCustomers": sorted(por_cliente.values(), key=lambda f: -f["total"])[:10],
         "errors": errors,
         "truncated": truncated,
@@ -1581,7 +1591,7 @@ def advice() -> dict:
                 "Company", erpnext.default_company(), timeout=READ_TIMEOUT
             ).get("default_currency") or "")
     except erpnext.ERPNextError:
-        moneda = ""
+        moneda = None
         errors.append("currency")
     for clase, campo, detectar in detectores:
         try:

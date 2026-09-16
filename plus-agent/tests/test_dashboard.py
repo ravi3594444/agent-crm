@@ -480,3 +480,79 @@ class ConsejosDelPanelTest(unittest.TestCase):
         ]})
         self.assertEqual([i["id"] for i in salida["items"]], ["p:grande", "p:chico"], salida)
         self.assertNotIn("weight", salida["items"][0])
+
+
+class VentasHallazgosTest(unittest.TestCase):
+    """Lo que la revisión encontró y este archivo no probaba."""
+
+    def _correr(self, pedidos, renglones=(), dias=7, llamadas=None, romper=()):
+        from contextlib import nullcontext
+
+        registro = llamadas if llamadas is not None else []
+
+        class Falso:
+            ERPNextError = ERP_ERROR
+            default_company = staticmethod(lambda: "Lacteos Test SA")
+            manager_scope = staticmethod(nullcontext)
+
+            @staticmethod
+            def get_doc(doctype, name, timeout=None):
+                if "moneda" in romper:
+                    raise ERP_ERROR("sin moneda")
+                return {"default_currency": "ARS"}
+
+            @staticmethod
+            def get_list(doctype, **kwargs):
+                registro.append((doctype, kwargs))
+                if doctype == "Sales Order Item":
+                    if "renglones" in romper:
+                        raise ERP_ERROR("sin renglones")
+                    return list(renglones)
+                return list(pedidos)
+
+        return _con_modulos({"app.erpnext": Falso, "app.policy": PolicyFalso},
+                            lambda: dashboard.sales(dias))
+
+    def test_un_pedido_con_fecha_futura_no_entra(self):
+        """ERPNext deja fechar un Sales Order adelante. Sin tope superior entra
+        en los totales y arma una fila posterior a `until`, y el validador del
+        panel rechaza el informe ENTERO por incoherente."""
+        llamadas = []
+        self._correr([], llamadas=llamadas)
+        filtros = next(k["filters"] for d, k in llamadas if d == "Sales Order")
+        operadores = {(f[0], f[1]) for f in filtros}
+        self.assertIn(("transaction_date", "<="), operadores, filtros)
+        self.assertIn(("transaction_date", ">="), operadores, filtros)
+
+    def test_la_moneda_que_no_se_pudo_leer_es_None_y_no_cadena_vacia(self):
+        """El validador acepta una moneda ISO o `null`. Con `""` tiraba la
+        respuesta entera, incluido el `errors` que explicaba la falla."""
+        salida = self._correr([], romper=("moneda",))
+        self.assertIsNone(salida["currency"], salida)
+        self.assertIn("currency", salida["errors"], salida)
+
+    def test_un_ranking_que_no_se_pudo_leer_es_None_y_no_una_lista_vacia(self):
+        """`[]` dice «no se vendió nada»; `None` dice «no pude mirar». Es la
+        misma distinción que `averageOrder`, un campo más allá."""
+        pedidos = [{"name": "SO-1", "customer": "C1", "customer_name": "Uno",
+                    "grand_total": 100, "transaction_date": "2026-09-14"}]
+        salida = self._correr(pedidos, romper=("renglones",))
+        self.assertIsNone(salida["topProducts"], salida)
+        self.assertIn("products", salida["errors"], salida)
+        # El ranking de clientes sale de los pedidos, que SÍ se leyeron.
+        self.assertEqual(len(salida["topCustomers"]), 1, salida)
+        # Y no se anuncia un recorte que nadie midió.
+        self.assertNotIn("topProducts", salida["truncated"], salida)
+
+    def test_el_recorte_se_anuncia_cuando_el_tope_se_alcanza_de_verdad(self):
+        """El centinela `+1` distingue «llegué al tope» de «esto es todo»."""
+        pedidos = [{"name": "SO-1", "customer": "C1", "customer_name": "Uno",
+                    "grand_total": 100, "transaction_date": "2026-09-14"}]
+        tope = dashboard.LIMIT * 8
+        muchos = [{"parent": "SO-1", "item_code": f"I{i}", "item_name": "x",
+                   "qty": 1, "amount": 1} for i in range(tope + 1)]
+        salida = self._correr(pedidos, muchos)
+        self.assertIn("topProducts", salida["truncated"], salida)
+        justo = muchos[:tope]
+        salida = self._correr(pedidos, justo)
+        self.assertNotIn("topProducts", salida["truncated"], salida)

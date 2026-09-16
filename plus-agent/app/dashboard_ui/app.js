@@ -82,7 +82,7 @@ function makeDemo(range=7) {
     topCustomers:customers.map(c=>{const rows=booked.filter(o=>o.customerId===c.id);return {id:c.id,name:c.name,orders:rows.length,total:rows.reduce((sum,o)=>sum+o.total,0)};}).filter(c=>c.orders).sort((a,b)=>b.total-a.total),errors:[],truncated:[]});
   const advice=validateAdvice({generatedAt:at('15:50'),enabled:false,currency:'ARS',items:[
     {id:'demo-dormido',kind:'dormido',title:'A regular has gone quiet',body:'Café Magnolia has not ordered in the last 21 days.',about:'Café Magnolia',assumption:'Compared with a weekly ordering pattern over the previous eight weeks.',amount:null,customerId:'CUST-008',orderId:null,productId:null},
-    {id:'demo-perdida',kind:'perdida',title:'Sold below cost',body:'Two lines on this order went out below their recorded purchase cost.',about:orders[3].id,assumption:'Cost taken from the purchase price list; rebates are not included.',amount:-18400,customerId:orders[3].customerId,orderId:orders[3].id,productId:null},
+    {id:'demo-perdida',kind:'perdida',title:'Sold below cost',body:'Two lines on this order went out below their recorded purchase cost.',about:orders[3].id,assumption:'Cost taken from the purchase price list; rebates are not included.',amount:-18400,customerId:null,orderId:orders[3].id,productId:null},
     {id:'demo-deuda',kind:'deuda',title:'An overdue balance needs a look',body:'Almacén Don Pedro has a balance beyond the usual payment window.',about:'Almacén Don Pedro',assumption:'A 14-day payment tolerance; recent unallocated payments may change this.',amount:62500,customerId:'CUST-001',orderId:null,productId:null},
     {id:'demo-quiebre',kind:'quiebre',title:'Creamy cheese may run out',body:'Available stock may not last until the next scheduled delivery.',about:'Creamy cheese · 1 kg',assumption:'Demand follows the last seven days and the next delivery arrives in two days.',customerId:null,orderId:null,productId:'QUESO-CREM-1K'}
   ],errors:[],truncated:[]});
@@ -734,7 +734,7 @@ function validateSales(value) {
 }
 function isCurrency(value){return isText(value)&&/^[A-Z]{3}$/.test(value);}
 function validateAdvice(value) {
-  requireValue(value&&isMoment(value.generatedAt)&&typeof value.enabled==='boolean'&&isCurrency(value.currency)&&listaSana(value.items),'advice information');
+  requireValue(value&&isMoment(value.generatedAt)&&typeof value.enabled==='boolean'&&(value.currency===null||isCurrency(value.currency))&&listaSana(value.items),'advice information');
   requireValue(['errors','truncated'].every(key=>Array.isArray(value[key])&&value[key].every(isText)),'advice notices');
   const items=value.items.map(row=>{
     requireValue(row&&isId(row.id)&&['perdida','dormido','deuda','quiebre'].includes(row.kind)&&['title','body','about','assumption'].every(key=>isText(row[key])),'advice finding');
