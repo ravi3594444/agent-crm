@@ -317,6 +317,30 @@ _ERROR_MSG = (
     "ni de errores técnicos."
 )
 
+# LA MISMA FALLA, DEL LADO DEL DUEÑO, DICE OTRA COSA
+# --------------------------------------------------
+# `_ERROR_MSG` está escrito para el agente de CLIENTES —«decile al cliente»,
+# «llamá a escalar_a_humano»— y lo usaban los dos. Medido en una conversación
+# real del dueño: `contar_stock` falló contra ERPNext, el modelo leyó esta
+# orden, y el dueño recibió una tarjeta «🙋 Un cliente necesita una persona /
+# Cliente: cuenta no registrada / Tel: <su propio número>» diciéndole que
+# alguien lo iba a mirar. Él ES ese alguien. Y como el mensaje tampoco dice que
+# no se guardó nada, el modelo completó el hueco con lo que sonaba bien: «ya te
+# anoté los 5 kg de leche», sobre una escritura que nunca ocurrió.
+#
+# Las dos mitades que cambian son las dos que estaban mal para este lado:
+# «no se guardó nada» —que es lo único que impide la confirmación inventada— y
+# «no escales», porque derivar al equipo a alguien que ES el equipo es mandarle
+# un aviso sobre sí mismo. El nombre de la herramienta NO se nombra acá: si
+# `escalar_a_humano` deja de existir mañana, esto sigue siendo cierto.
+_ERROR_MSG_GERENCIA = (
+    "Esa herramienta falló y NO GUARDÓ NADA. No inventes un resultado y no digas "
+    "que quedó anotado, registrado, pendiente ni a medias: no quedó nada. "
+    "Decíle en UNA línea qué no se pudo hacer, con palabras del negocio y sin "
+    "jerga técnica, y ofrecele intentarlo de nuevo. NO lo derives a una persona "
+    "del equipo: el que te está escribiendo ES el equipo."
+)
+
 # UN VALOR DE ENUM EQUIVOCADO NO ES UNA HERRAMIENTA ROTA
 # -----------------------------------------------------
 # `_ERROR_MSG` manda a escalar_a_humano, y para una herramienta que falló de
@@ -363,22 +387,48 @@ def _error_de_herramienta(exc: Exception) -> str:
     return _ERROR_MSG
 
 
+def _error_de_herramienta_gerencia(exc: Exception) -> str:
+    """Lo mismo para el agente del dueño, con la otra mitad del mensaje.
+
+    El tratamiento del enum es idéntico a propósito —un valor mal escrito no es
+    una herramienta rota de ningún lado del teléfono—; lo que cambia es sólo el
+    texto de la falla de verdad. Son dos ToolNode distintos, así que el que
+    decide cuál se usa es el agente y no un `if` sobre algo que el modelo
+    escribe.
+    """
+    if isinstance(exc, ValidationError):
+        detalle = _valores_esperados(exc)
+        if detalle:
+            return _error_de_herramienta(exc)
+    return _ERROR_MSG_GERENCIA
+
+
 
 # The system prompt is built per call (prompt=) and never stored in the
 # checkpoint; the model only sees a bounded tail of the thread
 # (pre_model_hook=). See app/conversacion.py for why.
+TOOLNODE_CLIENTES = ToolNodeSinInventario(
+    TOOLS_CLIENTES, handle_tool_errors=_error_de_herramienta
+)
+# CADA AGENTE CON SU MANEJADOR, y son dos objetos con nombre porque cuál le toca
+# a cuál es justamente lo que estuvo mal: los dos usaban el de clientes, y el
+# dueño terminó recibiendo una tarjeta de «un cliente necesita una persona»
+# sobre sí mismo. Un `handle_tool_errors` compartido no se ve desde afuera del
+# grafo compilado, y lo que no se puede mirar no se puede probar.
+TOOLNODE_GERENCIA = ToolNodeSinInventario(
+    TOOLS_AGENTE_GERENCIA, handle_tool_errors=_error_de_herramienta_gerencia
+)
+
 agente_clientes = create_react_agent(
     model=_modelo_clientes,
-    tools=ToolNodeSinInventario(TOOLS_CLIENTES, handle_tool_errors=_error_de_herramienta),
+    tools=TOOLNODE_CLIENTES,
     prompt=prompt_clientes,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,
 )
 agente_gerencia = create_react_agent(
     model=_modelo_gerencia,
-    tools=ToolNodeSinInventario(
-        TOOLS_AGENTE_GERENCIA, handle_tool_errors=_error_de_herramienta
-    ),
+    tools=TOOLNODE_GERENCIA,
     prompt=prompt_gerencia,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,

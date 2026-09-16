@@ -1180,3 +1180,58 @@ def test_el_error_de_una_herramienta_pide_una_sola_disculpa() -> None:
     assert "escalar_a_humano" in graph._ERROR_MSG
     assert "No inventes un resultado" in graph._ERROR_MSG
     assert "No le hables de herramientas" in graph._ERROR_MSG
+
+
+def test_del_lado_del_dueno_una_herramienta_rota_no_lo_deriva_a_si_mismo() -> None:
+    """La misma falla, contada para el otro lado del teléfono.
+
+    `_ERROR_MSG` está escrito para el agente de clientes —«decile al cliente»,
+    «llamá a escalar_a_humano»— y lo usaban LOS DOS. Medido en vivo: un conteo
+    que ERPNext rechazó terminó en una tarjeta «🙋 Un cliente necesita una
+    persona / Cliente: cuenta no registrada / Tel: <el número del dueño>»,
+    prometiéndole que alguien lo iba a mirar. Él es ese alguien.
+
+    Se afirma la conducta de la función, no el catálogo: el mensaje de gerencia
+    tiene que decir que no se guardó nada —es lo único que impide la
+    confirmación inventada— y no puede mandar a derivar.
+
+    MUTACIÓN: que `_error_de_herramienta_gerencia` devuelva `_ERROR_MSG`. Cae
+    ésta y sólo ésta.
+    """
+    from app import graph
+
+    del_dueno = graph._error_de_herramienta_gerencia(RuntimeError("ERPNext 417"))
+
+    assert "NO GUARDÓ NADA" in del_dueno
+    assert "escalar_a_humano" not in del_dueno
+    # Y el de clientes sigue siendo el que era: ahí derivar SÍ es lo correcto.
+    assert "escalar_a_humano" in graph._error_de_herramienta(RuntimeError("x"))
+
+
+def test_cada_agente_lleva_su_propio_manejador_de_errores() -> None:
+    """EL CABLE. Los dos mensajes pueden estar perfectos y el agente usar el otro.
+
+    Es exactamente lo que pasaba: el texto de clientes existía y era correcto
+    para clientes, y el ToolNode de gerencia lo usaba igual.
+
+    MUTACIÓN: `TOOLNODE_GERENCIA` con `handle_tool_errors=_error_de_herramienta`.
+    Cae ésta y sólo ésta.
+    """
+    from app import graph
+
+    assert _manejador(graph.TOOLNODE_GERENCIA) is graph._error_de_herramienta_gerencia
+    assert _manejador(graph.TOOLNODE_CLIENTES) is graph._error_de_herramienta
+
+
+def _manejador(nodo):
+    """El `handle_tool_errors` que quedó puesto, se llame como se llame adentro.
+
+    langgraph lo guarda en `_handle_tool_errors`, privado. Se prueban los dos
+    nombres para que una renombrada de la librería —las versiones están fijas,
+    así que sería a propósito— caiga acá con una frase y no con un
+    `AttributeError` que parece un bug del agente.
+    """
+    for nombre in ("handle_tool_errors", "_handle_tool_errors"):
+        if hasattr(nodo, nombre):
+            return getattr(nodo, nombre)
+    raise AssertionError("langgraph ya no expone el manejador de errores del ToolNode")

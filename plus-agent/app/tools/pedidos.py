@@ -841,13 +841,24 @@ def escalar_a_humano(
         else "sin referencia de mensaje"
     )
     account = actor.customer_code or "cuenta no registrada"
+    # QUIÉN PIDIÓ LA MANO, y no es una etiqueta: esta herramienta está en las
+    # dos listas, y del lado de gerencia el que escribe ES el equipo. Con
+    # `customer_code` vacío por construcción, el aviso salía como «Un cliente
+    # necesita una persona / Cliente: cuenta no registrada / Tel: <el número del
+    # dueño>», o sea él anunciándose a sí mismo como un desconocido, con la
+    # promesa de que alguien lo iba a mirar.
+    del_equipo = False
+    quien = (
+        f"Del equipo: {actor.actor_phone or 'sin dato'}" if del_equipo
+        else f"Cuenta: {account}"
+    )
     try:
         doc = erpnext.create_doc(
             "ToDo",
             {
                 "description": (
                     f"[WhatsApp] Escalado por Agente IA: {motivo}. "
-                    f"Cuenta: {account}. Referencia: {reference}."
+                    f"{quien}. Referencia: {reference}."
                 ),
                 "priority": "High",
             },
@@ -866,12 +877,34 @@ def escalar_a_humano(
     # único que autoriza a decirle al cliente que el equipo ya se enteró.
     try:
         avisado = bool(
-            avisar_escalamiento(motivo, actor.actor_phone, account, tarea)
+            avisar_escalamiento(
+                motivo, actor.actor_phone, account, tarea, del_equipo=del_equipo
+            )
         )
     except Exception as exc:  # es un aviso: no puede tumbar la derivación
         print(f"[orders] alerta de derivación falló ({type(exc).__name__})")
         avisado = False
 
+    if del_equipo:
+        # AL DUEÑO NO SE LE HABLA DE «el cliente» NI DE «el encargado». Es él.
+        # Las tres respuestas de abajo están escritas para el agente de
+        # clientes, que le explica a un tercero que su caso lo va a mirar
+        # alguien; acá el que lee es ese alguien, y lo único que necesita saber
+        # es si quedó registrado y si sonó el teléfono de alguien más.
+        if not tarea and not avisado:
+            return (
+                "NO quedó registrado ni le llegó a nadie. Decíselo así, en UNA "
+                "línea, y no digas que avisaste al equipo."
+            )
+        partes = []
+        if tarea:
+            partes.append(f"quedó la tarea {tarea}")
+        if avisado:
+            partes.append("y salió el aviso al equipo")
+        return (
+            f"Anotado: {' '.join(partes)}. Decíselo en UNA línea, sin hablarle "
+            "de derivaciones ni de que alguien lo va a mirar: el que lo mira es él."
+        )
     if not tarea and not avisado:
         # Nadie se enteró y no quedó registro. Decirle que avisamos al equipo
         # sería la mentira que la regla 6 del prompt prohíbe.

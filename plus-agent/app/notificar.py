@@ -751,15 +751,25 @@ def avisar_falla_tecnica(telefono: str, texto: str, error: str) -> bool:
 
 
 def avisar_escalamiento(
-    motivo: str, telefono: str, cliente: str, tarea: str = ""
+    motivo: str, telefono: str, cliente: str, tarea: str = "", *, del_equipo: bool = False
 ) -> bool:
     """An ERPNext ToDo is invisible until someone opens the system; a complaint
-    would wait until morning. This makes the phone ring instead."""
+    would wait until morning. This makes the phone ring instead.
+
+    `del_equipo` dice QUIÉN pidió la mano, y cambia la tarjeta entera. Sin él,
+    una herramienta que falla del lado del dueño le mandaba a él mismo «Un
+    cliente necesita una persona / Cliente: cuenta no registrada / Tel: <su
+    número>» y le prometía que alguien lo iba a mirar. Él es ese alguien. El
+    default es `False` porque el llamador original es el agente de clientes y
+    una etiqueta de privacidad que se equivoca hacia «cliente» no cuenta de más
+    sobre nadie.
+    """
     from app import idioma as idioma_mod
 
     lengua = _lengua_equipo()
     cuerpo = idioma_mod.t(
-        "gerencia.escalamiento_cuerpo",
+        "gerencia.escalamiento_cuerpo_equipo" if del_equipo
+        else "gerencia.escalamiento_cuerpo",
         lengua,
         cliente=cliente or idioma_mod.t("gerencia.no_registrado", lengua),
         telefono=telefono or idioma_mod.t("gerencia.sin_dato", lengua),
@@ -768,7 +778,11 @@ def avisar_escalamiento(
     if tarea:
         cuerpo += "\n" + idioma_mod.t("gerencia.escalamiento_tarea", lengua, tarea=tarea)
     return alertar_excepcion(
-        idioma_mod.t("gerencia.escalamiento_asunto", lengua),
+        idioma_mod.t(
+            "gerencia.escalamiento_asunto_equipo" if del_equipo
+            else "gerencia.escalamiento_asunto",
+            lengua,
+        ),
         cuerpo,
         urgencia=URGENCIA_ALTA,
         plantilla_env="WHATSAPP_STAFF_ALERT_TEMPLATE",

@@ -184,16 +184,34 @@ def contar_stock(
             dep=dep,
         )
 
-    doc = erpnext.create_doc(
-        "Stock Reconciliation",
-        {
-            "company": company,
-            "purpose": "Stock Reconciliation",
-            "posting_date": _hoy(),
-            "set_posting_time": 1,
-            "items": [{"item_code": item_code, "warehouse": dep, "qty": cantidad_real}],
-        },
-    )
+    try:
+        doc = erpnext.create_doc(
+            "Stock Reconciliation",
+            {
+                "company": company,
+                "purpose": "Stock Reconciliation",
+                "posting_date": _hoy(),
+                "set_posting_time": 1,
+                "items": [{"item_code": item_code, "warehouse": dep, "qty": cantidad_real}],
+            },
+        )
+    except erpnext.ERPNextError as exc:
+        # SE ATRAPA ACÁ Y NO SE DEJA SUBIR. Levantar la manda al manejador
+        # genérico del grafo, que dice «esa herramienta falló» y nada más: el
+        # modelo se queda sin saber que no se guardó nada y sin el motivo, y lo
+        # que completa es una confirmación que no ocurrió. Medido en vivo: «ya
+        # te anoté los 5 kg de leche» sobre un documento que ERPNext había
+        # rechazado. El motivo va incluido porque el que lee es el DUEÑO y es su
+        # sistema: un 417 se arregla poniéndole las cuentas de inventario a la
+        # compañía, y eso no se adivina desde «hubo un problema».
+        print(f"[captura] conteo de {item_code} rechazado por ERPNext")
+        return idioma.t(
+            "captura.conteo_rechazado",
+            idioma.gerencia(),
+            item_code=item_code,
+            dep=dep,
+            motivo=str(exc)[:200],
+        )
     erpnext.add_comment(
         "Stock Reconciliation", doc["name"],
         f"Conteo físico por WhatsApp. Sistema: {sistema:g}, contado: {cantidad_real:g}.",
