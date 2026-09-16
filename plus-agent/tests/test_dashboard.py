@@ -416,3 +416,109 @@ class VentasTest(unittest.TestCase):
         hija = [k for d, k in llamadas if d == "Sales Order Item"]
         self.assertEqual(len(hija), 1, llamadas)
         self.assertEqual(hija[0].get("parent"), "Sales Order", hija)
+
+
+# --------------------------------------------------------------- consejos
+class ConsejosTest(unittest.TestCase):
+    """`advice()` informa el interruptor y no lo obedece.
+
+    Lo que `consejos.activo()` apaga es el ENVÍO por WhatsApp, que desde el
+    1/10/2026 Meta cobra por unidad. Leerlos en un panel que el dueño abrió él
+    mismo no manda nada, así que apagado es «no te los mando» y no «no los
+    podés ver». Un filtro acá dejaría la pantalla vacía en la configuración de
+    fábrica, que es exactamente cuando más hace falta que muestre algo.
+    """
+
+    def _consejo(self, clase, clave, sobre, peso=0.0):
+        class C:
+            pass
+        c = C()
+        c.clase, c.clave, c.sobre = clase, clave, sobre
+        c.titulo, c.cuerpo, c.supuesto, c.peso = "T", "B", "S", peso
+        return c
+
+    def _correr(self, *, activo=True, por_clase=None, rompe=()):
+        import datetime as _dt
+        import sys
+
+        hechos = por_clase or {}
+        prueba = self
+
+        class ConsejosFalso:
+            PERDIDA, DORMIDO, DEUDA, QUIEBRE = "perdida", "dormido", "deuda", "quiebre"
+
+            @staticmethod
+            def activo():
+                return activo
+
+            @staticmethod
+            def _detectar(clase, dia):
+                if clase in rompe:
+                    raise RuntimeError("lectura caída")
+                # El doble deriva de lo que se le PASA: si `advice` dejara de
+                # mandar el día del negocio, esto lo delata en vez de taparlo.
+                prueba.assertIsInstance(dia, _dt.date)
+                return list(hechos.get(clase, ()))
+
+            perdidas = staticmethod(lambda dia: ConsejosFalso._detectar("perdida", dia))
+            dormidos = staticmethod(lambda dia: ConsejosFalso._detectar("dormido", dia))
+            deudas = staticmethod(lambda dia: ConsejosFalso._detectar("deuda", dia))
+            quiebres = staticmethod(lambda dia: ConsejosFalso._detectar("quiebre", dia))
+
+        class PolicyFalso:
+            @staticmethod
+            def _hoy_del_negocio():
+                return _dt.date(2026, 9, 15)
+
+        modulos = {"app.consejos": ConsejosFalso, "app.policy": PolicyFalso}
+        real = {k: sys.modules.get(k) for k in modulos}
+        paquete = sys.modules.get("app")
+        try:
+            for k, v in modulos.items():
+                sys.modules[k] = v
+            if paquete is not None:
+                paquete.consejos, paquete.policy = ConsejosFalso, PolicyFalso
+            return dashboard.advice()
+        finally:
+            for k, v in real.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+
+    def test_apagado_informa_el_interruptor_y_muestra_igual(self):
+        salida = self._correr(
+            activo=False,
+            por_clase={"perdida": [self._consejo("perdida", "perdida:SO-1", "SO-1")]},
+        )
+        self.assertFalse(salida["enabled"], salida)
+        self.assertEqual(len(salida["items"]), 1, salida)
+
+    def test_aboutKind_es_por_detector_y_no_una_constante(self):
+        """`sobre` es un pedido, un cliente o un artículo según la clase."""
+        salida = self._correr(por_clase={
+            "perdida": [self._consejo("perdida", "p:1", "SO-1")],
+            "deuda": [self._consejo("deuda", "d:1", "CUST-1")],
+            "quiebre": [self._consejo("quiebre", "q:1", "LECHE")],
+        })
+        por_clase = {i["kind"]: i["aboutKind"] for i in salida["items"]}
+        self.assertEqual(por_clase, {"perdida": "order", "deuda": "customer",
+                                     "quiebre": "product"}, salida)
+
+    def test_una_clase_caida_no_se_lleva_las_otras_tres(self):
+        salida = self._correr(
+            rompe=("deuda",),
+            por_clase={"perdida": [self._consejo("perdida", "p:1", "SO-1")]},
+        )
+        self.assertEqual(salida["errors"], ["deuda"], salida)
+        self.assertEqual([i["id"] for i in salida["items"]], ["p:1"], salida)
+
+    def test_el_peso_ordena_y_no_viaja(self):
+        """Plata perdida y unidades faltantes no se comparan entre sí."""
+        salida = self._correr(por_clase={"perdida": [
+            self._consejo("perdida", "p:chico", "SO-1", peso=10.0),
+            self._consejo("perdida", "p:grande", "SO-2", peso=900.0),
+        ]})
+        self.assertEqual([i["id"] for i in salida["items"]], ["p:grande", "p:chico"], salida)
+        self.assertNotIn("weight", salida["items"][0], salida["items"][0])
+        self.assertNotIn("peso", salida["items"][0], salida["items"][0])

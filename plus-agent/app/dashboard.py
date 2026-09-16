@@ -12,7 +12,7 @@ import math
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from html import unescape
 from urllib.parse import quote, unquote, urlsplit
 
@@ -1281,7 +1281,7 @@ class DashboardAPI:
         confirm_match = re.fullmatch(r"/orders/([^/]{1,140})/confirm", path)
         readers = {
             "/snapshot": snapshot, "/controls": controls, "/operations": operations,
-            "/today": today, "/queue": queue, "/sales": sales,
+            "/today": today, "/queue": queue, "/sales": sales, "/advice": advice,
         }
         if path == "/config" and scope["method"] == "GET":
             # No company, model, origin, or business data is returned before auth.
@@ -1541,6 +1541,77 @@ def _float(valor: object) -> float:
         return float(valor or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+
+# ----------------------------------------------------------------- consejos
+
+
+def advice() -> dict:
+    """Lo que el dueño tendría que saber sin haber preguntado.
+
+    `enabled` SE INFORMA Y NO FILTRA, y esa es la decisión de esta función.
+    `consejos.activo()` arranca apagado a propósito, pero lo que apaga es el
+    ENVÍO: desde el 1/10/2026 Meta cobra los mensajes de servicio por unidad, y
+    el tope de 3 por día está para eso. Leerlos en un panel que el dueño abrió
+    él mismo no manda nada ni cuesta nada, así que apagado significa «no te los
+    mando», no «no los podés ver». El panel muestra los hallazgos y dice que el
+    envío está apagado.
+
+    `peso` NO SALE AL CABLE. Para `perdida` es plata perdida y para `quiebre`
+    son unidades que van a faltar: dos números que no se comparan entre sí, y
+    un frontend que los ordenara juntos armaría un ranking sin sentido. Se
+    ordena acá, dentro de cada clase —donde sí es comparable— y lo que viaja es
+    el ORDEN, no el número.
+
+    `sobre` es polimórfico: un pedido en `perdida`, un cliente en `dormido` y
+    `deuda`, un código de artículo en `quiebre`. Viaja con `aboutKind` al lado
+    para que el panel sepa contra qué diálogo enlazarlo sin re-deducirlo del
+    `kind`.
+
+    Ningún detector levanta —lo dicen sus docstrings: un error de lectura es
+    «hoy no hay consejo de esta clase»—, pero el `except` está igual: si un día
+    uno deja de cumplirlo, el panel pierde UNA clase y no las cuatro.
+    """
+    from datetime import datetime
+
+    from app import consejos, policy
+
+    dia = policy._hoy_del_negocio()
+    detectores = (
+        (consejos.PERDIDA, "order", consejos.perdidas),
+        (consejos.DORMIDO, "customer", consejos.dormidos),
+        (consejos.DEUDA, "customer", consejos.deudas),
+        (consejos.QUIEBRE, "product", consejos.quiebres),
+    )
+    items: list[dict] = []
+    errors: list[str] = []
+    for clase, tipo, detectar in detectores:
+        try:
+            hallados = detectar(dia)
+        # Ningún detector levanta —lo prometen sus docstrings—, pero si un día
+        # uno deja de cumplirlo el panel pierde UNA clase y no las cuatro, y el
+        # nombre de la que se cayó sale en `errors` en vez de desaparecer.
+        except Exception:
+            errors.append(clase)
+            continue
+        for consejo in sorted(hallados, key=lambda c: -float(c.peso or 0)):
+            items.append({
+                "id": str(consejo.clave),
+                "kind": str(consejo.clase),
+                "about": str(consejo.sobre),
+                "aboutKind": tipo,
+                "title": str(consejo.titulo),
+                "body": str(consejo.cuerpo),
+                "assumption": str(consejo.supuesto or ""),
+            })
+    return {
+        "generatedAt": datetime.now(UTC).isoformat(),
+        "enabled": consejos.activo(),
+        "items": items,
+        "errors": errors,
+        "truncated": [],
+    }
 
 
 def install_dashboard(application) -> None:
