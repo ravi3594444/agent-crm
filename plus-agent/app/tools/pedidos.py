@@ -847,7 +847,7 @@ def escalar_a_humano(
     # necesita una persona / Cliente: cuenta no registrada / Tel: <el número del
     # dueño>», o sea él anunciándose a sí mismo como un desconocido, con la
     # promesa de que alguien lo iba a mirar.
-    del_equipo = False
+    del_equipo = actor.is_management
     quien = (
         f"Del equipo: {actor.actor_phone or 'sin dato'}" if del_equipo
         else f"Cuenta: {account}"
