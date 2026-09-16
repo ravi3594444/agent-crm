@@ -90,12 +90,26 @@ no tenerlo, porque se le cree.
 ## La superficie de herramientas: qué ve cada agente
 
 `app/graph.py` arma DOS registros, y cuál se monta en qué agente es un límite de
-privilegio, no un detalle de cableado. Hoy: **12 de clientes, 24 en el registro de
-gerencia — de las cuales 4 son compartidas, así que 20 son sólo de
+privilegio, no un detalle de cableado. Hoy: **12 de clientes, 25 en el registro de
+gerencia — de las cuales 4 son compartidas, así que 21 son sólo de
 gerencia** (eran 19 sólo-de-gerencia antes de colapsarlas, y 23 antes de eso).
 El número de gerencia no se cuenta a mano: sale de
 `tests/test_autorizacion_gerencia.py`, que deriva `SOLO_GERENCIA` de
-`TOOLS_GERENCIA − TOOLS_CLIENTES` y afirma 20. La de clientes subió a 12 con
+`TOOLS_GERENCIA − TOOLS_CLIENTES` y afirma 21. Decía 24 y 20 acá hasta el
+16/09: el test estaba al día y el mapa no, que es la forma en que un mapa hace
+daño — se le cree.
+
+**Y ese registro NO es lo que se le monta al agente.** `TOOLS_AGENTE_GERENCIA =
+_con_externas()` le suma las herramientas de los servidores MCP de
+`MCP_EXTERNOS`, que no están en este repo y se descubren en el import. Medido
+en el VM el 16/09 con `@casys/mcp-erpnext`: 84 externas sobre las 25 propias,
+109 en total, ~29.100 tokens de prompt por turno. Lo que se publica por
+`app/mcp_server.py` sigue siendo `TOOLS_GERENCIA` a secas, y esa distinción es
+a propósito: republicar la superficie de un tercero por nuestra puerta sería lo
+peor de las dos, porque parece nuestra. **Un servidor externo caído ya no es
+mudo**: `_con_externas` imprime el resumen —con el motivo— también cuando hay
+servidor configurado y no entró ninguna herramienta; antes no dejaba una sola
+línea y se leía igual que «nadie configuró nada». La de clientes subió a 12 con
 `condiciones_de_entrega`.
 
 Y desde `app/mcp_server.py` esas 19 son también la superficie MCP, sin una
