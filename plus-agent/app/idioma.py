@@ -2215,21 +2215,21 @@ CATALOGO: dict[str, dict[str, str]] = {
             "stock de esos productos."
         ),
         EN: (
-            "Count {nombre} confirmed. From now on the bot can talk about the "
-            "stock of those products."
+            "Done — count {nombre} is applied. I can tell customers what's in "
+            "stock now."
         ),
     },
     "conteo.ya_confirmado": {
         ES: "El conteo {nombre} ya estaba confirmado.",
-        EN: "Count {nombre} was already confirmed.",
+        EN: "Count {nombre} was already applied.",
     },
     "conteo.cancelado": {
         ES: "El conteo {nombre} está cancelado; cargá uno nuevo.",
-        EN: "Count {nombre} is cancelled; load a new one.",
+        EN: "Count {nombre} was cancelled. Send me a new one.",
     },
     "conteo.no_pude_abrir": {
         ES: "No pude abrir el conteo {nombre}. Revisalo en ERPNext.",
-        EN: "I could not open count {nombre}. Check it in ERPNext.",
+        EN: "I couldn't open count {nombre}. Have a look at it in ERPNext.",
     },
     "conteo.no_pude_confirmar": {
         ES: (
@@ -2237,8 +2237,8 @@ CATALOGO: dict[str, dict[str, str]] = {
             "volvé a intentar."
         ),
         EN: (
-            "I could not confirm count {nombre}. Confirm it in ERPNext or try "
-            "again."
+            "I couldn't apply count {nombre}. Try again, or apply it in "
+            "ERPNext."
         ),
     },
     "captura.conteo_rechazado": {
