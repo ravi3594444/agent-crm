@@ -19,6 +19,7 @@ from app import (
     erpnext,
     excepciones,
     policy,
+    rastro,
     reloj,
     solicitudes,
 )
@@ -293,8 +294,13 @@ def _message_key(message_id: str) -> str:
 
 
 def _log_ref(value: str) -> str:
-    """Non-reversible correlation tag for logs; never log ERP/customer IDs."""
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    """Non-reversible correlation tag for logs; never log ERP/customer IDs.
+
+    El hash vive en `app/rastro.py` porque `entrega.autorizada` escribe la otra
+    mitad de la correlación: dos copias que tienen que dar lo mismo, y nada que
+    las obligue, es la forma de defecto que `CLAUDE.md` describe.
+    """
+    return rastro.ref(value)
 
 
 def _agendar_entrega(doc: dict) -> None:

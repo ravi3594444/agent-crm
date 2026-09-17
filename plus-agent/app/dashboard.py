@@ -162,21 +162,20 @@ def controls() -> dict:
     This existing reader may use policy-scoped READS to verify durable Company
     audit markers. It does not propose, apply, or bypass an owner setting.
     """
-    from app import inventario, limites
+    from app import etiquetas_panel, inventario, limites
 
-    labels = {
-        "AUTO_CONFIRM_MAX": "Order ceiling",
-        "AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO": "Quantity per product",
-        "STOCK_BUFFER_PCT": "Stock buffer",
-        "AUTO_CONFIRM_MAX_CLIENTE_NUEVO": "New customer ceiling",
-    }
+    # La tabla estaba ACÁ y tenía cuatro filas; las otras 42 caían al alias, o
+    # sea al castellano que el dueño tipea por WhatsApp. Ahora es una sola
+    # tabla para las dos listas del panel: con dos, la de arriba y la de abajo
+    # terminan llamando distinto al mismo ajuste.
     rows = limites.resumen()
     policies = [{
-        "id": row["nombre"], "name": labels.get(row["nombre"], row["alias"]),
+        "id": row["nombre"], "name": etiquetas_panel.nombre_de(row["nombre"]),
         "value": limites.mostrar(row["nombre"], row["valor"], en_idioma="en")
         if not row["problema"] else "Unavailable",
-        "note": row["problema"] or row["significado"],
-        "source": row["origen"], "unit": row["unidad"], "valid": not bool(row["problema"]),
+        "note": row["problema"] or etiquetas_panel.explicacion_de(row["nombre"]),
+        "source": row["origen"], "unit": etiquetas_panel.unidad_de(row["unidad"]),
+        "valid": not bool(row["problema"]),
     } for row in rows]
     policies.append({
         "id": "STOCK_CONFIABLE_HORAS", "name": "Stock trust window",
@@ -1981,7 +1980,7 @@ def settings(mirando: str) -> dict:
     rojo y sin ofrecer un número «recomendado» — que sería subirle un techo de
     seguridad por su cuenta.
     """
-    from app import limites
+    from app import etiquetas_panel, limites
 
     try:
         filas = limites.resumen(lengua="en")
@@ -2000,9 +1999,13 @@ def settings(mirando: str) -> dict:
         defi = limites.TODOS[nombre]
         por_grupo[grupo].append({
             "id": nombre,
-            "name": fila["alias"],
-            "meaning": fila["significado"],
-            "unit": fila["unidad"],
+            # `alias` y `significado` están en castellano a propósito: son lo
+            # que el dueño TIPEA por WhatsApp y lo que lee ahí. El panel no
+            # matchea nada, así que muestra el par inglés. Ver
+            # app/etiquetas_panel.py.
+            "name": etiquetas_panel.nombre_de(nombre),
+            "meaning": etiquetas_panel.explicacion_de(nombre),
+            "unit": etiquetas_panel.unidad_de(fila["unidad"]),
             "kind": defi.tipo,
             "optional": bool(defi.opcional),
             # El valor CRUDO y el mostrado son dos: el primero es lo que hay que

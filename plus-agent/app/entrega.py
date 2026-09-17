@@ -24,7 +24,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from app import erpnext, limites
+from app import erpnext, limites, rastro
 
 # Todos los motivos de esta capa arrancan igual, para que el resto del sistema
 # sepa que ESTE pedido está esperando por la entrega y no por otra regla: el
@@ -219,7 +219,11 @@ def autorizada(sales_order: dict) -> tuple[bool, str]:
     # fue exactamente el defecto: ver `motivo_para_log`. Acá la categoría es la
     # que decidió `evaluar_zona`, no una deducción, y no contiene una letra de
     # la dirección.
-    print(f"[entrega] no autorizada categoria={evaluacion.categoria}", flush=True)
+    print(
+        f"[entrega] no autorizada order={rastro.ref(sales_order.get('name'))} "
+        f"categoria={evaluacion.categoria}",
+        flush=True,
+    )
     return False, f"{MOTIVO}: {texto_direccion(direccion)} — {evaluacion.motivo}"
 
 
