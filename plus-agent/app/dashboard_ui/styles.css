@@ -113,11 +113,23 @@ dialog{border:1px solid var(--border);padding:0;color:inherit;background:white;m
    dónde salió ese valor. `source` se muestra siempre y no sólo cuando algo
    está mal: un tope en 0 es la postura de fábrica, no un error, y decir de
    dónde viene es lo que deja mostrarlo sin pintarlo de rojo. */
-.setting-row{display:grid;grid-template-columns:1fr auto auto;gap:12px 18px;align-items:center;padding:14px 0;border-top:1px solid var(--border)}
+.setting-row{display:grid;grid-template-columns:1fr auto auto;gap:12px 20px;align-items:center;padding:16px 0;border-top:1px solid var(--border)}
 .setting-row:first-of-type{border-top:0}
 .setting-what strong{display:block;font-size:.95rem}
+/* Los nombres de los ajustes son los ALIAS que el dueño dice por WhatsApp
+   —«nombre del negocio», «rubro»—, o sea castellano en minúscula, adentro de
+   un panel en inglés con mayúscula inicial. Se arregla en el CSS y no en el
+   dato: el alias es lo que él tipea, y cambiarlo en la lista lo rompería del
+   otro lado. */
+.setting-what strong::first-letter{text-transform:uppercase}
 .setting-what small,.setting-value small{display:block;color:var(--muted);font-size:.78rem;margin-top:2px}
-.setting-value{text-align:right}
+/* La explicación corría el ancho entero de la pantalla: a 1900px son más de
+   160 caracteres por renglón y el ojo pierde la línea al volver. */
+.setting-what small{max-width:62ch}
+/* Ancho fijo para que los «Change» queden en una columna: sin esto cada fila
+   empieza el botón donde termina SU valor, y la lista se ve dentada. */
+.setting-value{text-align:right;min-width:9.5rem}
+.setting-value .is-unset{color:var(--muted);font-weight:500}
 .setting-value span{font-weight:600;font-variant-numeric:tabular-nums}
 .setting-problem{grid-column:1/-1;display:flex;gap:8px;align-items:center;margin:0;color:#b07971;font-size:.82rem}
 .setting-problem .icon{width:15px;height:15px;flex-shrink:0}
@@ -143,3 +155,39 @@ dialog{border:1px solid var(--border);padding:0;color:inherit;background:white;m
 .price-cell span{font-variant-numeric:tabular-nums}
 .link-button{background:none;border:0;padding:0 0 0 10px;color:#6555db;font-size:.8rem;font-weight:650;text-decoration:underline;text-underline-offset:3px}
 :root[data-theme="dark"] .link-button{color:var(--purple)}
+
+/* EL RIEL: la barra lateral plegada a iconos.
+   Sólo arriba de 820px, que es donde la barra está fija. Abajo de eso ya es un
+   cajón que se abre y se cierra con `menu-open`, y plegarlo no significa nada:
+   el botón se esconde ahí mismo para que no ofrezca algo que no hace. */
+@media(min-width:821px){
+  .dashboard.rail .sidebar{width:76px;padding-left:12px;padding-right:12px;align-items:stretch}
+  .dashboard.rail .main-wrap{margin-left:76px}
+  /* Lo puramente decorativo se va: la nota, el rótulo de sección, el subtítulo
+     del workspace y del perfil no nombran ningún destino. */
+  .dashboard.rail :is(.nav-label,.sidebar-note,.brand-tag,.workspace>div,.profile>div){display:none}
+  /* LO QUE NOMBRA UN ENLACE NO SE BORRA, SE ESCONDE A LA VISTA.
+     Con `display:none` el único contenido del `<a>` pasaba a ser un SVG
+     `aria-hidden`, o sea un enlace SIN NOMBRE ACCESIBLE: un lector de pantalla
+     plegado no puede decir cuál es Orders y cuál Customers. El texto se queda
+     en el árbol y sale del dibujo. */
+  .dashboard.rail :is(.brand-wordmark,.nav-item>span){position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+  .dashboard.rail .nav-item{justify-content:center;padding-left:0;padding-right:0;gap:0}
+  .dashboard.rail :is(.workspace,.profile){justify-content:center;padding-left:0;padding-right:0}
+  .dashboard.rail .profile{margin-left:-12px;margin-right:-12px}
+  .dashboard.rail .brand{justify-content:center;padding:0}
+  .dashboard.rail .sidebar-bottom{padding-top:24px}
+}
+@media(max-width:820px){.rail-toggle{display:none}}
+.rail-toggle{border:1px solid var(--border);min-width:40px;min-height:40px;background:var(--surface);color:var(--secondary)}
+
+/* «Typing exactly»: los tres comandos que Python lee antes que el modelo. */
+.commands-card .commands-list{display:flex;flex-direction:column}
+.command-row{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;align-items:baseline;padding:14px 0;border-top:1px solid var(--border)}
+.command-row:first-child{border-top:0}
+.command-row code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;background:var(--surface-soft);border:1px solid var(--border);border-radius:6px;padding:4px 9px;white-space:nowrap}
+.command-row strong{display:block;font-size:.9rem}
+.command-row small{display:block;color:var(--muted);font-size:.78rem;line-height:1.7;margin-top:3px;max-width:62ch}
+.command-note{display:flex;gap:9px;align-items:flex-start;margin:16px 0 0;padding-top:16px;border-top:1px solid var(--border);color:var(--muted);font-size:.8rem;line-height:1.75}
+.command-note .icon{width:15px;height:15px;flex-shrink:0;margin-top:3px}
+@media(max-width:620px){.command-row{grid-template-columns:1fr}}
