@@ -16,6 +16,7 @@ import os
 from collections.abc import Mapping
 
 from langchain_core.messages import (
+    AIMessage,
     BaseMessage,
     HumanMessage,
     SystemMessage,
@@ -24,7 +25,7 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 
 from app import idioma, reloj
-from app.prompts import SYSTEM_ES_AR
+from app.prompts import PRESENTACION_PRIMER_MENSAJE, SYSTEM_ES_AR
 from app.prompts_gerencia import SYSTEM_GERENCIA
 
 _DEFAULT_MAX_MESSAGES = 40
@@ -270,6 +271,54 @@ def mensaje_perfil(nombre: str) -> HumanMessage:
     )
 
 
+def ya_hablamos(state) -> bool:
+    """¿Hay más arriba un mensaje nuestro que el cliente haya LEÍDO?
+
+    Es la misma evidencia que usa la regla del saludo en el prompt («si más
+    arriba ya hay un mensaje tuyo, no vuelvas a saludar»), pero resuelta en
+    Python: el modelo no tiene que decidirlo y un modelo más chico no la puede
+    saltear. Ver `prompts.PRESENTACION_PRIMER_MENSAJE` para el porqué.
+
+    UN `AIMessage` CON `tool_calls` NO CUENTA, y esto es lo único delicado acá:
+    dentro de un MISMO turno el hilo crece cada vez que el modelo pide una
+    herramienta, así que en la segunda llamada del PRIMER turno ya hay un
+    `AIMessage` nuestro. Si contara, la presentación desaparecería justo en la
+    llamada que redacta la respuesta —el caso normal, «hola, tenés queso?» ->
+    `consultar_stock` -> contesta— y no se presentaría nunca con nadie que
+    pregunte algo en su primer mensaje. El cliente no leyó ese mensaje: de un
+    turno lee UNO, el último, y lo mismo vale para el texto que algunos
+    proveedores mandan junto con la llamada a la herramienta.
+
+    LO QUE ESTO NO ARREGLA: el historial que llega acá es la cola recortada por
+    `recortar_historial`, así que un turno solo con más de
+    `CONVERSATION_MAX_MESSAGES` mensajes dejaría una cola sin ninguna respuesta
+    nuestra y el agente se presentaría de nuevo. Con `PASOS_MAX_CLIENTES=8` eso
+    pide más de cuatro herramientas por llamada, y pasa en un turno que ya salió
+    mal; es una presentación repetida, no un dato inventado.
+    """
+    for msg in _mensajes(state):
+        if not isinstance(msg, AIMessage) or getattr(msg, "tool_calls", None):
+            continue
+        if texto_plano(msg).strip():
+            return True
+    return False
+
+
+def presentacion(state) -> str:
+    """El hueco `{PRESENTACION}` del prompt del cliente: la línea, o nada.
+
+    Se deriva del hilo y no de un dato que traiga el turno a propósito, y eso
+    paga solo en el cierre honesto de `pasos.cerrar`: ahí el prompt se arma con
+    un historial sintético, así que una bandera calculada en `responder_cliente`
+    diría «segundo mensaje» sobre una conversación en la que el cliente todavía
+    no escuchó nada. Con esto, un primer turno que se cortó y se cerró con lo
+    que había también se presenta.
+    """
+    if ya_hablamos(state):
+        return ""
+    return PRESENTACION_PRIMER_MENSAJE.format(NEGOCIO=negocio())
+
+
 def prompt_clientes(state, config: RunnableConfig) -> list[BaseMessage]:
     """Fresh customer system prompt; identity comes only from server config."""
     configurable = _configurable(config)
@@ -326,6 +375,11 @@ def prompt_clientes(state, config: RunnableConfig) -> list[BaseMessage]:
         or "lunes a viernes de 8 a 17",
         HOY=business_today(),
         IDIOMA_REGLA=idioma.regla_prompt(guardado),
+        # La presentación del primer contacto: la línea cuando nadie de este
+        # lado habló todavía, y "" en todos los demás turnos. El hueco está
+        # pegado a la regla del saludo único porque es ESE saludo el que dice
+        # también quién sos, y no un mensaje aparte.
+        PRESENTACION=presentacion(state),
         # Lo que el dueño YA contestó y este agente no tenía cómo saber. Va al
         # final del prompt, debajo de las nueve reglas, porque es un DATO: el
         # marco que trae adentro dice que no cambia un precio, un stock, un

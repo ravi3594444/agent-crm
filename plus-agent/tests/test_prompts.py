@@ -110,8 +110,12 @@ def test_el_cliente_sabe_quien_es_y_no_lo_niega():
     assert "{IDENTIDAD}" in SYSTEM_ES_AR
     assert "si sos una persona o si sos un bot" in SYSTEM_ES_AR
     assert "No lo niegues nunca" in SYSTEM_ES_AR
-    # Y no lo aclara si nadie preguntó: eso es lo que arruina la conversación.
-    # (La cláusula quedó a mitad de frase al exigir la respuesta explícita.)
+    # Y no lo REPITE: la cláusula sigue escrita, pero ya no vale para el primer
+    # mensaje. El dueño revirtió esa mitad —ahora el agente se presenta sin que
+    # le pregunten en el primer contacto, y la presentación la pone
+    # `conversacion.presentacion()` como hueco `{PRESENTACION}`—, así que esto
+    # protege lo que quedó: del segundo mensaje en adelante, no se vuelve a
+    # aclarar lo que es si nadie preguntó.
     assert "no lo aclares si no te lo preguntan" in SYSTEM_ES_AR
 
 
