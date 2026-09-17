@@ -486,8 +486,8 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
         # Por qué NO se confirmó solo no quedaba escrito en ningún lado. El
         # modo sombra lo anota, pero corre en el barrido y sólo si el dueño lo
         # prendió, así que en el alta —que es cuando se mira— «¿por qué quedó
-        # en borrador?» se contestaba apagando gates de a uno. Son siete gates
-        # y cualquiera de ellos deja el pedido igual de silencioso.
+        # en borrador?» se contestaba apagando gates de a uno. Son alrededor
+        # de una docena y cualquiera deja el pedido igual de silencioso.
         motivos = " | ".join(
             entrega.motivo_para_log(m) for m in decision.motivos
         )
