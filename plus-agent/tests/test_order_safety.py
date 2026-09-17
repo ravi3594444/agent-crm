@@ -1192,8 +1192,23 @@ def test_del_lado_del_dueno_una_herramienta_rota_no_lo_deriva_a_si_mismo() -> No
     prometiéndole que alguien lo iba a mirar. Él es ese alguien.
 
     Se afirma la conducta de la función, no el catálogo: el mensaje de gerencia
-    tiene que decir que no se guardó nada —es lo único que impide la
-    confirmación inventada— y no puede mandar a derivar.
+    tiene que impedir que el modelo COMPLETE el hueco con lo que suene bien, y
+    no puede mandar a derivar.
+
+    ESTE TEST AFIRMABA «NO GUARDÓ NADA» Y ESA ERA LA AFIRMACIÓN EQUIVOCADA, no
+    el test. Protegía algo real —sin ella el modelo contestó «ya te anoté los 5
+    kg», sobre una escritura que no ocurrió— pero lo protegía fijando un HECHO
+    que este manejador no puede saber: le llega cualquier excepción de cualquier
+    herramienta, y varias escriben antes de poder fallar (`contar_stock` crea la
+    Stock Reconciliation y DESPUÉS comenta, avisa y arma la respuesta). Con eso,
+    una falla posterior a la escritura le hacía decir al dueño que no había
+    quedado nada sobre un documento que sí existe, y el «probá de nuevo» que
+    seguía le fabricaba el duplicado. O sea: una mentira cambiada por la otra.
+
+    Así que lo que se afirma ahora son las DOS prohibiciones, que juntas son la
+    propiedad que el test siempre quiso: no afirmar que quedó registrado, y no
+    afirmar que no quedó nada. Donde sí se sabe, lo dice la herramienta
+    (`captura.conteo_rechazado` abre con «NO se guardó nada» y no pasa por acá).
 
     MUTACIÓN: que `_error_de_herramienta_gerencia` devuelva `_ERROR_MSG`. Cae
     ésta y sólo ésta.
@@ -1202,7 +1217,8 @@ def test_del_lado_del_dueno_una_herramienta_rota_no_lo_deriva_a_si_mismo() -> No
 
     del_dueno = graph._error_de_herramienta_gerencia(RuntimeError("ERPNext 417"))
 
-    assert "NO GUARDÓ NADA" in del_dueno
+    assert "no digas que quedó anotado ni registrado" in del_dueno
+    assert "tampoco digas que no quedó nada" in del_dueno
     assert "escalar_a_humano" not in del_dueno
     # Y el de clientes sigue siendo el que era: ahí derivar SÍ es lo correcto.
     assert "escalar_a_humano" in graph._error_de_herramienta(RuntimeError("x"))

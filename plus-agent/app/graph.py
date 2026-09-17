@@ -349,16 +349,35 @@ _ERROR_MSG = (
 # anoté los 5 kg de leche», sobre una escritura que nunca ocurrió.
 #
 # Las dos mitades que cambian son las dos que estaban mal para este lado:
-# «no se guardó nada» —que es lo único que impide la confirmación inventada— y
+# qué pasó con la escritura —que es lo que impide la confirmación inventada— y
 # «no escales», porque derivar al equipo a alguien que ES el equipo es mandarle
 # un aviso sobre sí mismo. El nombre de la herramienta NO se nombra acá: si
 # `escalar_a_humano` deja de existir mañana, esto sigue siendo cierto.
+#
+# Y NO DICE «NO SE GUARDÓ NADA», aunque ésa fue la primera redacción y arreglaba
+# el defecto medido. Decía un HECHO que este manejador no puede saber: le llega
+# cualquier excepción de cualquier herramienta, y varias escriben ANTES de poder
+# fallar. `registrar_venta_offline` crea la factura borrador y después llama a
+# `add_comment`; `contar_stock` crea la Stock Reconciliation y después comenta,
+# avisa y arma la respuesta. Una falla en cualquiera de esos pasos llegaba acá y
+# le hacía decir al dueño que no había quedado nada, sobre un documento que SÍ
+# existe — y el «probá de nuevo» que seguía le fabrica el duplicado.
+#
+# O sea que la primera versión cambiaba una mentira por la otra: antes el modelo
+# inventaba una confirmación, después inventaba una negación. Lo único cierto es
+# que no se sabe, y decirlo no afloja la protección: la prohibición de inventar
+# un resultado sigue textual, y ahora aplica para los dos lados. Donde SÍ se
+# sabe que no se escribió nada —el `create_doc` que falló, atrapado por la
+# herramienta misma— lo dice la herramienta: `captura.conteo_rechazado` empieza
+# con «NO se guardó nada» y no pasa por acá.
 _ERROR_MSG_GERENCIA = (
-    "Esa herramienta falló y NO GUARDÓ NADA. No inventes un resultado y no digas "
-    "que quedó anotado, registrado, pendiente ni a medias: no quedó nada. "
-    "Decíle en UNA línea qué no se pudo hacer, con palabras del negocio y sin "
-    "jerga técnica, y ofrecele intentarlo de nuevo. NO lo derives a una persona "
-    "del equipo: el que te está escribiendo ES el equipo."
+    "Esa herramienta falló y NO SE SABE si alcanzó a guardar algo. No inventes "
+    "un resultado: no digas que quedó anotado ni registrado, y tampoco digas "
+    "que no quedó nada — no lo sabés. Decíle en UNA línea qué falló y que no "
+    "podés confirmar si llegó a registrarse, con palabras del negocio y sin "
+    "jerga técnica, y ofrecele FIJARSE antes de volver a intentarlo, porque "
+    "repetirlo a ciegas puede dejarlo cargado dos veces. NO lo derives a una "
+    "persona del equipo: el que te está escribiendo ES el equipo."
 )
 
 # UN VALOR DE ENUM EQUIVOCADO NO ES UNA HERRAMIENTA ROTA

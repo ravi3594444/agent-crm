@@ -896,14 +896,26 @@ def escalar_a_humano(
                 "NO quedó registrado ni le llegó a nadie. Decíselo así, en UNA "
                 "línea, y no digas que avisaste al equipo."
             )
+        # CADA MITAD SE DICE SOLA, y el encabezado no la adelanta. Con un
+        # "Anotado:" fijo delante y las frases pensadas para ir juntas, el caso
+        # de aviso sin tarea salía «Anotado: y salió el aviso al equipo»: la
+        # conjunción suelta, y un «Anotado» sobre un ToDo que no existe. Es la
+        # misma mentira que la regla 6 prohíbe, una línea más abajo de donde ya
+        # se la evita.
         partes = []
         if tarea:
             partes.append(f"quedó la tarea {tarea}")
         if avisado:
-            partes.append("y salió el aviso al equipo")
+            partes.append("salió el aviso al equipo")
+        # Sólo la PRIMERA letra, no `.capitalize()`: ése además baja a
+        # minúscula todo el resto, y el resto incluye el nombre del documento de
+        # ERPNext —`TODO-0007` salía `todo-0007`—, que es justo lo que el dueño
+        # podría copiar para buscarlo.
+        frase = " y ".join(partes)
         return (
-            f"Anotado: {' '.join(partes)}. Decíselo en UNA línea, sin hablarle "
-            "de derivaciones ni de que alguien lo va a mirar: el que lo mira es él."
+            f"{frase[:1].upper()}{frase[1:]}. Decíselo en UNA línea, sin "
+            "hablarle de derivaciones ni de que alguien lo va a mirar: el que lo "
+            "mira es él."
         )
     if not tarea and not avisado:
         # Nadie se enteró y no quedó registro. Decirle que avisamos al equipo

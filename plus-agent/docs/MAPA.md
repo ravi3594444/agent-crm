@@ -113,7 +113,7 @@ servidor configurado y no entró ninguna herramienta; antes no dejaba una sola
 línea y se leía igual que «nadie configuró nada». La de clientes subió a 12 con
 `condiciones_de_entrega`.
 
-Y desde `app/mcp_server.py` esas 19 son también la superficie MCP, sin una
+Y desde `app/mcp_server.py` esas 25 son también la superficie MCP, sin una
 segunda lista: lo que se saca de `TOOLS_GERENCIA` deja de existir para n8n y
 para Claude Code en el mismo commit.
 

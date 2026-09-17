@@ -78,8 +78,10 @@ def _sin_coincidencia(consulta: str) -> str:
         "LO TENGAMOS: el catálogo está cargado en un idioma y el cliente puede "
         "haberlo pedido en otro, o con el nombre de la categoría en vez del "
         "producto. NO le contestes que no tenemos eso.\n"
-        "Esto es todo lo que hay; ofrecele lo que se parezca a lo que pidió, con "
-        "su nombre tal cual figura acá:\n"
+        "Esto es PARTE del catálogo, no todo —son los primeros que trajo la "
+        "consulta—: ofrecele lo que se parezca a lo que pidió, con su nombre tal "
+        "cual figura acá, y si no está en esta lista NO concluyas que no "
+        "existe.\n"
         f"{lineas}"
     )
 

@@ -92,14 +92,29 @@ def _parsear(texto: str, region: str | None = None):
 
 
 def _canonico(numero) -> str:
-    """E.164 sin `+`, con el prefijo de móvil del país si le falta."""
+    """E.164 sin `+`, con el prefijo de móvil del país si le falta.
+
+    EL E.164 LO ESCRIBE LA LIBRERÍA, no `str(national_number)`. `national_number`
+    es un ENTERO, así que se come los ceros a la izquierda que en algunos países
+    son parte del número: en Italia el 0 troncal NO se saca —`+39 06 6982` es
+    seis-nueve-ocho-dos con el cero— y se guarda aparte, en
+    `italian_leading_zero`. Medido: `+39 06 6982` salía `3966982` en vez de
+    `39066982`, o sea un número que no es. `format_number(..., E164)` sabe de ese
+    campo y de `number_of_leading_zeros`; nosotros no teníamos por qué.
+    """
     if numero is None:
         return ""
-    nsn = str(numero.national_number)
+    e164 = phonenumbers.format_number(
+        numero, phonenumbers.PhoneNumberFormat.E164
+    ).lstrip("+")
+    codigo = str(numero.country_code)
+    if not e164.startswith(codigo):  # no debería pasar; si pasa, no adivinamos
+        return e164
+    nsn = e164[len(codigo):]
     prefijo = _PREFIJO_MOVIL.get(numero.country_code, "")
     if prefijo and not nsn.startswith(prefijo):
         nsn = prefijo + nsn
-    return f"{numero.country_code}{nsn}"
+    return f"{codigo}{nsn}"
 
 
 def normalizar(raw: str | None, pais: str | None = None) -> str:

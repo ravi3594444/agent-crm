@@ -961,7 +961,26 @@ def _reclamar(turno: str = "", *, a_pedido: bool = False) -> tuple[Hueco | None,
                 cliente.delete(CLAVE_PREGUNTA)
                 hueco = None
             if hueco is not None:
-                if a_pedido or not turno or turno == preguntado:
+                if a_pedido:
+                    # LA PREGUNTA VUELVE A SER DE ESTE TURNO. Sin esto, pedirla
+                    # la CALLABA: `a_pedido` devolvía el hueco sin tocar el
+                    # estado, y la vuelta siguiente del react loop —el
+                    # `pre_model_hook` rearmando `prompt_gerencia`, que llama
+                    # acá SIN `a_pedido`— veía un turno distinto al `preguntado`
+                    # y la marcaba como escuchada. `bloque(ya_preguntada=True)`
+                    # dice textual «NO se lo vuelvas a preguntar y no lo
+                    # menciones», así que el dueño preguntaba «¿qué más
+                    # necesitás saber?» y el prompt le ordenaba al modelo no
+                    # contestarlo. Peor: gastaba el turno del medio, y el
+                    # siguiente la retiraba con cuatro horas de descanso.
+                    if turno and turno != preguntado:
+                        cliente.set(
+                            CLAVE_PREGUNTA,
+                            f"{clave_abierta}|{turno}|",
+                            ex=PREGUNTA_VENTANA_SEGUNDOS,
+                        )
+                    return hueco, False
+                if not turno or turno == preguntado:
                     return hueco, False
                 if not escuchado:
                     # Segundo turno: ya salió por WhatsApp y está esperando la
