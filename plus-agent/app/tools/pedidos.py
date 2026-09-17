@@ -482,6 +482,20 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
         )
         decision = policy.Decision(False, ["no se pudo completar la política"])
 
+    if not decision.auto:
+        # Por qué NO se confirmó solo no quedaba escrito en ningún lado. El
+        # modo sombra lo anota, pero corre en el barrido y sólo si el dueño lo
+        # prendió, así que en el alta —que es cuando se mira— «¿por qué quedó
+        # en borrador?» se contestaba apagando gates de a uno. Son siete gates
+        # y cualquiera de ellos deja el pedido igual de silencioso.
+        motivos = " | ".join(
+            entrega.motivo_para_log(m) for m in decision.motivos
+        )
+        print(
+            f"[orders] sin auto-confirmar order={_log_ref(name)} "
+            f"motivos={motivos or 'ninguno'}"
+        )
+
     if decision.auto:
         try:
             with policy.auto_submit_lock():

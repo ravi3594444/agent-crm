@@ -213,3 +213,22 @@ def autorizada(sales_order: dict) -> tuple[bool, str]:
     if evaluacion.dentro:
         return True, ""
     return False, f"{MOTIVO}: {texto_direccion(direccion)} — {evaluacion.motivo}"
+
+
+def motivo_para_log(motivo: str) -> str:
+    """El motivo de `autorizada`, sin la dirección ni el nombre del documento.
+
+    Los tres motivos que devuelve `autorizada` llevan adentro o la dirección
+    del cliente o el nombre de su documento en ERPNext, y `tools/pedidos.py`
+    deja escrito —en `_log_ref`— que en el log no van IDs de cliente. Lo que
+    sirve para diagnosticar es POR QUÉ no se puede entregar, no a quién: eso
+    es exactamente lo que queda. Vive acá y no en el que loggea porque las
+    tres frases se arman acá, así que una cuarta se cubre sola.
+
+    Un motivo que no es de entrega vuelve entero: los demás nombran productos
+    y montos, que el log ya escribe en claro en otras líneas.
+    """
+    if not motivo.startswith(MOTIVO):
+        return motivo
+    _, sep, cola = motivo.partition(" — ")
+    return f"{MOTIVO} — {cola}" if sep else MOTIVO
