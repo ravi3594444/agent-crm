@@ -859,9 +859,19 @@ def test_los_dos_agentes_tienen_instalado_el_manejador_que_deja_reintentar() -> 
     mueve, esto explota en CI y alguien vuelve a mirar el cableado."""
     from app import graph
 
-    for nombre in ("agente_clientes", "agente_gerencia"):
+    # UNO POR AGENTE, y son distintos a propósito desde el 17/09: el texto de
+    # `_ERROR_MSG` está escrito para el cliente —«decile al cliente», «llamá a
+    # escalar_a_humano»— y los dos agentes lo usaban. Del lado del dueño eso
+    # producía una tarjeta «un cliente necesita una persona» sobre él mismo, y
+    # una confirmación inventada, porque ese texto tampoco dice que no se
+    # guardó nada. Lo que este test protege no cambia: que en el agente
+    # COMPILADO haya quedado instalado un manejador que deja reintentar.
+    for nombre, esperado in (
+        ("agente_clientes", graph._error_de_herramienta),
+        ("agente_gerencia", graph._error_de_herramienta_gerencia),
+    ):
         instalado = getattr(graph, nombre).nodes["tools"].bound
-        assert instalado._handle_tool_errors is graph._error_de_herramienta, (
+        assert instalado._handle_tool_errors is esperado, (
             f"{nombre}: quedó {instalado._handle_tool_errors!r}"
         )
 

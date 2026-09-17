@@ -204,7 +204,12 @@ def contar_stock(
         # rechazado. El motivo va incluido porque el que lee es el DUEÑO y es su
         # sistema: un 417 se arregla poniéndole las cuentas de inventario a la
         # compañía, y eso no se adivina desde «hubo un problema».
-        print(f"[captura] conteo de {item_code} rechazado por ERPNext")
+        # Sin `print` propio: `erpnext._request` ya deja la línea del rechazo
+        # CON el motivo que mandó ERPNext, que es estrictamente más útil que
+        # ésta. Dos líneas para el mismo evento, y una de ellas era además
+        # castellano escrito a mano dentro de una herramienta de gerencia, que
+        # es justo lo que `test_ninguna_herramienta_de_gerencia_tiene_castellano
+        # _escrito_a_mano` existe para impedir — y lo agarró.
         return idioma.t(
             "captura.conteo_rechazado",
             idioma.gerencia(),
