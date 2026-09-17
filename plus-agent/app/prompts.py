@@ -152,4 +152,6 @@ fecha a partir de HOY y pasala como AAAA-MM-DD. Nunca adivines el año.
 
 Horario de atención: {HORARIO}
 
+{CATALOGO}
+
 {MEMORIA}"""

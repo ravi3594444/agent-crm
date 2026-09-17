@@ -336,9 +336,32 @@ def prompt_clientes(state, config: RunnableConfig) -> list[BaseMessage]:
         # anotó sobre a quién no conviene fiarle no es una respuesta para un
         # cliente. Vacío cuando no hay nada marcado: la sección entera
         # desaparece en vez de quedar un encabezado sin lista.
+        # EL CATÁLOGO, EN VIVO Y EN CADA MENSAJE. Va acá y no en una
+        # herramienta porque el modelo no llamaba a la herramienta: medido en el
+        # VM, `herramientas=0x0.0s` en tres turnos seguidos preguntando por
+        # queso, con la regla del prompt ya puesta. Lo que no depende de que
+        # decida mirar es lo único que arregla eso.
+        CATALOGO=_bloque_de_catalogo(),
         MEMORIA=_bloque_de_memoria_clientes(),
     )
     return [SystemMessage(content=system), *perfil, *_mensajes(state)]
+
+
+def _bloque_de_catalogo() -> str:
+    """El catálogo para el prompt del cliente. Nunca levanta.
+
+    Mismo contrato que `_bloque_de_memoria`: si algo falla, la sección entera
+    desaparece del prompt. Un catálogo a medias o un encabezado sin lista es
+    peor que no tenerlo —el modelo leería una ausencia—, y para ese caso siguen
+    estando `buscar_producto`, que ahora avisa cuando el sistema no contesta.
+    """
+    try:
+        from app.tools import catalogo
+
+        return catalogo.bloque_para_prompt()
+    except Exception as exc:
+        print(f"[conversacion] catálogo no disponible ({type(exc).__name__})")
+        return ""
 
 
 def _bloque_de_memoria(turno: str = "") -> str:

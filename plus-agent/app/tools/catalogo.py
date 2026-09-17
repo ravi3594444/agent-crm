@@ -20,6 +20,79 @@ from app.runtime_context import RuntimeContextError, actor_context, require_cust
 # NADA. Trece en este negocio; el tope está por el cliente que tenga doscientos.
 MAX_CATALOGO_SUGERIDO = 25
 
+# CUÁNTOS ENTRAN EN EL PROMPT DE CADA MENSAJE. Más alto que el de arriba porque
+# acá el objetivo es que ESTÉ COMPLETO: lo que no entra es lo único sobre lo que
+# el modelo puede volver a equivocarse.
+MAX_CATALOGO_PROMPT = 60
+
+# El bloque se arma UNA vez y vale un minuto. `prompt_clientes` se rearma en
+# CADA vuelta del react loop —tres por mensaje— y sin esto serían tres consultas
+# a ERPNext para contestar un «hola». Un minuto sigue siendo en vivo para un
+# catálogo: un producto que se da de alta ahora aparece en el mensaje siguiente,
+# no al otro día.
+CACHE_CATALOGO_SEGUNDOS = 60
+_cache_catalogo: tuple[float, str] | None = None
+
+
+def bloque_para_prompt() -> str:
+    """El catálogo entero para el prompt del cliente. `""` si no se pudo leer.
+
+    POR QUÉ ESTO EXISTE Y NO ALCANZABA CON LA HERRAMIENTA. Medido en el VM, tres
+    turnos seguidos preguntando por queso: `herramientas=0x0.0s` en los tres. El
+    modelo contestó «only muzzarella and reggianito» sin abrir el catálogo, y
+    después se copió a sí mismo del historial. Arreglar lo que `buscar_producto`
+    CONTESTA no sirve cuando no se lo llama, y la regla del prompt que se lo
+    ordena tampoco alcanzó: un prompt inclina, no obliga. Con la lista acá
+    adentro la pregunta deja de depender de que decida mirar.
+
+    VACÍO SI FALLA, y esto es lo único que no se puede equivocar: un ERPNext
+    caído tiene que hacer DESAPARECER la sección, nunca dejar un encabezado con
+    cero productos debajo. «Esto es lo que vendemos: (nada)» es la misma mentira
+    que todo esto vino a arreglar, escrita por nosotros en vez de por el modelo.
+    """
+    global _cache_catalogo
+    import time
+
+    ahora = time.monotonic()
+    if _cache_catalogo and ahora - _cache_catalogo[0] < CACHE_CATALOGO_SEGUNDOS:
+        return _cache_catalogo[1]
+    try:
+        items = erpnext.get_list(
+            "Item",
+            filters=[["disabled", "=", 0]],
+            fields=["item_name", "stock_uom"],
+            limit=MAX_CATALOGO_PROMPT + 1,
+        )
+    except erpnext.ERPNextError:
+        return ""
+    nombres = [i for i in items if i.get("item_name")]
+    if not nombres:
+        return ""
+    hay_mas = len(nombres) > MAX_CATALOGO_PROMPT
+    nombres = nombres[:MAX_CATALOGO_PROMPT]
+    lineas = "\n".join(
+        f"- {i['item_name']} (se vende por {i['stock_uom']})" for i in nombres
+    )
+    cola = (
+        "\nY HAY MÁS que no entran en esta lista: si te piden algo que no está "
+        "acá, buscalo con buscar_producto ANTES de decir que no lo tenemos."
+        if hay_mas
+        else ""
+    )
+    bloque = (
+        "LO QUE VENDEMOS\n"
+        "Éstos son los productos que EXISTEN, al día de este mensaje. Si te "
+        "piden algo que no figura con ese nombre, fijate primero si es alguno de "
+        "éstos dicho de otra manera —en otro idioma, con el nombre de la "
+        "categoría, con una marca—: «cheese» es queso. NO contestes que no lo "
+        "tenemos sin haber mirado esta lista.\n"
+        "Los PRECIOS y el STOCK no están acá y no se adivinan: eso sale de "
+        "buscar_producto y consultar_stock, como siempre.\n"
+        f"{lineas}{cola}"
+    )
+    _cache_catalogo = (ahora, bloque)
+    return bloque
+
 
 def _sin_coincidencia(consulta: str) -> str:
     """La búsqueda no encontró nada. Eso NO significa que no lo tengamos.
