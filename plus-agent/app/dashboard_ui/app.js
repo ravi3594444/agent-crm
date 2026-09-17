@@ -598,6 +598,13 @@ function cerrarSesion(aviso) {
   forgetConnection();
   state.connectRequest++;
   document.querySelectorAll('dialog[open]').forEach(d=>d.close());
+  // `sesionPendiente` TAMBIÉN. Es la copia en memoria del token guardado, la
+  // que dibuja «Your sign-in is saved» y la que «Try again» le pasa a
+  // `restaurarSesion`. Sin limpiarla acá, Disconnect borraba el token del
+  // disco y dejaba el botón que lo reintenta: el comentario de arriba dice
+  // que ésta es la ÚNICA salida que borra el token guardado, y con una copia
+  // viva eso no era cierto.
+  state.sesionPendiente=null;
   state.connection=null;state.session++;state.busy=false;
   state.detailRequest++;state.fxRequest++;state.fxLoading=false;state.fxError='';
   data=disconnectedData();state.stale=false;
@@ -688,7 +695,7 @@ document.addEventListener('click',async e=>{
     const guardada=state.sesionPendiente;
     if(guardada){state.sesionPendiente=null;state.restoring=true;render();restaurarSesion(guardada);}
   }
-  if(action==='demo'){state.connectRequest++;state.detailRequest++;data=makeDemo(state.range);state.session++;state.connection=null;state.stale=false;state.busy=false;state.extrasBusy=false;state.extrasError='';state.extrasLoadedAt=null;state.reads=freshReads();render();restoreDisplayCurrency();}
+  if(action==='demo'){state.connectRequest++;state.detailRequest++;data=makeDemo(state.range);state.session++;state.connection=null;state.sesionPendiente=null;state.stale=false;state.busy=false;state.extrasBusy=false;state.extrasError='';state.extrasLoadedAt=null;state.reads=freshReads();render();restoreDisplayCurrency();}
   if(action==='retry-currency')setDisplayCurrency(state.fxFailedTarget||state.displayCurrency);
   if(action==='retry-extras')loadExtras(true);
   if(target.dataset.read)await loadRead(target.dataset.read,true);
@@ -771,7 +778,7 @@ document.addEventListener('submit',async e=>{
     button.disabled=true;button.textContent='Connecting…';error.textContent='';
     const connection={base:url.origin,token},snapshot=await fetchData(connection);
     if(attempt!==state.connectRequest||!$('#connection-dialog').open)return;
-    rememberConnection(connection);data=snapshot;state.connection=connection;state.session++;state.detailRequest++;state.busy=false;state.stale=false;state.page=1;state.extrasError='';state.extrasBusy=false;state.extrasLoadedAt=null;state.reads=freshReads();$('#detail-dialog').close();$('#connection-dialog').close();form.reset();render();restoreDisplayCurrency();toast('Connected to your live CRM.');loadViewReads();
+    rememberConnection(connection);data=snapshot;state.connection=connection;state.sesionPendiente=null;state.session++;state.detailRequest++;state.busy=false;state.stale=false;state.page=1;state.extrasError='';state.extrasBusy=false;state.extrasLoadedAt=null;state.reads=freshReads();$('#detail-dialog').close();$('#connection-dialog').close();form.reset();render();restoreDisplayCurrency();toast('Connected to your live CRM.');loadViewReads();
   }catch(ex){if(attempt!==state.connectRequest||!$('#connection-dialog').open)return;error.textContent=ex.name==='TimeoutError'?'The service took too long to respond. Try again.':ex.message==='Failed to fetch'?'Could not reach the service. Check its address, HTTPS, and allowed dashboard origin.':ex.message;button.disabled=false;button.textContent='Connect workspace';}
 });
 document.querySelectorAll('dialog').forEach(dialog=>{dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}});dialog.addEventListener('close',()=>{if(dialog.id==='connection-dialog'){state.connectRequest++;dialog.innerHTML='';}if(dialog.id==='detail-dialog'){state.detailRequest++;dialog.innerHTML='';}if(dialog.id==='setting-dialog')dialog.innerHTML='';if(dialog.id==='price-dialog')dialog.innerHTML='';});});

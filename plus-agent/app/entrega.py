@@ -212,23 +212,36 @@ def autorizada(sales_order: dict) -> tuple[bool, str]:
     evaluacion = evaluar_zona(direccion)
     if evaluacion.dentro:
         return True, ""
+    # LA CATEGORÍA AL LOG, ACÁ, QUE ES DONDE SE SABE. El motivo que sale de esta
+    # función lleva la dirección adentro por diseño —es para el EQUIPO, que
+    # necesita saber cuál dirección—, así que quien quiera loggearlo tiene que
+    # reconstruir la categoría a partir del texto. Eso no se puede hacer bien y
+    # fue exactamente el defecto: ver `motivo_para_log`. Acá la categoría es la
+    # que decidió `evaluar_zona`, no una deducción, y no contiene una letra de
+    # la dirección.
+    print(f"[entrega] no autorizada categoria={evaluacion.categoria}", flush=True)
     return False, f"{MOTIVO}: {texto_direccion(direccion)} — {evaluacion.motivo}"
 
 
 def motivo_para_log(motivo: str) -> str:
-    """El motivo de `autorizada`, sin la dirección ni el nombre del documento.
+    """El motivo de `autorizada` reducido a QUE FUE EL DE ENTREGA, sin dirección.
 
-    Los tres motivos que devuelve `autorizada` llevan adentro o la dirección
-    del cliente o el nombre de su documento en ERPNext, y `tools/pedidos.py`
-    deja escrito —en `_log_ref`— que en el log no van IDs de cliente. Lo que
-    sirve para diagnosticar es POR QUÉ no se puede entregar, no a quién: eso
-    es exactamente lo que queda. Vive acá y no en el que loggea porque las
-    tres frases se arman acá, así que una cuarta se cubre sola.
+    Los motivos que devuelve `autorizada` llevan adentro la dirección del
+    cliente o el nombre de su documento en ERPNext, y `tools/pedidos.py` deja
+    escrito —en `_log_ref`— que en el log no van IDs de cliente.
 
-    Un motivo que no es de entrega vuelve entero: los demás nombran productos
-    y montos, que el log ya escribe en claro en otras líneas.
+    La primera versión de esto cortaba por el guión largo y se quedaba con la
+    cola, dando por sentado que la cola era una categoría. NO LO ES: los cuatro
+    motivos de `evaluar_zona` que más se ven interpolan el CP y la localidad
+    («el código postal 5000 y la localidad «Córdoba» no están en las zonas de
+    reparto»). O sea que sacaba la calle y devolvía la ciudad, debajo de un
+    docstring que prometía lo contrario — peor que no recortar nada, porque a
+    un docstring así se le cree. Por eso acá no queda cola ninguna.
+
+    El POR QUÉ no se pierde: lo imprime `autorizada` como `categoria=`, en el
+    momento en que la tiene y sin tener que deducirla.
+
+    Un motivo que no es de entrega vuelve entero: los demás nombran productos y
+    montos, que el log ya escribe en claro en otras líneas.
     """
-    if not motivo.startswith(MOTIVO):
-        return motivo
-    _, sep, cola = motivo.partition(" — ")
-    return f"{MOTIVO} — {cola}" if sep else MOTIVO
+    return MOTIVO if motivo.startswith(MOTIVO) else motivo

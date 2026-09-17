@@ -59,6 +59,8 @@ from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
 
+from app import modelos
+
 
 def _motivo(error: BaseException) -> str:
     """El texto del error del proveedor, aplastado y acotado. "" si no dice nada.
@@ -151,8 +153,18 @@ class Progreso(BaseCallbackHandler):
         # 300 caracteres la vuelve ilegible. La de latencia sigue igual.
         #
         # Al LOG y nunca al modelo ni al cliente, misma frontera que
-        # `erpnext._motivo_del_servidor`.
-        print(f"[modelo] {type(error).__name__}: {_motivo(error)}", flush=True)
+        # `erpnext._motivo_del_servidor`. Y ENMASCARADO: esto es texto que vino
+        # DE LA RED, y `modelos.enmascarar` existe para eso —«se aplica siempre
+        # antes de imprimir algo que vino de la red», dice su docstring—. No
+        # alcanza con no tener la clave a mano: el que la repite es el proveedor
+        # en el cuerpo de su propio error, y por eso `enmascarar` tapa además
+        # cualquier cosa con forma de clave. Escribir la frontera en un
+        # comentario y no aplicarla es no tenerla.
+        print(
+            f"[modelo] {type(error).__name__}: "
+            f"{modelos.enmascarar(_motivo(error), limite=300)}",
+            flush=True,
+        )
 
     # ------------------------------------------------------ las herramientas
 

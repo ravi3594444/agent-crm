@@ -463,6 +463,27 @@ def _notificar_confirmada(order: dict) -> None:
         print(f"[orders] aviso de confirmación falló ({type(exc).__name__})")
 
 
+def _avisar_sin_auto(name: str, decision: policy.Decision) -> None:
+    """Por qué este pedido NO se auto-confirmó, al log del contenedor.
+
+    No quedaba escrito en ningún lado: el modo sombra lo anota, pero corre en
+    el barrido y sólo si el dueño lo prendió, así que en el alta —que es cuando
+    se mira— «¿por qué quedó en borrador?» se contestaba apagando gates de a
+    uno. `policy._evaluar` tiene alrededor de una docena y cualquiera deja el
+    pedido igual de silencioso.
+
+    Los motivos pasan por `entrega.motivo_para_log`, que es lo único que los
+    separa de la dirección del cliente. Lo llaman los DOS caminos que terminan
+    en borrador —la primera decisión y la relectura bajo el lock—, porque son
+    dos respuestas distintas sobre el mismo pedido y sólo una de las dos manda.
+    """
+    motivos = " | ".join(entrega.motivo_para_log(m) for m in decision.motivos)
+    print(
+        f"[orders] sin auto-confirmar order={_log_ref(name)} "
+        f"motivos={motivos or 'ninguno'}"
+    )
+
+
 def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
     name = str(order.get("name") or "").strip()
     if not name:
@@ -483,18 +504,7 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
         decision = policy.Decision(False, ["no se pudo completar la política"])
 
     if not decision.auto:
-        # Por qué NO se confirmó solo no quedaba escrito en ningún lado. El
-        # modo sombra lo anota, pero corre en el barrido y sólo si el dueño lo
-        # prendió, así que en el alta —que es cuando se mira— «¿por qué quedó
-        # en borrador?» se contestaba apagando gates de a uno. Son alrededor
-        # de una docena y cualquiera deja el pedido igual de silencioso.
-        motivos = " | ".join(
-            entrega.motivo_para_log(m) for m in decision.motivos
-        )
-        print(
-            f"[orders] sin auto-confirmar order={_log_ref(name)} "
-            f"motivos={motivos or 'ninguno'}"
-        )
+        _avisar_sin_auto(name, decision)
 
     if decision.auto:
         try:
@@ -512,7 +522,14 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
                     )
                     _notificar_confirmada(complete)
                     return _order_result(complete, validated, delivery)
+                # LA RELECTURA MANDÓ Y DIJO QUE NO. Acá el pedido queda en
+                # borrador igual que arriba, y hasta recién no lo decía nadie:
+                # el aviso salía de la PRIMERA decisión, que en este camino
+                # dijo que sí. O sea que el único caso donde la política cambia
+                # de opinión bajo el lock —el que más querés ver— era el único
+                # que seguía mudo.
                 decision = final_decision
+                _avisar_sin_auto(name, decision)
         except Exception as exc:
             print(
                 f"[orders] auto-confirmación falló order={_log_ref(name)} "
