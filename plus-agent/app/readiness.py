@@ -131,6 +131,23 @@ def _valor(env: Mapping[str, str], clave: str) -> str:
     return str(env.get(clave, "") or "").strip()
 
 
+def _codigo_pais(env: Mapping[str, str]) -> str:
+    """El código de discado de ESTE mapping, con la precedencia del runtime.
+
+    `app/telefono.py` congela `PAIS` y `REGION` cuando se importa, o sea con el
+    entorno del PROCESO. Un preflight de un .env candidato que declara otro país
+    normalizaba sus teléfonos con el país que está corriendo, y con eso contesta
+    mal sobre duplicados y sobre si el dueño está en el equipo. Acá se rehace la
+    misma cadena —explícito, derivado, default— pero leyendo `env`.
+    """
+    from app import pais as _pais_mod
+
+    explicito = _valor(env, "PAIS_TELEFONO")
+    if explicito:
+        return explicito
+    return _pais_mod.codigo_de(_valor(env, "PAIS_NEGOCIO")) or _pais_mod.CODIGO_POR_DEFECTO
+
+
 def _http_real(url: str, headers: dict | None = None, params: dict | None = None) -> tuple[int, object]:
     try:
         respuesta = httpx.get(url, headers=headers, params=params, timeout=10.0)
@@ -292,30 +309,72 @@ def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
             f"{territorio!r} no es un código ISO de dos letras (AR, US, IN, BR)",
         )
     else:
-        # Se deriva con el MISMO código que usa el runtime, no con una copia:
-        # un informe que calcula el país por su cuenta puede decir «US» sobre
-        # un despliegue que está normalizando teléfonos como argentinos.
-        anterior = os.environ.get("PAIS_NEGOCIO")
-        os.environ["PAIS_NEGOCIO"] = territorio
-        try:
-            derivado = f"+{_pais_mod.codigo_telefono()} · {_pais_mod.locale()}"
-        finally:
-            if anterior is None:
-                os.environ.pop("PAIS_NEGOCIO", None)
-            else:
-                os.environ["PAIS_NEGOCIO"] = anterior
-        reporte.ok("PAIS_NEGOCIO", f"{territorio}: {derivado}")
+        # NO ALCANZA CON LA FORMA, y esto es lo que dejaba pasar un `ZZ`: dos
+        # letras, alfabético, y ni libphonenumber ni CLDR lo conocen. El runtime
+        # entonces no deriva nada y se cae al default argentino —+54 y es_AR—
+        # mientras el informe decía OK, o sea que un typo en el .env sale a
+        # normalizar teléfonos y a escribir montos con reglas de otro país sin
+        # una línea en ningún lado.
+        #
+        # Se le pregunta a los MISMOS datos que usa el runtime, y se le pregunta
+        # por el territorio DE ESTE mapping, sin escribir en `os.environ`: la
+        # versión anterior lo pisaba y lo restauraba, lo que es una variable
+        # global compartida con todo el proceso para responder una pregunta que
+        # no necesitaba ninguna.
+        codigo = _pais_mod.codigo_de(territorio)
+        idioma = _pais_mod.locale_de(territorio)
+        if not codigo or not idioma:
+            falta = " ni ".join(
+                nombre
+                for nombre, dato in (
+                    ("código de discado (libphonenumber)", codigo),
+                    ("idioma oficial (CLDR)", idioma),
+                )
+                if not dato
+            )
+            reporte.error(
+                "PAIS_NEGOCIO",
+                f"{territorio!r} no tiene {falta}: no es un país que se pueda "
+                f"derivar, y todo saldría con el default "
+                f"(+{_pais_mod.CODIGO_POR_DEFECTO} · {_pais_mod.LOCALE_POR_DEFECTO}) "
+                "sin avisar",
+            )
+        else:
+            reporte.ok("PAIS_NEGOCIO", f"{territorio}: +{codigo} · {idioma}")
 
     pais = _valor(env, "PAIS_TELEFONO")
     if not pais:
+        # Se dice el código que va a salir DE VERDAD, no de dónde sale. Con un
+        # `PAIS_NEGOCIO` que no deriva, «sale de PAIS_NEGOCIO (ZZ)» es una línea
+        # OK que contradice al ERROR de arriba y deja creyendo que el país está
+        # puesto cuando lo que se va a usar es el default.
         reporte.ok(
             "PAIS_TELEFONO",
-            f"vacío: sale de PAIS_NEGOCIO ({territorio or 'tampoco puesto: 54'})",
+            f"vacío: se usa +{_codigo_pais(env)} "
+            + (f"(de PAIS_NEGOCIO={territorio})" if _pais_mod.codigo_de(territorio)
+               else "(el default: PAIS_NEGOCIO no está puesto o no deriva)"),
         )
     elif not pais.isdigit():
         reporte.error("PAIS_TELEFONO", "tiene que ser el código de país en dígitos")
     else:
-        reporte.ok("PAIS_TELEFONO", f"configurado ({len(pais)} dígitos)")
+        derivado = _pais_mod.codigo_de(territorio)
+        if derivado and derivado != pais:
+            # LA CONTRADICCIÓN, DICHA. Arreglar `.env.example` sirve para la
+            # próxima instalación y no hace nada por las que ya existen: un
+            # .env escrito con la plantilla vieja tiene `PAIS_TELEFONO=54`
+            # adentro, gana sobre `PAIS_NEGOCIO`, y cambiar el país que la
+            # plantilla dice que es «lo único que hay que poner» deja los
+            # teléfonos normalizados como argentinos. Callado, eso son clientes
+            # que dejan de matchear.
+            reporte.aviso(
+                "PAIS_TELEFONO",
+                f"+{pais} puesto a mano GANA sobre PAIS_NEGOCIO={territorio} "
+                f"(+{derivado}): los teléfonos se normalizan con reglas de "
+                f"+{pais} y los montos con los de {territorio}. Si no es a "
+                "propósito, dejala vacía",
+            )
+        else:
+            reporte.ok("PAIS_TELEFONO", f"configurado ({len(pais)} dígitos)")
 
     crudos = [t.strip() for t in _valor(env, "TELEFONOS_EQUIPO").split(",") if t.strip()]
     if not crudos:
@@ -324,7 +383,8 @@ def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
             "vacío: sin agente de gestión, sin alertas y nadie puede confirmar pedidos",
         )
     else:
-        normalizados = [telefono.normalizar(t) for t in crudos]
+        codigo_pais = _codigo_pais(env)
+        normalizados = [telefono.normalizar(t, codigo_pais) for t in crudos]
         invalidos = sum(1 for n in normalizados if not n)
         unicos = {n for n in normalizados if n}
         if invalidos:
@@ -338,7 +398,7 @@ def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
         # El resumen del día va al DUEÑO, explícito, no al primero de la lista.
         dueno_crudo = _valor(env, "TELEFONO_DUENO")
         if dueno_crudo:
-            dueno = telefono.normalizar(dueno_crudo)
+            dueno = telefono.normalizar(dueno_crudo, codigo_pais)
             if not dueno:
                 reporte.error("TELEFONO_DUENO", "no se puede interpretar")
             elif dueno not in unicos:
@@ -509,6 +569,14 @@ def chequear_panel(env: Mapping[str, str], reporte: Reporte) -> None:
         )
         return
 
+    # SIN el país del mapping, a propósito, y esto NO es un olvido del arreglo
+    # de `chequear_equipo`. Acá los dos lados se comparan entre sí: la otra
+    # mitad sale de `dashboard.entradas_de_tokens`, que normaliza con el país
+    # del proceso y es el mismo parser que usa el panel en vivo. Pasarle el país
+    # candidato a una sola de las dos mitades las despega y empieza a contar
+    # como «mirón» a alguien del equipo. Lo que se chequea acá es si un token
+    # pertenece a alguien del equipo, y eso sólo tiene sentido con los dos lados
+    # escritos igual.
     del_equipo = {
         numero
         for numero in (

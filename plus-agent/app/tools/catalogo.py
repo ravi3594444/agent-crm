@@ -47,7 +47,21 @@ def _sin_coincidencia(consulta: str) -> str:
             limit=MAX_CATALOGO_SUGERIDO,
         )
     except erpnext.ERPNextError:
-        catalogo = []
+        # UNA CAÍDA NO ES UN CATÁLOGO VACÍO, y hasta acá las dos cosas caían en
+        # el mismo texto: «preguntale cómo lo llama él». O sea que un ERPNext
+        # que no contesta salía al cliente como una charla sobre el nombre del
+        # producto, que es tapar una caída conversando. La primera búsqueda —la
+        # de `buscar_producto`— sí anduvo y no matcheó, así que lo único cierto
+        # es que ningún nombre coincide; si el sistema se cayó entre esa
+        # consulta y ésta, tampoco hay con qué ofrecer alternativas, y eso hay
+        # que decirlo en vez de completarlo.
+        return (
+            f"Ningún producto se llama '{consulta}', y al intentar leer el "
+            "catálogo completo para ofrecerle algo parecido EL SISTEMA FALLÓ. "
+            "NO le digas que no lo tenemos y NO le prometas nada: no pudiste "
+            "verificar. Decile que en este momento no podés confirmar qué hay "
+            "y que lo revisás enseguida; si insiste, usá escalar_a_humano."
+        )
     if not catalogo:
         return (
             f"No encontré nada parecido a '{consulta}' en el catálogo. "

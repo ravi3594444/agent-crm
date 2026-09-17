@@ -36,14 +36,52 @@ import os
 import phonenumbers
 from babel.core import get_global
 
+# Lo que este archivo asume sin ninguna variable puesta, que es lo que el
+# proyecto asumió siempre. Son constantes y no literales sueltos porque
+# `app/readiness.py` tiene que rehacer esta MISMA cadena de precedencia sobre un
+# .env candidato, y dos copias del "54" se despegan la primera vez que una
+# cambia.
+CODIGO_POR_DEFECTO = "54"
+LOCALE_POR_DEFECTO = "es_AR"
 
-def territorio() -> str:
-    """`PAIS_NEGOCIO` como código ISO de dos letras, o "" si no está puesto."""
-    crudo = str(os.getenv("PAIS_NEGOCIO", "") or "").strip().upper()
+
+def _limpio(lugar: str | None) -> str:
+    """Un código ISO de dos letras en mayúsculas, o "" si no tiene esa forma."""
+    crudo = str(lugar or "").strip().upper()
     return crudo if len(crudo) == 2 and crudo.isalpha() else ""
 
 
-def codigo_telefono(por_defecto: str = "54") -> str:
+def territorio() -> str:
+    """`PAIS_NEGOCIO` como código ISO de dos letras, o "" si no está puesto."""
+    return _limpio(os.getenv("PAIS_NEGOCIO", ""))
+
+
+def codigo_de(lugar: str | None) -> str:
+    """El código de discado de ESE territorio, o "" si no es un país real.
+
+    Separada de `codigo_telefono()` porque son dos preguntas distintas, y
+    confundirlas es lo que dejaba pasar un `PAIS_NEGOCIO=ZZ`. «Qué código uso»
+    siempre tiene respuesta —termina en el default—; «este territorio existe»
+    tiene que poder contestar que no, y es la única de las dos que sirve para
+    validar lo que alguien escribió en el .env.
+    """
+    lugar = _limpio(lugar)
+    if not lugar:
+        return ""
+    codigo = phonenumbers.country_code_for_region(lugar)
+    return str(codigo) if codigo else ""
+
+
+def locale_de(lugar: str | None) -> str:
+    """El locale de ESE territorio, o "" si CLDR no le conoce idioma oficial."""
+    lugar = _limpio(lugar)
+    if not lugar:
+        return ""
+    idioma = idioma_del_territorio(lugar)
+    return f"{idioma}_{lugar}" if idioma else ""
+
+
+def codigo_telefono(por_defecto: str = CODIGO_POR_DEFECTO) -> str:
     """El código de discado: lo explícito, lo derivado, o el de siempre.
 
     Devuelve un string de dígitos porque es lo que `app/telefono.py` compara
@@ -52,12 +90,7 @@ def codigo_telefono(por_defecto: str = "54") -> str:
     explicito = str(os.getenv("PAIS_TELEFONO", "") or "").strip()
     if explicito:
         return explicito
-    lugar = territorio()
-    if lugar:
-        codigo = phonenumbers.country_code_for_region(lugar)
-        if codigo:
-            return str(codigo)
-    return por_defecto
+    return codigo_de(territorio()) or por_defecto
 
 
 def idioma_del_territorio(lugar: str) -> str:
@@ -80,14 +113,9 @@ def idioma_del_territorio(lugar: str) -> str:
     return oficiales[0][1] if oficiales else ""
 
 
-def locale(por_defecto: str = "es_AR") -> str:
+def locale(por_defecto: str = LOCALE_POR_DEFECTO) -> str:
     """El locale para los montos: lo explícito, lo derivado, o el de siempre."""
     explicito = str(os.getenv("LOCALE", "") or "").strip()
     if explicito:
         return explicito.replace("-", "_")
-    lugar = territorio()
-    if lugar:
-        idioma = idioma_del_territorio(lugar)
-        if idioma:
-            return f"{idioma}_{lugar}"
-    return por_defecto
+    return locale_de(territorio()) or por_defecto

@@ -210,12 +210,29 @@ def contar_stock(
         # castellano escrito a mano dentro de una herramienta de gerencia, que
         # es justo lo que `test_ninguna_herramienta_de_gerencia_tiene_castellano
         # _escrito_a_mano` existe para impedir — y lo agarró.
+        # `exc.motivo` Y NO `str(exc)`, PEDIDO A PROPÓSITO. El docstring de
+        # `ERPNextError` deja el cuerpo de ERPNext fuera de `str(exc)` porque
+        # todo lo que se interpola en un mensaje de herramienta lo lee el
+        # modelo, y el agente de CLIENTES tiene lectura ancha; y deja el motivo
+        # disponible «para quien sepa que lo está pidiendo». Ésta es esa
+        # excepción, y se sostiene sola: `contar_stock` vive únicamente en
+        # TOOLS_GERENCIA, o sea que del otro lado hay un número de
+        # TELEFONOS_EQUIPO mirando SU sistema.
+        #
+        # Y sin esto el comentario de arriba era falso: decía «el motivo va
+        # incluido» y lo que iba era «Stock Reconciliation falló (417)», que es
+        # el operativo y el código y nada más. El 417 real de este proyecto
+        # decía «OpeningEntryAccountError: Difference Account must be a
+        # Asset/Liability type account» y hubo que sacarlo del contenedor a
+        # mano — que es exactamente el viaje que este PR agregó `motivo` para
+        # ahorrar. Si ERPNext no mandó cuerpo se cae a `str(exc)`, que al menos
+        # trae la operación y el status.
         return idioma.t(
             "captura.conteo_rechazado",
             idioma.gerencia(),
             item_code=item_code,
             dep=dep,
-            motivo=str(exc)[:200],
+            motivo=(exc.motivo or str(exc))[:200],
         )
     erpnext.add_comment(
         "Stock Reconciliation", doc["name"],

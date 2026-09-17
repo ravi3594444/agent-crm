@@ -102,12 +102,23 @@ def _canonico(numero) -> str:
     return f"{numero.country_code}{nsn}"
 
 
-def normalizar(raw: str | None) -> str:
+def normalizar(raw: str | None, pais: str | None = None) -> str:
     """Devuelve el teléfono en forma canónica (dígitos, E.164 sin `+`).
 
     Devuelve "" si no hay nada usable. Nunca levanta excepción: esto corre
     sobre datos cargados a mano y tiene que tolerar cualquier basura.
+
+    `pais` es el código de discado a usar en lugar del del proceso, y existe
+    para UN caso: `app/readiness.py` chequea un .env CANDIDATO, que puede
+    declarar otro país que el que está corriendo. `PAIS` y `REGION` se congelan
+    al importar este módulo, así que sin este parámetro un preflight de un .env
+    estadounidense normaliza con reglas argentinas y contesta sobre duplicados
+    y sobre el número del dueño mirando otra cosa. En el runtime no se pasa:
+    ahí el país del proceso ES el país.
     """
+    codigo = str(pais or "").strip() or PAIS
+    region = REGION if codigo == PAIS else _region(codigo)
+
     d = solo_digitos(raw)
     if not d:
         return ""
@@ -120,7 +131,7 @@ def normalizar(raw: str | None) -> str:
     #    empiece con el del negocio. En los dos casos la librería sabe de qué
     #    país es y cómo se escribe — incluido el caso que rompía antes, un
     #    número indio con PAIS_TELEFONO=91.
-    if str(raw or "").strip().startswith("+") or d.startswith(PAIS):
+    if str(raw or "").strip().startswith("+") or d.startswith(codigo):
         canonico = _canonico(_parsear(f"+{d}"))
         if canonico:
             return canonico
@@ -134,8 +145,8 @@ def normalizar(raw: str | None) -> str:
     #    Se exige `is_valid_number` y no que parsee: los números de prueba
     #    argentinos no son válidos —son inventados— y tienen que seguir
     #    llegando al paso 4, que es el permisivo.
-    if REGION and 11 <= len(d) <= 15 and not d.startswith("0"):
-        numero = _parsear(d, REGION)
+    if region and 11 <= len(d) <= 15 and not d.startswith("0"):
+        numero = _parsear(d, region)
         if numero is not None and phonenumbers.is_valid_number(numero):
             canonico = _canonico(numero)
             if canonico:
@@ -143,13 +154,13 @@ def normalizar(raw: str | None) -> str:
 
     # 3. E.164 DE OTRO PAÍS, SIN `+`. Indistinguible de un nacional largo para
     #    cualquier parser, así que se deja como vino. Ver el docstring.
-    if 11 <= len(d) <= 15 and not d.startswith("0") and not d.startswith(PAIS):
+    if 11 <= len(d) <= 15 and not d.startswith("0") and not d.startswith(codigo):
         return d
 
     # 4. NACIONAL DEL PAÍS CONFIGURADO: el 0 troncal, el 15 argentino y los
     #    códigos de área de 2 a 4 dígitos los resuelve la librería.
-    if REGION:
-        canonico = _canonico(_parsear(d, REGION))
+    if region:
+        canonico = _canonico(_parsear(d, region))
         if canonico:
             return canonico
 

@@ -49,6 +49,7 @@ encenderlo.
 """
 from __future__ import annotations
 
+import contextlib
 import hmac
 import json
 import os
@@ -549,34 +550,68 @@ def _telefono_de_stdio() -> str:
     return telefono
 
 
+@contextlib.contextmanager
+def _canal_apartado():
+    """Aparta el stdout REAL para el protocolo y manda todo lo demás a stderr.
+
+    ESTE ARCHIVO NO ESCRIBE UN `print` A SECAS, PERO NO ALCANZA, y por qué no
+    alcanza está medido: `_catalogo()` importa `app.graph` TARDE, recién cuando
+    alguien pide `tools/list`, y esa importación arrastra medio proyecto —
+    `limites`, `agenda`, `solicitudes`, `notificar`…— que entre todos tienen
+    ~370 `print()` de diagnóstico, escritos para el contenedor del agente, donde
+    stdout es el log y está bien que vayan ahí. Acá stdout ES el canal del
+    protocolo. Uno solo de esos 370 que se dispare durante la importación sale
+    ANTES de la respuesta JSON-RPC, en el mismo stream, y el cliente no puede
+    parsear nada.
+
+    No es hipotético: con este archivo intacto, un `tools/list` imprimía
+    «[limites] no pude leer el almacén, uso el entorno para el negocio» como
+    primera línea de stdout. Un módulo que no sabe que existe MCP rompía el
+    servidor MCP.
+
+    Por eso el arreglo va acá y no en los 370 llamados: mientras corre el
+    servidor, `sys.stdout` ES stderr, y las respuestas se escriben al descriptor
+    apartado, al que nadie más tiene referencia. Cualquier `print` futuro de
+    cualquier módulo ya nace del lado correcto.
+    """
+    protocolo = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        yield protocolo
+    finally:
+        sys.stdout = protocolo
+
+
 def main() -> int:
     """El servidor stdio: JSON por línea, protocolo por stdout, avisos por stderr.
 
     LO QUE NUNCA VA A STDOUT. En este transporte stdout ES el canal del
     protocolo: un `print` de diagnóstico se mete en medio de un mensaje y el
     cliente lo lee como JSON roto. Todo lo que no sea una respuesta sale por
-    stderr (`_avisar`), y por eso este archivo no tiene un solo `print` a secas.
+    stderr (`_avisar`), este archivo no tiene un solo `print` a secas, y los de
+    los módulos que se importan acá adentro los desvía `_canal_apartado`.
     """
-    try:
-        telefono = _telefono_de_stdio()
-    except MCPNoConfigurado as exc:
-        _avisar(str(exc))
-        return 2
-    for linea in sys.stdin:
-        linea = linea.strip()
-        if not linea:
-            continue
+    with _canal_apartado() as protocolo:
         try:
-            mensaje = json.loads(linea)
-        except json.JSONDecodeError:
-            respuesta: dict | None = _error(None, ERROR_PARSE, "invalid JSON")
-            sys.stdout.write(json.dumps(respuesta) + "\n")
-            sys.stdout.flush()
-            continue
-        respuestas, _ = despachar_lote(mensaje, telefono)
-        for respuesta in respuestas:
-            sys.stdout.write(json.dumps(respuesta, allow_nan=False) + "\n")
-        sys.stdout.flush()
+            telefono = _telefono_de_stdio()
+        except MCPNoConfigurado as exc:
+            _avisar(str(exc))
+            return 2
+        for linea in sys.stdin:
+            linea = linea.strip()
+            if not linea:
+                continue
+            try:
+                mensaje = json.loads(linea)
+            except json.JSONDecodeError:
+                respuesta: dict | None = _error(None, ERROR_PARSE, "invalid JSON")
+                protocolo.write(json.dumps(respuesta) + "\n")
+                protocolo.flush()
+                continue
+            respuestas, _ = despachar_lote(mensaje, telefono)
+            for respuesta in respuestas:
+                protocolo.write(json.dumps(respuesta, allow_nan=False) + "\n")
+            protocolo.flush()
     return 0
 
 
