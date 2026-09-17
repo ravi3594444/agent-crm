@@ -21,67 +21,72 @@ app/notificar.py.
 """
 from __future__ import annotations
 
-from app import idioma, limites, notificar
+from app import idioma, limites
 
 
 def preparar(limite: str, valor: str, telefono: str) -> str:
-    """Prepara el cambio, le manda el código al dueño y devuelve qué decirle.
+    """Cambia el ajuste YA y devuelve qué decirle al dueño. SIN código.
 
     ``telefono`` tiene que ser un número YA verificado: este módulo no
-    autoriza a nadie. Quien llama decide si esa persona puede (require_management
-    en la herramienta, es_equipo en el ruteo).
+    autoriza a nadie. Quien llama decide si esa persona puede
+    (`require_management` en la herramienta, `es_equipo` en el ruteo).
 
-    Todo el estado —la propuesta, su código, su vencimiento y su huella— lo
-    maneja limites.proponer(). Pedir dos veces el mismo cambio devuelve la MISMA
-    propuesta con el MISMO código, así que una entrega doble de Meta o un turno
-    reintentado no dejan dos códigos vivos.
+    ESTO ERA DE DOS PASOS Y AHORA ES DE UNO, POR DECISIÓN DEL DUEÑO. El modelo
+    proponía, Python le mandaba cuatro dígitos al teléfono del dueño por un
+    canal aparte, y el router determinista de `app/main.py` aplicaba; el código
+    nunca entraba en el contexto de ningún modelo, así que nada que el modelo
+    hiciera —ni que lo convencieran de hacer— podía proveerlo. Sacarlo
+    significa que lo que el modelo decida cambiar, se cambia.
+
+    El dueño lo pidió expresamente y más de una vez: configurar un negocio
+    tecleando un código por cada ajuste es la fricción que, según él, hace que
+    el producto no se venda. Y no es un camino nuevo en este repo:
+    `cambiar_precio` ya escribe el precio de lista «sin código y sin
+    confirmar», con el mismo argumento suyo citado en `graph.py`.
+
+    LO QUE NO CAMBIÓ, porque nunca dependió del código: `limites.validar` sigue
+    rechazando un valor imposible, `limites._escribir` sigue siendo el único
+    camino de escritura y sigue auditando en ERPNext ANTES de guardar —si no se
+    puede dejar el registro durable, el cambio no se aplica—, y el teléfono
+    verificado sigue quedando en esa auditoría. Sin código, ese registro es lo
+    único que queda para reconstruir quién pidió un cambio que nadie recuerda.
+
+    La maquinaria de propuestas (`limites.proponer`, `aplicar`, `pendiente`,
+    `descartar`) queda intacta y sin usar desde acá: revertir esto es volver a
+    llamarla, no reescribirla.
     """
+    # El idioma se lee ANTES de escribir, no después: si el cambio es el del
+    # propio idioma, el acuse tiene que salir en el que el dueño venía leyendo.
+    # Leerlo después contestaría en el nuevo, sobre un mensaje que mandó en el
+    # viejo — que es exactamente lo que el comentario de la versión con código
+    # dejaba dicho, y sigue valiendo.
+    lengua = idioma.gerencia()
     try:
-        propuesta = limites.proponer(limite, valor, telefono)
+        entrada = limites.fijar(limite, valor, telefono)
     except limites.LimiteError as exc:
-        # En el idioma del equipo, como todo lo demás que sale de acá. Quién
-        # convierte la excepción en ese texto es `limites.motivo`, en un solo
+        # Quién convierte la excepción en texto es `limites.motivo`, en un solo
         # lugar: acá y en app/main.py estaba la MISMA línea escrita dos veces, y
         # dos copias de una regla son dos reglas.
-        lengua = idioma.gerencia()
         return idioma.t(
             "codigo.ajuste_no_preparado", lengua, motivo=limites.motivo(exc, lengua)
         )
 
-    # El idioma en que se le habla al equipo AHORA — no el propuesto. Si está
-    # pasando de español a inglés, el pedido de confirmación llega todavía en
-    # español: recién cuando confirma cambia el idioma.
-    lengua = idioma.gerencia()
-    nombre_ajuste = propuesta.get("limite") or propuesta.get("nombre") or ""
-    anterior = limites.mostrar(nombre_ajuste, propuesta["anterior"], lengua)
-    nuevo = limites.mostrar(nombre_ajuste, propuesta["nuevo"], lengua)
-    cambio = f"*{propuesta['alias']}*: {anterior} → {nuevo}"
-
-    # Determinista, y a SU número. Este envío es la razón por la que los dos
-    # pasos son dos: el código nunca entra en el contexto del modelo, así que
-    # nada que el modelo haga —ni que lo convenzan de hacer— puede proveerlo.
-    #
-    # Se reenvía en un repetido, CON EL MISMO CÓDIGO. Un turno reintentado es el
-    # caso normal acá —el modelo llamó la herramienta dos veces, Meta reentregó
-    # el mensaje— y la falla que importa es el envío que nunca llegó. Reenviar
-    # los mismos dígitos es seguro: es una propuesta y un código, así que lo
-    # peor que pasa es que lea el mismo mensaje dos veces. Sortear uno nuevo era
-    # el defecto: dos mensajes, dos códigos, y sólo el último servía.
-    entregado = notificar.pedir_codigo_de_ajuste(
-        telefono,
-        idioma.t(
-            "codigo.ajuste_pedido",
-            lengua,
-            cambio=cambio,
-            codigo=propuesta["codigo"],
-            minutos=int(limites.PROPUESTA_TTL_SEGUNDOS // 60),
-        ),
+    # El acuse nombra el ajuste con su alias de siempre —el que el dueño teclea
+    # por WhatsApp— y muestra de dónde a dónde fue. Sin código que teclear, este
+    # mensaje es lo ÚNICO que le dice que algo cambió: si no se lee claro, un
+    # cambio que él no quiso pasa desapercibido hasta que muerde.
+    # Se reusa el MISMO texto que usaba el camino con código
+    # (`codigo.ajuste_aplicado`): ya está en los dos idiomas, ya dice que rige
+    # desde el próximo pedido y sin reiniciar, y ya deja dicho que queda
+    # registrado a nombre del dueño. Escribir uno nuevo sería una segunda
+    # redacción de la misma noticia, que es como se separan dos mensajes que
+    # tienen que decir lo mismo.
+    nombre_ajuste = entrada["limite"]
+    return idioma.t(
+        "codigo.ajuste_aplicado",
+        lengua,
+        ajuste=limites.definicion(nombre_ajuste).alias[0],
+        anterior=limites.mostrar(nombre_ajuste, entrada["anterior"], lengua),
+        nuevo=limites.mostrar(nombre_ajuste, entrada["nuevo"], lengua),
+        ts=entrada["ts"],
     )
-    if not entregado:
-        # Un cambio esperando un código que nunca vio no se puede confirmar, y
-        # puede confundirlo diez minutos después. Mejor no dejarlo.
-        limites.descartar(telefono)
-        return idioma.t("codigo.ajuste_sin_codigo", lengua, cambio=cambio)
-    if propuesta.get("repetida"):
-        return idioma.t("codigo.ajuste_repetido", lengua, cambio=cambio)
-    return idioma.t("codigo.ajuste_preparado", lengua, cambio=cambio)

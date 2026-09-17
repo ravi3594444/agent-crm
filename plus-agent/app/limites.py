@@ -2265,7 +2265,19 @@ def aplicar(codigo: str, telefono: str) -> dict:
         )
     # tecleado=False: proponer() ya normalizó esto. Re-agruparlo es el error
     # de mil veces que describe el docstring de _numero.
-    nuevo = validar(nombre, str(propuesta.get("nuevo")), tecleado=False)
+    return _escribir(nombre, str(propuesta.get("nuevo")), telefono, tecleado=False)
+
+
+def _escribir(
+    nombre: str, valor_crudo: str, telefono: str, *, tecleado: bool
+) -> dict:
+    """Valida el valor, lo guarda y lo audita. El ÚNICO camino de escritura.
+
+    Lo comparten `aplicar` (con código) y `fijar` (sin). Dos copias de esto
+    serían dos reglas sobre qué queda auditado y cuándo, y se separarían en la
+    dirección peligrosa: la que escribe sin registrar.
+    """
+    nuevo = validar(nombre, valor_crudo, tecleado=tecleado)
     anterior = vigente(nombre)
 
     entrada = {
@@ -2293,6 +2305,44 @@ def aplicar(codigo: str, telefono: str) -> dict:
         f"por {_tag(telefono)} ({entrada['ts']})"
     )
     return entrada
+
+
+def fijar(nombre_o_alias: str, valor_crudo: str, telefono: str) -> dict:
+    """Cambia un ajuste YA, sin código de confirmación.
+
+    DECISIÓN DEL DUEÑO, EXPLÍCITA Y REPETIDA. El código de cuatro dígitos era
+    el freno determinista: el modelo PROPONÍA y sólo el dueño, tecleando un
+    número que nunca entró en el contexto de ningún modelo, aplicaba. Sacarlo
+    significa que lo que el modelo decida cambiar, se cambia.
+
+    No es la primera vez ni es un camino nuevo: `cambiar_precio` ya escribe el
+    precio de lista «sin código y sin confirmar», y el comentario de
+    `graph.py` deja dicho que lo pidió el dueño con las mismas palabras («no
+    one can confirm everytime i need automated»). Esto es la misma decisión,
+    aplicada al resto de los ajustes.
+
+    LO QUE SIGUE EN PIE, porque no dependía del código:
+      * `validar` — un valor fuera de rango, mal tipeado o imposible se
+        rechaza igual. El código nunca fue lo que hacía legal a un número.
+      * `_escribir` es el ÚNICO camino de escritura y audita antes de guardar:
+        si no se puede dejar el registro durable en ERPNext, el cambio no se
+        aplica. Un ajuste que se mueve sin quedar anotado es peor que uno que
+        no se mueve.
+      * Quién llama sigue decidiendo quién puede: `require_management` en la
+        herramienta, `es_equipo` en el ruteo. Esto no autoriza a nadie.
+
+    `telefono` tiene que venir YA verificado por quien llama, y queda en la
+    auditoría: sin código, el registro de QUIÉN lo pidió es lo único que queda
+    para reconstruir un cambio que nadie recuerda haber hecho.
+    """
+    defi = definicion(nombre_o_alias)
+    if not telefono:
+        raise LimiteError(
+            "no sé quién pide el cambio", clave="limite.sin_quien_confirma"
+        )
+    # tecleado=True: esto viene de una persona escribiendo, así que «1.500» son
+    # mil quinientos. Es la misma normalización que hacía `proponer`.
+    return _escribir(defi.nombre, valor_crudo, telefono, tecleado=True)
 
 
 def _auditar_en_erpnext(entrada: dict) -> None:
