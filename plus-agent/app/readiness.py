@@ -1112,6 +1112,53 @@ def _es_cero(valor: object) -> bool:
         return False
 
 
+def chequear_auto_confirmacion(reporte: Reporte) -> None:
+    """¿Se va a confirmar algún pedido solo, con lo que hay configurado?
+
+    ES OTRA PREGUNTA QUE EL RESTO DE ESTE ARCHIVO. Todo lo demás valida que la
+    configuración sea VÁLIDA; esto pregunta si SIRVE. Un `.env` impecable puede
+    no confirmar un solo pedido nunca y hasta hoy salía en verde — el dueño
+    leía «todo OK», mandaba un pedido de prueba, lo veía frenado, arreglaba un
+    ajuste, mandaba otro. Cinco veces el 17/09, con clientes reales del otro
+    lado. Los motivos existían y eran correctos: lo que no existía era una
+    forma de verlos TODOS JUNTOS antes de que hubiera un cliente.
+
+    AVISO Y NO ERROR, incluso con la automatización apagada: `AUTO_CONFIRM_MAX`
+    en 0 es la postura de lanzamiento que `CLAUDE.md` pide, o sea un despliegue
+    CORRECTO en el que nada se confirma solo. Un error acá haría fallar el
+    preflight de una instalación bien hecha, y un preflight que grita sobre lo
+    normal se deja de leer — que es exactamente cómo se pierden los avisos que
+    sí importan. Por eso se nombra el MODO: «los revisa una persona» es una
+    decisión, no una falla.
+    """
+    from app import modos
+
+    diagnostico = modos.diagnosticar()
+    if diagnostico.problema:
+        reporte.aviso(
+            "Auto-confirmación", f"no pude saberlo: {diagnostico.problema}"
+        )
+        return
+    if diagnostico.confirma_algo:
+        reporte.ok(
+            "Auto-confirmación",
+            "hay pedidos que pueden confirmarse solos; cada uno sigue pasando "
+            "por las reglas de policy (deuda, stock, precio, zona)",
+        )
+        return
+    titulo = next(
+        (m.titulo for m in modos.MODOS if m.clave == diagnostico.modo), ""
+    )
+    encabezado = (
+        f"NINGÚN pedido se confirma solo — modo «{titulo}»"
+        if titulo
+        else "NINGÚN pedido se confirma solo"
+    )
+    reporte.aviso("Auto-confirmación", encabezado)
+    for freno in diagnostico.frenos:
+        reporte.aviso(freno.nombre, freno.consecuencia)
+
+
 def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_limites: Callable[[], list[dict]] | None) -> None:
     maestra = _valor(env, "STOCK_CONFIABLE").lower()
     if maestra == "true":
@@ -1805,6 +1852,11 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
     chequear_plantillas(env, reporte, http, waba, resumen)
     chequear_erpnext(env, reporte, http)
     chequear_stock_y_limites(env, reporte, resumen)
+    # Después de los límites y ANTES de entrega: usa los mismos valores que
+    # acaba de reportar `chequear_stock_y_limites`, y leerlo pegado a ellos es
+    # leer la consecuencia justo debajo de la causa.
+    if _valor(env, "REDIS_URL"):
+        chequear_auto_confirmacion(reporte)
     chequear_entrega(env, reporte, resumen, http)
     if _valor(env, "REDIS_URL"):
         chequear_solicitudes(reporte)
