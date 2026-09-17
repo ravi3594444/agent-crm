@@ -1090,12 +1090,12 @@ const settingsFixture = () => ({
   groups: [
     {
       id: 'negocio', name: 'Your business', settings: [
-        { id: 'NOMBRE_NEGOCIO', name: 'nombre del negocio', meaning: 'How your business is named', unit: 'texto', kind: 'texto', optional: true, value: 'Plus Dairy', display: 'Plus Dairy', source: 'You set this', configured: true, problem: '' },
+        { id: 'NOMBRE_NEGOCIO', name: 'nombre del negocio', meaning: 'How your business is named', unit: 'texto', kind: 'texto', optional: true, advanced: false, value: 'Plus Dairy', display: 'Plus Dairy', source: 'You set this', configured: true, problem: '' },
       ],
     },
     {
       id: 'limites', name: 'Automatic confirmation', settings: [
-        { id: 'AUTO_CONFIRM_MAX', name: 'monto maximo', meaning: 'Largest order confirmed without a person', unit: '$', kind: 'numero', optional: false, value: '0', display: '$ 0', source: 'Shipped default', configured: false, problem: '' },
+        { id: 'AUTO_CONFIRM_MAX', name: 'monto maximo', meaning: 'Largest order confirmed without a person', unit: '$', kind: 'numero', optional: false, advanced: false, value: '0', display: '$ 0', source: 'Shipped default', configured: false, problem: '' },
       ],
     },
   ],

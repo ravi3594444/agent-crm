@@ -1817,6 +1817,47 @@ def cuenta_cargo() -> str:
     return os.getenv(CUENTA_CARGO, "").strip()
 
 
+# LOS DOCE QUE VE UN DUEÑO. El resto sigue existiendo, se sigue pudiendo cambiar
+# y se sigue validando igual: lo único que cambia es que no se le ponen delante a
+# alguien que vino a vender queso.
+#
+# POR QUÉ DOCE Y NO CUARENTA Y SEIS. El panel mostraba los 46, y 46 ajustes no son
+# una configuración: son un formulario que nadie termina. Trece de ellos son
+# nombres de plantillas de Meta —infraestructura, y opcionales en el piloto
+# porque adentro de la ventana de 24 h se manda texto libre—, y nueve más son
+# afinado fino (el colchón de stock, los plazos de aviso, la banda de descuento)
+# que tiene un default razonable y que el dueño no toca en su vida.
+#
+# ES UNA LISTA BLANCA Y NO UNA NEGRA, a propósito: un ajuste nuevo nace OCULTO.
+# Con una lista negra, el próximo que alguien agregue aparecería solo en la cara
+# del dueño, y volver a 46 no requeriría ninguna decisión — pasaría de a uno.
+BASICOS: frozenset[str] = frozenset({
+    # Quién es el negocio. Los cuatro son del dueño y no hay default posible.
+    "NOMBRE_NEGOCIO",
+    "NOMBRE_AGENTE",
+    "RUBRO_NEGOCIO",
+    "HORARIO_ATENCION",
+    # En qué idioma le habla el sistema al equipo.
+    "IDIOMA_GERENCIA",
+    # Las cuatro decisiones de plata. `AUTO_CONFIRM_MAX` es la que define el
+    # modo entero: en 0 no se confirma nada solo (ver `app/modos.py`).
+    "AUTO_CONFIRM_MAX",
+    "AUTO_CONFIRM_MAX_QTY_POR_PRODUCTO",
+    "AUTO_CONFIRM_MAX_DEBT",
+    "PRECIO_CAMBIO_MAX_PCT",
+    # Las tres preguntas de reparto que hace cualquier cliente por WhatsApp:
+    # ¿llegás a mi barrio?, ¿qué días?, ¿puedo pasar a buscarlo?
+    "ZONAS_ENTREGA_LOCALIDADES",
+    "ENTREGA_DIAS",
+    "RETIRO_LOCAL_ACTIVO",
+})
+
+
+def es_basico(nombre: str) -> bool:
+    """¿Este ajuste va en la pantalla del dueño, o en «avanzado»?"""
+    return nombre in BASICOS
+
+
 def resumen(lengua: str | None = None) -> list[dict]:
     """Cada límite con su valor vigente y de dónde salió, para el dueño.
 

@@ -91,15 +91,15 @@ function makeDemo(range=7) {
     items:products.map(p=>({id:p.id,price:p.price,unit:'Unidad'})),errors:[],truncated:[]});
   const settings=validateSettings({problem:'',pending:null,groups:[
     {id:'negocio',name:'Your business',settings:[
-      {id:'NOMBRE_NEGOCIO',name:'Business name',meaning:'What the business is called. It is the first line of both agent prompts.',unit:'text',kind:'texto',optional:true,value:'Plus Dairy',display:'Plus Dairy',source:'You set this',configured:true,problem:''},
-      {id:'RUBRO_NEGOCIO',name:'Trade',meaning:'What the business does, in a few words.',unit:'text',kind:'texto',optional:true,value:'-',display:'-',source:'Shipped default',configured:false,problem:''},
-      {id:'HORARIO_ATENCION',name:'Opening hours',meaning:'The hours the business is open, worded the way you would tell a customer.',unit:'text',kind:'texto',optional:false,value:'lunes a viernes de 8 a 17',display:'lunes a viernes de 8 a 17',source:'From the server file',configured:false,problem:''}]},
+      {id:'NOMBRE_NEGOCIO',name:'Business name',meaning:'What the business is called. It is the first line of both agent prompts.',unit:'text',kind:'texto',optional:true,advanced:false,value:'Plus Dairy',display:'Plus Dairy',source:'You set this',configured:true,problem:''},
+      {id:'RUBRO_NEGOCIO',name:'Trade',meaning:'What the business does, in a few words.',unit:'text',kind:'texto',optional:true,advanced:false,value:'-',display:'-',source:'Shipped default',configured:false,problem:''},
+      {id:'HORARIO_ATENCION',name:'Opening hours',meaning:'The hours the business is open, worded the way you would tell a customer.',unit:'text',kind:'texto',optional:false,advanced:false,value:'lunes a viernes de 8 a 17',display:'lunes a viernes de 8 a 17',source:'From the server file',configured:false,problem:''}]},
     {id:'plantillas',name:'WhatsApp templates',settings:[
-      {id:'WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE',name:'Confirmed template',meaning:'Tells the customer their order was confirmed.',unit:'Meta template',kind:'plantilla',optional:true,value:'pedido_confirmado',display:'pedido_confirmado',source:'You set this',configured:true,problem:''},
-      {id:'WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE',name:'Expired template',meaning:'Tells the customer their request expired with no answer.',unit:'Meta template',kind:'plantilla',optional:true,value:'-',display:'-',source:'Shipped default',configured:false,problem:''}]},
+      {id:'WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE',name:'Confirmed template',meaning:'Tells the customer their order was confirmed.',unit:'Meta template',kind:'plantilla',optional:true,advanced:true,value:'pedido_confirmado',display:'pedido_confirmado',source:'You set this',configured:true,problem:''},
+      {id:'WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE',name:'Expired template',meaning:'Tells the customer their request expired with no answer.',unit:'Meta template',kind:'plantilla',optional:true,advanced:true,value:'-',display:'-',source:'Shipped default',configured:false,problem:''}]},
     {id:'limites',name:'Automatic confirmation',settings:[
-      {id:'AUTO_CONFIRM_MAX',name:'Order ceiling',meaning:'The largest order that can be confirmed without anyone looking at it.',unit:'$',kind:'numero',optional:false,value:'0',display:'$ 0',source:'Shipped default',configured:false,problem:''},
-      {id:'STOCK_BUFFER_PCT',name:'Stock buffer',meaning:'Stock held back for sales that have not been entered yet.',unit:'%',kind:'numero',optional:false,value:'20',display:'20%',source:'Shipped default',configured:false,problem:''}]}]});
+      {id:'AUTO_CONFIRM_MAX',name:'Order ceiling',meaning:'The largest order that can be confirmed without anyone looking at it.',unit:'$',kind:'numero',optional:false,advanced:false,value:'0',display:'$ 0',source:'Shipped default',configured:false,problem:''},
+      {id:'STOCK_BUFFER_PCT',name:'Stock buffer',meaning:'Stock held back for sales that have not been entered yet.',unit:'%',kind:'numero',optional:false,advanced:true,value:'20',display:'20%',source:'Shipped default',configured:false,problem:''}]}]});
   return {prices,settings,sales,advice,mode:'demo',company:'Plus Dairy',today,since:dateShift(today,-29),currency:'ARS',generatedAt:new Date().toISOString(),orders,customers,products,activity:validateActivity(activity),conversations,queue:validateQueue(queue),operations,errors:[],truncated:[],limit:250,policies:[{name:'Order ceiling',value:'$ 150.000',note:'Maximum order value for automatic confirmation'},{name:'New customer ceiling',value:'$ 30.000',note:'Separate limit until a customer has order history'},{name:'Stock buffer',value:'20%',note:'Keep a buffer before confirming an order'},{name:'Stock trust window',value:'24 hours',note:'Require a recent confirmed stock count'}],agents:[{id:'sales',name:'Sales agent',role:'Customer conversations & order drafts',model:'Qwen · sales model',status:'Demo'},{id:'manager',name:'Management agent',role:'Business reports & manager assistance',model:'Qwen · management model',status:'Demo'}]};
 }
 const repoHosted = /\/dashboard(?:\/|$)/.test(location.pathname);
@@ -109,7 +109,7 @@ function disconnectedData() {
 }
 function freshReads(){return Object.fromEntries(['activity','queue','operations','sales','advice','settings','prices'].map(key=>[key,{busy:false,error:'',loadedAt:null,pending:null,range:null}]));}
 let data=demoRequested?makeDemo():disconnectedData();
-const state={theme:readThemePreference(),rail:readRailPreference(),restoring:false,sesionPendiente:null,view:'today',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,reads:freshReads(),extrasBusy:false,extrasError:'',extrasLoadedAt:null,detailRequest:0,connectRequest:0,configured:null,displayCurrency:'',currencyPreference:readCurrencyPreference(),fx:null,fxLoading:false,fxRequest:0,fxError:'',fxFailedTarget:''};
+const state={theme:readThemePreference(),rail:readRailPreference(),avanzados:false,restoring:false,sesionPendiente:null,view:'today',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,reads:freshReads(),extrasBusy:false,extrasError:'',extrasLoadedAt:null,detailRequest:0,connectRequest:0,configured:null,displayCurrency:'',currencyPreference:readCurrencyPreference(),fx:null,fxLoading:false,fxRequest:0,fxError:'',fxFailedTarget:''};
 const currencyNames={ARS:'Argentine peso',INR:'Indian rupee',USD:'US dollar',EUR:'Euro',GBP:'British pound',BRL:'Brazilian real',UYU:'Uruguayan peso',CLP:'Chilean peso',MXN:'Mexican peso',CAD:'Canadian dollar',AUD:'Australian dollar',CHF:'Swiss franc',CNY:'Chinese yuan',JPY:'Japanese yen',AED:'UAE dirham'};
 const fxCache=new Map();
 const nav=[['today','Today'],['overview','Overview'],['sales','Sales'],['advice','Advice'],['queue','Coming up'],['orders','Orders'],['inventory','Inventory'],['customers','Customers'],['agents','AI agents']];
@@ -485,7 +485,17 @@ function settingsList() {
   // propuesta viva por teléfono, así que pedir un segundo cambio pisa el
   // primero. Verlo es lo que evita que eso pase sin que nadie se entere.
   const esperando=report.pending?`<div class="notice pending-notice">${icon('clock')}<span><strong>${escape(report.pending.name)}</strong> is waiting for your four-digit code on WhatsApp: ${escape(report.pending.from||'—')} → ${escape(report.pending.to||'—')}. Reply there to apply it, or propose another change to replace it.</span></div>`:'';
-  return `${esperando}${report.groups.map(group=>`<section class="card settings-group"><div class="card-heading"><div><h2>${escape(group.name)}</h2></div><span class="subtle-pill">${group.settings.length} settings</span></div>${group.settings.map(settingRow).join('')}</section>`).join('')}`;
+  // DOCE, NO CUARENTA Y SEIS. El resto no desaparece —hace falta una vez y
+  // algunos son imprescindibles— pero no se le ponen delante a alguien que vino
+  // a vender queso. Los grupos que quedan VACÍOS al filtrar no se dibujan: una
+  // tarjeta «Templates · 0 settings» es peor que no tenerla, porque ocupa el
+  // lugar de algo y no dice nada.
+  const ocultos=report.groups.reduce((n,g)=>n+g.settings.filter(s=>s.advanced).length,0);
+  const grupos=report.groups
+    .map(group=>({...group, settings:state.avanzados?group.settings:group.settings.filter(s=>!s.advanced)}))
+    .filter(group=>group.settings.length);
+  const interruptor=ocultos?`<div class="settings-advanced"><button class="text-link" data-action="avanzados">${state.avanzados?'Hide':'Show'} ${ocultos} advanced setting${ocultos===1?'':'s'}</button></div>`:'';
+  return `${esperando}${grupos.map(group=>`<section class="card settings-group"><div class="card-heading"><div><h2>${escape(group.name)}</h2></div><span class="subtle-pill">${group.settings.length} settings</span></div>${group.settings.map(settingRow).join('')}</section>`).join('')}${interruptor}`;
 }
 function settingsView() {
   return `${settingsList()}<div class="settings-grid"><section class="card connection-card"><span class="stat-icon violet">${icon('link')}</span><h2>${data.mode==='demo'?'Connect your business':'Your CRM connection'}</h2><p>${data.mode==='demo'?'Explore sample orders now, or connect to your deployed Plus Agent for a live view of ERPNext.':'This workspace reads orders, customers, and inventory from your agent service.'}</p><dl><div><dt>Workspace</dt><dd>${escape(data.company)}</dd></div><div><dt>Data source</dt><dd>${data.mode==='demo'?'Sample dataset':'ERPNext via Plus Agent'}</dd></div><div><dt>Access</dt><dd>Read, confirm orders, propose settings</dd></div><div><dt>Connection</dt><dd>${data.mode==='demo'?'Not connected':state.stale?'Interrupted':'Connected'}</dd></div></dl><div class="connection-buttons"><button class="button primary" data-action="connect">${icon('link')}${data.mode==='demo'?'Connect live data':'Change connection'}</button>${data.mode==='live'?'<button class="button" data-action="disconnect">Disconnect</button>':''}</div></section><section class="card setting-notes"><h2>Designed around your workflow</h2><div>${icon('orders')}<section><h3>ERPNext is the source of truth</h3><p>The dashboard reads recent orders, all-date pending orders, and up to 250 records per section. Loaded totals are labeled when a limit is reached.</p></section></div><div>${icon('shield')}<section><h3>Approvals stay protected</h3><p>You can confirm an order here, and propose a settings change. A settings change is never applied from this screen: the agent texts you a four-digit code, and you reply to it on WhatsApp. That second step stays on another device on purpose.</p></section></div><div>${icon('link')}<section><h3>You stay signed in</h3><p>Your access stays on this device and this browser until you press Disconnect, so reloading keeps you where you were. It is never sent anywhere except your own agent service. While you are signed in, visible dashboards refresh every minute.</p></section></div></section></div>`;
@@ -695,6 +705,7 @@ document.addEventListener('click',async e=>{
     const guardada=state.sesionPendiente;
     if(guardada){state.sesionPendiente=null;state.restoring=true;render();restaurarSesion(guardada);}
   }
+  if(action==='avanzados'){state.avanzados=!state.avanzados;render();return;}
   if(action==='demo'){state.connectRequest++;state.detailRequest++;data=makeDemo(state.range);state.session++;state.connection=null;state.sesionPendiente=null;state.restoring=false;state.stale=false;state.busy=false;state.extrasBusy=false;state.extrasError='';state.extrasLoadedAt=null;state.reads=freshReads();render();restoreDisplayCurrency();}
   if(action==='retry-currency')setDisplayCurrency(state.fxFailedTarget||state.displayCurrency);
   if(action==='retry-extras')loadExtras(true);
@@ -979,7 +990,7 @@ function isMoment(value){return isText(value)&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\
 // Declaración y no `const`: `makeDemo()` corre al cargar el módulo y llama a
 // este validador, así que una `const` caería en su zona muerta. Ver `isMoney`.
 function validateSetting(s) {
-  requireValue(isId(s?.id)&&isText(s.name)&&isText(s.meaning)&&isText(s.unit)&&isText(s.kind)&&typeof s.optional==='boolean'&&isText(s.value)&&isText(s.display)&&isText(s.source)&&typeof s.configured==='boolean'&&isText(s.problem),'a setting');
+  requireValue(isId(s?.id)&&isText(s.name)&&isText(s.meaning)&&isText(s.unit)&&isText(s.kind)&&typeof s.optional==='boolean'&&typeof s.advanced==='boolean'&&isText(s.value)&&isText(s.display)&&isText(s.source)&&typeof s.configured==='boolean'&&isText(s.problem),'a setting');
   return {id:s.id,name:s.name,meaning:s.meaning,unit:s.unit,kind:s.kind,optional:s.optional,value:s.value,display:s.display,source:s.source,configured:s.configured,problem:s.problem};
 }
 function validateSettings(value) {

@@ -2008,6 +2008,14 @@ def settings(mirando: str) -> dict:
             "unit": etiquetas_panel.unidad_de(fila["unidad"]),
             "kind": defi.tipo,
             "optional": bool(defi.opcional),
+            # AVANZADO NO ES «OCULTO»: viaja igual y el panel lo muestra detrás
+            # de un interruptor. Filtrarlo acá dejaría sin puerta a ajustes que
+            # hacen falta UNA vez y son imprescindibles —
+            # `AUTO_CONFIRM_PRICE_LIST` sin poner no confirma un solo pedido—,
+            # y el dueño tendría que volver al `.env`, que es de donde esto lo
+            # vino a sacar. Lo que cambia es qué ve primero: doce cosas suyas,
+            # no cuarenta y seis.
+            "advanced": not limites.es_basico(nombre),
             # El valor CRUDO y el mostrado son dos: el primero es lo que hay que
             # volver a mandar para no cambiar nada, el segundo es prosa.
             "value": plain_text(fila["valor"]),
