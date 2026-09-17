@@ -356,3 +356,46 @@ def _alta_resuelta(cliente: str, canonico: str, direccion: dict, *, creado: bool
     nombre_direccion = asegurar_direccion(cliente, direccion)
     recordar_direccion(canonico, nombre_direccion)
     return {"cliente": cliente, "direccion": nombre_direccion, "creado": creado}
+
+
+def cambiar_direccion(numero: str, cliente: str, direccion: dict) -> dict:
+    """La dirección de entrega que ESTE teléfono acaba de dar, para ESE cliente.
+
+    Devuelve `{"direccion", "creada"}`: el nombre de la Address a la que va a
+    salir el próximo pedido, y si hubo que crearla o ya estaba guardada. Esa
+    diferencia no es cosmética —«ya la tenía anotada» y «te la anoté» son dos
+    respuestas distintas para el que pregunta— y se DERIVA de las direcciones
+    que el cliente tiene, no de lo que devuelve la creación: `asegurar_direccion`
+    contesta el mismo nombre en los dos casos, a propósito, para que un
+    reintento no deje tres copias.
+
+    EL TELÉFONO NO ES UN PARÁMETRO QUE ELIJA NADIE, igual que en `crear`: llega
+    del webhook firmado y el `cliente` lo resolvió ese mismo teléfono. Lo único
+    que esta función agrega sobre `asegurar_direccion` es lo que `crear` ya
+    hacía al final —recordar la dirección para el pedido de este turno— y el
+    MISMO lock: las dos escriben una Address para el mismo teléfono, así que
+    comparten la sección crítica. Sin eso, dos mensajes en vuelo (Meta
+    reintenta, y la gente manda la dirección dos veces) pasan los dos por la
+    comparación de `asegurar_direccion` antes de que exista la primera Address
+    y el cliente termina con dos iguales.
+
+    NO DECIDE SI SE ENTREGA, y no puede: eso lo mira `app/entrega.py` sobre la
+    dirección completa, y el pedido lo confirma una persona. Lo peor que puede
+    dejar es una Address de más colgada del cliente que la dio.
+    """
+    canonico = telefono.normalizar(numero)
+    if not canonico:
+        raise erpnext.ERPNextError("el teléfono del remitente no es válido")
+    if not str(cliente or "").strip():
+        raise erpnext.ERPNextError("falta la cuenta del cliente")
+    cuenta = str(cliente).strip()
+
+    with distributed_lock(
+        f"alta-cliente:{canonico}",
+        lease_seconds=LOCK_ALTA_SEGUNDOS,
+        wait_seconds=ESPERA_ALTA_SEGUNDOS,
+    ):
+        previas = direcciones_de(cuenta)
+        nombre = asegurar_direccion(cuenta, direccion)
+        recordar_direccion(canonico, nombre)
+        return {"direccion": nombre, "creada": nombre not in previas}
