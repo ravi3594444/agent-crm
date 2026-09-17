@@ -782,6 +782,15 @@ def chequear_erpnext(env: Mapping[str, str], reporte: Reporte, http: Http | None
 
     # Which roles may submit a Sales Order (standard + custom permissions).
     roles_submit: set[str] = set()
+    # SE CUENTAN LAS LECTURAS, NO SE MIRA SI EL CONJUNTO QUEDÓ VACÍO.
+    #
+    # Un 403 no agrega nada al set, así que «vacío» y «una de las dos falló»
+    # daban lo mismo: con DocPerm devolviendo un rol y Custom DocPerm en 403,
+    # `roles_submit` queda no-vacío, el guardia de abajo no salta, y la
+    # conclusión sale de MEDIA lectura —justo el defecto que ese guardia vino
+    # a arreglar, una capa más adentro—. Los permisos custom son los que un
+    # ERPNext real usa para acotar un rol, o sea la mitad que más importa.
+    permisos_leidos = 0
     for doctype in ("DocPerm", "Custom DocPerm"):
         estado, cuerpo = http(
             f"{url}/api/resource/{doctype}",
@@ -794,8 +803,9 @@ def chequear_erpnext(env: Mapping[str, str], reporte: Reporte, http: Http | None
             },
         )
         if estado == 200 and isinstance(cuerpo, dict):
+            permisos_leidos += 1
             roles_submit |= {str(f.get("role")) for f in cuerpo.get("data") or [] if f.get("role")}
-    if not roles_submit:
+    if permisos_leidos < 2:
         reporte.aviso("ERPNext permisos", "no pude leer qué roles tienen Submit en Sales Order")
 
     for rol, par in pares.items():
@@ -815,7 +825,22 @@ def chequear_erpnext(env: Mapping[str, str], reporte: Reporte, http: Http | None
         if estado != 200 or not isinstance(datos, dict):
             reporte.aviso(f"ERPNext {rol}", "no pude leer sus roles")
             continue
-        roles = {str(r.get("role")) for r in datos.get("roles") or [] if r.get("role")}
+        # VACÍO NO ES LO MISMO QUE NO VINO, y Frappe distingue las dos cosas:
+        # una credencial sin permiso sobre la tabla hija devuelve el User SIN la
+        # clave `roles`, mientras que un usuario que de verdad no tiene ninguno
+        # la devuelve como lista vacía. Colapsarlas hacía que «este usuario no
+        # tiene roles» —que en política significa que NADA se confirma nunca—
+        # saliera como un aviso de lectura en vez del error que es.
+        tabla_de_roles = datos.get("roles")
+        if tabla_de_roles is None:
+            reporte.aviso(
+                f"ERPNext {rol}",
+                "el User se lee pero su tabla de roles no viene en la respuesta, así "
+                "que no puedo comprobar si tiene Submit en Sales Order: dar lectura "
+                f"de User a la credencial de {rol}",
+            )
+            continue
+        roles = {str(r.get("role")) for r in tabla_de_roles if r.get("role")}
         # DOS LECTURAS TIENEN QUE HABER SALIDO BIEN PARA PODER DECIR «Submit: no».
         #
         # Sin ellas `roles & roles_submit` es vacío ∩ vacío, así que `puede_submit`
@@ -836,7 +861,7 @@ def chequear_erpnext(env: Mapping[str, str], reporte: Reporte, http: Http | None
         # Mismo criterio que «ERPNext zona» más abajo: lo que no se pudo mirar es
         # AVISO con el permiso que falta, nunca FALTA (rojo para siempre) ni un OK
         # afirmando lo que no se vio.
-        if not roles_submit:
+        if permisos_leidos < 2:
             reporte.aviso(
                 f"ERPNext {rol}",
                 "no pude comprobar si tiene Submit en Sales Order porque no pude leer "
@@ -844,18 +869,10 @@ def chequear_erpnext(env: Mapping[str, str], reporte: Reporte, http: Http | None
                 "credencial de política",
             )
             continue
-        if not roles:
-            reporte.aviso(
-                f"ERPNext {rol}",
-                "el User se lee pero sin su tabla de roles, así que no puedo comprobar "
-                "si tiene Submit en Sales Order: dar lectura de User a la credencial "
-                "de política",
-            )
-            continue
         puede_submit = bool(roles & roles_submit) or "System Manager" in roles
         if rol in ROLES_SUBMIT_PROHIBIDOS and puede_submit:
             reporte.error(f"ERPNext {rol}", f"{len(roles)} rol(es), y alguno permite Submit en Sales Order")
-        elif rol == "politica" and roles_submit and not puede_submit:
+        elif rol == "politica" and not puede_submit:
             reporte.error(f"ERPNext {rol}", f"{len(roles)} rol(es) y ninguno permite Submit: nada se confirmaría")
         else:
             reporte.ok(f"ERPNext {rol}", f"{len(roles)} rol(es); Submit: {'sí' if puede_submit else 'no'}")

@@ -163,9 +163,16 @@ dialog{border:1px solid var(--border);padding:0;color:inherit;background:white;m
 @media(min-width:821px){
   .dashboard.rail .sidebar{width:76px;padding-left:12px;padding-right:12px;align-items:stretch}
   .dashboard.rail .main-wrap{margin-left:76px}
-  .dashboard.rail :is(.brand-wordmark,.nav-label,.sidebar-note,.brand-tag,.workspace>div,.profile>div,.nav-count,.new-tag){display:none}
+  /* Lo puramente decorativo se va: la nota, el rótulo de sección, el subtítulo
+     del workspace y del perfil no nombran ningún destino. */
+  .dashboard.rail :is(.nav-label,.sidebar-note,.brand-tag,.workspace>div,.profile>div){display:none}
+  /* LO QUE NOMBRA UN ENLACE NO SE BORRA, SE ESCONDE A LA VISTA.
+     Con `display:none` el único contenido del `<a>` pasaba a ser un SVG
+     `aria-hidden`, o sea un enlace SIN NOMBRE ACCESIBLE: un lector de pantalla
+     plegado no puede decir cuál es Orders y cuál Customers. El texto se queda
+     en el árbol y sale del dibujo. */
+  .dashboard.rail :is(.brand-wordmark,.nav-item>span){position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
   .dashboard.rail .nav-item{justify-content:center;padding-left:0;padding-right:0;gap:0}
-  .dashboard.rail .nav-item>span{display:none}
   .dashboard.rail :is(.workspace,.profile){justify-content:center;padding-left:0;padding-right:0}
   .dashboard.rail .profile{margin-left:-12px;margin-right:-12px}
   .dashboard.rail .brand{justify-content:center;padding:0}

@@ -109,7 +109,7 @@ function disconnectedData() {
 }
 function freshReads(){return Object.fromEntries(['activity','queue','operations','sales','advice','settings','prices'].map(key=>[key,{busy:false,error:'',loadedAt:null,pending:null,range:null}]));}
 let data=demoRequested?makeDemo():disconnectedData();
-const state={theme:readThemePreference(),rail:readRailPreference(),restoring:false,view:'today',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,reads:freshReads(),extrasBusy:false,extrasError:'',extrasLoadedAt:null,detailRequest:0,connectRequest:0,configured:null,displayCurrency:'',currencyPreference:readCurrencyPreference(),fx:null,fxLoading:false,fxRequest:0,fxError:'',fxFailedTarget:''};
+const state={theme:readThemePreference(),rail:readRailPreference(),restoring:false,sesionPendiente:null,view:'today',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,reads:freshReads(),extrasBusy:false,extrasError:'',extrasLoadedAt:null,detailRequest:0,connectRequest:0,configured:null,displayCurrency:'',currencyPreference:readCurrencyPreference(),fx:null,fxLoading:false,fxRequest:0,fxError:'',fxFailedTarget:''};
 const currencyNames={ARS:'Argentine peso',INR:'Indian rupee',USD:'US dollar',EUR:'Euro',GBP:'British pound',BRL:'Brazilian real',UYU:'Uruguayan peso',CLP:'Chilean peso',MXN:'Mexican peso',CAD:'Canadian dollar',AUD:'Australian dollar',CHF:'Swiss franc',CNY:'Chinese yuan',JPY:'Japanese yen',AED:'UAE dirham'};
 const fxCache=new Map();
 const nav=[['today','Today'],['overview','Overview'],['sales','Sales'],['advice','Advice'],['queue','Coming up'],['orders','Orders'],['inventory','Inventory'],['customers','Customers'],['agents','AI agents']];
@@ -432,15 +432,15 @@ function commandsCard() {
   const filas=[
     ['ok SO-ORD-1','Approve that order','Seven ways to say it: ok, confirmar, confirma, confirmo, aprobar, apruebo, aprobado.'],
     ['ver SO-ORD-1','See its detail','Also detalle, detalles, mostrar.'],
-    ['no SO-ORD-1 sin stock','Reject, with the reason the customer is told','Also rechazar. The same verb-and-order shape carries cancelar, contraoferta, retiro, preparar, despachar and despreparar — nine actions in all.'],
+    ['rechazar SO-ORD-1 sin stock','Reject, with the reason the customer is told','The reason only travels with rechazar, cancelar and contraoferta. A bare no rejects too, but on its own: no SO-ORD-1. The same verb-and-order shape also carries retiro, preparar, despachar and despreparar — nine actions in all.'],
     ['1234','A four-digit code','Applies the settings change the agent proposed. It arrives on your WhatsApp — never here, and never in this dashboard’s replies.'],
     ['123456','A six-digit code','Applies an action the management agent proposed. Same idea, for the steps that cannot be undone.'],
     ['manager language english','An exact phrase','Switches the language your team is answered in. Also «idioma de gerencia …». It still asks for the four-digit code afterwards.'],
   ];
   return `<section class="card commands-card">
-    <div class="card-heading"><div><h2>Typing exactly</h2><p>Four kinds of message are read by the software before the agent sees them. Everything else is ordinary conversation.</p></div></div>
+    <div class="card-heading"><div><h2>Typing exactly</h2><p>Four kinds of message from your team are read by the software before the management agent sees them. Everything else you write is ordinary conversation.</p></div></div>
     <div class="commands-list">${filas.map(([texto,que,hace])=>`<div class="command-row"><code>${escape(texto)}</code><div><strong>${escape(que)}</strong><small>${escape(hace)}</small></div></div>`).join('')}</div>
-    <p class="command-note">${icon('info')}<span>There is no command list to learn. Ask for what you want in your own words — «¿cuánto vendí esta semana?», «subí el tope a 50.000», «no repartimos en Alta Córdoba» — and the agent works the rest out. Say something vague about an open order and it will not guess: it answers with the order’s summary and the exact words that would act on it.</span></p>
+    <p class="command-note">${icon('info')}<span>There is no command list to learn. Ask for what you want in your own words — «¿cuánto vendí esta semana?», «subí el tope a 50.000», «no repartimos en Alta Córdoba» — and the agent works the rest out. Two more messages never reach a model, and neither is something you type: a customer’s plain yes or no to an offer you sent is settled deterministically, because that is where a price and a date get agreed; and a vague line from you about an open order is answered with that order’s summary and the exact words that would act on it, rather than guessed at.</span></p>
   </section>`;
 }
 function agentsView() {
@@ -611,20 +611,31 @@ async function restaurarSesion(connection) {
   const session=state.session;
   try{
     const snapshot=await fetchData(connection);
-    if(state.session!==session)return;
-    data=snapshot;state.connection=connection;state.session++;state.detailRequest++;
+    // Si algo la superó —el dueño eligió el demo, o se conectó a mano mientras
+    // esto volaba— hay que APAGAR el cartel igual. Devolverse sin tocarlo dejaba
+    // «Restoring your saved session…» en pantalla para siempre: el que lo
+    // encendió ya no manda, y el que mandaba no sabía que estaba encendido.
+    if(state.session!==session){state.restoring=false;render();return;}
+    data=snapshot;state.connection=connection;state.sesionPendiente=null;state.session++;state.detailRequest++;
     state.busy=false;state.stale=false;state.page=1;state.reads=freshReads();
     state.restoring=false;render();restoreDisplayCurrency();loadViewReads();
   }catch(ex){
-    if(state.session!==session)return;
+    if(state.session!==session){state.restoring=false;render();return;}
     state.restoring=false;
     // UN 401 NO ES UN FALLO PASAJERO y un timeout sí, así que no se tratan
     // igual: el token revocado se BORRA —si no, cada carga lo reintenta para
     // siempre— y una red caída se conserva, porque hacerle pegar el token de
     // nuevo por un corte de wifi es exactamente el problema que esto vino a
     // arreglar.
-    if(ex.status===401){forgetConnection();render();toast('Your saved sign-in is no longer valid. Connect again.');}
-    else{render();toast('Could not reach your CRM. Your sign-in is saved — try Connect again.');}
+    if(ex.status===401){state.sesionPendiente=null;forgetConnection();render();toast('Your saved sign-in is no longer valid. Connect again.');}
+    else{
+      // El token quedó guardado, pero `state.connection` es null y el formulario
+      // abre con el campo VACÍO: prometer «tu sesión sigue guardada» y después
+      // pedirle que lo pegue de nuevo es no haberla guardado. Se deja a mano
+      // para que el reintento sea un botón y no una recarga.
+      state.sesionPendiente=connection;render();
+      toast('Could not reach your CRM. Your sign-in is saved — press Try again.');
+    }
   }
 }
 async function refresh(silent=false) {
@@ -673,6 +684,10 @@ document.addEventListener('click',async e=>{
   if(action==='connect')openConnection();
   if(action==='theme'){state.theme=state.theme==='dark'?'light':'dark';try{localStorage.setItem('plus.dashboard.theme',state.theme);}catch{}render();}
   if(action==='rail'){state.rail=!state.rail;try{localStorage.setItem('plus.dashboard.rail',state.rail?'1':'0');}catch{}render();}
+  if(action==='retry-session'){
+    const guardada=state.sesionPendiente;
+    if(guardada){state.sesionPendiente=null;state.restoring=true;render();restaurarSesion(guardada);}
+  }
   if(action==='demo'){state.connectRequest++;state.detailRequest++;data=makeDemo(state.range);state.session++;state.connection=null;state.stale=false;state.busy=false;state.extrasBusy=false;state.extrasError='';state.extrasLoadedAt=null;state.reads=freshReads();render();restoreDisplayCurrency();}
   if(action==='retry-currency')setDisplayCurrency(state.fxFailedTarget||state.displayCurrency);
   if(action==='retry-extras')loadExtras(true);
@@ -763,7 +778,12 @@ document.querySelectorAll('dialog').forEach(dialog=>{dialog.addEventListener('cl
 window.addEventListener('hashchange',()=>{const view=location.hash.slice(1);if(Object.hasOwn(views,view))goto(view);});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&state.menu){state.menu=false;render();}});
 if(Object.hasOwn(views,location.hash.slice(1)))state.view=location.hash.slice(1);
-const sesionGuardada=readConnection();
+// `?demo=1` GANA SOBRE LA SESIÓN GUARDADA, y esto no es una preferencia de
+// arranque: el demo se abre DELANTE de un cliente. Con un token guardado en ese
+// navegador la restauración pisaba `makeDemo()` con el snapshot real —pedidos y
+// clientes de la empresa— en la pantalla que existe justamente para no mostrar
+// eso. La sesión NO se borra: sacar el `?demo=1` vuelve a entrar.
+const sesionGuardada=demoRequested?null:readConnection();
 if(sesionGuardada)state.restoring=true;
 render();
 revealLogo();
@@ -776,7 +796,9 @@ function connectionGate() {
     <h2>Open your live CRM workspace</h2>
     <p>${repoHosted?'This dashboard runs inside your Plus Agent. Sign in to read your real ERPNext orders, stock, and customers.':'Connect to your deployed Plus Agent to see your real ERPNext orders, stock, and customers.'}</p>
     ${state.configured===false?'<div class="notice">Dashboard access has not been enabled on this agent yet. Complete the one-time setup, then sign in.</div>':''}
-    <button class="button primary" data-action="connect">${icon('link')}${repoHosted?'Sign in to this agent':'Connect to your agent'}</button>
+    ${state.sesionPendiente?'<div class="notice">Your sign-in is saved, but the agent service could not be reached.</div>':''}
+    ${state.sesionPendiente?`<button class="button primary" data-action="retry-session">${icon('link')}Try again</button>`:''}
+    <button class="button ${state.sesionPendiente?'':'primary'}" data-action="connect">${icon('link')}${repoHosted?'Sign in to this agent':'Connect to your agent'}</button>
     <div class="gate-links"><a href="https://github.com/ravi3594444/agent-crm/blob/feat/plus-operations-dashboard/DASHBOARD.md" target="_blank" rel="noopener noreferrer">Setup instructions</a><button class="text-link" data-action="demo">Explore sample data</button></div>
     <div class="gate-note">${icon('shield')}No business records are shown until you sign in.</div>
   </section>`;

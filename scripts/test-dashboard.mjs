@@ -1398,3 +1398,95 @@ test('the sidebar rail folds to icons and stays folded', async () => {
   const otro = workspace({ preferences: [['plus.dashboard.rail', '1']] });
   assert.equal(otro.run('state.rail'), true);
 });
+
+// ---------------------------------------------------------------------------
+// LOS CUATRO HALLAZGOS DE LA REVISIÓN SOBRE ESTA MISMA TANDA.
+//
+// Cada uno con su mutación, y cada mutación mata UN test:
+//   H) arrancar con `readConnection()` a secas   -> cae sólo el 1º
+//   I) devolverse sin apagar `state.restoring`   -> cae sólo el 2º
+//   J) no guardar `state.sesionPendiente`        -> cae sólo el 3º
+//   K) `display:none` sobre el texto del nav     -> cae sólo el 4º
+// ---------------------------------------------------------------------------
+
+test('an explicit ?demo=1 is never overwritten by a saved live session', async () => {
+  // MUTACIÓN H. Éste es el que importa de los cuatro: el demo se abre DELANTE
+  // de un cliente, y con un token guardado en ese navegador la restauración
+  // pisaba los datos de muestra con los pedidos y clientes REALES de la
+  // empresa. La pantalla que existe para no mostrar eso, mostrándolo.
+  const pedidos = [];
+  const w = workspace({
+    search: '?demo=1',
+    preferences: [['plus.dashboard.connection', SAVED]],
+    fetch: async (...args) => { pedidos.push(args); throw new Error('should never be called'); },
+  });
+  await flush();
+  assert.equal(pedidos.length, 0, 'no se puede pedir el CRM real en modo demo');
+  assert.equal(w.run('data.mode'), 'demo');
+  assert.equal(w.run('state.restoring'), false);
+  // Y la sesión NO se borra: sacar el ?demo=1 tiene que volver a entrar sola.
+  assert.equal(w.preferences.get('plus.dashboard.connection'), SAVED);
+});
+
+test('a restore that something else supersedes does not leave the banner on', async () => {
+  // MUTACIÓN I. `state.session` lo mueven el demo y el connect manual, y la
+  // restauración se devolvía sin apagar su propio cartel: el que lo encendió ya
+  // no manda, y el que manda no sabe que está encendido, así que «Restoring
+  // your saved session…» se queda en pantalla en cada render que venga.
+  const puerta = deferred();
+  const w = workspace({
+    preferences: [['plus.dashboard.connection', SAVED]],
+    fetch: async () => puerta.promise,
+  });
+  assert.equal(w.run('state.restoring'), true);
+  await w.click({ action: 'demo' });
+  puerta.resolve({ ok: true, json: async () => w.fixture() });
+  await flush();
+  assert.equal(w.run('state.restoring'), false);
+  assert.equal(w.run('data.mode'), 'demo', 'el demo elegido a mano gana');
+  assert.doesNotMatch(w.nodes.app.innerHTML, /Restoring your saved session/);
+});
+
+test('a saved sign-in the service cannot answer offers a retry in the page', async () => {
+  // MUTACIÓN J. Se prometía «tu sesión sigue guardada» y después el formulario
+  // abría con el campo del token VACÍO, así que el reintento era recargar o
+  // volver a pegarlo: o sea no haberla guardado.
+  let caer = true;
+  const w = workspace({
+    preferences: [['plus.dashboard.connection', SAVED]],
+    fetch: async () => { if (caer) throw new Error('Failed to fetch'); return response(w.fixture()); },
+  });
+  await flush();
+  assert.equal(w.run('data.mode'), 'disconnected');
+  assert.ok(w.run('state.sesionPendiente'), 'la conexión queda a mano para reintentar');
+  assert.match(w.nodes.app.innerHTML, /Try again/);
+  caer = false;
+  await w.click({ action: 'retry-session' });
+  await flush();
+  assert.equal(w.run('data.mode'), 'live');
+  assert.equal(w.run('state.sesionPendiente'), null);
+});
+
+test('the collapsed rail hides nav labels from sight, never from the accessibility tree', async () => {
+  // MUTACIÓN K. Con `display:none` el único contenido del `<a>` queda siendo un
+  // SVG `aria-hidden`, o sea un enlace SIN NOMBRE: plegada la barra, un lector
+  // de pantalla no puede decir cuál es Orders y cuál Customers. El texto tiene
+  // que salir del dibujo, no del árbol.
+  // Sin comentarios: la explicación de arriba de la regla NOMBRA `display:none`
+  // para decir por qué no se usa, y un parser ingenuo la lee como si fuera CSS.
+  const css = readFileSync(new URL('../plus-agent/app/dashboard_ui/styles.css', import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+  const reglas = css.split('}').filter(r => r.includes('.dashboard.rail') && r.includes('display:none'));
+  for (const regla of reglas) {
+    const selector = regla.slice(regla.lastIndexOf('.dashboard.rail'));
+    assert.ok(!/\.nav-item\s*>\s*span/.test(selector), `un nav-item no puede perder su nombre: ${selector}`);
+    assert.ok(!/\.brand-wordmark/.test(selector), `la marca no puede perder su nombre: ${selector}`);
+  }
+  // Y el texto sigue estando en el HTML que se renderiza con el riel plegado.
+  const w = workspace({ preferences: [['plus.dashboard.rail', '1']] });
+  await w.click({ action: 'demo' });
+  assert.equal(w.run('state.rail'), true);
+  for (const etiqueta of ['Orders', 'Customers', 'Inventory']) {
+    assert.match(w.nodes.app.innerHTML, new RegExp(`<span>${etiqueta}</span>`));
+  }
+});

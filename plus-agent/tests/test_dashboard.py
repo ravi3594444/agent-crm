@@ -938,6 +938,59 @@ class PreciosQueSeMuestranTest(unittest.TestCase):
 #
 # MUTACIÓN: agregarle una acción a `_ARG_ACTIONS` en app/main.py, p. ej.
 # "reprogramar": ("reprogramar", True). Cae éste y sólo éste.
+def _ejemplos_de_la_tarjeta() -> list[str]:
+    """Los textos que la tarjeta del panel muestra como comando, tal cual."""
+    from pathlib import Path
+
+    fuente = (Path(__file__).resolve().parents[1] / "app" / "dashboard_ui" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    inicio = fuente.index("const filas=[", fuente.index("function commandsCard()"))
+    bloque = fuente[inicio : fuente.index("];", inicio)]
+    return re.findall(r"\n\s*\['([^']+)'", bloque)
+
+
+# ---------------------------------------------------------------------------
+# UN EJEMPLO QUE NO ANDA ES PEOR QUE NO DAR EJEMPLOS.
+#
+# La primera versión de esto buscaba las PALABRAS de cada acción adentro de la
+# tarjeta, y por eso pasó en verde mostrando `no SO-ORD-1 sin stock`, que el
+# router RECHAZA: `_ARG_ACTIONS` —la tabla de los verbos que llevan motivo— no
+# tiene «no», y `_STAFF_COMMAND_RE` no admite texto después del pedido. O sea
+# que el dueño copiaba el ejemplo de la pantalla, el mensaje se le iba al
+# modelo, y el rechazo determinista no ocurría. La palabra «no» aparecía en el
+# propio ejemplo inválido y satisfacía al test: exactamente un test incapaz de
+# fallar, de los que CLAUDE.md dice que son el defecto.
+#
+# Ahora cada ejemplo se EJECUTA contra el parser que le corresponde.
+#
+# MUTACIÓN: volver a poner `no SO-ORD-1 sin stock` en la tarjeta. Cae éste y
+# sólo éste.
+def test_every_example_the_dashboard_shows_is_accepted_by_the_router():
+    from app import main
+
+    ejemplos = _ejemplos_de_la_tarjeta()
+    assert ejemplos, "no se pudieron leer los ejemplos de commandsCard()"
+
+    rechazados = []
+    for texto in ejemplos:
+        if re.fullmatch(r"\d{4}", texto):
+            aceptado = main._CODIGO_AJUSTE_RE.match(texto) is not None
+        elif re.fullmatch(r"\d{6}", texto):
+            aceptado = main._CODIGO_ACCION_RE.match(texto) is not None
+        elif main._COMANDO_IDIOMA_RE.match(texto):
+            aceptado = True
+        else:
+            aceptado = main._staff_command(texto) is not None
+        if not aceptado:
+            rechazados.append(texto)
+
+    assert not rechazados, (
+        "la tarjeta del panel muestra como comando algo que el router NO acepta: "
+        f"{rechazados}. Quien lo copie va a terminar hablándole al modelo."
+    )
+
+
 def test_the_dashboard_command_card_names_every_action_the_router_accepts():
     import ast
     from pathlib import Path

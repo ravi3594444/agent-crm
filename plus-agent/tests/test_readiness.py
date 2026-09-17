@@ -2110,29 +2110,87 @@ def test_sin_leer_DocPerm_no_se_afirma_Submit_en_ninguna_identidad() -> None:
     assert reporte.listo, texto
 
 
-def test_un_User_sin_tabla_de_roles_tampoco_afirma_Submit() -> None:
-    """La otra lectura: DocPerm se lee, el User se lee, su tabla de roles no.
+def test_un_User_cuya_tabla_de_roles_no_vino_tampoco_afirma_Submit() -> None:
+    """La otra lectura: DocPerm se lee, el User se lee, su tabla de roles NO VIENE.
 
-    Es el 403 parcial de Frappe: el doc vuelve 200 y la tabla hija viene vacía.
-    Sin este guardia `roles` es vacío y el reporte volvía a decir «Submit: no»
-    con la misma confianza, ahora por la otra mitad.
+    Frappe distingue las dos cosas y este chequeo también tiene que hacerlo: una
+    credencial sin permiso sobre la tabla hija devuelve el User SIN la clave
+    `roles`, y eso es «no pude mirar». Una lista VACÍA es otra cosa —el usuario
+    no tiene ninguno— y la cubre el test de abajo.
+
+    Este test nació afirmando que `{"roles": []}` era el caso ilegible, que es
+    justo la confusión que escondía el defecto: con las dos colapsadas, «este
+    usuario no tiene roles» —que en política significa que nada se confirma
+    nunca— salía como un aviso de lectura.
+
+    MUTACIÓN: volver a `if not tabla_de_roles:`. Cae éste y sólo éste.
     """
 
     def http(url, headers=None, params=None):
         if "/api/resource/User/agente@x" in url:
+            return 200, {"data": {"email": "agente@x"}}
+        return _http_sano(url, headers, params)
+
+    reporte = _correr(BASE, http=http)
+    texto = reporte.texto()
+
+    assert "AVISO  ERPNext agente: el User se lee pero su tabla de roles no viene" in texto, texto
+    # Y nombra la credencial que de verdad hizo esa lectura: el User de cada
+    # identidad se pide con SUS propias claves, así que mandar a tocar la de
+    # política dejaba al que lo lee cambiando una cuenta que no es.
+    assert "dar lectura de User a la credencial de agente" in texto, texto
+    assert "ERPNext agente: 0 rol(es)" not in texto, texto
+    assert "ERPNext politica: 1 rol(es); Submit: sí" in texto, texto
+    assert "ERPNext gerencia: 1 rol(es); Submit: no" in texto, texto
+
+
+def test_una_politica_sin_ningun_rol_es_un_error_y_no_un_aviso() -> None:
+    """La tabla VIENE y está vacía: es una medición, no una lectura fallida.
+
+    En política significa el peor estado posible del sistema —nada se confirma
+    nunca, ningún pedido avanza— y salía como «no pude comprobar», que es la
+    forma de no enterarse.
+
+    MUTACIÓN: devolverle el `and roles_submit` al `elif` de política, o tratar la
+    lista vacía como ilegible. Cae éste y sólo éste.
+    """
+
+    def http(url, headers=None, params=None):
+        if "/api/resource/User/politica@x" in url:
             return 200, {"data": {"roles": []}}
         return _http_sano(url, headers, params)
 
     reporte = _correr(BASE, http=http)
     texto = reporte.texto()
 
-    assert "AVISO  ERPNext agente: el User se lee pero sin su tabla de roles" in texto, texto
-    assert "dar lectura de User a la credencial de política" in texto
-    assert "ERPNext agente: 0 rol(es)" not in texto, texto
-    # Las otras dos se leyeron bien y siguen midiendo: el guardia es por
-    # identidad, no un apagón del chequeo entero.
-    assert "ERPNext politica: 1 rol(es); Submit: sí" in texto, texto
-    assert "ERPNext gerencia: 1 rol(es); Submit: no" in texto, texto
+    assert "ERROR  ERPNext politica: 0 rol(es) y ninguno permite Submit" in texto, texto
+    assert not reporte.listo, texto
+
+
+def test_una_sola_de_las_dos_lecturas_de_permisos_no_alcanza() -> None:
+    """DocPerm contesta y Custom DocPerm no: eso es MEDIA lectura.
+
+    Un 403 no agrega nada al conjunto, así que mirar si quedó vacío no distingue
+    «nadie puede emitir» de «una de las dos consultas falló». Con DocPerm
+    devolviendo un rol, el conjunto queda no-vacío y la conclusión salía igual
+    —el mismo defecto que el guardia vino a arreglar, una capa más adentro—.
+    Y los permisos custom son los que un ERPNext real usa para acotar un rol.
+
+    MUTACIÓN: volver a `if not roles_submit:`. Cae éste y sólo éste.
+    """
+
+    def http(url, headers=None, params=None):
+        if "/api/resource/Custom DocPerm" in url:
+            return 403, {}
+        return _http_sano(url, headers, params)
+
+    reporte = _correr(BASE, http=http)
+    texto = reporte.texto()
+
+    assert "Submit: no" not in texto, texto
+    assert "Submit: sí" not in texto, texto
+    for rol in ("agente", "gerencia", "politica"):
+        assert f"AVISO  ERPNext {rol}: no pude comprobar si tiene Submit" in texto, texto
     assert reporte.listo, texto
 
 
