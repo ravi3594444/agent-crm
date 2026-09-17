@@ -5,6 +5,13 @@ cuales los primeros cinco ya te dicen si algo está roto.
 
 El orden importa: el paso 2 es el que hace que el 3 sirva de algo.
 
+**Esto es el lado de la APP.** El lado de ERPNext —los tres usuarios, sus
+permisos de lectura, las cuentas de inventario, el asiento de apertura, y los
+precios con `price_list` + `currency` + `uom`— está en
+[`SETUP-ERPNEXT.md`](SETUP-ERPNEXT.md), y va ANTES que esto en una instalación
+nueva: sin esos permisos el agente crea el pedido y ERPNext lo rechaza con un
+403 que sólo se ve cuando un cliente real pidió algo.
+
 ---
 
 ## 1. Traer el código
