@@ -4,8 +4,10 @@ QUÉ PROVEEDOR
   LLM_PROVIDER=qwen    (default) Qwen en Alibaba Model Studio (DashScope)
   LLM_PROVIDER=gemini            Gemini por el endpoint OpenAI-compatible de
                                  Google (generativelanguage.googleapis.com)
+  LLM_PROVIDER=groq              Groq (api.groq.com/openai/v1), que sirve Qwen
+                                 y otros por endpoint OpenAI-compatible
 
-Los dos hablan el protocolo de OpenAI, así que el cliente es el mismo
+Los tres hablan el protocolo de OpenAI, así que el cliente es el mismo
 (`langchain_openai.ChatOpenAI`) y lo único que cambia es la clave, el endpoint
 y los nombres de modelo. UNA clave por proveedor, la misma para los dos
 agentes.
@@ -59,6 +61,12 @@ MODELO_GERENCIA_DEFAULT = "qwen3.8-max"
 GEMINI_BASE_URL_DEFAULT = "https://generativelanguage.googleapis.com/v1beta/openai/"
 GEMINI_MODELO_DEFAULT = "gemini-3.5-flash"
 
+GROQ_BASE_URL_DEFAULT = "https://api.groq.com/openai/v1"
+# El modelo que se midió andando acá. Groq renombra su catálogo más seguido que
+# los otros dos, así que un default viejo se ve como «400 model not found» y no
+# como un default viejo: `make verificar-modelos` lo dice en una llamada.
+GROQ_MODELO_DEFAULT = "qwen/qwen3.8-27b"
+
 VAR_PROVEEDOR = "LLM_PROVIDER"
 PROVEEDOR_DEFAULT = "qwen"
 
@@ -111,6 +119,33 @@ PROVEEDORES: Mapping[str, Proveedor] = {
             "gerencia": MODELO_GERENCIA_DEFAULT,
         },
         razona=True,
+    ),
+    "groq": Proveedor(
+        nombre="groq",
+        etiqueta="Groq (endpoint OpenAI-compatible)",
+        # NO se lee DASHSCOPE_API_KEY ni GEMINI_API_KEY: misma regla que arriba,
+        # una clave de un proveedor no sirve para otro.
+        claves=("GROQ_API_KEY",),
+        var_base_url="GROQ_BASE_URL",
+        base_url_default=GROQ_BASE_URL_DEFAULT,
+        var_modelo={
+            "clientes": ("GROQ_SALES_MODEL",),
+            "gerencia": ("GROQ_MANAGER_MODEL",),
+        },
+        modelo_default={
+            "clientes": GROQ_MODELO_DEFAULT,
+            "gerencia": GROQ_MODELO_DEFAULT,
+        },
+        # razona=False NO dice que el modelo no razone —los Qwen de Groq
+        # razonan— sino que NO acepta los controles de DashScope. Y es la
+        # diferencia entre «no se mandan» y «no se pueden mandar»: abajo,
+        # `extra_body["enable_thinking"]` se escribe cuando `prov.razona`, sin
+        # mirar si está en true o en false, porque DashScope EXIGE el false
+        # explícito. Groq contesta `400 property 'enable_thinking' is
+        # unsupported` y el turno se corta — medido el 17/09 con LLM_PROVIDER=qwen
+        # apuntado a Groq y las dos QWEN_THINKING_* en false: no alcanzaban,
+        # porque lo que manda la propiedad es el proveedor y no el valor.
+        razona=False,
     ),
     "gemini": Proveedor(
         nombre="gemini",
