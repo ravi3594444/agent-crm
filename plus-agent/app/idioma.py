@@ -2778,6 +2778,145 @@ CATALOGO: dict[str, dict[str, str]] = {
             'deliver: tell them the manager confirms that one.'
         ),
     },
+    # ------------------------------ la dirección de ESTE cliente, al cliente
+    # Lo que devuelven `direccion_de_entrega` y `cambiar_direccion_de_entrega`
+    # (app/tools/pedidos.py). Son OTRA cosa que `condiciones.*`: aquéllas son
+    # los días y las zonas del negocio, esto es a dónde sale el pedido de quien
+    # está escribiendo. Antes no había ninguna de las dos herramientas y el
+    # agente usaba la dirección de la ficha sin decirlo: un pedido salió con
+    # «Entrega: purnia, purnia» sin que nadie hubiera preguntado a dónde iba.
+    #
+    # NINGUNA DE ESTAS FRASES PROMETE UNA ENTREGA, y todas lo dicen: guardar
+    # una dirección no es haber verificado que se llega. Eso lo mira
+    # `app/entrega.py` sobre la dirección completa y lo confirma una persona.
+    "direccion.sin_cuenta": {
+        ES: (
+            'Todavía no tiene cuenta, así que no hay ninguna dirección '
+            'guardada. Si quiere pedir, pedile en UNA pregunta el nombre (o el '
+            'del negocio) y la dirección completa, y dalo de alta con '
+            'crear_cliente.'
+        ),
+        EN: (
+            'There is no account yet, so there is no address on file. If they '
+            'want to order, ask in ONE question for their name (or the '
+            'business name) and the full address, and register them with '
+            'crear_cliente.'
+        ),
+    },
+    "direccion.ninguna": {
+        ES: (
+            'La cuenta no tiene ninguna dirección de entrega guardada. Pedile '
+            'la dirección completa —calle y número, localidad, y código postal '
+            'si lo sabe— y anotala con cambiar_direccion_de_entrega antes de '
+            'cargar el pedido. No la adivines.'
+        ),
+        EN: (
+            'The account has no delivery address on file. Ask for the full '
+            'address — street and number, town, and postcode if they know it — '
+            'and save it with cambiar_direccion_de_entrega before you create '
+            'the order. Do not guess it.'
+        ),
+    },
+    "direccion.actual": {
+        ES: (
+            'El próximo pedido saldría a: {direccion}. Antes de cargarlo '
+            'preguntale si va a esa misma dirección o a otra. Si dice otra, '
+            'pedile la nueva completa y anotala con '
+            'cambiar_direccion_de_entrega. No la des por buena sin preguntar y '
+            'no le prometas día ni hora.'
+        ),
+        EN: (
+            'The next order would go to: {direccion}. Before you create it, '
+            'ask whether it goes to that same address or a different one. If '
+            'they say a different one, ask for the new one in full and save it '
+            'with cambiar_direccion_de_entrega. Do not assume it, and do not '
+            'promise a day or a time.'
+        ),
+    },
+    "direccion.otras": {
+        ES: (
+            ' Tiene {cuantas} direcciones guardadas: si te nombra otra, pedila '
+            'completa igual y anotala.'
+        ),
+        EN: (
+            ' There are {cuantas} addresses on file: if they name another one, '
+            'still ask for it in full and save it.'
+        ),
+    },
+    "direccion.no_pude": {
+        ES: (
+            'No pude leer la dirección guardada. No adivines a dónde va el '
+            'pedido: preguntale la dirección completa antes de cargarlo.'
+        ),
+        EN: (
+            'I could not read the saved address. Do not guess where the order '
+            'goes: ask for the full address before you create it.'
+        ),
+    },
+    "direccion.anotada": {
+        ES: (
+            'Anotada: {direccion}. El próximo pedido de este cliente sale a esa '
+            'dirección. Decile en una línea que quedó anotada; no le prometas '
+            'la entrega ni le des día u hora, que eso lo revisa una persona.'
+        ),
+        EN: (
+            'Saved: {direccion}. This customer\'s next order goes to that '
+            'address. Tell them in one line that it is saved; do not promise '
+            'the delivery and do not give a day or a time — a person reviews '
+            'that.'
+        ),
+    },
+    "direccion.ya_estaba": {
+        ES: (
+            'Ya la tenía anotada: {direccion}. El próximo pedido sale a esa '
+            'dirección. No le digas que la guardaste de nuevo: seguí con lo '
+            'que estaba pidiendo.'
+        ),
+        EN: (
+            'It was already on file: {direccion}. The next order goes to that '
+            'address. Do not tell them you saved it again: carry on with what '
+            'they were asking for.'
+        ),
+    },
+    "direccion.pendiente_de_revision": {
+        ES: (
+            'Anotada: {direccion}. ATENCIÓN: no me consta que entreguemos en '
+            'esa zona, así que un pedido a esta dirección va a quedar RECIBIDO '
+            'y pendiente de revisión de entrega. NO le digas que no repartimos '
+            'ahí —no es lo mismo— y no le prometas la entrega: sin día, sin '
+            'hora y sin decir que está confirmado. Si pregunta, eso se lo '
+            'confirma el encargado.'
+        ),
+        EN: (
+            'Saved: {direccion}. HEADS UP: I cannot confirm we deliver to that '
+            'area, so an order to this address will stay RECEIVED and pending '
+            'a delivery review. Do NOT tell them we do not deliver there — '
+            'that is not the same thing — and do not promise the delivery: no '
+            'day, no time, and do not say it is confirmed. If they ask, the '
+            'manager confirms that one.'
+        ),
+    },
+    "direccion.no_guarde": {
+        ES: (
+            'No pude guardar la dirección. No le digas que quedó anotada: '
+            'pedile perdón UNA vez y decile que eso lo ve el encargado.'
+        ),
+        EN: (
+            'I could not save the address. Do not tell them it is on file: '
+            'apologise ONCE and say the manager will look at it.'
+        ),
+    },
+    "direccion.sin_coordinar": {
+        ES: (
+            'No pude guardar la dirección de forma segura y no la reintentes '
+            'ahora. No le digas que quedó anotada: decile que eso lo ve el '
+            'encargado.'
+        ),
+        EN: (
+            'I could not save the address safely, and do not retry it now. Do '
+            'not tell them it is on file: say the manager will look at it.'
+        ),
+    },
     # Las dos que hacen VISIBLE que una nota pasó a ser pública. Van separadas
     # de `memoria.anotado` y `memoria.linea` en vez de llevar un `{marca}`
     # vacío: una marca que casi siempre es cadena vacía deja una frase con dos

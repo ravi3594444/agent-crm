@@ -18,6 +18,7 @@ from app import (
     entrega,
     erpnext,
     excepciones,
+    idioma,
     policy,
     reloj,
     solicitudes,
@@ -819,6 +820,173 @@ def crear_cliente(
         "revisión de entrega: no le prometas la entrega ni le digas que está "
         "confirmado."
     )
+
+
+# ---------------------------------------------------------------------------
+# LA DIRECCIÓN DE ENTREGA, DEL LADO DEL CLIENTE
+#
+# EL DEFECTO. `TOOLS_CLIENTES` no tenía con qué leer ni cambiar una dirección,
+# así que el agente tomaba un pedido y salía con la que estaba en la ficha sin
+# decírselo a nadie: un pedido real informó «Entrega: purnia, purnia» sin que
+# nunca se hubiera preguntado a dónde iba. La pregunta que faltaba —«¿va a la
+# misma de siempre o a otra?»— no es que no se hacía: no se PODÍA hacer, porque
+# no había función que contestarla.
+#
+# POR QUÉ SON DOS HERRAMIENTAS Y NO UNA CON UN MODO. Es la regla escrita en
+# docs/MAPA.md: detrás de un `Literal` van LECTURAS de un mismo tema, nunca una
+# escritura, y `ver_ajustes`/`proponer_limite` y `ver_memoria`/`anotar_dato`
+# están separadas por eso mismo. Una sola herramienta con `accion="leer"` o
+# `"cambiar"` es una en la que elegir mal la rama ESCRIBE, y el valor que elige
+# la rama lo escribe el modelo.
+#
+# DE DÓNDE SALE LA IDENTIDAD. De `_cuenta_del_remitente`, igual que
+# `crear_pedido`: el teléfono lo puso el webhook firmado de Meta y la cuenta la
+# resuelve ese teléfono. NINGUNA de las dos acepta un teléfono, un código de
+# cliente ni un nombre de Address como argumento —eso es lo que haría falta
+# para mover la dirección de OTRO cliente desde un mensaje— y
+# `tests/test_direccion_entrega.py` lo comprueba sobre el esquema de verdad.
+#
+# LO PEOR QUE PUEDEN HACER. La de lectura, nada. La de escritura, dejar una
+# Address de más colgada del cliente que la dio y una llave en Redis. Ninguna
+# confirma, emite, cancela ni cotiza nada, y ninguna promete una entrega:
+# guardar una dirección no es haber verificado que se llega ahí.
+# ---------------------------------------------------------------------------
+
+
+def _remitente_con_cuenta(config: RunnableConfig) -> tuple[str, str, str]:
+    """(lengua, cuenta, teléfono) de quien escribió. `cuenta` "" si no tiene.
+
+    LA LENGUA SE RESUELVE AUNQUE NO HAYA CUENTA, y no es un detalle: el que no
+    tiene cuenta es justamente el más probable que esté escribiendo por primera
+    vez, y la respuesta «todavía no tiene cuenta» es la que más se lee. Sale de
+    `idioma.para_destinatario` con el teléfono del webhook — nunca del texto
+    del mensaje.
+    """
+    try:
+        actor = actor_context(config)
+    except RuntimeContextError:
+        return idioma.por_defecto(), "", ""
+    lengua = idioma.para_destinatario(actor.actor_phone)
+    try:
+        _, cuenta = _cuenta_del_remitente(config)
+    except RuntimeContextError:
+        return lengua, "", actor.actor_phone
+    return lengua, cuenta, actor.actor_phone
+
+
+@tool
+def direccion_de_entrega(config: RunnableConfig) -> str:
+    """A dónde saldría el pedido de quien te está escribiendo.
+
+    Sólo lectura: no cambia ni anota nada, y no acepta ningún dato.
+
+    Usala ANTES de crear_pedido —siempre— y cuando pregunte «¿a dónde me lo
+    llevás?» o diga que se mudó. Lo que devuelve es la dirección que va a usar
+    el pedido de verdad, así que preguntale si va a ÉSA o a otra en vez de
+    darla por buena.
+
+    Esto NO son los días, los horarios ni las zonas de reparto: eso es
+    condiciones_de_entrega. Y no confirma que se pueda entregar ahí: la entrega
+    de un pedido la revisa una persona.
+    """
+    lengua, cuenta, numero = _remitente_con_cuenta(config)
+    if not cuenta:
+        return idioma.t("direccion.sin_cuenta", lengua)
+    try:
+        # La AUTORIDAD de a dónde va el pedido es esta función y no una lectura
+        # propia: es la misma que llama `crear_pedido`, así que lo que escucha
+        # el cliente no puede discrepar con lo que va a hacer el sistema. La
+        # lista sale aparte y sólo para decir cuántas hay.
+        elegida = clientes.direccion_para_pedido(cuenta, numero)
+        if not elegida:
+            return idioma.t("direccion.ninguna", lengua)
+        guardadas = clientes.direcciones_de(cuenta)
+        doc = erpnext.get_doc("Address", elegida)
+    except erpnext.ERPNextError as exc:
+        print(f"[orders] no pude leer la dirección de {cuenta}: {exc}")
+        return idioma.t("direccion.no_pude", lengua)
+
+    # Una Address sin calle no se puede leer en voz alta, y `texto_direccion`
+    # devolvería su propio texto de relleno —en castellano— adentro de una
+    # frase que puede ser inglesa. Vale lo mismo que no haber podido leerla:
+    # lo que sigue es preguntar la dirección, no adivinarla.
+    if not str((doc or {}).get("address_line1") or "").strip():
+        print(f"[orders] la dirección {elegida} no tiene calle")
+        return idioma.t("direccion.no_pude", lengua)
+
+    respuesta = idioma.t(
+        "direccion.actual", lengua, direccion=entrega.texto_direccion(doc)
+    )
+    if len(guardadas) > 1:
+        respuesta += idioma.t("direccion.otras", lengua, cuantas=len(guardadas))
+    return respuesta
+
+
+@tool
+def cambiar_direccion_de_entrega(
+    direccion: Annotated[
+        DireccionEntrega,
+        Field(description="La dirección que ACABA DE DAR, con cada dato en su "
+                          "campo: no la manden como una sola línea de texto. "
+                          "No completes ni adivines lo que no dijo."),
+    ],
+    config: RunnableConfig,
+) -> str:
+    """Anota la dirección de entrega que te dio el que está escribiendo.
+
+    Usala cuando dice que el pedido va a otra dirección, cuando se mudó, o
+    cuando direccion_de_entrega dice que no hay ninguna guardada. Pedile la
+    dirección COMPLETA antes —calle y número, localidad, y código postal si lo
+    sabe—: no inventes ni completes ningún dato.
+
+    Cambia la dirección del que ESTÁ ESCRIBIENDO y de nadie más. No pidas ni
+    pases su teléfono ni su código de cuenta: los pone el servidor.
+
+    El próximo pedido sale a esta dirección. Esto NO confirma que se entregue
+    ahí: si la zona no consta, el pedido queda pendiente de revisión y no le
+    prometés la entrega.
+    """
+    lengua, cuenta, numero = _remitente_con_cuenta(config)
+    if not cuenta:
+        return idioma.t("direccion.sin_cuenta", lengua)
+
+    try:
+        resultado = clientes.cambiar_direccion(
+            numero, cuenta, direccion.como_erpnext()
+        )
+    except CoordinationError:
+        return idioma.t("direccion.sin_coordinar", lengua)
+    except erpnext.ERPNextError as exc:
+        print(f"[orders] no pude guardar la dirección de {cuenta}: {exc}")
+        return idioma.t("direccion.no_guarde", lengua)
+
+    # Se le repite lo que ÉL dijo, no lo que quedó guardado: cuando la
+    # dirección ya estaba, la que existe puede estar escrita distinto, y esto
+    # es una confirmación de lo que acaba de decir. Además ahorra una lectura
+    # que podría fallar justo después de haber guardado bien.
+    escrita = entrega.texto_direccion(direccion.como_erpnext())
+    nombre = str(resultado.get("direccion") or "")
+    try:
+        doc = erpnext.get_doc("Address", nombre)
+    except erpnext.ERPNextError as exc:
+        # Guardada quedó. No saber la zona NO es un «no repartimos», y es el
+        # mismo texto que la zona que no consta: el pedido se toma y lo revisa
+        # una persona.
+        print(f"[orders] no pude releer la dirección {nombre}: {exc}")
+        return idioma.t("direccion.pendiente_de_revision", lengua, direccion=escrita)
+
+    zona = entrega.evaluar_zona(doc)
+    if not zona.dentro:
+        # El motivo va al LOG y no a la respuesta: es castellano de diagnóstico
+        # y adentro de la frase inglesa sería la fuga que describe docs/MAPA.md.
+        print(
+            f"[orders] dirección {nombre} sin zona confirmada "
+            f"({zona.categoria}): {zona.motivo}"
+        )
+        return idioma.t("direccion.pendiente_de_revision", lengua, direccion=escrita)
+    if resultado.get("creada"):
+        return idioma.t("direccion.anotada", lengua, direccion=escrita)
+    return idioma.t("direccion.ya_estaba", lengua, direccion=escrita)
 
 
 @tool

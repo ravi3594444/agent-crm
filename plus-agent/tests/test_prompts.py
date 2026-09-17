@@ -55,9 +55,26 @@ def test_los_nombres_de_producto_no_se_traducen():
 
 
 def test_con_los_cuatro_datos_crea_el_pedido_sin_pedir_permiso():
+    """Lo que dijo ÉL va directo; lo que dedujo el modelo se repasa.
+
+    ESTE TEST SE MOVIÓ, y conviene saber por qué: afirmaba las tres líneas de
+    abajo y nada más, o sea «nunca se pide confirmación antes de crear_pedido».
+    El dueño pidió un repaso —un pedido salió con «2 Kg» de algo que el cliente
+    había escrito «2g», y la primera vez que vio el detalle fue en la
+    confirmación—, así que la frontera se corrió y ahora pasa por QUIÉN puso el
+    dato. Las tres primeras siguen igual porque la regla 3 sigue igual: los
+    cuatro datos dichos por el cliente van al borrador sin una pregunta de más.
+    Lo que se agrega es la otra mitad, y sin ella el prompt tendría dos órdenes
+    que se contradicen en vez de una frontera.
+    """
     assert "DIRECTAMENTE" in SYSTEM_ES_AR
     assert "No pidas permiso" in SYSTEM_ES_AR
     assert "Antes de crear_pedido confirmá" not in SYSTEM_ES_AR
+    # El repaso existe...
+    assert "Antes de llamar a crear_pedido, repetile en UNA línea" in SYSTEM_ES_AR
+    # ...y está ACOTADO a lo que no dijo el cliente, que es lo que lo hace
+    # compatible con la regla 3 en vez de una orden contraria.
+    assert "no hace falta confirmarlo; lo que dedujiste vos, sí" in SYSTEM_ES_AR
 
 
 def test_pregunta_solo_si_falta_algo_y_una_sola_vez():
@@ -110,8 +127,12 @@ def test_el_cliente_sabe_quien_es_y_no_lo_niega():
     assert "{IDENTIDAD}" in SYSTEM_ES_AR
     assert "si sos una persona o si sos un bot" in SYSTEM_ES_AR
     assert "No lo niegues nunca" in SYSTEM_ES_AR
-    # Y no lo aclara si nadie preguntó: eso es lo que arruina la conversación.
-    # (La cláusula quedó a mitad de frase al exigir la respuesta explícita.)
+    # Y no lo REPITE: la cláusula sigue escrita, pero ya no vale para el primer
+    # mensaje. El dueño revirtió esa mitad —ahora el agente se presenta sin que
+    # le pregunten en el primer contacto, y la presentación la pone
+    # `conversacion.presentacion()` como hueco `{PRESENTACION}`—, así que esto
+    # protege lo que quedó: del segundo mensaje en adelante, no se vuelve a
+    # aclarar lo que es si nadie preguntó.
     assert "no lo aclares si no te lo preguntan" in SYSTEM_ES_AR
 
 

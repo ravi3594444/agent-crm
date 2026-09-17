@@ -68,10 +68,12 @@ from app.tools.operaciones import (
     ver_avisos_fallidos,
 )
 from app.tools.pedidos import (
+    cambiar_direccion_de_entrega,
     crear_cliente,
     crear_lead,
     crear_pedido,
     dar_de_baja_pedido,
+    direccion_de_entrega,
     escalar_a_humano,
     pedir_excepcion_de_entrega,
     recordar,
@@ -90,6 +92,21 @@ TOOLS_CLIENTES = [
     # `pedir_excepcion_de_entrega` más la decisión de una persona— y un ajuste
     # que falta sale como faltante, nunca como un «no repartimos».
     condiciones_de_entrega,
+    # A DÓNDE va el pedido de quien escribió, y cómo se cambia. Son DOS y no
+    # una con un modo: detrás de un Literal van lecturas de un mismo tema y
+    # nunca una escritura (docs/MAPA.md), que es por lo que también están
+    # separadas ver_ajustes/proponer_limite y ver_memoria/anotar_dato.
+    #
+    # Las dos derivan la identidad como `crear_cliente`: del teléfono del
+    # webhook, por `_cuenta_del_remitente`. NINGUNA acepta un teléfono, un
+    # código de cliente ni un nombre de Address como argumento — es lo único
+    # que haría falta para que un mensaje moviera la dirección de otra persona.
+    # `cambiar_direccion_de_entrega` escribe UNA Address colgada de la cuenta
+    # de quien la dio y la recuerda para el pedido de este turno; no confirma,
+    # no emite, no cancela y no cotiza. Que la dirección esté guardada no
+    # promete la entrega: la zona la mira app/entrega.py y la revisa una
+    # persona.
+    direccion_de_entrega, cambiar_direccion_de_entrega,
     # Pide una excepción de entrega. NO decide: o el dueño la dejó autorizada
     # de antemano, o abre una solicitud para una persona (app/solicitudes.py).
     pedir_excepcion_de_entrega,
