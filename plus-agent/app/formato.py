@@ -24,11 +24,14 @@ es UN asterisco, y `**` se muestra tal cual. El cliente ve asteriscos sueltos.
 from __future__ import annotations
 
 import math
-import os
 import re
 from decimal import Decimal, InvalidOperation
 
-from babel.numbers import format_currency
+from babel import Locale
+from babel.core import UnknownLocaleError
+from babel.numbers import format_currency, get_territory_currencies
+
+from app import pais as _pais
 
 # --- LOCALE: la forma del número, no el idioma de la prosa -----------------
 #
@@ -52,21 +55,99 @@ LOCALES = (LOCALE_POR_DEFECTO, "en_US")
 # idioma. Si acá se usara AUTO_CONFIRM_CURRENCY, un despliegue en ARS con
 # LOCALE=en_US escribiría "ARS 1,200.50": un código de moneda donde antes había
 # un símbolo, en los cuarenta lugares donde se muestra plata.
-_MONEDA_DEL_LOCALE = {"es_AR": "ARS", "en_US": "USD"}
+# LA MONEDA DE LOS DOS LOCALES QUE ESTE PRODUCTO TRAJO SIEMPRE. Para cualquier
+# otro se pregunta a CLDR por la moneda del territorio (en_IN -> IN -> INR), que
+# es el mismo dato que Babel ya usa para el símbolo y los separadores. Esta
+# tabla queda porque es una DECISIÓN: `es_AR` es ARS aunque un día alguien
+# despliegue en otro territorio con español argentino.
+_MONEDA_EXPLICITA = {"es_AR": "ARS", "en_US": "USD"}
 
 _NORMALES = {codigo.lower(): codigo for codigo in LOCALES}
+
+
+def _babel(codigo: str):
+    """El `Locale` de Babel, o None si no existe. Nunca levanta."""
+    try:
+        return Locale.parse(codigo)
+    except (ValueError, TypeError, UnknownLocaleError):
+        return None
 
 
 def locale_configurado() -> str:
     """El locale del despliegue. NUNCA levanta y nunca queda vacío.
 
-    Cualquier cosa que no sea uno de `LOCALES` es el de por defecto, igual que
-    `idioma.por_defecto()`: un locale mal escrito no puede dejar sin salir un
-    mensaje. Quien avisa que está mal escrito es `readiness`, en el arranque y
-    una sola vez, en vez de este módulo cuarenta veces por mensaje.
+    ACEPTA CUALQUIER LOCALE QUE CONOZCA CLDR, no dos. Hasta hoy la lista era
+    `("es_AR", "en_US")` y cualquier otra cosa —incluido `pt_BR`, que existe—
+    caía al de por defecto: un cliente brasileño veía sus reales escritos a la
+    argentina. Era una decisión escrita y probada, y se cambia a propósito
+    porque este producto se vende fuera de Argentina.
+
+    Lo que NO cambia: algo que CLDR no reconoce es el de por defecto, porque un
+    locale mal escrito no puede dejar sin salir un mensaje. Quien avisa que
+    está mal escrito es `readiness`, una vez en el arranque, en vez de este
+    módulo cuarenta veces por mensaje.
     """
-    crudo = str(os.getenv("LOCALE", "") or "").strip().replace("-", "_").lower()
-    return _NORMALES.get(crudo, LOCALE_POR_DEFECTO)
+    # `LOCALE` explícito gana; si no está, sale de `PAIS_NEGOCIO`; si no está
+    # ninguna, el de siempre. Un despliegue que ya existe no se entera.
+    crudo = _pais.locale(LOCALE_POR_DEFECTO)
+    if not crudo:
+        return LOCALE_POR_DEFECTO
+    conocido = _NORMALES.get(crudo.lower())
+    if conocido:
+        return conocido
+    return crudo if _babel(crudo) is not None else LOCALE_POR_DEFECTO
+
+
+def moneda_del_locale(codigo: str) -> str:
+    """El código ISO de la moneda que corresponde a ese locale.
+
+    Explícita para los dos de siempre; para el resto, la del territorio según
+    CLDR. Sin territorio —un locale de idioma pelado como `en`— se cae al de
+    por defecto, que es lo mismo que hace `locale_configurado` con la basura.
+    """
+    if codigo in _MONEDA_EXPLICITA:
+        return _MONEDA_EXPLICITA[codigo]
+    lugar = _babel(codigo)
+    territorio = getattr(lugar, "territory", None) if lugar else None
+    if territorio:
+        monedas = get_territory_currencies(territorio)
+        if monedas:
+            return monedas[0]
+    return _MONEDA_EXPLICITA[LOCALE_POR_DEFECTO]
+
+
+# LA PARTE ENTERA DEL PATRÓN DE CLDR: «#,##0», o «#,##,##0» en la India, donde
+# se agrupa por lakhs. Es lo único que se le toma al patrón del locale.
+_AGRUPACION = re.compile(r"[#,]*0")
+
+
+def _patron(codigo: str, decimales: int) -> str:
+    """El patrón de moneda: agrupación del país, símbolo pegado, decimales del llamador.
+
+    TRES COSAS DISTINTAS, Y POR ESO NO SE USA EL PATRÓN DE CLDR TAL CUAL:
+
+    · La AGRUPACIÓN sí es del país, y es lo que se saca de acá. Con el patrón
+      fijo `¤#,##0` que había antes, un millón doscientos mil en `en_IN` salía
+      «₹1,200,000» en vez de «₹12,00,000»: la India agrupa por lakhs y el
+      patrón escrito a mano se lo comía.
+    · La POSICIÓN DEL SÍMBOLO no: CLDR pone `¤ #,##0,00` para es_AR, con
+      espacio, y este producto escribió siempre «$12.000» pegado, en cuarenta
+      lugares y en los tests. Cambiar eso no es internacionalizar, es cambiarle
+      la cara a un despliegue que ya existe.
+    · Los DECIMALES son del llamador —un total lleva dos, un tope ninguno—, que
+      es lo que documenta `pesos` y por lo que va `currency_digits=False`.
+    """
+    entero = "#,##0"
+    lugar = _babel(codigo)
+    if lugar is not None:
+        try:
+            crudo = getattr(lugar.currency_formats.get("standard"), "pattern", "")
+        except Exception:  # pragma: no cover - datos de CLDR, no comportamiento
+            crudo = ""
+        encontrado = _AGRUPACION.search(crudo or "")
+        if encontrado:
+            entero = encontrado.group(0)
+    return "\u00a4" + entero + ("." + "0" * decimales if decimales > 0 else "")
 
 
 def _decimal(monto: object) -> Decimal:
@@ -102,12 +183,12 @@ def pesos(monto: float | int | None, decimales: int = 0) -> str:
     siempre. `currency_digits=False` es lo que le devuelve la decisión al
     patrón.
     """
-    patron = "\u00a4#,##0" + ("." + "0" * decimales if decimales > 0 else "")
     idioma_del_numero = locale_configurado()
+    patron = _patron(idioma_del_numero, decimales)
     try:
         return format_currency(
             _decimal(monto),
-            _MONEDA_DEL_LOCALE[idioma_del_numero],
+            moneda_del_locale(idioma_del_numero),
             locale=idioma_del_numero,
             format=patron,
             currency_digits=False,

@@ -855,6 +855,16 @@ def _responder(item: dict, lengua: str, progreso: Progreso) -> str:
                 data,
                 thread_id=thread_tag,
                 telefono=telefono,
+                # EL ID DEL MENSAJE ENTRANTE, que el camino del cliente ya
+                # pasaba cuatro líneas más abajo y éste no. Sin él,
+                # `memoria._reclamar` no puede distinguir otra vuelta del react
+                # loop de un mensaje nuevo del dueño, y su default para «no sé
+                # de qué turno me hablás» es preguntar de nuevo sin gastar el
+                # turno: o sea la misma pregunta en CADA mensaje, que es el
+                # defecto que el turno existe para cerrar. Medido en vivo: la
+                # clave de Redis seguía en el formato viejo, sin marcas de
+                # turno, horas después de desplegar el arreglo.
+                inbound_message_id=message_id,
                 callbacks=[progreso],
             ),
             message_id,

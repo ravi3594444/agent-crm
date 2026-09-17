@@ -32,6 +32,7 @@ from app import (
     clientes,
     erpnext,
     idioma,
+    inventario,
     notificar,
     outbound_status,
     policy,
@@ -165,6 +166,14 @@ def contar_stock(
         actor = require_management(config)
     except RuntimeContextError:
         return idioma.t("captura.conteo_sin_autenticar", idioma.gerencia())
+    # Un producto sin inventario no se puede reconciliar: ERPNext lo rechaza, y
+    # el motivo que devuelve habla de doctypes. El dueño acaba de marcarlo «no
+    # lo contamos» y al minuto siguiente le pide un conteo — decirle eso en
+    # castellano es más barato que hacerle leer una validación de Frappe.
+    if inventario.sin_seguimiento(item_code):
+        return idioma.t(
+            "captura.conteo_sin_seguimiento", idioma.gerencia(), item_code=item_code
+        )
     company, default_warehouse = erpnext.default_context()
     dep = deposito or default_warehouse
     bins = erpnext.get_list(
@@ -184,16 +193,56 @@ def contar_stock(
             dep=dep,
         )
 
-    doc = erpnext.create_doc(
-        "Stock Reconciliation",
-        {
-            "company": company,
-            "purpose": "Stock Reconciliation",
-            "posting_date": _hoy(),
-            "set_posting_time": 1,
-            "items": [{"item_code": item_code, "warehouse": dep, "qty": cantidad_real}],
-        },
-    )
+    try:
+        doc = erpnext.create_doc(
+            "Stock Reconciliation",
+            {
+                "company": company,
+                "purpose": "Stock Reconciliation",
+                "posting_date": _hoy(),
+                "set_posting_time": 1,
+                "items": [{"item_code": item_code, "warehouse": dep, "qty": cantidad_real}],
+            },
+        )
+    except erpnext.ERPNextError as exc:
+        # SE ATRAPA ACÁ Y NO SE DEJA SUBIR. Levantar la manda al manejador
+        # genérico del grafo, que dice «esa herramienta falló» y nada más: el
+        # modelo se queda sin saber que no se guardó nada y sin el motivo, y lo
+        # que completa es una confirmación que no ocurrió. Medido en vivo: «ya
+        # te anoté los 5 kg de leche» sobre un documento que ERPNext había
+        # rechazado. El motivo va incluido porque el que lee es el DUEÑO y es su
+        # sistema: un 417 se arregla poniéndole las cuentas de inventario a la
+        # compañía, y eso no se adivina desde «hubo un problema».
+        # Sin `print` propio: `erpnext._request` ya deja la línea del rechazo
+        # CON el motivo que mandó ERPNext, que es estrictamente más útil que
+        # ésta. Dos líneas para el mismo evento, y una de ellas era además
+        # castellano escrito a mano dentro de una herramienta de gerencia, que
+        # es justo lo que `test_ninguna_herramienta_de_gerencia_tiene_castellano
+        # _escrito_a_mano` existe para impedir — y lo agarró.
+        # `exc.motivo` Y NO `str(exc)`, PEDIDO A PROPÓSITO. El docstring de
+        # `ERPNextError` deja el cuerpo de ERPNext fuera de `str(exc)` porque
+        # todo lo que se interpola en un mensaje de herramienta lo lee el
+        # modelo, y el agente de CLIENTES tiene lectura ancha; y deja el motivo
+        # disponible «para quien sepa que lo está pidiendo». Ésta es esa
+        # excepción, y se sostiene sola: `contar_stock` vive únicamente en
+        # TOOLS_GERENCIA, o sea que del otro lado hay un número de
+        # TELEFONOS_EQUIPO mirando SU sistema.
+        #
+        # Y sin esto el comentario de arriba era falso: decía «el motivo va
+        # incluido» y lo que iba era «Stock Reconciliation falló (417)», que es
+        # el operativo y el código y nada más. El 417 real de este proyecto
+        # decía «OpeningEntryAccountError: Difference Account must be a
+        # Asset/Liability type account» y hubo que sacarlo del contenedor a
+        # mano — que es exactamente el viaje que este PR agregó `motivo` para
+        # ahorrar. Si ERPNext no mandó cuerpo se cae a `str(exc)`, que al menos
+        # trae la operación y el status.
+        return idioma.t(
+            "captura.conteo_rechazado",
+            idioma.gerencia(),
+            item_code=item_code,
+            dep=dep,
+            motivo=(exc.motivo or str(exc))[:200],
+        )
     erpnext.add_comment(
         "Stock Reconciliation", doc["name"],
         f"Conteo físico por WhatsApp. Sistema: {sistema:g}, contado: {cantidad_real:g}.",

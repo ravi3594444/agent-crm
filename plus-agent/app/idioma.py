@@ -670,6 +670,21 @@ CATALOGO: dict[str, dict[str, str]] = {
         ES: "Cliente: {cliente}\nTel: {telefono}\nMotivo: {motivo}",
         EN: "Customer: {cliente}\nPhone: {telefono}\nReason: {motivo}",
     },
+    # LA MISMA DERIVACIÓN, CUANDO LA PIDE ALGUIEN DEL EQUIPO. No es cosmética:
+    # con las de arriba, un miembro del equipo cuya herramienta falló recibía
+    # «🙋 Un cliente necesita una persona / Cliente: cuenta no registrada / Tel:
+    # <su propio número>» —él, anunciado como un cliente desconocido, avisándose
+    # a sí mismo—. `customer_code` está vacío para el equipo por construcción,
+    # así que el hueco no se llenaba con un dato ausente sino con la etiqueta
+    # equivocada.
+    "gerencia.escalamiento_asunto_equipo": {
+        ES: "🙋 Alguien del equipo necesita una mano",
+        EN: "🙋 Someone on the team needs a hand",
+    },
+    "gerencia.escalamiento_cuerpo_equipo": {
+        ES: "Del equipo: {telefono}\nMotivo: {motivo}",
+        EN: "From the team: {telefono}\nReason: {motivo}",
+    },
     "gerencia.escalamiento_tarea": {ES: "Tarea: {tarea}", EN: "Task: {tarea}"},
     # Un mensaje que terminó en disculpa técnica. Quien escribió puede ser un
     # cliente o el propio equipo, así que dice «de quién» y no «cliente». Lo que
@@ -2180,6 +2195,67 @@ CATALOGO: dict[str, dict[str, str]] = {
     "captura.conteo_sin_autenticar": {
         ES: 'No pude autenticar quién cuenta; no cargué el conteo.',
         EN: 'I could not verify who is doing the count, so I did not record it.',
+    },
+    # LO QUE SE DICE CUANDO EL CONTEO NO SE PUDO ESCRIBIR. Existe porque sin
+    # ella la falla llegaba al modelo como «esa herramienta falló» a secas, y el
+    # modelo completaba el hueco con lo que sonaba bien: «ya te anoté los 5 kg de
+    # leche», sobre una escritura que ERPNext había rechazado. Las dos mitades
+    # que importan son «NO se guardó nada» y el motivo, que es lo único que
+    # convierte una disculpa en algo que el dueño puede ir a arreglar.
+    # LO QUE CONTESTA EL BOTÓN DE CONFIRMAR UN CONTEO. Vivían escritas a mano en
+    # `app/decisiones.py`, o sea en castellano para todo el mundo: ese módulo no
+    # es una herramienta —lo llama el router determinista de `app/main.py`— y el
+    # audit que hace fallar el build ante castellano a mano deriva su lista de
+    # módulos de `graph.TOOLS_GERENCIA`. Sin herramienta, sin audit. El dueño lo
+    # vio al tocar el botón: toda la conversación en inglés y la confirmación en
+    # castellano.
+    "conteo.confirmado": {
+        ES: (
+            "Conteo {nombre} confirmado. Desde ahora el bot puede hablar de "
+            "stock de esos productos."
+        ),
+        EN: (
+            "Done — count {nombre} is applied. I can tell customers what's in "
+            "stock now."
+        ),
+    },
+    "conteo.ya_confirmado": {
+        ES: "El conteo {nombre} ya estaba confirmado.",
+        EN: "Count {nombre} was already applied.",
+    },
+    "conteo.cancelado": {
+        ES: "El conteo {nombre} está cancelado; cargá uno nuevo.",
+        EN: "Count {nombre} was cancelled. Send me a new one.",
+    },
+    "conteo.no_pude_abrir": {
+        ES: "No pude abrir el conteo {nombre}. Revisalo en ERPNext.",
+        EN: "I couldn't open count {nombre}. Have a look at it in ERPNext.",
+    },
+    "conteo.no_pude_confirmar": {
+        ES: (
+            "No pude confirmar el conteo {nombre}. Confirmalo en ERPNext o "
+            "volvé a intentar."
+        ),
+        EN: (
+            "I couldn't apply count {nombre}. Try again, or apply it in "
+            "ERPNext."
+        ),
+    },
+    "captura.conteo_rechazado": {
+        ES: (
+            "NO se guardó nada: ERPNext rechazó el conteo de {item_code} en "
+            "{dep}. Motivo: {motivo}. Decíselo así —que no quedó registrado— y "
+            "no digas que lo anotaste."
+        ),
+        EN: (
+            "NOTHING was saved: ERPNext rejected the count of {item_code} in "
+            "{dep}. Reason: {motivo}. Tell him exactly that — it was not "
+            "recorded — and do not say you noted it down."
+        ),
+    },
+    "captura.conteo_sin_seguimiento": {
+        ES: 'A {item_code} no le llevamos la cuenta: está cargado como producto sin inventario, así que siempre figura disponible y no hay nada que ajustar. Si querés contarlo, primero hay que marcarlo como producto con stock en ERPNext.',
+        EN: 'We do not track {item_code}: it is set up as a non-stock product, so it always shows as available and there is nothing to adjust. To count it, it first has to be marked as a stock item in ERPNext.',
     },
     "captura.conteo_sin_diferencia": {
         ES: 'El sistema ya tiene {sistema} de {item_code} en {dep}; no hace falta ningún ajuste.',

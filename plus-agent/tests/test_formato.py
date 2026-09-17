@@ -234,9 +234,16 @@ def test_el_locale_lo_decide_el_despliegue_y_se_lee_en_cada_llamada(
         ("es_AR", "es_AR"),
         ("", "es_AR"),
         ("   ", "es_AR"),
-        # Un locale que existe pero que este producto no habla, y uno que no
-        # existe: los dos caen al de por defecto en vez de romper un mensaje.
-        ("pt_BR", "es_AR"),
+        # UN LOCALE QUE EXISTE SE RESPETA, y esto cambió a propósito. Hasta
+        # el 17/09 `pt_BR` caía a `es_AR` —«un locale que existe pero que este
+        # producto no habla»—, así que un cliente brasileño veía sus reales
+        # escritos a la argentina. El producto se vende fuera de Argentina, así
+        # que ahora vale cualquier locale que conozca CLDR y la moneda sale del
+        # territorio. Lo que NO cambió: lo que CLDR no reconoce cae al de por
+        # defecto, porque un locale mal escrito no puede dejar sin salir un
+        # mensaje.
+        ("pt_BR", "pt_BR"),
+        ("en_IN", "en_IN"),
         ("no-es-un-locale", "es_AR"),
     ],
 )

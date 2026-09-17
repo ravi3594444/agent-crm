@@ -16,6 +16,164 @@ from app import erpnext, idioma, inventario, policy
 from app.formato import pesos
 from app.runtime_context import RuntimeContextError, actor_context, require_customer
 
+# CUÁNTOS PRODUCTOS SE LE MUESTRAN AL MODELO CUANDO LA BÚSQUEDA NO ENCUENTRA
+# NADA. Trece en este negocio; el tope está por el cliente que tenga doscientos.
+MAX_CATALOGO_SUGERIDO = 25
+
+# CUÁNTOS ENTRAN EN EL PROMPT DE CADA MENSAJE. Más alto que el de arriba porque
+# acá el objetivo es que ESTÉ COMPLETO: lo que no entra es lo único sobre lo que
+# el modelo puede volver a equivocarse.
+MAX_CATALOGO_PROMPT = 60
+
+# El bloque se arma UNA vez y vale un minuto. `prompt_clientes` se rearma en
+# CADA vuelta del react loop —tres por mensaje— y sin esto serían tres consultas
+# a ERPNext para contestar un «hola». Un minuto sigue siendo en vivo para un
+# catálogo: un producto que se da de alta ahora aparece en el mensaje siguiente,
+# no al otro día.
+CACHE_CATALOGO_SEGUNDOS = 60
+_cache_catalogo: tuple[float, str] | None = None
+
+
+def _en_una_linea(texto: object) -> str:
+    """Un nombre de producto que no puede salirse de su renglón.
+
+    Esto entra en el MENSAJE DE SISTEMA, que es el canal de las instrucciones, y
+    un `item_name` con un salto de línea adentro deja de ser un ítem de la lista
+    y pasa a ser una línea más del prompt. Hoy no es una puerta de un cliente
+    —los Items los crea el dueño o el seed, y ninguna herramienta del agente de
+    clientes escribe uno—, y por eso esto es un cierre barato y no un rediseño:
+    el día que exista un camino donde alguien de afuera proponga un nombre, el
+    canal ya está cerrado en vez de haber que acordarse.
+    """
+    plano = " ".join(str(texto or "").split())
+    return plano[:120]
+
+
+def bloque_para_prompt() -> str:
+    """El catálogo entero para el prompt del cliente. `""` si no se pudo leer.
+
+    POR QUÉ ESTO EXISTE Y NO ALCANZABA CON LA HERRAMIENTA. Medido en el VM, tres
+    turnos seguidos preguntando por queso: `herramientas=0x0.0s` en los tres. El
+    modelo contestó «only muzzarella and reggianito» sin abrir el catálogo, y
+    después se copió a sí mismo del historial. Arreglar lo que `buscar_producto`
+    CONTESTA no sirve cuando no se lo llama, y la regla del prompt que se lo
+    ordena tampoco alcanzó: un prompt inclina, no obliga. Con la lista acá
+    adentro la pregunta deja de depender de que decida mirar.
+
+    VACÍO SI FALLA, y esto es lo único que no se puede equivocar: un ERPNext
+    caído tiene que hacer DESAPARECER la sección, nunca dejar un encabezado con
+    cero productos debajo. «Esto es lo que vendemos: (nada)» es la misma mentira
+    que todo esto vino a arreglar, escrita por nosotros en vez de por el modelo.
+    """
+    global _cache_catalogo
+    import time
+
+    ahora = time.monotonic()
+    if _cache_catalogo and ahora - _cache_catalogo[0] < CACHE_CATALOGO_SEGUNDOS:
+        return _cache_catalogo[1]
+    try:
+        items = erpnext.get_list(
+            "Item",
+            filters=[["disabled", "=", 0]],
+            fields=["item_name", "stock_uom"],
+            limit=MAX_CATALOGO_PROMPT + 1,
+        )
+    except erpnext.ERPNextError:
+        return ""
+    nombres = [i for i in items if i.get("item_name")]
+    if not nombres:
+        return ""
+    hay_mas = len(nombres) > MAX_CATALOGO_PROMPT
+    nombres = nombres[:MAX_CATALOGO_PROMPT]
+    lineas = "\n".join(
+        f"- {_en_una_linea(i['item_name'])} (se vende por {_en_una_linea(i['stock_uom'])})"
+        for i in nombres
+    )
+    cola = (
+        "\nY HAY MÁS que no entran en esta lista: si te piden algo que no está "
+        "acá, buscalo con buscar_producto ANTES de decir que no lo tenemos."
+        if hay_mas
+        else ""
+    )
+    bloque = (
+        "LO QUE VENDEMOS\n"
+        "Éstos son los productos que EXISTEN, al día de este mensaje. Si te "
+        "piden algo que no figura con ese nombre, fijate primero si es alguno de "
+        "éstos dicho de otra manera —en otro idioma, con el nombre de la "
+        "categoría, con una marca—: «cheese» es queso. NO contestes que no lo "
+        "tenemos sin haber mirado esta lista.\n"
+        "Los PRECIOS y el STOCK no están acá y no se adivinan: eso sale de "
+        "buscar_producto y consultar_stock, como siempre.\n"
+        f"{lineas}{cola}"
+    )
+    _cache_catalogo = (ahora, bloque)
+    return bloque
+
+
+def _sin_coincidencia(consulta: str) -> str:
+    """La búsqueda no encontró nada. Eso NO significa que no lo tengamos.
+
+    `item_name` se busca con un LIKE, así que la coincidencia es por
+    subcadena y en el idioma en que está cargado el catálogo. Medido en una
+    conversación real: el cliente escribió «cheese», el catálogo dice «Queso
+    cremoso», no hubo match — y el agente le contestó «we don't have cheese».
+    Era falso, y era además el ÚNICO producto con stock cargado en el sistema.
+
+    El texto viejo —«preguntale cómo lo llama él, u ofrecele lo más cercano»—
+    dejaba la conclusión en manos del modelo, y el modelo concluyó una
+    ausencia. Así que el catálogo viaja ACÁ ADENTRO: con la lista a la vista no
+    tiene que recordar nada ni traducir nada, y la prohibición de decir que no
+    lo tenemos es explícita y no una sugerencia.
+
+    No se nombran precios ni stock: eso sigue saliendo de una búsqueda con
+    coincidencia, que es la única que los mira.
+    """
+    try:
+        catalogo = erpnext.get_list(
+            "Item",
+            filters=[["disabled", "=", 0]],
+            fields=["item_name", "stock_uom"],
+            limit=MAX_CATALOGO_SUGERIDO,
+        )
+    except erpnext.ERPNextError:
+        # UNA CAÍDA NO ES UN CATÁLOGO VACÍO, y hasta acá las dos cosas caían en
+        # el mismo texto: «preguntale cómo lo llama él». O sea que un ERPNext
+        # que no contesta salía al cliente como una charla sobre el nombre del
+        # producto, que es tapar una caída conversando. La primera búsqueda —la
+        # de `buscar_producto`— sí anduvo y no matcheó, así que lo único cierto
+        # es que ningún nombre coincide; si el sistema se cayó entre esa
+        # consulta y ésta, tampoco hay con qué ofrecer alternativas, y eso hay
+        # que decirlo en vez de completarlo.
+        return (
+            f"Ningún producto se llama '{consulta}', y al intentar leer el "
+            "catálogo completo para ofrecerle algo parecido EL SISTEMA FALLÓ. "
+            "NO le digas que no lo tenemos y NO le prometas nada: no pudiste "
+            "verificar. Decile que en este momento no podés confirmar qué hay "
+            "y que lo revisás enseguida; si insiste, usá escalar_a_humano."
+        )
+    if not catalogo:
+        return (
+            f"No encontré nada parecido a '{consulta}' en el catálogo. "
+            "Preguntale cómo lo llama él. NO le digas que no lo tenemos: puede "
+            "estar cargado con otro nombre."
+        )
+    lineas = "\n".join(
+        f"- {item['item_name']} (se vende por {item['stock_uom']})"
+        for item in catalogo
+        if item.get("item_name")
+    )
+    return (
+        f"Ninguno de los productos se llama '{consulta}'. ESO NO QUIERE DECIR QUE NO "
+        "LO TENGAMOS: el catálogo está cargado en un idioma y el cliente puede "
+        "haberlo pedido en otro, o con el nombre de la categoría en vez del "
+        "producto. NO le contestes que no tenemos eso.\n"
+        "Esto es PARTE del catálogo, no todo —son los primeros que trajo la "
+        "consulta—: ofrecele lo que se parezca a lo que pidió, con su nombre tal "
+        "cual figura acá, y si no está en esta lista NO concluyas que no "
+        "existe.\n"
+        f"{lineas}"
+    )
+
 
 @tool
 def buscar_producto(
@@ -33,10 +191,7 @@ def buscar_producto(
         limit=8,
     )
     if not items:
-        return (
-            f"No encontré nada parecido a '{consulta}' en el catálogo. "
-            "Preguntale cómo lo llama él, u ofrecele lo más cercano que tengas."
-        )
+        return _sin_coincidencia(consulta)
 
     price_list = os.getenv("AUTO_CONFIRM_PRICE_LIST", "").strip()
     currency = os.getenv("AUTO_CONFIRM_CURRENCY", "").strip()
@@ -144,6 +299,16 @@ def consultar_stock(
         return (
             f"No pude verificar el depósito de preparación para {item_code}. "
             "No confirmes disponibilidad."
+        )
+    # Un producto que no se inventaría no tiene conteo que vencer, y contestar
+    # «nadie lo contó» sobre los tornillos es no contestar. Se dice que hay, sin
+    # número: el número sería inventado, y la regla 1 de `prompts.py` no
+    # distingue entre inventar un precio e inventar una existencia.
+    if inventario.sin_seguimiento(item_code):
+        return (
+            f"{item_code}: es un producto que no llevamos contado, siempre "
+            "tenemos. Podés tomarle el pedido. NO le des un número de "
+            "existencias: no hay ninguno que sea cierto."
         )
     # Trust is earned per product by a confirmed count, and it expires.
     fresco, sin_confianza = inventario.confiable(item_code, warehouse)

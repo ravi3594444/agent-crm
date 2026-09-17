@@ -24,7 +24,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
-from app import erpnext, limites
+from app import erpnext, limites, rastro
 
 # Todos los motivos de esta capa arrancan igual, para que el resto del sistema
 # sepa que ESTE pedido está esperando por la entrega y no por otra regla: el
@@ -212,4 +212,40 @@ def autorizada(sales_order: dict) -> tuple[bool, str]:
     evaluacion = evaluar_zona(direccion)
     if evaluacion.dentro:
         return True, ""
+    # LA CATEGORÍA AL LOG, ACÁ, QUE ES DONDE SE SABE. El motivo que sale de esta
+    # función lleva la dirección adentro por diseño —es para el EQUIPO, que
+    # necesita saber cuál dirección—, así que quien quiera loggearlo tiene que
+    # reconstruir la categoría a partir del texto. Eso no se puede hacer bien y
+    # fue exactamente el defecto: ver `motivo_para_log`. Acá la categoría es la
+    # que decidió `evaluar_zona`, no una deducción, y no contiene una letra de
+    # la dirección.
+    print(
+        f"[entrega] no autorizada order={rastro.ref(sales_order.get('name'))} "
+        f"categoria={evaluacion.categoria}",
+        flush=True,
+    )
     return False, f"{MOTIVO}: {texto_direccion(direccion)} — {evaluacion.motivo}"
+
+
+def motivo_para_log(motivo: str) -> str:
+    """El motivo de `autorizada` reducido a QUE FUE EL DE ENTREGA, sin dirección.
+
+    Los motivos que devuelve `autorizada` llevan adentro la dirección del
+    cliente o el nombre de su documento en ERPNext, y `tools/pedidos.py` deja
+    escrito —en `_log_ref`— que en el log no van IDs de cliente.
+
+    La primera versión de esto cortaba por el guión largo y se quedaba con la
+    cola, dando por sentado que la cola era una categoría. NO LO ES: los cuatro
+    motivos de `evaluar_zona` que más se ven interpolan el CP y la localidad
+    («el código postal 5000 y la localidad «Córdoba» no están en las zonas de
+    reparto»). O sea que sacaba la calle y devolvía la ciudad, debajo de un
+    docstring que prometía lo contrario — peor que no recortar nada, porque a
+    un docstring así se le cree. Por eso acá no queda cola ninguna.
+
+    El POR QUÉ no se pierde: lo imprime `autorizada` como `categoria=`, en el
+    momento en que la tiene y sin tener que deducirla.
+
+    Un motivo que no es de entrega vuelve entero: los demás nombran productos y
+    montos, que el log ya escribe en claro en otras líneas.
+    """
+    return MOTIVO if motivo.startswith(MOTIVO) else motivo

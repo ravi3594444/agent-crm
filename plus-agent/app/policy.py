@@ -461,6 +461,15 @@ def _evaluar(
         empresa = str(sales_order.get("company") or "").strip()
         pedido_desde = str(sales_order.get("creation") or "").strip()
         for (code, warehouse), qty in cantidades.items():
+            # UN PRODUCTO QUE NO SE INVENTARÍA NO TIENE CONTEO QUE VENCER. Sin
+            # esto, una ferretería veía CADA pedido derivado a una persona por
+            # «nadie contó ese producto» — y no lo contó porque no se cuentan
+            # 2.400 tornillos por día, no porque se lo hayan olvidado. Los dos
+            # controles que siguen abajo se apagan para estos productos a
+            # propósito y lo compensa el dueño después, con `cancelar` dentro
+            # de las 24 h. Ver `inventario.sin_seguimiento`, que falla cerrada.
+            if inventario.sin_seguimiento(code):
+                continue
             # Is what ERPNext says about THIS product recent enough to promise?
             # A stock figure nobody has counted in three weeks is a guess.
             # El MISMO `ignorar_postura` que apartó la postura arriba. Sin

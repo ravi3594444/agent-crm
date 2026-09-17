@@ -1180,3 +1180,74 @@ def test_el_error_de_una_herramienta_pide_una_sola_disculpa() -> None:
     assert "escalar_a_humano" in graph._ERROR_MSG
     assert "No inventes un resultado" in graph._ERROR_MSG
     assert "No le hables de herramientas" in graph._ERROR_MSG
+
+
+def test_del_lado_del_dueno_una_herramienta_rota_no_lo_deriva_a_si_mismo() -> None:
+    """La misma falla, contada para el otro lado del teléfono.
+
+    `_ERROR_MSG` está escrito para el agente de clientes —«decile al cliente»,
+    «llamá a escalar_a_humano»— y lo usaban LOS DOS. Medido en vivo: un conteo
+    que ERPNext rechazó terminó en una tarjeta «🙋 Un cliente necesita una
+    persona / Cliente: cuenta no registrada / Tel: <el número del dueño>»,
+    prometiéndole que alguien lo iba a mirar. Él es ese alguien.
+
+    Se afirma la conducta de la función, no el catálogo: el mensaje de gerencia
+    tiene que impedir que el modelo COMPLETE el hueco con lo que suene bien, y
+    no puede mandar a derivar.
+
+    ESTE TEST AFIRMABA «NO GUARDÓ NADA» Y ESA ERA LA AFIRMACIÓN EQUIVOCADA, no
+    el test. Protegía algo real —sin ella el modelo contestó «ya te anoté los 5
+    kg», sobre una escritura que no ocurrió— pero lo protegía fijando un HECHO
+    que este manejador no puede saber: le llega cualquier excepción de cualquier
+    herramienta, y varias escriben antes de poder fallar (`contar_stock` crea la
+    Stock Reconciliation y DESPUÉS comenta, avisa y arma la respuesta). Con eso,
+    una falla posterior a la escritura le hacía decir al dueño que no había
+    quedado nada sobre un documento que sí existe, y el «probá de nuevo» que
+    seguía le fabricaba el duplicado. O sea: una mentira cambiada por la otra.
+
+    Así que lo que se afirma ahora son las DOS prohibiciones, que juntas son la
+    propiedad que el test siempre quiso: no afirmar que quedó registrado, y no
+    afirmar que no quedó nada. Donde sí se sabe, lo dice la herramienta
+    (`captura.conteo_rechazado` abre con «NO se guardó nada» y no pasa por acá).
+
+    MUTACIÓN: que `_error_de_herramienta_gerencia` devuelva `_ERROR_MSG`. Cae
+    ésta y sólo ésta.
+    """
+    from app import graph
+
+    del_dueno = graph._error_de_herramienta_gerencia(RuntimeError("ERPNext 417"))
+
+    assert "no digas que quedó anotado ni registrado" in del_dueno
+    assert "tampoco digas que no quedó nada" in del_dueno
+    assert "escalar_a_humano" not in del_dueno
+    # Y el de clientes sigue siendo el que era: ahí derivar SÍ es lo correcto.
+    assert "escalar_a_humano" in graph._error_de_herramienta(RuntimeError("x"))
+
+
+def test_cada_agente_lleva_su_propio_manejador_de_errores() -> None:
+    """EL CABLE. Los dos mensajes pueden estar perfectos y el agente usar el otro.
+
+    Es exactamente lo que pasaba: el texto de clientes existía y era correcto
+    para clientes, y el ToolNode de gerencia lo usaba igual.
+
+    MUTACIÓN: `TOOLNODE_GERENCIA` con `handle_tool_errors=_error_de_herramienta`.
+    Cae ésta y sólo ésta.
+    """
+    from app import graph
+
+    assert _manejador(graph.TOOLNODE_GERENCIA) is graph._error_de_herramienta_gerencia
+    assert _manejador(graph.TOOLNODE_CLIENTES) is graph._error_de_herramienta
+
+
+def _manejador(nodo):
+    """El `handle_tool_errors` que quedó puesto, se llame como se llame adentro.
+
+    langgraph lo guarda en `_handle_tool_errors`, privado. Se prueban los dos
+    nombres para que una renombrada de la librería —las versiones están fijas,
+    así que sería a propósito— caiga acá con una frase y no con un
+    `AttributeError` que parece un bug del agente.
+    """
+    for nombre in ("handle_tool_errors", "_handle_tool_errors"):
+        if hasattr(nodo, nombre):
+            return getattr(nodo, nombre)
+    raise AssertionError("langgraph ya no expone el manejador de errores del ToolNode")

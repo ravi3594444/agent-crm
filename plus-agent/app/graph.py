@@ -9,6 +9,7 @@ They use DIFFERENT ERPNext API credentials, so the permission boundary is
 enforced by ERPNext itself — not by which prompt happened to load.
 """
 import os
+import sys
 
 from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.redis import RedisSaver
@@ -209,12 +210,31 @@ TOOLS_GERENCIA = [
 # Un fallo del servidor externo NO puede tumbar el agente: si no levanta, se
 # avisa y se sigue con las herramientas propias. Un ERP de terceros caído es un
 # martes; un agente que no contesta el WhatsApp es el negocio parado.
+#
+# TODO ESTE AVISO VA A stderr, Y NO ES ESTILO. `app/mcp_server.py` importa este
+# módulo TARDE —dentro de `_catalogo()`, cuando alguien pide la lista de
+# herramientas— y en el transporte stdio de MCP, stdout ES el canal del
+# protocolo: una línea de log ahí sale ANTES de la respuesta JSON-RPC, en el
+# mismo stream, y el cliente no puede parsear el `tools/list`. Por eso
+# `mcp_server.py` «no tiene un solo print a secas» y por eso acá tampoco puede
+# haberlo, aunque este archivo no sea el servidor.
+def _avisar(mensaje: str) -> None:
+    print(mensaje, file=sys.stderr, flush=True)
+
+
 def _con_externas() -> list:
     try:
         from app import mcp_cliente
 
         externas = mcp_cliente.cargar(TOOLS_GERENCIA)
-        if not externas:
+        if not externas and mcp_cliente.servidores():
+            # HAY SERVIDOR CONFIGURADO Y NO ENTRÓ NADA: el motivo lo guarda
+            # `cargar` y sólo lo imprime `resumen()`, que abajo se llama nada
+            # más que cuando cargó algo. O sea que un servidor caído no dejaba
+            # UNA línea en el log: se veía como si nadie hubiera configurado
+            # nada. Medido el 16/09 — el contenedor de Casys estaba en bucle de
+            # reinicio y hubo que sacarle el motivo con un `python -c` a mano.
+            _avisar(mcp_cliente.resumen(TOOLS_GERENCIA))
             # COPIA, no la misma lista. Sin servidores externos el contenido es
             # idéntico y la tentación es devolver la constante; entonces las dos
             # son el MISMO objeto y un `TOOLS_AGENTE_GERENCIA.append(...)` de
@@ -222,10 +242,10 @@ def _con_externas() -> list:
             # `mcp_server` publica, sin tocar una línea de ese archivo. Lo
             # encontró su propio test, que fallaba con esto puesto.
             return list(TOOLS_GERENCIA)
-        print(mcp_cliente.resumen(TOOLS_GERENCIA))
+        _avisar(mcp_cliente.resumen(TOOLS_GERENCIA))
         return TOOLS_GERENCIA + externas
     except Exception as exc:  # el agente arranca igual, con lo suyo
-        print(f"[mcp] no pude cargar los servidores externos ({type(exc).__name__})")
+        _avisar(f"[mcp] no pude cargar los servidores externos ({type(exc).__name__})")
         return list(TOOLS_GERENCIA)
 
 
@@ -317,6 +337,49 @@ _ERROR_MSG = (
     "ni de errores técnicos."
 )
 
+# LA MISMA FALLA, DEL LADO DEL DUEÑO, DICE OTRA COSA
+# --------------------------------------------------
+# `_ERROR_MSG` está escrito para el agente de CLIENTES —«decile al cliente»,
+# «llamá a escalar_a_humano»— y lo usaban los dos. Medido en una conversación
+# real del dueño: `contar_stock` falló contra ERPNext, el modelo leyó esta
+# orden, y el dueño recibió una tarjeta «🙋 Un cliente necesita una persona /
+# Cliente: cuenta no registrada / Tel: <su propio número>» diciéndole que
+# alguien lo iba a mirar. Él ES ese alguien. Y como el mensaje tampoco dice que
+# no se guardó nada, el modelo completó el hueco con lo que sonaba bien: «ya te
+# anoté los 5 kg de leche», sobre una escritura que nunca ocurrió.
+#
+# Las dos mitades que cambian son las dos que estaban mal para este lado:
+# qué pasó con la escritura —que es lo que impide la confirmación inventada— y
+# «no escales», porque derivar al equipo a alguien que ES el equipo es mandarle
+# un aviso sobre sí mismo. El nombre de la herramienta NO se nombra acá: si
+# `escalar_a_humano` deja de existir mañana, esto sigue siendo cierto.
+#
+# Y NO DICE «NO SE GUARDÓ NADA», aunque ésa fue la primera redacción y arreglaba
+# el defecto medido. Decía un HECHO que este manejador no puede saber: le llega
+# cualquier excepción de cualquier herramienta, y varias escriben ANTES de poder
+# fallar. `registrar_venta_offline` crea la factura borrador y después llama a
+# `add_comment`; `contar_stock` crea la Stock Reconciliation y después comenta,
+# avisa y arma la respuesta. Una falla en cualquiera de esos pasos llegaba acá y
+# le hacía decir al dueño que no había quedado nada, sobre un documento que SÍ
+# existe — y el «probá de nuevo» que seguía le fabrica el duplicado.
+#
+# O sea que la primera versión cambiaba una mentira por la otra: antes el modelo
+# inventaba una confirmación, después inventaba una negación. Lo único cierto es
+# que no se sabe, y decirlo no afloja la protección: la prohibición de inventar
+# un resultado sigue textual, y ahora aplica para los dos lados. Donde SÍ se
+# sabe que no se escribió nada —el `create_doc` que falló, atrapado por la
+# herramienta misma— lo dice la herramienta: `captura.conteo_rechazado` empieza
+# con «NO se guardó nada» y no pasa por acá.
+_ERROR_MSG_GERENCIA = (
+    "Esa herramienta falló y NO SE SABE si alcanzó a guardar algo. No inventes "
+    "un resultado: no digas que quedó anotado ni registrado, y tampoco digas "
+    "que no quedó nada — no lo sabés. Decíle en UNA línea qué falló y que no "
+    "podés confirmar si llegó a registrarse, con palabras del negocio y sin "
+    "jerga técnica, y ofrecele FIJARSE antes de volver a intentarlo, porque "
+    "repetirlo a ciegas puede dejarlo cargado dos veces. NO lo derives a una "
+    "persona del equipo: el que te está escribiendo ES el equipo."
+)
+
 # UN VALOR DE ENUM EQUIVOCADO NO ES UNA HERRAMIENTA ROTA
 # -----------------------------------------------------
 # `_ERROR_MSG` manda a escalar_a_humano, y para una herramienta que falló de
@@ -363,22 +426,48 @@ def _error_de_herramienta(exc: Exception) -> str:
     return _ERROR_MSG
 
 
+def _error_de_herramienta_gerencia(exc: Exception) -> str:
+    """Lo mismo para el agente del dueño, con la otra mitad del mensaje.
+
+    El tratamiento del enum es idéntico a propósito —un valor mal escrito no es
+    una herramienta rota de ningún lado del teléfono—; lo que cambia es sólo el
+    texto de la falla de verdad. Son dos ToolNode distintos, así que el que
+    decide cuál se usa es el agente y no un `if` sobre algo que el modelo
+    escribe.
+    """
+    if isinstance(exc, ValidationError):
+        detalle = _valores_esperados(exc)
+        if detalle:
+            return _error_de_herramienta(exc)
+    return _ERROR_MSG_GERENCIA
+
+
 
 # The system prompt is built per call (prompt=) and never stored in the
 # checkpoint; the model only sees a bounded tail of the thread
 # (pre_model_hook=). See app/conversacion.py for why.
+TOOLNODE_CLIENTES = ToolNodeSinInventario(
+    TOOLS_CLIENTES, handle_tool_errors=_error_de_herramienta
+)
+# CADA AGENTE CON SU MANEJADOR, y son dos objetos con nombre porque cuál le toca
+# a cuál es justamente lo que estuvo mal: los dos usaban el de clientes, y el
+# dueño terminó recibiendo una tarjeta de «un cliente necesita una persona»
+# sobre sí mismo. Un `handle_tool_errors` compartido no se ve desde afuera del
+# grafo compilado, y lo que no se puede mirar no se puede probar.
+TOOLNODE_GERENCIA = ToolNodeSinInventario(
+    TOOLS_AGENTE_GERENCIA, handle_tool_errors=_error_de_herramienta_gerencia
+)
+
 agente_clientes = create_react_agent(
     model=_modelo_clientes,
-    tools=ToolNodeSinInventario(TOOLS_CLIENTES, handle_tool_errors=_error_de_herramienta),
+    tools=TOOLNODE_CLIENTES,
     prompt=prompt_clientes,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,
 )
 agente_gerencia = create_react_agent(
     model=_modelo_gerencia,
-    tools=ToolNodeSinInventario(
-        TOOLS_AGENTE_GERENCIA, handle_tool_errors=_error_de_herramienta
-    ),
+    tools=TOOLNODE_GERENCIA,
     prompt=prompt_gerencia,
     pre_model_hook=recortar_historial,
     checkpointer=_checkpointer,

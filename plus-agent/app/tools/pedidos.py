@@ -19,6 +19,7 @@ from app import (
     erpnext,
     excepciones,
     policy,
+    rastro,
     reloj,
     solicitudes,
 )
@@ -293,8 +294,13 @@ def _message_key(message_id: str) -> str:
 
 
 def _log_ref(value: str) -> str:
-    """Non-reversible correlation tag for logs; never log ERP/customer IDs."""
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    """Non-reversible correlation tag for logs; never log ERP/customer IDs.
+
+    El hash vive en `app/rastro.py` porque `entrega.autorizada` escribe la otra
+    mitad de la correlación: dos copias que tienen que dar lo mismo, y nada que
+    las obligue, es la forma de defecto que `CLAUDE.md` describe.
+    """
+    return rastro.ref(value)
 
 
 def _agendar_entrega(doc: dict) -> None:
@@ -463,6 +469,27 @@ def _notificar_confirmada(order: dict) -> None:
         print(f"[orders] aviso de confirmación falló ({type(exc).__name__})")
 
 
+def _avisar_sin_auto(name: str, decision: policy.Decision) -> None:
+    """Por qué este pedido NO se auto-confirmó, al log del contenedor.
+
+    No quedaba escrito en ningún lado: el modo sombra lo anota, pero corre en
+    el barrido y sólo si el dueño lo prendió, así que en el alta —que es cuando
+    se mira— «¿por qué quedó en borrador?» se contestaba apagando gates de a
+    uno. `policy._evaluar` tiene alrededor de una docena y cualquiera deja el
+    pedido igual de silencioso.
+
+    Los motivos pasan por `entrega.motivo_para_log`, que es lo único que los
+    separa de la dirección del cliente. Lo llaman los DOS caminos que terminan
+    en borrador —la primera decisión y la relectura bajo el lock—, porque son
+    dos respuestas distintas sobre el mismo pedido y sólo una de las dos manda.
+    """
+    motivos = " | ".join(entrega.motivo_para_log(m) for m in decision.motivos)
+    print(
+        f"[orders] sin auto-confirmar order={_log_ref(name)} "
+        f"motivos={motivos or 'ninguno'}"
+    )
+
+
 def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
     name = str(order.get("name") or "").strip()
     if not name:
@@ -482,6 +509,9 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
         )
         decision = policy.Decision(False, ["no se pudo completar la política"])
 
+    if not decision.auto:
+        _avisar_sin_auto(name, decision)
+
     if decision.auto:
         try:
             with policy.auto_submit_lock():
@@ -498,7 +528,14 @@ def _after_create(order: dict, validated: list[dict], delivery: str) -> str:
                     )
                     _notificar_confirmada(complete)
                     return _order_result(complete, validated, delivery)
+                # LA RELECTURA MANDÓ Y DIJO QUE NO. Acá el pedido queda en
+                # borrador igual que arriba, y hasta recién no lo decía nadie:
+                # el aviso salía de la PRIMERA decisión, que en este camino
+                # dijo que sí. O sea que el único caso donde la política cambia
+                # de opinión bajo el lock —el que más querés ver— era el único
+                # que seguía mudo.
                 decision = final_decision
+                _avisar_sin_auto(name, decision)
         except Exception as exc:
             print(
                 f"[orders] auto-confirmación falló order={_log_ref(name)} "
@@ -841,13 +878,24 @@ def escalar_a_humano(
         else "sin referencia de mensaje"
     )
     account = actor.customer_code or "cuenta no registrada"
+    # QUIÉN PIDIÓ LA MANO, y no es una etiqueta: esta herramienta está en las
+    # dos listas, y del lado de gerencia el que escribe ES el equipo. Con
+    # `customer_code` vacío por construcción, el aviso salía como «Un cliente
+    # necesita una persona / Cliente: cuenta no registrada / Tel: <el número del
+    # dueño>», o sea él anunciándose a sí mismo como un desconocido, con la
+    # promesa de que alguien lo iba a mirar.
+    del_equipo = actor.is_management
+    quien = (
+        f"Del equipo: {actor.actor_phone or 'sin dato'}" if del_equipo
+        else f"Cuenta: {account}"
+    )
     try:
         doc = erpnext.create_doc(
             "ToDo",
             {
                 "description": (
                     f"[WhatsApp] Escalado por Agente IA: {motivo}. "
-                    f"Cuenta: {account}. Referencia: {reference}."
+                    f"{quien}. Referencia: {reference}."
                 ),
                 "priority": "High",
             },
@@ -866,12 +914,46 @@ def escalar_a_humano(
     # único que autoriza a decirle al cliente que el equipo ya se enteró.
     try:
         avisado = bool(
-            avisar_escalamiento(motivo, actor.actor_phone, account, tarea)
+            avisar_escalamiento(
+                motivo, actor.actor_phone, account, tarea, del_equipo=del_equipo
+            )
         )
     except Exception as exc:  # es un aviso: no puede tumbar la derivación
         print(f"[orders] alerta de derivación falló ({type(exc).__name__})")
         avisado = False
 
+    if del_equipo:
+        # AL DUEÑO NO SE LE HABLA DE «el cliente» NI DE «el encargado». Es él.
+        # Las tres respuestas de abajo están escritas para el agente de
+        # clientes, que le explica a un tercero que su caso lo va a mirar
+        # alguien; acá el que lee es ese alguien, y lo único que necesita saber
+        # es si quedó registrado y si sonó el teléfono de alguien más.
+        if not tarea and not avisado:
+            return (
+                "NO quedó registrado ni le llegó a nadie. Decíselo así, en UNA "
+                "línea, y no digas que avisaste al equipo."
+            )
+        # CADA MITAD SE DICE SOLA, y el encabezado no la adelanta. Con un
+        # "Anotado:" fijo delante y las frases pensadas para ir juntas, el caso
+        # de aviso sin tarea salía «Anotado: y salió el aviso al equipo»: la
+        # conjunción suelta, y un «Anotado» sobre un ToDo que no existe. Es la
+        # misma mentira que la regla 6 prohíbe, una línea más abajo de donde ya
+        # se la evita.
+        partes = []
+        if tarea:
+            partes.append(f"quedó la tarea {tarea}")
+        if avisado:
+            partes.append("salió el aviso al equipo")
+        # Sólo la PRIMERA letra, no `.capitalize()`: ése además baja a
+        # minúscula todo el resto, y el resto incluye el nombre del documento de
+        # ERPNext —`TODO-0007` salía `todo-0007`—, que es justo lo que el dueño
+        # podría copiar para buscarlo.
+        frase = " y ".join(partes)
+        return (
+            f"{frase[:1].upper()}{frase[1:]}. Decíselo en UNA línea, sin "
+            "hablarle de derivaciones ni de que alguien lo va a mirar: el que lo "
+            "mira es él."
+        )
     if not tarea and not avisado:
         # Nadie se enteró y no quedó registro. Decirle que avisamos al equipo
         # sería la mentira que la regla 6 del prompt prohíbe.

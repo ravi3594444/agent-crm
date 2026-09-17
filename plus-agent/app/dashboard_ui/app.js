@@ -3,6 +3,7 @@ const escape = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','
 const paths = {
   sales: '<path d="M4 20V10m6 10V4m6 16v-7m5 7H2M14 5h7v7m0-7-8 8"/>',
   advice: '<path d="M9 18h6m-5 3h4M8 14a6 6 0 1 1 8 0l-1 2H9zM12 1v1M2 8H1m22 0h-1"/>',
+  rail: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
   moon: '<path d="M20 14A9 9 0 0 1 10 4a9 9 0 1 0 10 10Z"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1 1m12 12 1 1M5 19l1-1M18 6l1-1"/>',
   today: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 11h18m-13 5 3 3 5-5"/>',
@@ -90,15 +91,15 @@ function makeDemo(range=7) {
     items:products.map(p=>({id:p.id,price:p.price,unit:'Unidad'})),errors:[],truncated:[]});
   const settings=validateSettings({problem:'',pending:null,groups:[
     {id:'negocio',name:'Your business',settings:[
-      {id:'NOMBRE_NEGOCIO',name:'nombre del negocio',meaning:'How your business is named in the first line of both agent prompts',unit:'texto',kind:'texto',optional:true,value:'Plus Dairy',display:'Plus Dairy',source:'You set this',configured:true,problem:''},
-      {id:'RUBRO_NEGOCIO',name:'rubro',meaning:'What the business does, in a few words',unit:'texto',kind:'texto',optional:true,value:'-',display:'-',source:'Shipped default',configured:false,problem:''},
-      {id:'HORARIO_ATENCION',name:'horario de atencion',meaning:'The hours you tell a customer you are open',unit:'texto',kind:'texto',optional:false,value:'lunes a viernes de 8 a 17',display:'lunes a viernes de 8 a 17',source:'From the server file',configured:false,problem:''}]},
+      {id:'NOMBRE_NEGOCIO',name:'Business name',meaning:'What the business is called. It is the first line of both agent prompts.',unit:'text',kind:'texto',optional:true,value:'Plus Dairy',display:'Plus Dairy',source:'You set this',configured:true,problem:''},
+      {id:'RUBRO_NEGOCIO',name:'Trade',meaning:'What the business does, in a few words.',unit:'text',kind:'texto',optional:true,value:'-',display:'-',source:'Shipped default',configured:false,problem:''},
+      {id:'HORARIO_ATENCION',name:'Opening hours',meaning:'The hours the business is open, worded the way you would tell a customer.',unit:'text',kind:'texto',optional:false,value:'lunes a viernes de 8 a 17',display:'lunes a viernes de 8 a 17',source:'From the server file',configured:false,problem:''}]},
     {id:'plantillas',name:'WhatsApp templates',settings:[
-      {id:'WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE',name:'plantilla de confirmado',meaning:'Tells the customer their order was confirmed',unit:'plantilla de Meta',kind:'plantilla',optional:true,value:'pedido_confirmado',display:'pedido_confirmado',source:'You set this',configured:true,problem:''},
-      {id:'WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE',name:'plantilla de vencido',meaning:'Tells the customer their request expired with no answer',unit:'plantilla de Meta',kind:'plantilla',optional:true,value:'-',display:'-',source:'Shipped default',configured:false,problem:''}]},
+      {id:'WHATSAPP_CUSTOMER_CONFIRMED_TEMPLATE',name:'Confirmed template',meaning:'Tells the customer their order was confirmed.',unit:'Meta template',kind:'plantilla',optional:true,value:'pedido_confirmado',display:'pedido_confirmado',source:'You set this',configured:true,problem:''},
+      {id:'WHATSAPP_CUSTOMER_EXPIRED_TEMPLATE',name:'Expired template',meaning:'Tells the customer their request expired with no answer.',unit:'Meta template',kind:'plantilla',optional:true,value:'-',display:'-',source:'Shipped default',configured:false,problem:''}]},
     {id:'limites',name:'Automatic confirmation',settings:[
-      {id:'AUTO_CONFIRM_MAX',name:'monto maximo',meaning:'Largest order that can be confirmed without anyone looking at it',unit:'$',kind:'numero',optional:false,value:'0',display:'$ 0',source:'Shipped default',configured:false,problem:''},
-      {id:'STOCK_BUFFER_PCT',name:'colchon de stock',meaning:'Stock held back for sales that are not loaded yet',unit:'%',kind:'numero',optional:false,value:'20',display:'20%',source:'Shipped default',configured:false,problem:''}]}]});
+      {id:'AUTO_CONFIRM_MAX',name:'Order ceiling',meaning:'The largest order that can be confirmed without anyone looking at it.',unit:'$',kind:'numero',optional:false,value:'0',display:'$ 0',source:'Shipped default',configured:false,problem:''},
+      {id:'STOCK_BUFFER_PCT',name:'Stock buffer',meaning:'Stock held back for sales that have not been entered yet.',unit:'%',kind:'numero',optional:false,value:'20',display:'20%',source:'Shipped default',configured:false,problem:''}]}]});
   return {prices,settings,sales,advice,mode:'demo',company:'Plus Dairy',today,since:dateShift(today,-29),currency:'ARS',generatedAt:new Date().toISOString(),orders,customers,products,activity:validateActivity(activity),conversations,queue:validateQueue(queue),operations,errors:[],truncated:[],limit:250,policies:[{name:'Order ceiling',value:'$ 150.000',note:'Maximum order value for automatic confirmation'},{name:'New customer ceiling',value:'$ 30.000',note:'Separate limit until a customer has order history'},{name:'Stock buffer',value:'20%',note:'Keep a buffer before confirming an order'},{name:'Stock trust window',value:'24 hours',note:'Require a recent confirmed stock count'}],agents:[{id:'sales',name:'Sales agent',role:'Customer conversations & order drafts',model:'Qwen · sales model',status:'Demo'},{id:'manager',name:'Management agent',role:'Business reports & manager assistance',model:'Qwen · management model',status:'Demo'}]};
 }
 const repoHosted = /\/dashboard(?:\/|$)/.test(location.pathname);
@@ -108,7 +109,7 @@ function disconnectedData() {
 }
 function freshReads(){return Object.fromEntries(['activity','queue','operations','sales','advice','settings','prices'].map(key=>[key,{busy:false,error:'',loadedAt:null,pending:null,range:null}]));}
 let data=demoRequested?makeDemo():disconnectedData();
-const state={theme:readThemePreference(),view:'today',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,reads:freshReads(),extrasBusy:false,extrasError:'',extrasLoadedAt:null,detailRequest:0,connectRequest:0,configured:null,displayCurrency:'',currencyPreference:readCurrencyPreference(),fx:null,fxLoading:false,fxRequest:0,fxError:'',fxFailedTarget:''};
+const state={theme:readThemePreference(),rail:readRailPreference(),restoring:false,sesionPendiente:null,view:'today',range:7,filter:'all',search:'',stockFilter:'all',page:1,menu:false,busy:false,stale:false,connection:null,session:0,reads:freshReads(),extrasBusy:false,extrasError:'',extrasLoadedAt:null,detailRequest:0,connectRequest:0,configured:null,displayCurrency:'',currencyPreference:readCurrencyPreference(),fx:null,fxLoading:false,fxRequest:0,fxError:'',fxFailedTarget:''};
 const currencyNames={ARS:'Argentine peso',INR:'Indian rupee',USD:'US dollar',EUR:'Euro',GBP:'British pound',BRL:'Brazilian real',UYU:'Uruguayan peso',CLP:'Chilean peso',MXN:'Mexican peso',CAD:'Canadian dollar',AUD:'Australian dollar',CHF:'Swiss franc',CNY:'Chinese yuan',JPY:'Japanese yen',AED:'UAE dirham'};
 const fxCache=new Map();
 const nav=[['today','Today'],['overview','Overview'],['sales','Sales'],['advice','Advice'],['queue','Coming up'],['orders','Orders'],['inventory','Inventory'],['customers','Customers'],['agents','AI agents']];
@@ -126,7 +127,7 @@ function avatar(name,index=0) {return `<span class="avatar avatar-${index%5}" ar
 function shell() {
   const pending=(pendingOrders()||[]).length;
   const title=nav.find(([key])=>key===state.view)?.[1] || 'Connection & settings';
-  return `<div class="dashboard ${state.menu?'menu-open':''}">
+  return `<div class="dashboard ${state.menu?'menu-open':''} ${state.rail?'rail':''}">
     <button class="sidebar-shade" data-action="close-menu" aria-label="Close navigation"></button>
     <aside class="sidebar" aria-label="Main navigation">
       <a class="brand" href="#today" data-view="today">${mateLogo('sidebar')}<span class="brand-wordmark">WhatsApp<span>Mate<span class="brand-period">.</span></span></span></a>
@@ -139,8 +140,9 @@ function shell() {
     </aside>
     <div class="main-wrap">
       <header class="topbar"><div class="breadcrumbs"><button class="icon-button menu-button" data-action="menu" aria-label="Open navigation" aria-expanded="${state.menu}">${icon('menu')}</button><span>Workspace</span><span class="crumb-slash">/</span><strong>${title}</strong></div>
-      <div class="top-actions"><button class="icon-button theme-toggle" data-action="theme" aria-label="${state.theme==='dark'?'Switch to light mode':'Switch to charcoal night mode'}" title="${state.theme==='dark'?'Light mode':'Charcoal night mode'}" aria-pressed="${state.theme==='dark'}">${icon(state.theme==='dark'?'sun':'moon')}</button><span class="mode-chip ${data.mode==='live'?'live-chip':''}">${icon(data.mode==='demo'?'overview':'link')}${data.mode==='demo'?'Demo workspace':data.mode==='disconnected'?'Not connected':state.stale?'Connection interrupted':'Live data'}</span><button class="icon-button notification-button" data-action="pending" aria-label="View ${pending} orders awaiting review">${icon('bell')}${pending?'<span class="notification-dot"></span>':''}</button><span class="avatar owner small">${escape((data.company||'?').trim().charAt(0).toUpperCase())}</span></div></header>
+      <div class="top-actions"><button class="icon-button rail-toggle" data-action="rail" aria-label="${state.rail?'Expand the sidebar':'Collapse the sidebar to icons'}" title="${state.rail?'Expand sidebar':'Collapse sidebar'}" aria-pressed="${state.rail}">${icon('rail')}</button><button class="icon-button theme-toggle" data-action="theme" aria-label="${state.theme==='dark'?'Switch to light mode':'Switch to charcoal night mode'}" title="${state.theme==='dark'?'Light mode':'Charcoal night mode'}" aria-pressed="${state.theme==='dark'}">${icon(state.theme==='dark'?'sun':'moon')}</button><span class="mode-chip ${data.mode==='live'?'live-chip':''}">${icon(data.mode==='demo'?'overview':'link')}${data.mode==='demo'?'Demo workspace':data.mode==='disconnected'?'Not connected':state.stale?'Connection interrupted':'Live data'}</span><button class="icon-button notification-button" data-action="pending" aria-label="View ${pending} orders awaiting review">${icon('bell')}${pending?'<span class="notification-dot"></span>':''}</button><span class="avatar owner small">${escape((data.company||'?').trim().charAt(0).toUpperCase())}</span></div></header>
       <main id="main" tabindex="-1">
+        ${state.restoring?'<div class="notice">Restoring your saved session…</div>':''}
         ${state.stale?'<div class="notice error-notice">Connection interrupted. The last snapshot remains visible; refresh to try again.</div>':''}
         ${data.errors.length?`<div class="notice error-notice">Some data could not be read: ${escape(data.errors.join(', '))}. Missing information is shown as unavailable.</div>`:''}
         <div class="page-heading"><div><div class="eyebrow">YOUR OPERATIONS, CONNECTED</div><h1>${title}</h1><p>${{today:'Who talked to your agent, and what they needed.',queue:'See the work scheduled next and the decisions waiting for you.',sales:'See what sells, who buys, and how your business is growing.',advice:'A closer look at the signals that deserve your attention.',overview:'A clear view of your business. Every order, every day.',orders:'Follow each order from received to fulfilled.',inventory:'Know what is on the shelf and already reserved.',customers:'The people and businesses behind your orders.',agents:'Your team behind the conversations.',settings:'Connect your dashboard to the agent service.'}[state.view]}</p></div>
@@ -227,6 +229,49 @@ function readEmpty(key,title) {
 function mateLogo(scope) {
   return `<svg class="mate-logo" viewBox="0 0 100 100" aria-hidden="true"><defs><linearGradient id="mate-${scope}" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#39e154"/><stop offset=".5" stop-color="#00b678"/><stop offset="1" stop-color="#007478"/></linearGradient></defs><path fill="url(#mate-${scope})" d="M50 3a47 47 0 1 1-24 87L9 95q-6 2-4-5l4-15A47 47 0 0 1 50 3Z"/><g fill="#fff"><circle cx="27" cy="38" r="7"/><circle cx="72" cy="38" r="7"/></g><path class="mate-ribbon" d="m22 53 9 19q5 10 11-1l12-21q5-9 10 1l9 21q4 9 9-3l7-17" fill="none" stroke="#fff" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" transform="translate(-4 0)"/><path d="M50 22v7m-9 0 3 4m15-4-3 4" fill="none" stroke="#fff" stroke-width="2.7" stroke-linecap="round"/></svg>`;
 }
+// EL RIEL. La barra lateral se pliega a iconos y se queda así, como el tema:
+// una preferencia de quien mira, no del negocio, así que vive en el navegador
+// y no en los ajustes del dueño —que son los que cuestan un código de cuatro
+// dígitos—. Sólo tiene sentido con la barra fija: abajo de 820px ya es un
+// cajón, y el CSS no aplica el riel ahí.
+function readRailPreference() {
+  try{return localStorage.getItem('plus.dashboard.rail')==='1';}catch{return false;}
+}
+
+// LA SESIÓN SOBREVIVE AL REFRESH.
+//
+// Antes el token vivía SÓLO en memoria y la pantalla lo decía: «Reloading the
+// page signs you out». Recargar deslogueaba, así que el dueño volvía a pegar
+// el token cada vez que apretaba F5 — y un panel que te echa al refrescar no
+// se usa, se abandona.
+//
+// Se guarda hasta que él toque Disconnect. `readConnection` revalida con las
+// MISMAS reglas que el formulario (origen https salvo local, sin usuario, sin
+// path, token de 32+): el storage es del navegador y se puede editar a mano,
+// así que lo que sale de ahí entra por la misma puerta que lo que se tipea, y
+// no por una más ancha.
+const CLAVE_CONEXION='plus.dashboard.connection';
+function readConnection() {
+  try{
+    const crudo=localStorage.getItem(CLAVE_CONEXION);
+    if(!crudo)return null;
+    const guardada=JSON.parse(crudo);
+    const token=String(guardada?.token ?? '').trim();
+    if(token.length<32)return null;
+    const url=new URL(String(guardada?.base ?? ''));
+    const local=['localhost','127.0.0.1','[::1]'].includes(url.hostname);
+    if(url.username||url.password||url.search||url.hash||url.pathname!=='/')return null;
+    if(!(url.protocol==='https:'||local&&url.protocol==='http:'))return null;
+    return {base:url.origin,token};
+  }catch{return null;}
+}
+function rememberConnection(connection) {
+  try{localStorage.setItem(CLAVE_CONEXION,JSON.stringify(connection));}catch{}
+}
+function forgetConnection() {
+  try{localStorage.removeItem(CLAVE_CONEXION);}catch{}
+}
+
 function readThemePreference() {
   try{return localStorage.getItem('plus.dashboard.theme')==='dark'?'dark':'light';}catch{return 'light';}
 }
@@ -368,6 +413,36 @@ function customersView() {
   return `<section class="card"><div class="search-toolbar">${searchField('Search customers or locations…')}<span>${rows.length} customers</span></div>${listLimit('customers','orders','pending orders')}${data.customers===null?empty('Customer data is unavailable','Refresh the connection to try again.'):rows.length?`<div class="customer-grid">${rows.map((c,i)=>{const orders=(data.orders||[]).filter(o=>o.customerId===c.id);return `<button class="customer-card" data-customer="${escape(c.id)}"><div class="customer-card-top">${avatar(c.name,i)}${icon('arrow')}</div><h2>${escape(c.name)}</h2><p>${escape(c.group)} · ${escape(c.territory || 'Location unavailable')}</p><div class="customer-card-stats"><div><strong>${data.orders===null?'—':orders.length}</strong><span>Loaded orders</span></div><div><strong>${data.orders===null?'—':money(sumSales(orders))}</strong><span>Booked sales</span></div></div></button>`;}).join('')}</div>`:empty('No customers found','Try another name or location.')}</section>`;
 }
 
+// LO QUE HAY QUE TIPEAR EXACTO, QUE ES CASI NADA.
+//
+// El dueño preguntó cuántos comandos tiene esto, y la sospecha razonable de
+// cualquiera que abre un panel de agentes es que hay una lista de cien para
+// aprenderse. No la hay: `app/main.py` —el router DETERMINISTA, lo que matchea
+// ahí no llega nunca al modelo— intercepta CUATRO formas.
+//
+// La primera es la que se usa todos los días: un verbo y el número de pedido.
+// Son nueve acciones escritas de 36 maneras distintas («ok», «confirmar»,
+// «apruebo», «aprobado»…), y esa flexibilidad es el punto — no hay que
+// acordarse de UNA palabra, hay que decir la idea.
+//
+// Los dos códigos NO se muestran acá ni pueden mostrarse: llegan por WhatsApp,
+// a otro aparato, y esa segunda pantalla es justamente lo que hace que un
+// ajuste no se pueda cambiar desde una sola sesión robada.
+function commandsCard() {
+  const filas=[
+    ['ok SO-ORD-1','Approve that order','Seven ways to say it: ok, confirmar, confirma, confirmo, aprobar, apruebo, aprobado.'],
+    ['ver SO-ORD-1','See its detail','Also detalle, detalles, mostrar.'],
+    ['rechazar SO-ORD-1 sin stock','Reject, with the reason the customer is told','The reason only travels with rechazar, cancelar and contraoferta. A bare no rejects too, but on its own: no SO-ORD-1. The same verb-and-order shape also carries retiro, preparar, despachar and despreparar — nine actions in all.'],
+    ['1234','A four-digit code','Applies the settings change the agent proposed. It arrives on your WhatsApp — never here, and never in this dashboard’s replies.'],
+    ['123456','A six-digit code','Applies an action the management agent proposed. Same idea, for the steps that cannot be undone.'],
+    ['manager language english','An exact phrase','Switches the language your team is answered in. Also «idioma de gerencia …». It still asks for the four-digit code afterwards.'],
+  ];
+  return `<section class="card commands-card">
+    <div class="card-heading"><div><h2>Typing exactly</h2><p>Four kinds of message from your team are read by the software before the management agent sees them. Everything else you write is ordinary conversation.</p></div></div>
+    <div class="commands-list">${filas.map(([texto,que,hace])=>`<div class="command-row"><code>${escape(texto)}</code><div><strong>${escape(que)}</strong><small>${escape(hace)}</small></div></div>`).join('')}</div>
+    <p class="command-note">${icon('info')}<span>There is no command list to learn. Ask for what you want in your own words — «¿cuánto vendí esta semana?», «subí el tope a 50.000», «no repartimos en Alta Córdoba» — and the agent works the rest out. Two more messages never reach a model, and neither is something you type: a customer’s plain yes or no to an offer you sent is settled deterministically, because that is where a price and a date get agreed; and a vague line from you about an open order is answered with that order’s summary and the exact words that would act on it, rather than guessed at.</span></p>
+  </section>`;
+}
 function agentsView() {
   const ops=data.operations;
   const service=data.mode==='live'?`<section class="card service-card">
@@ -382,7 +457,7 @@ function agentsView() {
     </div>
     ${state.extrasError?`<div class="notice error-notice">${escape(state.extrasError)} Please retry.</div>`:''}
   </section>`:'';
-  return `${service}<div class="agent-grid">${data.agents.map(a=>`
+  return `${service}${commandsCard()}<div class="agent-grid">${data.agents.map(a=>`
     <section class="card agent-card"><div class="agent-card-top"><span class="agent-avatar ${a.id}">${icon(a.id==='sales'?'bolt':'shield')}</span><span class="subtle-pill">${escape(a.status)}</span></div>
     <h2>${escape(a.name)}</h2><p>${escape(a.role)}</p>
     <div class="model-line"><span>Model</span><strong>${escape(a.model)}</strong></div>
@@ -395,7 +470,7 @@ function agentsView() {
 function settingRow(item) {
   return `<div class="setting-row">
     <div class="setting-what"><strong>${escape(item.name)}</strong><small>${escape(item.meaning)}</small></div>
-    <div class="setting-value"><span>${escape(item.display||'—')}</span><small>${escape(item.source)}</small></div>
+    <div class="setting-value"><span class="${!item.display||item.display==='-'?'is-unset':''}">${escape(item.display||'—')}</span><small>${escape(item.source)}</small></div>
     <div class="setting-do">${data.mode==='live'?`<button class="button" data-setting="${escape(item.id)}">Change</button>`:''}</div>
     ${item.problem?`<p class="setting-problem">${icon('info')}${escape(item.problem)}</p>`:''}
   </div>`;
@@ -413,7 +488,7 @@ function settingsList() {
   return `${esperando}${report.groups.map(group=>`<section class="card settings-group"><div class="card-heading"><div><h2>${escape(group.name)}</h2></div><span class="subtle-pill">${group.settings.length} settings</span></div>${group.settings.map(settingRow).join('')}</section>`).join('')}`;
 }
 function settingsView() {
-  return `${settingsList()}<div class="settings-grid"><section class="card connection-card"><span class="stat-icon violet">${icon('link')}</span><h2>${data.mode==='demo'?'Connect your business':'Your CRM connection'}</h2><p>${data.mode==='demo'?'Explore sample orders now, or connect to your deployed Plus Agent for a live view of ERPNext.':'This workspace reads orders, customers, and inventory from your agent service.'}</p><dl><div><dt>Workspace</dt><dd>${escape(data.company)}</dd></div><div><dt>Data source</dt><dd>${data.mode==='demo'?'Sample dataset':'ERPNext via Plus Agent'}</dd></div><div><dt>Access</dt><dd>Read, confirm orders, propose settings</dd></div><div><dt>Connection</dt><dd>${data.mode==='demo'?'Not connected':state.stale?'Interrupted':'Connected'}</dd></div></dl><div class="connection-buttons"><button class="button primary" data-action="connect">${icon('link')}${data.mode==='demo'?'Connect live data':'Change connection'}</button>${data.mode==='live'?'<button class="button" data-action="disconnect">Disconnect</button>':''}</div></section><section class="card setting-notes"><h2>Designed around your workflow</h2><div>${icon('orders')}<section><h3>ERPNext is the source of truth</h3><p>The dashboard reads recent orders, all-date pending orders, and up to 250 records per section. Loaded totals are labeled when a limit is reached.</p></section></div><div>${icon('shield')}<section><h3>Approvals stay protected</h3><p>You can confirm an order here, and propose a settings change. A settings change is never applied from this screen: the agent texts you a four-digit code, and you reply to it on WhatsApp. That second step stays on another device on purpose.</p></section></div><div>${icon('link')}<section><h3>A connection for this session</h3><p>Your access token stays in memory. Reloading the page signs you out. While you are signed in, visible dashboards refresh every minute.</p></section></div></section></div>`;
+  return `${settingsList()}<div class="settings-grid"><section class="card connection-card"><span class="stat-icon violet">${icon('link')}</span><h2>${data.mode==='demo'?'Connect your business':'Your CRM connection'}</h2><p>${data.mode==='demo'?'Explore sample orders now, or connect to your deployed Plus Agent for a live view of ERPNext.':'This workspace reads orders, customers, and inventory from your agent service.'}</p><dl><div><dt>Workspace</dt><dd>${escape(data.company)}</dd></div><div><dt>Data source</dt><dd>${data.mode==='demo'?'Sample dataset':'ERPNext via Plus Agent'}</dd></div><div><dt>Access</dt><dd>Read, confirm orders, propose settings</dd></div><div><dt>Connection</dt><dd>${data.mode==='demo'?'Not connected':state.stale?'Interrupted':'Connected'}</dd></div></dl><div class="connection-buttons"><button class="button primary" data-action="connect">${icon('link')}${data.mode==='demo'?'Connect live data':'Change connection'}</button>${data.mode==='live'?'<button class="button" data-action="disconnect">Disconnect</button>':''}</div></section><section class="card setting-notes"><h2>Designed around your workflow</h2><div>${icon('orders')}<section><h3>ERPNext is the source of truth</h3><p>The dashboard reads recent orders, all-date pending orders, and up to 250 records per section. Loaded totals are labeled when a limit is reached.</p></section></div><div>${icon('shield')}<section><h3>Approvals stay protected</h3><p>You can confirm an order here, and propose a settings change. A settings change is never applied from this screen: the agent texts you a four-digit code, and you reply to it on WhatsApp. That second step stays on another device on purpose.</p></section></div><div>${icon('link')}<section><h3>You stay signed in</h3><p>Your access stays on this device and this browser until you press Disconnect, so reloading keeps you where you were. It is never sent anywhere except your own agent service. While you are signed in, visible dashboards refresh every minute.</p></section></div></section></div>`;
 }
 const views={today:todayView,queue:queueView,overview,sales:salesView,advice:adviceView,orders:ordersView,inventory:inventoryView,customers:customersView,agents:agentsView,settings:settingsView};
 function render() {
@@ -467,7 +542,7 @@ async function showCustomer(id) {
 function openConnection() {
   state.connectRequest++;
   const dialog=$('#connection-dialog');
-  dialog.innerHTML=`<div class="detail-head"><span>LIVE WORKSPACE</span><button class="icon-button" data-close="connection-dialog" aria-label="Close connection">${icon('close')}</button></div><form id="connect-form" class="connection-form"><span class="stat-icon violet">${icon('link')}</span><h2 id="connection-title">Connect to Plus Agent</h2><p>Use the address of your deployed agent service and its dashboard access token.</p><label ${repoHosted?'hidden':''}>Agent service URL<input name="url" type="url" required placeholder="https://agent.your-business.com" value="${escape(state.connection?.base || (repoHosted?location.origin:''))}" autocomplete="url"></label><label>Dashboard access token<input name="token" type="password" required minlength="32" autocomplete="off" placeholder="Enter your dashboard token"></label><p class="field-note">This is a dedicated dashboard token, not your ERPNext, WhatsApp, or model API key. It is kept only for this session.</p><div id="connection-error" class="form-error" role="alert"></div><button class="button primary full" type="submit">Connect workspace ${icon('arrow')}</button><p class="field-note">The dashboard API must be enabled on your agent service. A remote service must allow this dashboard’s origin.</p></form>`;
+  dialog.innerHTML=`<div class="detail-head"><span>LIVE WORKSPACE</span><button class="icon-button" data-close="connection-dialog" aria-label="Close connection">${icon('close')}</button></div><form id="connect-form" class="connection-form"><span class="stat-icon violet">${icon('link')}</span><h2 id="connection-title">Connect to Plus Agent</h2><p>Use the address of your deployed agent service and its dashboard access token.</p><label ${repoHosted?'hidden':''}>Agent service URL<input name="url" type="url" required placeholder="https://agent.your-business.com" value="${escape(state.connection?.base || (repoHosted?location.origin:''))}" autocomplete="url"></label><label>Dashboard access token<input name="token" type="password" required minlength="32" autocomplete="off" placeholder="Enter your dashboard token"></label><p class="field-note">This is a dedicated dashboard token, not your ERPNext, WhatsApp, or model API key. It is kept on this device until you press Disconnect.</p><div id="connection-error" class="form-error" role="alert"></div><button class="button primary full" type="submit">Connect workspace ${icon('arrow')}</button><p class="field-note">The dashboard API must be enabled on your agent service. A remote service must allow this dashboard’s origin.</p></form>`;
   dialog.showModal();
 }
 function openSetting(id) {
@@ -517,13 +592,58 @@ function cerrarSesion(aviso) {
   // El reseteo de sesión, escrito UNA vez. Lo usan Disconnect y el 401 del
   // refresco: dos salidas con dos copias del reseteo son dos salidas que se
   // desincronizan, y la que se olvide de limpiar `data` deja el CRM visible.
+  // Disconnect es la ÚNICA salida que borra el token guardado. Un 401 del
+  // refresco también llega acá, y también tiene que borrarlo: si no, el panel
+  // reintenta en cada carga con un token que ya no sirve.
+  forgetConnection();
   state.connectRequest++;
   document.querySelectorAll('dialog[open]').forEach(d=>d.close());
+  // `sesionPendiente` TAMBIÉN. Es la copia en memoria del token guardado, la
+  // que dibuja «Your sign-in is saved» y la que «Try again» le pasa a
+  // `restaurarSesion`. Sin limpiarla acá, Disconnect borraba el token del
+  // disco y dejaba el botón que lo reintenta: el comentario de arriba dice
+  // que ésta es la ÚNICA salida que borra el token guardado, y con una copia
+  // viva eso no era cierto.
+  state.sesionPendiente=null;state.restoring=false;
   state.connection=null;state.session++;state.busy=false;
   state.detailRequest++;state.fxRequest++;state.fxLoading=false;state.fxError='';
   data=disconnectedData();state.stale=false;
   state.extrasBusy=false;state.extrasError='';state.extrasLoadedAt=null;state.reads=freshReads();
   render();toast(aviso);
+}
+async function restaurarSesion(connection) {
+  // El mismo `fetchData` que usa Connect, así que el token guardado entra por
+  // exactamente la misma puerta que el tipeado: si ya no sirve, se entera acá
+  // y no en la primera lectura de una pantalla.
+  const session=state.session;
+  try{
+    const snapshot=await fetchData(connection);
+    // Si algo la superó —el dueño eligió el demo, o se conectó a mano mientras
+    // esto volaba— hay que APAGAR el cartel igual. Devolverse sin tocarlo dejaba
+    // «Restoring your saved session…» en pantalla para siempre: el que lo
+    // encendió ya no manda, y el que mandaba no sabía que estaba encendido.
+    if(state.session!==session){state.restoring=false;render();return;}
+    data=snapshot;state.connection=connection;state.sesionPendiente=null;state.session++;state.detailRequest++;
+    state.busy=false;state.stale=false;state.page=1;state.reads=freshReads();
+    state.restoring=false;render();restoreDisplayCurrency();loadViewReads();
+  }catch(ex){
+    if(state.session!==session){state.restoring=false;render();return;}
+    state.restoring=false;
+    // UN 401 NO ES UN FALLO PASAJERO y un timeout sí, así que no se tratan
+    // igual: el token revocado se BORRA —si no, cada carga lo reintenta para
+    // siempre— y una red caída se conserva, porque hacerle pegar el token de
+    // nuevo por un corte de wifi es exactamente el problema que esto vino a
+    // arreglar.
+    if(ex.status===401){state.sesionPendiente=null;forgetConnection();render();toast('Your saved sign-in is no longer valid. Connect again.');}
+    else{
+      // El token quedó guardado, pero `state.connection` es null y el formulario
+      // abre con el campo VACÍO: prometer «tu sesión sigue guardada» y después
+      // pedirle que lo pegue de nuevo es no haberla guardado. Se deja a mano
+      // para que el reintento sea un botón y no una recarga.
+      state.sesionPendiente=connection;render();
+      toast('Could not reach your CRM. Your sign-in is saved — press Try again.');
+    }
+  }
 }
 async function refresh(silent=false) {
   if(!state.connection||state.busy)return;
@@ -570,7 +690,12 @@ document.addEventListener('click',async e=>{
   const action=target.dataset.action;
   if(action==='connect')openConnection();
   if(action==='theme'){state.theme=state.theme==='dark'?'light':'dark';try{localStorage.setItem('plus.dashboard.theme',state.theme);}catch{}render();}
-  if(action==='demo'){state.connectRequest++;state.detailRequest++;data=makeDemo(state.range);state.session++;state.connection=null;state.stale=false;state.busy=false;state.extrasBusy=false;state.extrasError='';state.extrasLoadedAt=null;state.reads=freshReads();render();restoreDisplayCurrency();}
+  if(action==='rail'){state.rail=!state.rail;try{localStorage.setItem('plus.dashboard.rail',state.rail?'1':'0');}catch{}render();}
+  if(action==='retry-session'){
+    const guardada=state.sesionPendiente;
+    if(guardada){state.sesionPendiente=null;state.restoring=true;render();restaurarSesion(guardada);}
+  }
+  if(action==='demo'){state.connectRequest++;state.detailRequest++;data=makeDemo(state.range);state.session++;state.connection=null;state.sesionPendiente=null;state.restoring=false;state.stale=false;state.busy=false;state.extrasBusy=false;state.extrasError='';state.extrasLoadedAt=null;state.reads=freshReads();render();restoreDisplayCurrency();}
   if(action==='retry-currency')setDisplayCurrency(state.fxFailedTarget||state.displayCurrency);
   if(action==='retry-extras')loadExtras(true);
   if(target.dataset.read)await loadRead(target.dataset.read,true);
@@ -653,16 +778,24 @@ document.addEventListener('submit',async e=>{
     button.disabled=true;button.textContent='Connecting…';error.textContent='';
     const connection={base:url.origin,token},snapshot=await fetchData(connection);
     if(attempt!==state.connectRequest||!$('#connection-dialog').open)return;
-    data=snapshot;state.connection=connection;state.session++;state.detailRequest++;state.busy=false;state.stale=false;state.page=1;state.extrasError='';state.extrasBusy=false;state.extrasLoadedAt=null;state.reads=freshReads();$('#detail-dialog').close();$('#connection-dialog').close();form.reset();render();restoreDisplayCurrency();toast('Connected to your live CRM.');loadViewReads();
+    rememberConnection(connection);data=snapshot;state.connection=connection;state.sesionPendiente=null;state.restoring=false;state.session++;state.detailRequest++;state.busy=false;state.stale=false;state.page=1;state.extrasError='';state.extrasBusy=false;state.extrasLoadedAt=null;state.reads=freshReads();$('#detail-dialog').close();$('#connection-dialog').close();form.reset();render();restoreDisplayCurrency();toast('Connected to your live CRM.');loadViewReads();
   }catch(ex){if(attempt!==state.connectRequest||!$('#connection-dialog').open)return;error.textContent=ex.name==='TimeoutError'?'The service took too long to respond. Try again.':ex.message==='Failed to fetch'?'Could not reach the service. Check its address, HTTPS, and allowed dashboard origin.':ex.message;button.disabled=false;button.textContent='Connect workspace';}
 });
 document.querySelectorAll('dialog').forEach(dialog=>{dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}});dialog.addEventListener('close',()=>{if(dialog.id==='connection-dialog'){state.connectRequest++;dialog.innerHTML='';}if(dialog.id==='detail-dialog'){state.detailRequest++;dialog.innerHTML='';}if(dialog.id==='setting-dialog')dialog.innerHTML='';if(dialog.id==='price-dialog')dialog.innerHTML='';});});
 window.addEventListener('hashchange',()=>{const view=location.hash.slice(1);if(Object.hasOwn(views,view))goto(view);});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&state.menu){state.menu=false;render();}});
 if(Object.hasOwn(views,location.hash.slice(1)))state.view=location.hash.slice(1);
+// `?demo=1` GANA SOBRE LA SESIÓN GUARDADA, y esto no es una preferencia de
+// arranque: el demo se abre DELANTE de un cliente. Con un token guardado en ese
+// navegador la restauración pisaba `makeDemo()` con el snapshot real —pedidos y
+// clientes de la empresa— en la pantalla que existe justamente para no mostrar
+// eso. La sesión NO se borra: sacar el `?demo=1` vuelve a entrar.
+const sesionGuardada=demoRequested?null:readConnection();
+if(sesionGuardada)state.restoring=true;
 render();
 revealLogo();
 if(data.mode!=='disconnected')restoreDisplayCurrency();
+if(sesionGuardada)restaurarSesion(sesionGuardada);
 
 function connectionGate() {
   return `<section class="card live-gate">
@@ -670,7 +803,9 @@ function connectionGate() {
     <h2>Open your live CRM workspace</h2>
     <p>${repoHosted?'This dashboard runs inside your Plus Agent. Sign in to read your real ERPNext orders, stock, and customers.':'Connect to your deployed Plus Agent to see your real ERPNext orders, stock, and customers.'}</p>
     ${state.configured===false?'<div class="notice">Dashboard access has not been enabled on this agent yet. Complete the one-time setup, then sign in.</div>':''}
-    <button class="button primary" data-action="connect">${icon('link')}${repoHosted?'Sign in to this agent':'Connect to your agent'}</button>
+    ${state.sesionPendiente?'<div class="notice">Your sign-in is saved, but the agent service could not be reached.</div>':''}
+    ${state.sesionPendiente?`<button class="button primary" data-action="retry-session">${icon('link')}Try again</button>`:''}
+    <button class="button ${state.sesionPendiente?'':'primary'}" data-action="connect">${icon('link')}${repoHosted?'Sign in to this agent':'Connect to your agent'}</button>
     <div class="gate-links"><a href="https://github.com/ravi3594444/agent-crm/blob/feat/plus-operations-dashboard/DASHBOARD.md" target="_blank" rel="noopener noreferrer">Setup instructions</a><button class="text-link" data-action="demo">Explore sample data</button></div>
     <div class="gate-note">${icon('shield')}No business records are shown until you sign in.</div>
   </section>`;

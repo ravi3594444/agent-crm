@@ -50,6 +50,13 @@ services:
       # El token con el que ESTE servidor autentica a quien lo llama. Tiene que
       # coincidir con `MCP_EXTERNO_TOKEN_ERPNEXT` del agente.
       MCP_AUTH_TOKEN: ${MCP_ERPNEXT_AUTH_TOKEN:?falta MCP_ERPNEXT_AUTH_TOKEN}
+      # SIN ESTO, 3.0.4 NO ARRANCA. Con un token puesto exige además el
+      # «resource»: «MCP_AUTH_RESOURCE is required alongside MCP_AUTH_TOKEN(S)»,
+      # y el contenedor entra en un bucle de reinicio que desde afuera se ve
+      # como un ConnectError del agente y nada más. Es la URL por la que los
+      # clientes llegan A ESTE servidor, así que es la misma que va en
+      # MCP_EXTERNOS: si una cambia, la otra también.
+      MCP_AUTH_RESOURCE: ${MCP_ERPNEXT_AUTH_RESOURCE:-http://mcp-erpnext:3012/mcp}
       # Deny-by-default: sin esto `erpnext_method_call` no ejecuta ningún método
       # de Frappe. Dejarlo sin definir es lo correcto.
     networks:

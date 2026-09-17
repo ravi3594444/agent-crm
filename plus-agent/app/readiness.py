@@ -131,6 +131,23 @@ def _valor(env: Mapping[str, str], clave: str) -> str:
     return str(env.get(clave, "") or "").strip()
 
 
+def _codigo_pais(env: Mapping[str, str]) -> str:
+    """El código de discado de ESTE mapping, con la precedencia del runtime.
+
+    `app/telefono.py` congela `PAIS` y `REGION` cuando se importa, o sea con el
+    entorno del PROCESO. Un preflight de un .env candidato que declara otro país
+    normalizaba sus teléfonos con el país que está corriendo, y con eso contesta
+    mal sobre duplicados y sobre si el dueño está en el equipo. Acá se rehace la
+    misma cadena —explícito, derivado, default— pero leyendo `env`.
+    """
+    from app import pais as _pais_mod
+
+    explicito = _valor(env, "PAIS_TELEFONO")
+    if explicito:
+        return explicito
+    return _pais_mod.codigo_de(_valor(env, "PAIS_NEGOCIO")) or _pais_mod.CODIGO_POR_DEFECTO
+
+
 def _http_real(url: str, headers: dict | None = None, params: dict | None = None) -> tuple[int, object]:
     try:
         respuesta = httpx.get(url, headers=headers, params=params, timeout=10.0)
@@ -277,13 +294,87 @@ def chequear_modelos(env: Mapping[str, str], reporte: Reporte) -> None:
 
 
 def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
+    from app import pais as _pais_mod
+
+    territorio = str(_valor(env, "PAIS_NEGOCIO")).strip().upper()
+    if not territorio:
+        reporte.aviso(
+            "PAIS_NEGOCIO",
+            "vacío: el país no está declarado, así que el teléfono y los montos "
+            "salen de PAIS_TELEFONO y LOCALE por separado (y pueden contradecirse)",
+        )
+    elif len(territorio) != 2 or not territorio.isalpha():
+        reporte.error(
+            "PAIS_NEGOCIO",
+            f"{territorio!r} no es un código ISO de dos letras (AR, US, IN, BR)",
+        )
+    else:
+        # NO ALCANZA CON LA FORMA, y esto es lo que dejaba pasar un `ZZ`: dos
+        # letras, alfabético, y ni libphonenumber ni CLDR lo conocen. El runtime
+        # entonces no deriva nada y se cae al default argentino —+54 y es_AR—
+        # mientras el informe decía OK, o sea que un typo en el .env sale a
+        # normalizar teléfonos y a escribir montos con reglas de otro país sin
+        # una línea en ningún lado.
+        #
+        # Se le pregunta a los MISMOS datos que usa el runtime, y se le pregunta
+        # por el territorio DE ESTE mapping, sin escribir en `os.environ`: la
+        # versión anterior lo pisaba y lo restauraba, lo que es una variable
+        # global compartida con todo el proceso para responder una pregunta que
+        # no necesitaba ninguna.
+        codigo = _pais_mod.codigo_de(territorio)
+        idioma = _pais_mod.locale_de(territorio)
+        if not codigo or not idioma:
+            falta = " ni ".join(
+                nombre
+                for nombre, dato in (
+                    ("código de discado (libphonenumber)", codigo),
+                    ("idioma oficial (CLDR)", idioma),
+                )
+                if not dato
+            )
+            reporte.error(
+                "PAIS_NEGOCIO",
+                f"{territorio!r} no tiene {falta}: no es un país que se pueda "
+                f"derivar, y todo saldría con el default "
+                f"(+{_pais_mod.CODIGO_POR_DEFECTO} · {_pais_mod.LOCALE_POR_DEFECTO}) "
+                "sin avisar",
+            )
+        else:
+            reporte.ok("PAIS_NEGOCIO", f"{territorio}: +{codigo} · {idioma}")
+
     pais = _valor(env, "PAIS_TELEFONO")
     if not pais:
-        reporte.aviso("PAIS_TELEFONO", "vacío: se asume 54 (Argentina)")
+        # Se dice el código que va a salir DE VERDAD, no de dónde sale. Con un
+        # `PAIS_NEGOCIO` que no deriva, «sale de PAIS_NEGOCIO (ZZ)» es una línea
+        # OK que contradice al ERROR de arriba y deja creyendo que el país está
+        # puesto cuando lo que se va a usar es el default.
+        reporte.ok(
+            "PAIS_TELEFONO",
+            f"vacío: se usa +{_codigo_pais(env)} "
+            + (f"(de PAIS_NEGOCIO={territorio})" if _pais_mod.codigo_de(territorio)
+               else "(el default: PAIS_NEGOCIO no está puesto o no deriva)"),
+        )
     elif not pais.isdigit():
         reporte.error("PAIS_TELEFONO", "tiene que ser el código de país en dígitos")
     else:
-        reporte.ok("PAIS_TELEFONO", f"configurado ({len(pais)} dígitos)")
+        derivado = _pais_mod.codigo_de(territorio)
+        if derivado and derivado != pais:
+            # LA CONTRADICCIÓN, DICHA. Arreglar `.env.example` sirve para la
+            # próxima instalación y no hace nada por las que ya existen: un
+            # .env escrito con la plantilla vieja tiene `PAIS_TELEFONO=54`
+            # adentro, gana sobre `PAIS_NEGOCIO`, y cambiar el país que la
+            # plantilla dice que es «lo único que hay que poner» deja los
+            # teléfonos normalizados como argentinos. Callado, eso son clientes
+            # que dejan de matchear.
+            reporte.aviso(
+                "PAIS_TELEFONO",
+                f"+{pais} puesto a mano GANA sobre PAIS_NEGOCIO={territorio} "
+                f"(+{derivado}): los teléfonos se normalizan con reglas de "
+                f"+{pais} y los montos con los de {territorio}. Si no es a "
+                "propósito, dejala vacía",
+            )
+        else:
+            reporte.ok("PAIS_TELEFONO", f"configurado ({len(pais)} dígitos)")
 
     crudos = [t.strip() for t in _valor(env, "TELEFONOS_EQUIPO").split(",") if t.strip()]
     if not crudos:
@@ -292,7 +383,8 @@ def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
             "vacío: sin agente de gestión, sin alertas y nadie puede confirmar pedidos",
         )
     else:
-        normalizados = [telefono.normalizar(t) for t in crudos]
+        codigo_pais = _codigo_pais(env)
+        normalizados = [telefono.normalizar(t, codigo_pais) for t in crudos]
         invalidos = sum(1 for n in normalizados if not n)
         unicos = {n for n in normalizados if n}
         if invalidos:
@@ -306,7 +398,7 @@ def chequear_equipo(env: Mapping[str, str], reporte: Reporte) -> None:
         # El resumen del día va al DUEÑO, explícito, no al primero de la lista.
         dueno_crudo = _valor(env, "TELEFONO_DUENO")
         if dueno_crudo:
-            dueno = telefono.normalizar(dueno_crudo)
+            dueno = telefono.normalizar(dueno_crudo, codigo_pais)
             if not dueno:
                 reporte.error("TELEFONO_DUENO", "no se puede interpretar")
             elif dueno not in unicos:
@@ -477,6 +569,14 @@ def chequear_panel(env: Mapping[str, str], reporte: Reporte) -> None:
         )
         return
 
+    # SIN el país del mapping, a propósito, y esto NO es un olvido del arreglo
+    # de `chequear_equipo`. Acá los dos lados se comparan entre sí: la otra
+    # mitad sale de `dashboard.entradas_de_tokens`, que normaliza con el país
+    # del proceso y es el mismo parser que usa el panel en vivo. Pasarle el país
+    # candidato a una sola de las dos mitades las despega y empieza a contar
+    # como «mirón» a alguien del equipo. Lo que se chequea acá es si un token
+    # pertenece a alguien del equipo, y eso sólo tiene sentido con los dos lados
+    # escritos igual.
     del_equipo = {
         numero
         for numero in (
@@ -782,6 +882,15 @@ def chequear_erpnext(env: Mapping[str, str], reporte: Reporte, http: Http | None
 
     # Which roles may submit a Sales Order (standard + custom permissions).
     roles_submit: set[str] = set()
+    # SE CUENTAN LAS LECTURAS, NO SE MIRA SI EL CONJUNTO QUEDÓ VACÍO.
+    #
+    # Un 403 no agrega nada al set, así que «vacío» y «una de las dos falló»
+    # daban lo mismo: con DocPerm devolviendo un rol y Custom DocPerm en 403,
+    # `roles_submit` queda no-vacío, el guardia de abajo no salta, y la
+    # conclusión sale de MEDIA lectura —justo el defecto que ese guardia vino
+    # a arreglar, una capa más adentro—. Los permisos custom son los que un
+    # ERPNext real usa para acotar un rol, o sea la mitad que más importa.
+    permisos_leidos = 0
     for doctype in ("DocPerm", "Custom DocPerm"):
         estado, cuerpo = http(
             f"{url}/api/resource/{doctype}",
@@ -794,8 +903,9 @@ def chequear_erpnext(env: Mapping[str, str], reporte: Reporte, http: Http | None
             },
         )
         if estado == 200 and isinstance(cuerpo, dict):
+            permisos_leidos += 1
             roles_submit |= {str(f.get("role")) for f in cuerpo.get("data") or [] if f.get("role")}
-    if not roles_submit:
+    if permisos_leidos < 2:
         reporte.aviso("ERPNext permisos", "no pude leer qué roles tienen Submit en Sales Order")
 
     for rol, par in pares.items():
@@ -815,11 +925,54 @@ def chequear_erpnext(env: Mapping[str, str], reporte: Reporte, http: Http | None
         if estado != 200 or not isinstance(datos, dict):
             reporte.aviso(f"ERPNext {rol}", "no pude leer sus roles")
             continue
-        roles = {str(r.get("role")) for r in datos.get("roles") or [] if r.get("role")}
+        # VACÍO NO ES LO MISMO QUE NO VINO, y Frappe distingue las dos cosas:
+        # una credencial sin permiso sobre la tabla hija devuelve el User SIN la
+        # clave `roles`, mientras que un usuario que de verdad no tiene ninguno
+        # la devuelve como lista vacía. Colapsarlas hacía que «este usuario no
+        # tiene roles» —que en política significa que NADA se confirma nunca—
+        # saliera como un aviso de lectura en vez del error que es.
+        tabla_de_roles = datos.get("roles")
+        if tabla_de_roles is None:
+            reporte.aviso(
+                f"ERPNext {rol}",
+                "el User se lee pero su tabla de roles no viene en la respuesta, así "
+                "que no puedo comprobar si tiene Submit en Sales Order: dar lectura "
+                f"de User a la credencial de {rol}",
+            )
+            continue
+        roles = {str(r.get("role")) for r in tabla_de_roles if r.get("role")}
+        # DOS LECTURAS TIENEN QUE HABER SALIDO BIEN PARA PODER DECIR «Submit: no».
+        #
+        # Sin ellas `roles & roles_submit` es vacío ∩ vacío, así que `puede_submit`
+        # sale False por no haber medido nada —no por no tener el permiso—, y las
+        # tres identidades se imprimían como `OK ... 0 rol(es); Submit: no`.
+        # Incluida política, para la que «Submit: no» sería la PEOR configuración
+        # posible del sistema: nada se confirmaría nunca. El `elif` de abajo existe
+        # para cazar exactamente eso y está guardado por `roles_submit`, así que
+        # cuando la lectura falla tampoco corre: el único chequeo de la regla de
+        # las tres identidades quedaba en verde por no haber podido mirar.
+        #
+        # Medido en vivo el 2026-09-15 contra agentcrm4: la credencial de política
+        # tiene un solo rol («Politica IA») y ese rol no lee DocPerm ni System
+        # Settings, así que las dos lecturas daban 403 y el reporte decía OK tres
+        # veces. La separación estaba bien —se verificó a mano con `bench`—, pero
+        # el reporte habría dicho lo mismo si hubiera estado mal.
+        #
+        # Mismo criterio que «ERPNext zona» más abajo: lo que no se pudo mirar es
+        # AVISO con el permiso que falta, nunca FALTA (rojo para siempre) ni un OK
+        # afirmando lo que no se vio.
+        if permisos_leidos < 2:
+            reporte.aviso(
+                f"ERPNext {rol}",
+                "no pude comprobar si tiene Submit en Sales Order porque no pude leer "
+                "qué roles lo permiten: dar lectura de DocPerm y Custom DocPerm a la "
+                "credencial de política",
+            )
+            continue
         puede_submit = bool(roles & roles_submit) or "System Manager" in roles
         if rol in ROLES_SUBMIT_PROHIBIDOS and puede_submit:
             reporte.error(f"ERPNext {rol}", f"{len(roles)} rol(es), y alguno permite Submit en Sales Order")
-        elif rol == "politica" and roles_submit and not puede_submit:
+        elif rol == "politica" and not puede_submit:
             reporte.error(f"ERPNext {rol}", f"{len(roles)} rol(es) y ninguno permite Submit: nada se confirmaría")
         else:
             reporte.ok(f"ERPNext {rol}", f"{len(roles)} rol(es); Submit: {'sí' if puede_submit else 'no'}")
@@ -959,6 +1112,53 @@ def _es_cero(valor: object) -> bool:
         return False
 
 
+def chequear_auto_confirmacion(reporte: Reporte) -> None:
+    """¿Se va a confirmar algún pedido solo, con lo que hay configurado?
+
+    ES OTRA PREGUNTA QUE EL RESTO DE ESTE ARCHIVO. Todo lo demás valida que la
+    configuración sea VÁLIDA; esto pregunta si SIRVE. Un `.env` impecable puede
+    no confirmar un solo pedido nunca y hasta hoy salía en verde — el dueño
+    leía «todo OK», mandaba un pedido de prueba, lo veía frenado, arreglaba un
+    ajuste, mandaba otro. Cinco veces el 17/09, con clientes reales del otro
+    lado. Los motivos existían y eran correctos: lo que no existía era una
+    forma de verlos TODOS JUNTOS antes de que hubiera un cliente.
+
+    AVISO Y NO ERROR, incluso con la automatización apagada: `AUTO_CONFIRM_MAX`
+    en 0 es la postura de lanzamiento que `CLAUDE.md` pide, o sea un despliegue
+    CORRECTO en el que nada se confirma solo. Un error acá haría fallar el
+    preflight de una instalación bien hecha, y un preflight que grita sobre lo
+    normal se deja de leer — que es exactamente cómo se pierden los avisos que
+    sí importan. Por eso se nombra el MODO: «los revisa una persona» es una
+    decisión, no una falla.
+    """
+    from app import modos
+
+    diagnostico = modos.diagnosticar()
+    if diagnostico.problema:
+        reporte.aviso(
+            "Auto-confirmación", f"no pude saberlo: {diagnostico.problema}"
+        )
+        return
+    if diagnostico.confirma_algo:
+        reporte.ok(
+            "Auto-confirmación",
+            "hay pedidos que pueden confirmarse solos; cada uno sigue pasando "
+            "por las reglas de policy (deuda, stock, precio, zona)",
+        )
+        return
+    titulo = next(
+        (m.titulo for m in modos.MODOS if m.clave == diagnostico.modo), ""
+    )
+    encabezado = (
+        f"NINGÚN pedido se confirma solo — modo «{titulo}»"
+        if titulo
+        else "NINGÚN pedido se confirma solo"
+    )
+    reporte.aviso("Auto-confirmación", encabezado)
+    for freno in diagnostico.frenos:
+        reporte.aviso(freno.nombre, freno.consecuencia)
+
+
 def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_limites: Callable[[], list[dict]] | None) -> None:
     maestra = _valor(env, "STOCK_CONFIABLE").lower()
     if maestra == "true":
@@ -992,8 +1192,19 @@ def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_l
     from app import formato as _formato
 
     crudo_locale = _valor(env, "LOCALE")
-    conocidos = {codigo.lower(): codigo for codigo in _formato.LOCALES}
-    normal_locale = conocidos.get(crudo_locale.replace("-", "_").lower())
+    # CUALQUIER LOCALE QUE CONOZCA CLDR, no los dos de la lista: el producto se
+    # despliega fuera de Argentina y `en_IN` o `pt_BR` son configuraciones
+    # legítimas. `formato._babel` es el mismo juez que usa el módulo, así que
+    # el informe no puede decir que algo vale y el formateador tratarlo como
+    # basura. Los dos de `LOCALES` siguen siendo los que tienen moneda escrita
+    # a mano y cobertura de tests, y el aviso lo dice.
+    normal_locale = None
+    if crudo_locale:
+        candidato = crudo_locale.replace("-", "_")
+        conocidos = {codigo.lower(): codigo for codigo in _formato.LOCALES}
+        normal_locale = conocidos.get(candidato.lower()) or (
+            candidato if _formato._babel(candidato) is not None else None
+        )
     if not crudo_locale:
         reporte.ok(
             "LOCALE",
@@ -1003,12 +1214,20 @@ def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_l
     elif normal_locale is None:
         reporte.error(
             "LOCALE",
-            f"{crudo_locale!r} no es ninguno de {', '.join(_formato.LOCALES)}: "
-            f"los montos se van a escribir {_formato.LOCALE_POR_DEFECTO} igual, "
-            "que puede no ser lo que lee este cliente",
+            f"{crudo_locale!r} no es un locale que CLDR reconozca: los montos "
+            f"se van a escribir {_formato.LOCALE_POR_DEFECTO} igual, que puede "
+            "no ser lo que lee este cliente",
         )
-    else:
+    elif normal_locale in _formato.LOCALES:
         reporte.ok("LOCALE", f"montos con forma {normal_locale}")
+    else:
+        reporte.aviso(
+            "LOCALE",
+            f"{normal_locale}: válido, y la moneda sale del territorio según "
+            f"CLDR ({_formato.moneda_del_locale(normal_locale)}). Los que este "
+            f"producto trae probados son {', '.join(_formato.LOCALES)}: mirá un "
+            "monto antes de mostrárselo a un cliente",
+        )
 
     if resumen_limites is None:
         reporte.aviso("Límites", "sin Redis: no se verificaron los límites del dueño")
@@ -1024,6 +1243,26 @@ def chequear_stock_y_limites(env: Mapping[str, str], reporte: Reporte, resumen_l
         nombre = str(fila.get("nombre") or fila.get("alias") or "límite")
         if nombre in _limites.ENTREGA:
             continue  # chequear_entrega reports these, with the fallback line
+        # Las plantillas ya las reporta `chequear_plantillas`, y con el
+        # significado que importa: si está vacía, si el barrido que la dispara
+        # corre fuera de la ventana de 24 h, si Meta la tiene aprobada. Desde
+        # que son ajustes (`limites.PLANTILLAS`) también caen en este bucle, y
+        # el reporte imprimía DOS renglones por plantilla con veredictos
+        # opuestos: `FALTA ..._TEMPLATE: vacía` arriba y `OK ..._TEMPLATE:
+        # válido (default del código)` abajo. Los dos son ciertos —uno habla
+        # del negocio, el otro del tipo— y juntos no se pueden leer.
+        #
+        # Pero el `problema` NO se puede saltear: `_plantillas_del_dueno`
+        # descarta las filas que lo traen y se cae al `.env` en silencio, así
+        # que un nombre mal guardado por el dueño no aparece allá. Este bucle
+        # es el único lugar donde se ve. Por eso la excepción es condicional y
+        # no un `continue` a secas.
+        #
+        # Se filtra contra `PLANTILLAS` (las doce que chequea la otra función),
+        # no contra `limites.PLANTILLAS`, que incluye además
+        # WHATSAPP_TEMPLATE_LANGUAGE — ese no lo reporta nadie más.
+        if nombre in PLANTILLAS and not fila.get("problema"):
+            continue
         origen = {"dueño": "fijado por el dueño", "arranque": "del .env", "default": "default del código"}.get(
             str(fila.get("origen")), str(fila.get("origen"))
         )
@@ -1613,6 +1852,11 @@ def ejecutar(env: Mapping[str, str] | None = None, *, con_red: bool = True) -> R
     chequear_plantillas(env, reporte, http, waba, resumen)
     chequear_erpnext(env, reporte, http)
     chequear_stock_y_limites(env, reporte, resumen)
+    # Después de los límites y ANTES de entrega: usa los mismos valores que
+    # acaba de reportar `chequear_stock_y_limites`, y leerlo pegado a ellos es
+    # leer la consecuencia justo debajo de la causa.
+    if _valor(env, "REDIS_URL"):
+        chequear_auto_confirmacion(reporte)
     chequear_entrega(env, reporte, resumen, http)
     if _valor(env, "REDIS_URL"):
         chequear_solicitudes(reporte)

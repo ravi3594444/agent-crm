@@ -584,6 +584,51 @@ def test_when_the_button_cannot_be_sent_he_is_told_to_use_erpnext(
     assert "no promete stock" in reply
 
 
+def test_un_conteo_que_erpnext_rechaza_no_se_anuncia_como_anotado(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LO QUE EL DUEÑO ESCUCHÓ: «ya te anoté los 5 kg de leche», sobre un
+    documento que ERPNext había rechazado y que no existe en ninguna parte.
+
+    La herramienta levantaba, y el manejador genérico del grafo le decía al
+    modelo «esa herramienta falló» y nada más: sin «no se guardó nada» y sin
+    motivo, lo que el modelo completó fue una confirmación. Acá se prueban las
+    dos mitades que lo impiden —que lo diga, y que diga POR QUÉ— y que no se le
+    pida confirmar algo que no se escribió.
+
+    El motivo viaja entero a propósito: un 417 se arregla poniéndole las cuentas
+    de inventario a la compañía, y eso no se adivina desde «hubo un problema».
+
+    MUTACIÓN: sacarle el `except erpnext.ERPNextError` a `contar_stock` (que
+    vuelva a levantar). Cae ésta y sólo ésta.
+    """
+    from app import router
+    from app.tools import captura
+
+    monkeypatch.setattr(router, "STAFF", [GERENTE])
+    monkeypatch.setattr(captura.erpnext, "default_warehouse", lambda: "Depósito A - LP")
+    monkeypatch.setattr(
+        captura.erpnext, "get_list", Mock(return_value=[{"actual_qty": 20}])
+    )
+    monkeypatch.setattr(
+        captura.erpnext,
+        "create_doc",
+        Mock(side_effect=captura.erpnext.ERPNextError(
+            "ERPNext rechazó la creación de Stock Reconciliation (estado 417)"
+        )),
+    )
+    boton = Mock()
+    monkeypatch.setattr(captura.notificar, "pedir_confirmacion_conteo", boton)
+
+    reply = captura.contar_stock.invoke(
+        {"item_code": "QUE-CRE", "cantidad_real": 12}, config=_config_gerencia()
+    )
+
+    assert "NO se guardó nada" in reply, reply
+    assert "417" in reply, "sin el motivo, el dueño no tiene qué ir a arreglar"
+    boton.assert_not_called()
+
+
 def test_a_stranger_cannot_load_a_count(monkeypatch: pytest.MonkeyPatch) -> None:
     from app import router
     from app.tools import captura
@@ -871,8 +916,9 @@ def derivacion(monkeypatch: pytest.MonkeyPatch):
             raise erpnext_mod.ERPNextError("ERPNext caído")
         return {"name": "TODO-0001"}
 
-    def _avisar(motivo, telefono, cliente, tarea=""):
+    def _avisar(motivo, telefono, cliente, tarea="", *, del_equipo=False):
         estado["avisos"].append((motivo, telefono, cliente, tarea))
+        estado["del_equipo"] = del_equipo
         return not estado.get("aviso_falla")
 
     monkeypatch.setattr(erpnext_mod, "create_doc", _crear)
@@ -952,3 +998,35 @@ def test_un_aviso_que_explota_no_tumba_la_derivacion(monkeypatch, derivacion) ->
 
     assert "TODO-0001" in reply
     assert "no digas que ya le avisaste" in reply
+
+
+def test_la_derivacion_del_equipo_no_sale_como_un_cliente_desconocido(
+    derivacion, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """LO QUE EL DUEÑO RECIBIÓ: «🙋 Un cliente necesita una persona / Cliente:
+    cuenta no registrada / Tel: <su propio número>», y la promesa de que alguien
+    lo iba a mirar. Él es ese alguien.
+
+    `escalar_a_humano` está en las DOS listas de herramientas, y del lado de
+    gerencia `customer_code` está vacío por construcción: el hueco no se llenaba
+    con un dato ausente sino con la etiqueta equivocada.
+
+    Se afirma sobre el `del_equipo` que RECIBE `avisar_escalamiento` —lo que la
+    herramienta le pasa— y sobre lo que se le devuelve al modelo. El texto de la
+    tarjeta es de `app/idioma.py` y tiene su propia prueba: cruzar los dos acá
+    los ataría, y entonces cambiarle la redacción a la tarjeta rompería esto.
+
+    MUTACIÓN: `del_equipo = actor.is_management` -> `del_equipo = False`. Cae
+    ésta y sólo ésta.
+    """
+    from app.tools import pedidos
+
+    respuesta = pedidos.escalar_a_humano.invoke(
+        {"motivo": "falló el conteo de stock"}, config=_config_gerencia()
+    )
+
+    assert derivacion["del_equipo"] is True, (
+        "el que escribe ES el equipo: la tarjeta no lo puede anunciar como cliente"
+    )
+    assert "al cliente" not in respuesta.lower(), respuesta
+    assert "encargado" not in respuesta.lower(), respuesta
