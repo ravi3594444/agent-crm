@@ -6,6 +6,8 @@ QUÉ PROVEEDOR
                                  Google (generativelanguage.googleapis.com)
   LLM_PROVIDER=groq              Groq (api.groq.com/openai/v1), que sirve Qwen
                                  y otros por endpoint OpenAI-compatible
+  LLM_PROVIDER=fireworks         Fireworks AI (api.fireworks.ai/inference/v1),
+                                 idem: OpenAI-compatible, clave propia
 
 Los tres hablan el protocolo de OpenAI, así que el cliente es el mismo
 (`langchain_openai.ChatOpenAI`) y lo único que cambia es la clave, el endpoint
@@ -66,6 +68,12 @@ GROQ_BASE_URL_DEFAULT = "https://api.groq.com/openai/v1"
 # los otros dos, así que un default viejo se ve como «400 model not found» y no
 # como un default viejo: `make verificar-modelos` lo dice en una llamada.
 GROQ_MODELO_DEFAULT = "qwen/qwen3.8-27b"
+
+FIREWORKS_BASE_URL_DEFAULT = "https://api.fireworks.ai/inference/v1"
+# Fireworks nombra sus modelos con la cuenta adentro: el nombre ENTERO
+# —`accounts/fireworks/models/…`— es el modelo, no un prefijo de proveedor.
+# `configuracion()` rechaza los nombres con ":" por eso mismo; la barra no.
+FIREWORKS_MODELO_DEFAULT = "accounts/fireworks/models/deepseek-v4p1-flash"
 
 VAR_PROVEEDOR = "LLM_PROVIDER"
 PROVEEDOR_DEFAULT = "qwen"
@@ -145,6 +153,24 @@ PROVEEDORES: Mapping[str, Proveedor] = {
         # unsupported` y el turno se corta — medido el 17/09 con LLM_PROVIDER=qwen
         # apuntado a Groq y las dos QWEN_THINKING_* en false: no alcanzaban,
         # porque lo que manda la propiedad es el proveedor y no el valor.
+        razona=False,
+    ),
+    "fireworks": Proveedor(
+        nombre="fireworks",
+        etiqueta="Fireworks AI (endpoint OpenAI-compatible)",
+        claves=("FIREWORKS_API_KEY",),
+        var_base_url="FIREWORKS_BASE_URL",
+        base_url_default=FIREWORKS_BASE_URL_DEFAULT,
+        var_modelo={
+            "clientes": ("FIREWORKS_SALES_MODEL",),
+            "gerencia": ("FIREWORKS_MANAGER_MODEL",),
+        },
+        modelo_default={
+            "clientes": FIREWORKS_MODELO_DEFAULT,
+            "gerencia": FIREWORKS_MODELO_DEFAULT,
+        },
+        # Igual que groq: no acepta los controles de DashScope, así que no se
+        # mandan NUNCA en vez de depender de que dos variables estén en false.
         razona=False,
     ),
     "gemini": Proveedor(
