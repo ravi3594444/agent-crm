@@ -60,6 +60,16 @@ from uuid import UUID
 from langchain_core.callbacks import BaseCallbackHandler
 
 
+def _motivo(error: BaseException) -> str:
+    """El texto del error del proveedor, aplastado y acotado. "" si no dice nada.
+
+    Acotado porque un error de un cliente HTTP puede traer el cuerpo entero, y
+    aplastado porque un motivo de varios renglones deja de ser una línea de log.
+    """
+    texto = " ".join(str(error).split())
+    return texto[:300] if texto else "(sin texto)"
+
+
 class Progreso(BaseCallbackHandler):
     """Observa un turno del agente; programa a lo sumo un aviso de avance.
 
@@ -129,6 +139,20 @@ class Progreso(BaseCallbackHandler):
             inicio = self._inicio_modelo.pop(run_id, None)
             if inicio is not None:
                 self.segundos_modelo += time.monotonic() - inicio
+        # EL MOTIVO, EN SU PROPIA LÍNEA. `error_modelo=OpenAIAPIError` en la
+        # línea de latencia dice QUÉ clase de error y nada más, y eso es
+        # exactamente lo que costó semanas del lado de ERPNext: «estado 417» sin
+        # el cuerpo. Medido el 17/09 — turnos de 85s y uno cortado a los 50s, y
+        # grepear el log por 429, quota y rate no encontró NADA, porque el texto
+        # que lo dice se tiraba acá.
+        #
+        # Va en una línea aparte y no adentro de la de latencia: esa línea se
+        # lee de un vistazo para saber a quién le tocó la espera, y un motivo de
+        # 300 caracteres la vuelve ilegible. La de latencia sigue igual.
+        #
+        # Al LOG y nunca al modelo ni al cliente, misma frontera que
+        # `erpnext._motivo_del_servidor`.
+        print(f"[modelo] {type(error).__name__}: {_motivo(error)}", flush=True)
 
     # ------------------------------------------------------ las herramientas
 
