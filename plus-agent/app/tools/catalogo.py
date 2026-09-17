@@ -34,6 +34,21 @@ CACHE_CATALOGO_SEGUNDOS = 60
 _cache_catalogo: tuple[float, str] | None = None
 
 
+def _en_una_linea(texto: object) -> str:
+    """Un nombre de producto que no puede salirse de su renglón.
+
+    Esto entra en el MENSAJE DE SISTEMA, que es el canal de las instrucciones, y
+    un `item_name` con un salto de línea adentro deja de ser un ítem de la lista
+    y pasa a ser una línea más del prompt. Hoy no es una puerta de un cliente
+    —los Items los crea el dueño o el seed, y ninguna herramienta del agente de
+    clientes escribe uno—, y por eso esto es un cierre barato y no un rediseño:
+    el día que exista un camino donde alguien de afuera proponga un nombre, el
+    canal ya está cerrado en vez de haber que acordarse.
+    """
+    plano = " ".join(str(texto or "").split())
+    return plano[:120]
+
+
 def bloque_para_prompt() -> str:
     """El catálogo entero para el prompt del cliente. `""` si no se pudo leer.
 
@@ -71,7 +86,8 @@ def bloque_para_prompt() -> str:
     hay_mas = len(nombres) > MAX_CATALOGO_PROMPT
     nombres = nombres[:MAX_CATALOGO_PROMPT]
     lineas = "\n".join(
-        f"- {i['item_name']} (se vende por {i['stock_uom']})" for i in nombres
+        f"- {_en_una_linea(i['item_name'])} (se vende por {_en_una_linea(i['stock_uom'])})"
+        for i in nombres
     )
     cola = (
         "\nY HAY MÁS que no entran en esta lista: si te piden algo que no está "
