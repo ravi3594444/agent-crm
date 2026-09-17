@@ -2253,6 +2253,10 @@ CATALOGO: dict[str, dict[str, str]] = {
             "recorded — and do not say you noted it down."
         ),
     },
+    "captura.conteo_sin_seguimiento": {
+        ES: 'A {item_code} no le llevamos la cuenta: está cargado como producto sin inventario, así que siempre figura disponible y no hay nada que ajustar. Si querés contarlo, primero hay que marcarlo como producto con stock en ERPNext.',
+        EN: 'We do not track {item_code}: it is set up as a non-stock product, so it always shows as available and there is nothing to adjust. To count it, it first has to be marked as a stock item in ERPNext.',
+    },
     "captura.conteo_sin_diferencia": {
         ES: 'El sistema ya tiene {sistema} de {item_code} en {dep}; no hace falta ningún ajuste.',
         EN: 'The system already has {sistema} of {item_code} in {dep}; no adjustment is needed.',

@@ -300,6 +300,16 @@ def consultar_stock(
             f"No pude verificar el depósito de preparación para {item_code}. "
             "No confirmes disponibilidad."
         )
+    # Un producto que no se inventaría no tiene conteo que vencer, y contestar
+    # «nadie lo contó» sobre los tornillos es no contestar. Se dice que hay, sin
+    # número: el número sería inventado, y la regla 1 de `prompts.py` no
+    # distingue entre inventar un precio e inventar una existencia.
+    if inventario.sin_seguimiento(item_code):
+        return (
+            f"{item_code}: es un producto que no llevamos contado, siempre "
+            "tenemos. Podés tomarle el pedido. NO le des un número de "
+            "existencias: no hay ninguno que sea cierto."
+        )
     # Trust is earned per product by a confirmed count, and it expires.
     fresco, sin_confianza = inventario.confiable(item_code, warehouse)
     if not fresco:

@@ -32,6 +32,7 @@ from app import (
     clientes,
     erpnext,
     idioma,
+    inventario,
     notificar,
     outbound_status,
     policy,
@@ -165,6 +166,14 @@ def contar_stock(
         actor = require_management(config)
     except RuntimeContextError:
         return idioma.t("captura.conteo_sin_autenticar", idioma.gerencia())
+    # Un producto sin inventario no se puede reconciliar: ERPNext lo rechaza, y
+    # el motivo que devuelve habla de doctypes. El dueño acaba de marcarlo «no
+    # lo contamos» y al minuto siguiente le pide un conteo — decirle eso en
+    # castellano es más barato que hacerle leer una validación de Frappe.
+    if inventario.sin_seguimiento(item_code):
+        return idioma.t(
+            "captura.conteo_sin_seguimiento", idioma.gerencia(), item_code=item_code
+        )
     company, default_warehouse = erpnext.default_context()
     dep = deposito or default_warehouse
     bins = erpnext.get_list(

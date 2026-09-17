@@ -37,6 +37,47 @@ from app import erpnext, reloj
 MAX_CONTEOS = 20
 
 
+def sin_seguimiento(item_code: str) -> bool:
+    """¿ERPNext lleva la cuenta de este producto, o es de los que siempre hay?
+
+    `Item.is_stock_item = 0` es el concepto de ERPNext para un producto que no
+    se inventaría, y es el que hace falta acá: no se inventa un campo nuevo.
+
+    POR QUÉ EXISTE. Todo este módulo da por sentado que contar es posible. En
+    una lechería lo es —son trece productos y se cuentan a la mañana—, pero una
+    ferretería no cuenta 2.400 tornillos todos los días, y con la regla de
+    arriba CADA pedido de tornillos se iba a revisión humana por «nadie contó
+    ese producto». Un agente que deriva todo no automatiza nada.
+
+    QUÉ SE PIERDE, dicho con todas las letras: para estos productos se apagan
+    DOS controles —que el conteo sea reciente y que la cantidad entre— y no se
+    reemplazan por otro automático. Lo que queda es humano y posterior: el
+    pedido se confirma, el equipo lo ve, y si no había tanto se anula con
+    `cancelar` dentro de la ventana de 24 h. Es una decisión del dueño por
+    PRODUCTO, no una postura global, y por eso vive en el Item y no en el .env.
+
+    FALLA CERRADA, y la dirección importa más que de costumbre: si no se puede
+    leer el Item, la respuesta es False —o sea «sí se lleva la cuenta»—, con lo
+    que el producto sigue el camino normal y `confiable()` va a tropezar con la
+    misma lectura rota y mandar el pedido a revisión. Al revés, un ERPNext
+    caído volvería «no se sigue» para TODO el catálogo y auto-confirmaría el
+    sistema entero a ciegas, que es el peor resultado posible de una caída.
+    """
+    codigo = str(item_code or "").strip()
+    if not codigo:
+        return False
+    try:
+        item = erpnext.policy_get_doc("Item", codigo)
+    except erpnext.ERPNextError as exc:
+        print(f"[inventario] no pude leer el Item {codigo}: {exc}", flush=True)
+        return False
+    if not isinstance(item, dict) or "is_stock_item" not in item:
+        # Un Item sin el campo no es un Item sin seguimiento: es una lectura
+        # que no trajo lo que se preguntó, y eso se trata como duda.
+        return False
+    return int(item.get("is_stock_item") or 0) == 0
+
+
 def maestra_encendida() -> bool:
     """El interruptor de despliegue, leído en cada llamada (no al importar)."""
     return os.getenv("STOCK_CONFIABLE", "false").strip().lower() == "true"
